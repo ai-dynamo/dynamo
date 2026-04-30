@@ -255,8 +255,13 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             endpoint,
         } => {
             *inner.peer_instance_id.lock() = Some(instance_id);
-            // Holder side: install the outbound sender now that
-            // we know the peer's endpoint.
+            // Holder side: install the outbound sender + ensure
+            // peer's worker metadata is imported, then push
+            // Attached. Caller can rely on "Attached means ready
+            // to handle inbound Pull": the underlying RDMA call
+            // (pull_remote_block_sets) requires metadata, and we
+            // pay the roundtrip eagerly here so it's hot when
+            // the first Pull frame arrives.
             let inner_for_attach = Arc::clone(inner);
             let endpoint_clone = endpoint.clone();
             runtime.spawn(async move {
@@ -268,6 +273,26 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                             reason: format!("install outbound on Attach: {err}"),
                         });
                     return;
+                }
+                // Skipped when this side has no workers — see
+                // matching comment in `attach()`. Stream-only
+                // callers (no pull) remain usable.
+                if inner_for_attach.leader.worker_count() > 0 {
+                    if let Err(err) = inner_for_attach
+                        .leader
+                        .ensure_remote_metadata(instance_id)
+                        .await
+                    {
+                        tracing::error!(error = %err, peer = %instance_id, "metadata exchange failed on Attach");
+                        inner_for_attach
+                            .lifecycle_stream
+                            .push(LifecycleEvent::Failed {
+                                reason: format!(
+                                    "metadata exchange failed for {instance_id}: {err}"
+                                ),
+                            });
+                        return;
+                    }
                 }
                 inner_for_attach
                     .lifecycle_stream
@@ -341,6 +366,26 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 .lifecycle_stream
                 .push(LifecycleEvent::Failed { reason: message });
         }
+    }
+}
+
+impl VeloSession {
+    /// Test-only: route an inbound `Frame` directly through the
+    /// session's monitor dispatch, bypassing the wire. Lets unit
+    /// tests assert on dispatch_frame's per-variant side effects
+    /// (state-vector mutation, pin release on PullAck, lifecycle
+    /// emission, etc.) without standing up a paired velo
+    /// connection.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_inject_inbound_frame(&self, frame: Frame) {
+        dispatch_frame(&self.inner, frame, &Handle::current());
+    }
+
+    /// Test-only: count of pins currently held in
+    /// `available_pins` (the set holder drops on PullAck).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_available_pin_count(&self) -> usize {
+        self.inner.available_pins.lock().len()
     }
 }
 
@@ -802,6 +847,24 @@ impl VeloSessionFactory {
             runtime,
         })
     }
+
+    /// Test-only: same as the trait `open` but returns the
+    /// concrete `Arc<VeloSession>` so tests can call
+    /// `test_inject_inbound_frame` / `test_available_pin_count`
+    /// without downcasting from `Arc<dyn Session>`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn open_concrete(&self, session_id: SessionId) -> Result<Arc<VeloSession>> {
+        let anchor = self.velo.create_anchor::<Frame>();
+        let endpoint = endpoint_from_handle(anchor.handle());
+        let inner = VeloSession::new_inner(
+            session_id,
+            Arc::clone(&self.velo),
+            Arc::clone(&self.leader),
+            Some(endpoint),
+        );
+        spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
+        Ok(Arc::new(VeloSession { inner }))
+    }
 }
 
 impl SessionFactory for VeloSessionFactory {
@@ -828,14 +891,41 @@ impl SessionFactory for VeloSessionFactory {
         let leader = Arc::clone(&self.leader);
         let runtime = self.runtime.clone();
         Box::pin(async move {
-            // Open outbound to peer first.
+            // 1. Eager metadata exchange — ensures the peer is
+            //    velo-registered (the unary AM call surfaces a
+            //    clear error otherwise) AND that the holder's
+            //    worker metadata is imported into our
+            //    parallel_worker before any wire I/O. Cached
+            //    per-peer-instance on InstanceLeader so repeat
+            //    attaches between the same pair pay nothing.
+            //    Hot pull path: first session.pull(...) no
+            //    longer pays the metadata roundtrip.
+            //
+            //    Skipped when the local leader has no workers —
+            //    there's nothing to import into and pull(...)
+            //    would fail at the worker boundary regardless.
+            //    This keeps the session usable for stream-only
+            //    callers (e.g. tests that don't pull).
+            if leader.worker_count() > 0 {
+                leader
+                    .ensure_remote_metadata(peer_instance_id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "attach: metadata exchange failed for peer {peer_instance_id} \
+                             (peer not velo-registered, or remote leader unreachable)"
+                        )
+                    })?;
+            }
+
+            // 2. Open outbound to peer.
             let peer_handle = handle_from_endpoint(&peer_endpoint)?;
             let outbound = velo
                 .attach_anchor::<Frame>(peer_handle)
                 .await
                 .context("attach outbound to peer endpoint")?;
 
-            // Open our inbound anchor for the holder to attach back.
+            // 3. Open our inbound anchor for the holder to attach back.
             let anchor = velo.create_anchor::<Frame>();
             let local_endpoint = endpoint_from_handle(anchor.handle());
 
@@ -857,8 +947,10 @@ impl SessionFactory for VeloSessionFactory {
 
             spawn_monitor(Arc::clone(&inner), anchor, runtime.clone());
 
-            // Send Attach so the holder learns our identity +
-            // can attach its outbound to our anchor.
+            // 4. Send Attach so the holder learns our identity +
+            //    can attach its outbound to our anchor + run its
+            //    own ensure_remote_metadata for the reverse
+            //    direction.
             let session = VeloSession { inner };
             session
                 .send_frame(Frame::Attach {

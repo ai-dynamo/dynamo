@@ -26,7 +26,8 @@ use anyhow::Result;
 use futures::StreamExt;
 use kvbm_engine::G2;
 use kvbm_engine::disagg::session::{
-    AvailabilityDelta, CommitDelta, LifecycleEvent, SessionFactory, VeloSessionFactory,
+    AvailabilityDelta, CommitDelta, Frame, LifecycleEvent, Session, SessionFactory,
+    VeloSessionFactory,
 };
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
@@ -239,6 +240,62 @@ async fn close_from_holder_terminates_streams() -> Result<()> {
     assert!(
         matches!(next, Some(AvailabilityDelta::Drained)),
         "expected Drained on availability, got {next:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Case: Frame::PullAck on the holder's inbound dispatch drops pins
+// ============================================================================
+//
+// Asserts the load-bearing invariant required by plan §5 stage-1 review:
+// after a holder receives Frame::PullAck for a pull_id it previously
+// authorized via Frame::Pull, the pins for the corresponding hashes are
+// dropped from `available_pins`. Forges the inbound frames directly via
+// the test-only `test_inject_inbound_frame` helper so the test doesn't
+// need real RDMA workers.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_ack_drops_holder_pins() -> Result<()> {
+    let h = build_side().await;
+
+    let session_id = uuid::Uuid::new_v4();
+    let h_session = h.factory.open_concrete(session_id)?;
+
+    // Holder commits + makes-available 1 hash. After this the
+    // hash is pinned in `available_pins`.
+    let blocks = make_blocks(&h.g2_manager, 1, 200);
+    let hashes: Vec<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+    h_session.commit(hashes.clone())?;
+    h_session.make_available(blocks)?;
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        1,
+        "make_available should pin the block"
+    );
+
+    // Forge inbound Frame::Pull on holder's dispatch. This
+    // records the pull_id → hashes mapping in `inbound_pulls`
+    // and (via dispatch_frame) emits Frame::PullComplete on the
+    // outbound — but the outbound has no peer attached yet, so
+    // the PullComplete send fails silently. That's fine for
+    // this test; we only care that the holder records the pull.
+    let pull_id: u64 = 42;
+    h_session.test_inject_inbound_frame(Frame::Pull {
+        pull_id,
+        hashes: hashes.clone(),
+    });
+
+    // Forge inbound Frame::PullAck — this is what plan §5
+    // promises drops the pins. Assert the pin-release
+    // invariant directly.
+    h_session.test_inject_inbound_frame(Frame::PullAck { pull_id });
+
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        0,
+        "PullAck must drop holder pins for the acked pull_id"
     );
 
     Ok(())
