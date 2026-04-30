@@ -20,56 +20,21 @@ package v1alpha1
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-func TestBugDGD_HubClearsPVCAnnotationDropsSavedSpokeSpec(t *testing.T) {
-	create := true
-	name := "old-model-pvc"
+func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 	alpha := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pvc"},
-		Spec: DynamoGraphDeploymentSpec{
-			PVCs: []PVC{{
-				Create:           &create,
-				Name:             &name,
-				StorageClass:     "standard",
-				Size:             resource.MustParse("10Gi"),
-				VolumeAccessMode: corev1.ReadWriteOnce,
-			}},
-		},
-	}
-
-	hub := &v1beta1.DynamoGraphDeployment{}
-	if err := alpha.ConvertTo(hub); err != nil {
-		t.Fatalf("ConvertTo() error = %v", err)
-	}
-	delete(hub.Annotations, annDGDPVCs)
-
-	spoke := &DynamoGraphDeployment{}
-	if err := spoke.ConvertFrom(hub); err != nil {
-		t.Fatalf("ConvertFrom() error = %v", err)
-	}
-	if len(spoke.Spec.PVCs) > 0 {
-		t.Fatalf("PVCs restored from stale %q: %#v", annDGDSpokeSpec, spoke.Spec.PVCs)
-	}
-}
-
-func TestBugDGD_HubClearsComponentAnnotationDropsSavedSpokeSpec(t *testing.T) {
-	alpha := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "component-annotation"},
+		ObjectMeta: metav1.ObjectMeta{Name: "main-only-pod-template", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(v1beta1.ComponentTypeWorker),
-					Autoscaling: &Autoscaling{
-						Enabled:     true,
-						MinReplicas: 1,
-						MaxReplicas: 4,
-					},
 				},
 			},
 		},
@@ -79,13 +44,21 @@ func TestBugDGD_HubClearsComponentAnnotationDropsSavedSpokeSpec(t *testing.T) {
 	if err := alpha.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
-	delete(hub.Annotations, newDGDComponentCarrier(&hub.ObjectMeta, "worker").key(suffixAutoscaling))
+	hub.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: mainContainerName}},
+		},
+	}
 
 	spoke := &DynamoGraphDeployment{}
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom() error = %v", err)
 	}
-	if got := spoke.Spec.Services["worker"].Autoscaling; got != nil {
-		t.Fatalf("autoscaling restored from stale %q: %#v", annDGDSpokeSpec, got)
+	restored := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if diff := cmp.Diff(hub.Spec.Components[0].PodTemplate, restored.Spec.Components[0].PodTemplate, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
 	}
 }
