@@ -163,7 +163,7 @@ class StreamProcessor:
                         "token_ids": output_ids,
                         # Preserve SGLang's choice index for n>1 multimodal
                         # streams; older/non-n chunks are choice 0.
-                        "index": res.get("index", 0) or 0,
+                        "index": res.get("index") or 0,
                         "text": res.get("text", ""),
                         "finished": False,
                     }
@@ -179,8 +179,6 @@ class StreamProcessor:
                                 "finished": True,
                             }
                         )
-                        yield json.dumps(output)
-                        continue
 
                     yield json.dumps(output)
 

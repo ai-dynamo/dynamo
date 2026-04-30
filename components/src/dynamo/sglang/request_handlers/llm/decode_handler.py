@@ -431,7 +431,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # The loop should exit by itself when context.is_stopped() returns True.
                 # SGLang omits index for non-n/legacy chunks; treat those as
                 # choice 0 while preserving explicit indices for n>1.
-                output_idx = res.get("index", 0) or 0
+                output_idx = res.get("index") or 0
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
@@ -526,7 +526,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # The loop should exit by itself when context.is_stopped() returns True.
 
                 # Same defaulting as token mode: non-n chunks are choice 0.
-                index = res.get("index", 0) or 0
+                index = res.get("index") or 0
                 text = res.get("text", "")
 
                 finish_reason = res["meta_info"]["finish_reason"]

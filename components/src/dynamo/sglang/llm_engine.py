@@ -115,7 +115,7 @@ class SglangLLMEngine(LLMEngine):
             # SGLang includes an output index when n>1. Preserve it so the
             # Rust/OpenAI response layer can keep choices separate; default to
             # 0 for legacy/non-n chunks.
-            output_idx = res.get("index", 0) or 0
+            output_idx = res.get("index") or 0
             out: GenerateChunk = {"token_ids": [], "index": output_idx}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
