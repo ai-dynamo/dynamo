@@ -19,7 +19,6 @@ package v1alpha1
 
 import (
 	"encoding/json"
-	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -72,11 +71,13 @@ func roundTripFromV1alpha1(t *testing.T, src *DynamoGraphDeployment) *DynamoGrap
 	return out
 }
 
-func assertNoDGDComponentAnnotations(t *testing.T, annotations map[string]string) {
+func assertOnlyKnownDGDAnnotations(t *testing.T, annotations map[string]string) {
 	t.Helper()
 	for key := range annotations {
-		if strings.HasPrefix(key, annDGDComponentLegacyPrefix) {
-			t.Fatalf("unexpected legacy DGD component annotation %q in %v", key, annotations)
+		switch key {
+		case annDGDHubSpec, annDGDSpokeSpec, annDGDSpokeStatus:
+		default:
+			t.Fatalf("unexpected annotation %q in %v", key, annotations)
 		}
 	}
 }
@@ -290,7 +291,7 @@ func TestDGD_SpokeSaveCarriesAlphaOnlyFieldsSparsely(t *testing.T) {
 	if err := src.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	assertNoDGDComponentAnnotations(t, hub.Annotations)
+	assertOnlyKnownDGDAnnotations(t, hub.Annotations)
 	raw := hub.Annotations[annDGDSpokeSpec]
 	if raw == "" {
 		t.Fatalf("expected alpha-only fields in %q, got %v", annDGDSpokeSpec, hub.Annotations)
@@ -1281,66 +1282,6 @@ func TestDGD_FromV1alpha1_EmptyExtraPodSpecRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDGD_ConvertFrom_ScrubsLingeringAnnotations asserts that legacy
-// "nvidia.com/dgd-comp-*" annotations are dropped by ConvertFrom. Current DGD
-// conversion only uses sparse spec/status annotations.
-func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
-	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "scrub",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace":     "stale-value",
-				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref": "stale-value",
-				"user/keep-me": "kept",
-			},
-		},
-	}
-	a := &DynamoGraphDeployment{}
-	if err := a.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	assertNoDGDComponentAnnotations(t, a.ObjectMeta.Annotations)
-	if v, ok := a.ObjectMeta.Annotations["user/keep-me"]; !ok || v != "kept" {
-		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
-	}
-}
-
-func TestDGD_ConvertFrom_ScrubsLegacySpokeHubAnnotation(t *testing.T) {
-	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "legacy-spoke-hub",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				annDGDSpokeHubLegacy: `{"spec":{},"status":{}}`,
-				"user/keep-me":       "kept",
-			},
-		},
-	}
-
-	spoke := &DynamoGraphDeployment{}
-	if err := spoke.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	if _, ok := spoke.Annotations[annDGDSpokeHubLegacy]; ok {
-		t.Fatalf("legacy annotation was not scrubbed from spoke: %v", spoke.Annotations)
-	}
-	if v, ok := spoke.Annotations["user/keep-me"]; !ok || v != "kept" {
-		t.Fatalf("user annotations must be preserved, got %v", spoke.Annotations)
-	}
-
-	hub := &v1beta1.DynamoGraphDeployment{}
-	if err := spoke.ConvertTo(hub); err != nil {
-		t.Fatalf("ConvertTo: %v", err)
-	}
-	if _, ok := hub.Annotations[annDGDSpokeHubLegacy]; ok {
-		t.Fatalf("legacy annotation leaked back to hub: %v", hub.Annotations)
-	}
-	if v, ok := hub.Annotations["user/keep-me"]; !ok || v != "kept" {
-		t.Fatalf("user annotations must be preserved, got %v", hub.Annotations)
-	}
-}
-
 // TestDGD_ConvertFrom_DuplicateComponentNames asserts that ConvertFrom
 // returns an error when the v1beta1 spec.components list has two entries
 // with the same componentName, instead of silently overwriting the earlier
@@ -1365,57 +1306,6 @@ func TestDGD_ConvertFrom_DuplicateComponentNames(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate component name") {
 		t.Errorf("error message should mention duplicate component name, got %q", err.Error())
-	}
-}
-
-// TestScrubStaleDGDAnnotations_HyphenatedNames keeps coverage for the legacy
-// per-component DGD annotation shape. Hyphenated component names and suffixes
-// must not prevent scrubbing now that DGD uses sparse spec/status annotations.
-func TestScrubStaleDGDAnnotations_HyphenatedNames(t *testing.T) {
-	type tc struct {
-		name     string
-		anns     map[string]string
-		wantKept []string
-		wantGone []string
-	}
-	cases := []tc{
-		{
-			name: "hyphenated component with multi-hyphen suffix is scrubbed",
-			anns: map[string]string{
-				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref": "ref",
-				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace":     "ns",
-				"user/keep-me": "kept",
-			},
-			wantKept: []string{"user/keep-me"},
-			wantGone: []string{
-				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref",
-				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace",
-			},
-		},
-		{
-			name: "non-dgd-comp annotations are never touched",
-			anns: map[string]string{
-				"foo":                      "bar",
-				"nvidia.com/dcd-something": "kept",
-			},
-			wantKept: []string{"foo", "nvidia.com/dcd-something"},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			obj := &metav1.ObjectMeta{Annotations: maps.Clone(c.anns)}
-			scrubDGDInternalAnnotations(obj)
-			for _, k := range c.wantKept {
-				if _, ok := obj.Annotations[k]; !ok {
-					t.Errorf("expected %q to be kept; got annotations: %v", k, obj.Annotations)
-				}
-			}
-			for _, k := range c.wantGone {
-				if _, ok := obj.Annotations[k]; ok {
-					t.Errorf("expected %q to be scrubbed; got annotations: %v", k, obj.Annotations)
-				}
-			}
-		})
 	}
 }
 
@@ -1522,7 +1412,7 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	if sidecar.Image != "dynamo-frontend:1.2.3" {
 		t.Errorf("sidecar image: got %q, want %q", sidecar.Image, "dynamo-frontend:1.2.3")
 	}
-	assertNoDGDComponentAnnotations(t, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
 	saved := mustRestoreDGDSpokeServiceSave(t, b, "epp")
 	if saved.FrontendSidecar == nil {
 		t.Fatalf("expected frontendSidecar in sparse spoke save, got %#v", saved)
@@ -1535,7 +1425,7 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("FrontendSidecar round-trip mismatch (-want +got):\n%s", diff)
 	}
-	assertNoDGDComponentAnnotations(t, got.Annotations)
+	assertOnlyKnownDGDAnnotations(t, got.Annotations)
 }
 
 // TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload targets the
@@ -1559,7 +1449,7 @@ func TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	assertNoDGDComponentAnnotations(t, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
 	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
 	if saved.GPUMemoryService == nil || saved.GPUMemoryService.Enabled {
 		t.Fatalf("expected disabled GPUMemoryService in sparse save, got %#v", saved.GPUMemoryService)
@@ -1589,7 +1479,7 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	assertNoDGDComponentAnnotations(t, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
 	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
 	if saved.Failover == nil || saved.Failover.Enabled {
 		t.Fatalf("expected disabled Failover in sparse save, got %#v", saved.Failover)
@@ -1620,7 +1510,7 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	assertNoDGDComponentAnnotations(t, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
 	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
 	if saved.Checkpoint == nil || saved.Checkpoint.Enabled {
 		t.Fatalf("expected disabled Checkpoint in sparse save, got %#v", saved.Checkpoint)
@@ -1767,7 +1657,7 @@ func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	}
 	// Sanity: the sparse spoke save is what triggers the path we want to
 	// cover; fail loudly if future refactors break the assumption.
-	assertNoDGDComponentAnnotations(t, b1.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b1.Annotations)
 	saved := mustRestoreDGDSpokeServiceSave(t, b1, "worker")
 	if saved.SharedMemory == nil {
 		t.Fatalf("expected sharedMemory in sparse spoke save, got: %#v", saved)

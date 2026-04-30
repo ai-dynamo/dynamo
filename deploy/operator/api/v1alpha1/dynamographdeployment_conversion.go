@@ -48,15 +48,6 @@ const (
 	annDGDHubSpec     = "nvidia.com/dgd-hub-spec"
 	annDGDSpokeSpec   = "nvidia.com/dgd-spoke-spec"
 	annDGDSpokeStatus = "nvidia.com/dgd-spoke-status"
-
-	// Older conversion code wrote a full spoke-hub snapshot under this key.
-	// Current conversion never restores it, but must scrub stale copies.
-	annDGDSpokeHubLegacy = "nvidia.com/dgd-spoke-hub"
-
-	// Earlier conversion drafts used per-component DGD annotations. Current
-	// conversion only uses sparse spec/status annotations, but stale copies
-	// must be scrubbed so they cannot leak indefinitely.
-	annDGDComponentLegacyPrefix = "nvidia.com/dgd-comp-"
 )
 
 type dgdConversionContext struct {
@@ -499,11 +490,9 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 		annDGDHubSpec,
 		annDGDSpokeSpec,
 		annDGDSpokeStatus,
-		annDGDSpokeHubLegacy,
 	} {
 		delAnnFromObj(obj, key)
 	}
-	scrubAnnotationsByPrefix(obj, annDGDComponentLegacyPrefix)
 }
 
 // convertRestartToHub / convertRestartFromHub handle the Restart struct pair,
