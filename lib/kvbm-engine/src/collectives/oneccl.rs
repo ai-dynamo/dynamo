@@ -228,16 +228,18 @@ impl OneCclCollectives {
     }
 
     /// Broadcast memory regions using oneCCL.
-    ///
-    /// Unlike NCCL, oneCCL does not have a group start/end batching API.
-    /// Each broadcast is an independent collective call. oneCCL internally
-    /// batches operations submitted on the same stream.
     fn broadcast_regions(&self, regions: &[(usize, usize)], root: c_int) -> Result<()> {
         if regions.is_empty() {
             return Ok(());
         }
 
         let stream = self.ccl_stream.raw();
+
+        // Start a group call — batches all broadcasts
+        check_ccl_result(unsafe { sys::ccl_rs_group_start() })
+            .map_err(|e| anyhow::anyhow!("ccl_rs_group_start failed: {}", e))?;
+
+        let mut last_event: *mut sys::ccl_rs_event_t = ptr::null_mut();
 
         for (ptr, size) in regions {
             let mut event: *mut sys::ccl_rs_event_t = ptr::null_mut();
@@ -257,13 +259,22 @@ impl OneCclCollectives {
             })
             .map_err(|e| anyhow::anyhow!("ccl_rs_broadcast failed: {}", e))?;
 
-            // Wait for each broadcast to complete before starting the next.
-            // oneCCL events are per-operation, so we must synchronize.
-            if !event.is_null() {
-                check_ccl_result(unsafe { sys::ccl_rs_event_wait(event) })
-                    .map_err(|e| anyhow::anyhow!("ccl_rs_event_wait failed: {}", e))?;
-                unsafe { sys::ccl_rs_event_destroy(event) };
+            // Destroy any previous event; only need the last one for sync.
+            if !last_event.is_null() {
+                unsafe { sys::ccl_rs_event_destroy(last_event) };
             }
+            last_event = event;
+        }
+
+        // End group — submits all queued ops.
+        check_ccl_result(unsafe { sys::ccl_rs_group_end() })
+            .map_err(|e| anyhow::anyhow!("ccl_rs_group_end failed: {}", e))?;
+
+        // Wait on the last event to ensure all data is on-device.
+        if !last_event.is_null() {
+            check_ccl_result(unsafe { sys::ccl_rs_event_wait(last_event) })
+                .map_err(|e| anyhow::anyhow!("ccl_rs_event_wait failed: {}", e))?;
+            unsafe { sys::ccl_rs_event_destroy(last_event) };
         }
 
         Ok(())
@@ -298,9 +309,10 @@ impl OneCclCollectives {
 
     /// Create a completion notification.
     ///
-    /// Since all broadcasts are synchronously waited above (event_wait per op),
-    /// the data is already on-device when this returns. We create an
-    /// already-triggered event so callers see immediate completion.
+    /// group_end() + event_wait on the last op ensures all data is on-device
+    /// when this returns. Create an already-triggered event so callers
+    /// see immediate completion. 
+    /// TODO: fix the gap about register_cuda_event(trait CudaEventRegistrar)
     fn create_completion_notification(&self) -> Result<TransferCompleteNotification> {
         let nova_event = self.event_system.new_event()?;
         let handle = nova_event.handle();

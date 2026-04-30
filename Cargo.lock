@@ -4739,8 +4739,8 @@ dependencies = [
  "cudarc",
  "half 2.7.1",
  "ndarray 0.17.2",
- "rand 0.9.4",
  "oneapi-rs",
+ "rand 0.9.4",
 ]
 
 [[package]]
@@ -4783,7 +4783,7 @@ dependencies = [
  "anyhow",
  "bincode 2.0.1",
  "blake3",
- "clap 4.6.0",
+ "clap 4.6.1",
  "cudarc",
  "derive-getters",
  "derive_builder",
