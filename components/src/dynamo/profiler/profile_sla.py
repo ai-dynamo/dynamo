@@ -280,13 +280,95 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
 
 
 _MAX_COMBINED_RESOURCE_NAME_LENGTH = 45
+_GROVE_ROLE_SUFFIX_LEADER = "ldr"
+_GROVE_ROLE_SUFFIX_WORKER = "wkr"
+_GROVE_ROLE_SUFFIX_GMS = "gms"
+
+
+def _service_layout(svc_spec: Any) -> tuple[bool, bool, int]:
+    """Parse (is_multinode, is_gms_inter_pod, node_count) from a profiler service spec dict.
+
+    Mirrors GetNumberOfNodes / IsInterPodGMSEnabled on
+    DynamoComponentDeploymentSharedSpec (deploy/operator/api/v1alpha1/...).
+    """
+    if not isinstance(svc_spec, dict):
+        return False, False, 1
+    node_count = 1
+    multinode = svc_spec.get("multinode")
+    if isinstance(multinode, dict):
+        nc = multinode.get("nodeCount", 1)
+        if isinstance(nc, int) and nc > 0:
+            node_count = nc
+    gms = svc_spec.get("gpuMemoryService")
+    is_gms = (
+        isinstance(gms, dict)
+        and gms.get("enabled") is True
+        and gms.get("mode") == "InterPod"
+    )
+    return node_count > 1, is_gms, node_count
+
+
+def _longest_grove_combined_length(
+    dgd_name: str, svc_name: str, svc_spec: Any
+) -> tuple[int, str]:
+    """Compute the longest combined Grove resource name length for a service.
+
+    Mirrors the rule enforced by the operator's admission webhook in
+    deploy/operator/internal/webhook/validation/dynamographdeployment.go
+    (validateServiceNameLength). The combined length is what Grove validates
+    against its 45-character cap when generating PodCliqueSet / PodCliqueScalingGroup
+    / PodClique resources, so the profiler must reject the same shape early.
+
+    Returns (combined_length, human_readable_formula).
+    """
+    lower = svc_name.lower()
+    is_multinode, is_gms, node_count = _service_layout(svc_spec)
+
+    if is_gms:
+        # GMS layout: PCSG name = lower(svc); longest PCLQ is max(lower-gms-0, lower-wkr-N)
+        # where N = node_count - 1 for multinode GMS.
+        longest_pclq = f"{lower}-{_GROVE_ROLE_SUFFIX_GMS}-0"
+        if is_multinode:
+            worker_pclq = (
+                f"{lower}-{_GROVE_ROLE_SUFFIX_WORKER}-{node_count - 1}"
+            )
+            if len(worker_pclq) > len(longest_pclq):
+                longest_pclq = worker_pclq
+        combined = len(dgd_name) + len(lower) + len(longest_pclq)
+        formula = (
+            f"DGD ({len(dgd_name)}) + PCSG '{lower}' ({len(lower)}) "
+            f"+ longest PodClique '{longest_pclq}' ({len(longest_pclq)})"
+        )
+        return combined, formula
+
+    if is_multinode:
+        leader_pclq = f"{lower}-{_GROVE_ROLE_SUFFIX_LEADER}"
+        combined = len(dgd_name) + len(lower) + len(leader_pclq)
+        formula = (
+            f"DGD ({len(dgd_name)}) + PCSG '{lower}' ({len(lower)}) "
+            f"+ leader PodClique '{leader_pclq}' ({len(leader_pclq)})"
+        )
+        return combined, formula
+
+    # Single-node, non-GMS: only DGD + PodClique.
+    combined = len(dgd_name) + len(lower)
+    formula = (
+        f"DGD ({len(dgd_name)}) + PodClique '{lower}' ({len(lower)})"
+    )
+    return combined, formula
 
 
 def _validate_dgd_service_name_lengths(
     dgdr: DynamoGraphDeploymentRequestSpec,
     final_config: Any,
 ) -> None:
-    """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
+    """Raise ValueError if any service would exceed Grove's 45-character combined-name cap.
+
+    Mirrors the rule the operator's admission webhook enforces in
+    validateServiceNameLength. Catching this in the profiler converts a confusing
+    post-deploy admission rejection (DGDR loops in Deploying for ~30s) into an
+    immediate, actionable error during profile generation. (Issue #8480.)
+    """
     dgdr_name = os.environ.get("DGDR_NAME", "")
     dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
 
@@ -313,19 +395,20 @@ def _validate_dgd_service_name_lengths(
             return
     services = dgd_spec.get("spec", {}).get("services", {})
     violations = []
-    for svc_name in services:
-        combined = len(dgd_name) + len(svc_name)
+    for svc_name, svc_spec in services.items():
+        combined, formula = _longest_grove_combined_length(
+            dgd_name, svc_name, svc_spec
+        )
         if combined > _MAX_COMBINED_RESOURCE_NAME_LENGTH:
-            violations.append(
-                f"'{svc_name}' ({len(svc_name)}): combined length {combined}"
-            )
+            violations.append(f"'{svc_name}': {formula} = {combined}")
 
     if violations:
         raise ValueError(
             f"DGD name '{dgd_name}' (length {len(dgd_name)}) combined with service "
             f"name(s) exceeds the {_MAX_COMBINED_RESOURCE_NAME_LENGTH}-character "
-            f"pod-naming limit. Shorten the DGDR name '{dgdr_name}'. "
-            f"Violations: {'; '.join(violations)}"
+            f"Grove pod-naming limit. Shorten the DGDR name "
+            f"'{dgdr_name or '(from config)'}', the DGD name override, or the "
+            f"service names. Violations: {'; '.join(violations)}"
         )
 
 

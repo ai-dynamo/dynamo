@@ -1238,3 +1238,198 @@ class TestValidateDgdServiceNameLengths:
         config = self._make_final_config(["svc"])
         with pytest.raises(ValueError, match="pod-naming limit"):
             _validate_dgd_service_name_lengths(dgdr, config)
+
+    # --- Multinode + GMS rules (mirror operator-side validateServiceNameLength) ---
+
+    def test_multinode_uses_leader_podclique_in_combined_length(self, monkeypatch):
+        """Multinode services must include the leader PodClique ('svc-ldr') in the combined-length check.
+
+        The previous formula only checked dgd + svc, which under-rejected cases that
+        the operator's admission webhook would later reject. Reproduces issue #8480:
+        dgd 'trtllm-disagg' (13) + svc 'TRTLLMDecodeWorker' (18) + 'trtllmdecodeworker-ldr' (22) = 53.
+        """
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        monkeypatch.setenv("DGDR_NAME", "trtllm-disagg")
+        # DGDR_NAME 'trtllm-disagg' (13) → operator path would compute dgd_name = 'trtllm-disagg-dgd' (17),
+        # so override the DGD name to land exactly on the 13-char dgd from the issue.
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            backend="trtllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(
+                dgd={"metadata": {"name": "trtllm-disagg"}}
+            ),
+        )
+        config = {
+            "spec": {
+                "services": {
+                    "TRTLLMDecodeWorker": {"multinode": {"nodeCount": 2}},
+                }
+            }
+        }
+        with pytest.raises(ValueError) as exc_info:
+            _validate_dgd_service_name_lengths(dgdr, config)
+        msg = str(exc_info.value)
+        # Error must surface the exact length and mention the leader PCLQ component.
+        assert "53" in msg, msg
+        assert "leader PodClique" in msg, msg
+        assert "trtllmdecodeworker-ldr" in msg, msg
+
+    def test_multinode_passes_when_within_limit(self, monkeypatch):
+        """Multinode service that fits the rule must not raise."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        monkeypatch.setenv("DGDR_NAME", "x")
+        # dgd 'short' (5) + svc 'decode' (6) + 'decode-ldr' (10) = 21 ≤ 45
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            backend="sglang",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(dgd={"metadata": {"name": "short"}}),
+        )
+        config = {
+            "spec": {
+                "services": {"decode": {"multinode": {"nodeCount": 4}}}
+            }
+        }
+        _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
+
+    def test_gms_uses_longest_podclique_with_high_node_count(self, monkeypatch):
+        """For high node counts, GMS layout's worker PCLQ (svc-wkr-N) can exceed svc-gms-0 and must drive the check."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        monkeypatch.setenv("DGDR_NAME", "x")
+        # dgd (12) + PCSG 'enginegroup' (11) + 'enginegroup-wkr-99' (18) = 41 ≤ 45
+        # but with dgd 16 chars, would be 45; with 17 → 46 violation.
+        dgd_name = "x" * 17
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            backend="vllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(dgd={"metadata": {"name": dgd_name}}),
+        )
+        config = {
+            "spec": {
+                "services": {
+                    "enginegroup": {
+                        "multinode": {"nodeCount": 100},
+                        "gpuMemoryService": {
+                            "enabled": True,
+                            "mode": "InterPod",
+                        },
+                    },
+                }
+            }
+        }
+        with pytest.raises(ValueError) as exc_info:
+            _validate_dgd_service_name_lengths(dgdr, config)
+        msg = str(exc_info.value)
+        assert "enginegroup-wkr-99" in msg, msg
+        # Worker PCLQ (18) must be picked over gms-0 (13) for this node count.
+        assert "enginegroup-gms-0" not in msg, msg
+
+    def test_gms_single_node_uses_gms_podclique(self, monkeypatch):
+        """Single-node GMS still emits a 'svc-gms-0' PodClique that must factor into the check."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        monkeypatch.setenv("DGDR_NAME", "x")
+        # dgd (29) + 'svc' (3) + 'svc-gms-0' (9) = 41 ≤ 45 → passes
+        dgdr_passes = DynamoGraphDeploymentRequestSpec(
+            backend="vllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(dgd={"metadata": {"name": "x" * 29}}),
+        )
+        config = {
+            "spec": {
+                "services": {
+                    "svc": {
+                        "gpuMemoryService": {
+                            "enabled": True,
+                            "mode": "InterPod",
+                        },
+                    },
+                }
+            }
+        }
+        _validate_dgd_service_name_lengths(dgdr_passes, config)  # must not raise
+
+        # dgd (34) + 'svc' (3) + 'svc-gms-0' (9) = 46 → fails
+        dgdr_fails = DynamoGraphDeploymentRequestSpec(
+            backend="vllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(dgd={"metadata": {"name": "x" * 34}}),
+        )
+        with pytest.raises(ValueError, match="svc-gms-0"):
+            _validate_dgd_service_name_lengths(dgdr_fails, config)
+
+    def test_gms_disabled_is_ignored(self, monkeypatch):
+        """gpuMemoryService.enabled=false or mode!=InterPod should fall through to the non-GMS path."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        monkeypatch.setenv("DGDR_NAME", "x")
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            backend="vllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(dgd={"metadata": {"name": "dgd"}}),
+        )
+        # Single-node, GMS disabled → 'dgd' (3) + 'svc' (3) = 6, no PCSG/PCLQ overhead
+        config = {
+            "spec": {
+                "services": {
+                    "svc": {
+                        "gpuMemoryService": {
+                            "enabled": False,
+                            "mode": "InterPod",
+                        },
+                    },
+                }
+            }
+        }
+        _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
+
+        # GMS Local mode is not the inter-pod layout; should also fall through.
+        config["spec"]["services"]["svc"]["gpuMemoryService"] = {
+            "enabled": True,
+            "mode": "Local",
+        }
+        _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
+
+    def test_existing_message_still_lists_violations(self, monkeypatch):
+        """Backwards-compat: violations include service name and combined length, multiple violations are joined."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        monkeypatch.setenv("DGDR_NAME", "x")
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            backend="trtllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(
+                dgd={"metadata": {"name": "trtllm-disagg"}}
+            ),
+        )
+        config = {
+            "spec": {
+                "services": {
+                    "TRTLLMDecodeWorker": {"multinode": {"nodeCount": 2}},
+                    "TRTLLMPrefillWorker": {"multinode": {"nodeCount": 2}},
+                    "Frontend": {},  # short, must not appear in violations
+                }
+            }
+        }
+        with pytest.raises(ValueError) as exc_info:
+            _validate_dgd_service_name_lengths(dgdr, config)
+        msg = str(exc_info.value)
+        assert "TRTLLMDecodeWorker" in msg
+        assert "TRTLLMPrefillWorker" in msg
+        assert "Frontend" not in msg
