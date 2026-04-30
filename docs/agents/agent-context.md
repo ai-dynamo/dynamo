@@ -193,8 +193,7 @@ lanes.
     "tool_call_id": "call-abc",
     "tool_class": "web_search",
     "status": "succeeded",
-    "duration_ms": 420.5,
-    "output_bytes": 2048
+    "duration_ms": 420.5
   }
 }
 ```
@@ -209,13 +208,22 @@ Dynamo runtime APIs. The ms-agent integration used this shape:
 
 - Add a small helper module that stores the current `agent_context` in a context
   variable.
-- Wrap each agent run with that context.
+- Wrap each agent run with that context so LLM calls and tool records share the
+  same `workflow_id` and `program_id`.
 - Call one helper before each OpenAI-compatible LLM request to merge
   `extra_body.nvext.agent_context` and set `x-request-id`.
-- Wrap tool execution with `tool_start` and terminal `tool_end` or `tool_error`
-  records.
+- Emit `tool_start` and a terminal `tool_end` or `tool_error` wherever the
+  harness executes model-requested tools.
+- Propagate context through thread pools, subprocesses, and subagent launches
+  when those paths can make LLM calls or emit tool records.
 - Register a simple ZMQ publisher at process startup when tool tracing is
   enabled.
+
+You do not need custom code in every tool implementation when existing tool
+calls already pass through shared harness code. Add explicit hooks only for paths
+that bypass that flow, such as direct OpenAI calls inside a tool, background
+executor work that loses context variables, or subagent launches that need
+`parent_program_id`.
 
 That keeps the harness dependency boundary simple:
 
