@@ -3,6 +3,8 @@
 
 agent:
   enabled: true
+  image:
+    tag: "v0.20.0"
   extraArgs:
     - --dwarf-unwinding-disable
     - --python-unwinding-disable
