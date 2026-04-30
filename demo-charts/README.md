@@ -1,4 +1,4 @@
-# Failover demo & baseline pareto — chart artifacts
+# Failover demo — chart artifacts
 
 Snapshots of the perf and failover demo runs, captured 2026-04-30 on `nv-prd-dgxc nscale` cluster (B200, 1 worker × 8 GPU = tep8x1).
 
@@ -6,20 +6,6 @@ Snapshots of the perf and failover demo runs, captured 2026-04-30 on `nv-prd-dgx
 - **Stack**: dynamo branch `mabdulwahhab/trtllm-failover-build-20260429` (TRT-LLM rc11 fork at SHA `9ba5ee40`, gms-refactor)
 - **Workload**: `kv-reuse-difficult_200k-fixed/dataset.jsonl` mooncake-trace replay via aiperf 0.7.0
 - **Engine config**: graphs `[1,2,4,8,16,32,64,128]+padding`, autotuner on, chunked_prefill on, overlap on, CUTLASS NVFP4 GEMM, max_batch=128, fp8 KV, `free_gpu_memory_fraction=0.75`, Eagle3 spec decode
-
----
-
-## Pareto — baseline (failover OFF) vs Karen RC13 reference
-
-5 concurrency points (c3, c4, c8, c11, c16) on our tep8x1 setup, overlaid against Karen's RC13 tep8x3 reference points she shared.
-
-![pareto](pareto/pareto.png)
-
-- X axis: `output_token_throughput_per_user` (decode tok/s/user, the SLA metric)
-- Y axis: `total_token_throughput / 8 GPUs` (input + output tokens through engine, per GPU — matches Karen's chart axis)
-- Red dotted line: 100 tok/s/user SLA threshold
-
-Raw numbers in [pareto/pareto.csv](pareto/pareto.csv).
 
 ---
 
