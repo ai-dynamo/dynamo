@@ -64,8 +64,9 @@ def parse_args() -> Config:
     parser.add_argument(
         "--alloc-retry-timeout",
         type=float,
-        default=None,
-        help="Optional max seconds to wait for allocation retries before failing (default: wait indefinitely).",
+        default=30.0,
+        help="Max seconds to wait for allocation retries before failing (default: 30.0). "
+        "Pass an explicit large value if you need essentially-unbounded retry. See DYN-2927.",
     )
 
     args = parser.parse_args()
