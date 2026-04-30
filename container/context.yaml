@@ -56,7 +56,7 @@ vllm:
     runtime_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    vllm_ref: v0.17.1
+    vllm_ref: v0.20.0
   cpu:
     base_image: ubuntu
     runtime_image: ubuntu
