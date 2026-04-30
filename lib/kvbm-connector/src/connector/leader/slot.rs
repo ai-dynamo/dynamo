@@ -323,7 +323,17 @@ impl SlotStateMachine {
     ///    same state, with `cd_payload` attached. The local-match
     ///    onboarding is already running; CD just adds its cleanup.
     /// 3. `PreparingToOnboard(state)` with `state.cd_payload.is_none()` →
-    ///    same state, with `cd_payload` attached.
+    ///    `Onboarding(state with cd_payload attached)` — CD
+    ///    ownership unifies into `Onboarding`. The CD wrapper
+    ///    drives the actual load (G2→G1 via worker_pull_chunk +
+    ///    RDMA pull-back from the prefill peer) outside the
+    ///    canonical `start_onboarding` / `find_session.wait_for_completion`
+    ///    path; the slot's transactional state must reflect that
+    ///    it is actively onboarding so
+    ///    `process_finished_onboarding`'s `txn_take_onboarding`
+    ///    cleanup applies. The carried-over `find_session=Some(...)`
+    ///    from inner gnmt is released via `release_session` in
+    ///    that cleanup, identical to the canonical non-CD path.
     ///
     /// Any state with `cd_payload` already set returns
     /// `MarkedForDeletion`-shaped `InvalidTransition` (we don't
@@ -363,11 +373,18 @@ impl SlotStateMachine {
                     self.txn_state = TransactionState::PreparingToOnboard(state);
                     return Err(StateTransitionError::InvalidTransition {
                         from: "PreparingToOnboard(cd_payload=Some)",
-                        to: "PreparingToOnboard(cd_payload attach)",
+                        to: "Onboarding(cd_payload attach)",
                     });
                 }
                 state.cd_payload = Some(cd_payload);
-                self.txn_state = TransactionState::PreparingToOnboard(state);
+                // Promote PreparingToOnboard → Onboarding. CD owns
+                // the load lifecycle from this point; the canonical
+                // `start_onboarding` / `find_session.wait_for_completion`
+                // path is bypassed for CD requests, so the slot
+                // would otherwise stay in PreparingToOnboard
+                // forever and `process_finished_onboarding`'s
+                // `txn_take_onboarding` would error.
+                self.txn_state = TransactionState::Onboarding(state);
                 Ok(())
             }
             other => {
@@ -2546,6 +2563,102 @@ mod tests {
             assert!(matches!(
                 result.unwrap_err(),
                 StateTransitionError::MarkedForDeletion
+            ));
+        }
+
+        /// Mock CD onboarding payload for state-machine unit tests.
+        #[derive(Debug)]
+        struct MockCdPayload;
+        impl CdOnboardingPayload for MockCdPayload {}
+
+        /// Regression for #25: CD-decode-with-local-match path.
+        /// Inner gnmt finds matches → slot enters PreparingToOnboard
+        /// (find_session=Some). CD's commit_gnmt_remote attaches its
+        /// cd_payload via `txn_install_or_attach_cd_payload`. The
+        /// install MUST promote the slot to Onboarding so the canonical
+        /// `process_finished_onboarding` → `txn_take_onboarding`
+        /// cleanup applies. Otherwise the slot stays in
+        /// PreparingToOnboard forever and three cascading errors fire
+        /// at finished_recving / record_offload / request_finished.
+        #[test]
+        fn test_txn_install_cd_payload_promotes_preparing_to_onboarding() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+
+            // Inner gnmt path: matches found → PreparingToOnboard.
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+                .unwrap();
+            assert!(matches!(
+                slot.txn_state(),
+                TransactionState::PreparingToOnboard(_)
+            ));
+
+            // CD attach: must transition PreparingToOnboard → Onboarding.
+            slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
+                .unwrap();
+
+            // Slot is now Onboarding with both find_session and cd_payload set.
+            match slot.txn_state() {
+                TransactionState::Onboarding(state) => {
+                    assert!(
+                        state.find_session.is_some(),
+                        "find_session preserved across install"
+                    );
+                    assert!(state.cd_payload.is_some(), "cd_payload installed");
+                    assert_eq!(state.num_computed_tokens, 100);
+                }
+                other => panic!(
+                    "expected Onboarding after CD install on PreparingToOnboard slot, got {:?}",
+                    other.name()
+                ),
+            }
+
+            // Canonical cleanup: take_onboarding must now succeed.
+            let onboarding = slot.txn_take_onboarding().unwrap();
+            assert!(onboarding.find_session.is_some());
+            assert!(onboarding.cd_payload.is_some());
+            assert!(matches!(slot.txn_state(), TransactionState::Inactive));
+        }
+
+        /// CD-decode cold-cache path: no inner match. Inactive →
+        /// Onboarding(find_session=None, cd_payload=Some). Pinning
+        /// the existing arm 1 behavior so changes to arm 3 don't
+        /// silently affect cold-cache.
+        #[test]
+        fn test_txn_install_cd_payload_inactive_to_onboarding() {
+            let mut slot = create_test_slot();
+
+            slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
+                .unwrap();
+
+            match slot.txn_state() {
+                TransactionState::Onboarding(state) => {
+                    assert!(state.find_session.is_none());
+                    assert!(state.cd_payload.is_some());
+                }
+                other => panic!("expected Onboarding, got {:?}", other.name()),
+            }
+        }
+
+        /// Double-install on a slot that already has cd_payload must
+        /// fail; the wrapper's cd_request_state is the primary guard
+        /// but the slot enforces the invariant defensively.
+        #[test]
+        fn test_txn_install_cd_payload_twice_fails() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+                .unwrap();
+
+            // First install promotes PreparingToOnboard → Onboarding.
+            slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
+                .unwrap();
+
+            // Second install on Onboarding(cd_payload=Some) must fail.
+            let result = slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload));
+            assert!(matches!(
+                result.unwrap_err(),
+                StateTransitionError::InvalidTransition { .. }
             ));
         }
 
