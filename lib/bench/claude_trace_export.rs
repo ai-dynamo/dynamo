@@ -4,11 +4,11 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use dynamo_bench::coding::claude::discovery::discover_trace_files;
+use dynamo_bench::coding::claude::export::{ExportConfig, write_streamed_mooncake_rows};
 use dynamo_bench::coding::claude::parser::load_trace_records;
 use dynamo_bench::coding::common::{
     DEFAULT_BLOCK_SIZE, DEFAULT_OUTPUT_NAME, DEFAULT_TOKENIZER, expand_user_path, sidecar_path_for,
 };
-use dynamo_bench::coding::claude::export::{ExportConfig, write_streamed_mooncake_rows};
 use dynamo_bench::coding::tokenizer::HfTokenizerFactory;
 
 #[derive(Parser, Debug)]
