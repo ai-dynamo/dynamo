@@ -31,7 +31,10 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-const testModelPVCName = "model-pvc"
+const (
+	testHubOnlyTemplateName = "hub-only-template-name"
+	testModelPVCName        = "model-pvc"
+)
 
 func dcdRoundTripFromV1beta1(t *testing.T, src *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeployment {
 	t.Helper()
@@ -472,7 +475,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:        "hub-only-template-name",
+						Name:        testHubOnlyTemplateName,
 						Labels:      map[string]string{"old": "label"},
 						Annotations: map[string]string{"old": "annotation"},
 					},
@@ -528,7 +531,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	if got.Spec.ComponentType != v1beta1.ComponentTypePlanner {
 		t.Fatalf("expected v1alpha1 componentType edit to win, got %q", got.Spec.ComponentType)
 	}
-	if got.Spec.PodTemplate == nil || got.Spec.PodTemplate.Name != "hub-only-template-name" {
+	if got.Spec.PodTemplate == nil || got.Spec.PodTemplate.Name != testHubOnlyTemplateName {
 		t.Fatalf("expected hub-only podTemplate metadata to be preserved, got %#v", got.Spec.PodTemplate)
 	}
 	if diff := cmp.Diff(map[string]string{"new": "label"}, got.Spec.PodTemplate.Labels); diff != "" {

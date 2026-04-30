@@ -424,7 +424,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 					ComponentType: v1beta1.ComponentTypeWorker,
 					PodTemplate: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Name:        "hub-only-template-name",
+							Name:        testHubOnlyTemplateName,
 							Labels:      map[string]string{"old": "label"},
 							Annotations: map[string]string{"old": "annotation"},
 						},
@@ -481,7 +481,7 @@ func TestDGD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	if len(got.Spec.Components) != 1 || got.Spec.Components[0].ComponentType != v1beta1.ComponentTypePlanner {
 		t.Fatalf("expected v1alpha1 componentType edit to win, got %#v", got.Spec.Components)
 	}
-	if got.Spec.Components[0].PodTemplate == nil || got.Spec.Components[0].PodTemplate.Name != "hub-only-template-name" {
+	if got.Spec.Components[0].PodTemplate == nil || got.Spec.Components[0].PodTemplate.Name != testHubOnlyTemplateName {
 		t.Fatalf("expected hub-only podTemplate metadata to be preserved, got %#v", got.Spec.Components[0].PodTemplate)
 	}
 	if diff := cmp.Diff(map[string]string{"new": "label"}, got.Spec.Components[0].PodTemplate.Labels); diff != "" {
