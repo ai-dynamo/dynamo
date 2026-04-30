@@ -7,12 +7,12 @@
 //! approximate-mode blocks in the radix tree.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -71,7 +71,7 @@ impl Default for PruneConfig {
 #[derive(Debug)]
 pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
-    timers: HashMap<K, Instant>,
+    timers: FxHashMap<K, Instant>,
 
     /// A max-heap of (Reverse<expiration_instant>, key) used to efficiently find the
     /// next expiring timer. Reverse<Instant> makes earlier times pop first.
@@ -91,7 +91,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     pub fn new(threshold: usize, prune_config: PruneConfig) -> Self {
         let ttl = prune_config.ttl;
         PruneManager {
-            timers: HashMap::new(),
+            timers: FxHashMap::default(),
             expirations: BinaryHeap::new(),
             ttl,
             threshold,
@@ -120,6 +120,8 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     pub fn insert_at(&mut self, keys: Vec<K>, now: Instant) {
         let expiry_time = now + self.ttl;
 
+        self.timers.reserve(keys.len());
+        self.expirations.reserve(keys.len());
         for key in keys {
             // Insert or update the authoritative time in the map.
             self.timers.insert(key.clone(), expiry_time);
@@ -290,7 +292,8 @@ impl WorkerPruneManager {
         }
 
         let now = Instant::now();
-        let mut by_worker: HashMap<WorkerWithDpRank, Vec<BlockEntry>> = HashMap::new();
+        let mut by_worker: FxHashMap<WorkerWithDpRank, Vec<BlockEntry>> =
+            FxHashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
         for entry in entries {
             by_worker.entry(entry.worker).or_default().push(entry);
         }
@@ -317,8 +320,9 @@ impl WorkerPruneManager {
             return;
         }
 
-        let removed_entries: HashSet<_> = entries.iter().copied().collect();
-        let mut by_worker: HashMap<WorkerWithDpRank, Vec<BlockEntry>> = HashMap::new();
+        let removed_entries: FxHashSet<_> = entries.iter().copied().collect();
+        let mut by_worker: FxHashMap<WorkerWithDpRank, Vec<BlockEntry>> =
+            FxHashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
         for entry in entries {
             by_worker.entry(entry.worker).or_default().push(*entry);
         }
