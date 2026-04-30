@@ -44,6 +44,8 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
+    pytest.mark.profiled_vram_gib(7.6),  # actual profiled peak with kv-bytes
+    pytest.mark.requested_vllm_kv_cache_bytes(922_354_000),  # 2x safety over min=461 MiB
     pytest.mark.model(VLLM_MM_MODEL),
 ]
 
@@ -98,6 +100,18 @@ _COMMON_PROCESS_KWARGS: dict[str, Any] = {
 }
 
 
+def _vllm_gpu_memory_args() -> list[str]:
+    kv_bytes = os.getenv("_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES")
+    if kv_bytes:
+        return [
+            "--kv-cache-memory-bytes",
+            kv_bytes,
+            "--gpu-memory-utilization",
+            "0.01",
+        ]
+    return ["--gpu-memory-utilization", "0.40"]
+
+
 class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend worker that emits KV events."""
 
@@ -113,10 +127,9 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                "--gpu-memory-utilization",
-                "0.40",
                 "--max-model-len",
                 "4096",
+                *_vllm_gpu_memory_args(),
                 "--kv-events-config",
                 (
                     f'{{"publisher":"zmq","topic":"kv-events",'
@@ -221,7 +234,9 @@ def _build_payload(
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for uri in image_uris:
-        content.append({"type": "image_url", "image_url": {"url": uri}})
+        content.append(
+            {"type": "image_url", "image_url": {"url": uri, "detail": "auto"}}
+        )
 
     return {
         "model": VLLM_MM_MODEL,
