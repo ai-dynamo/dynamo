@@ -63,24 +63,116 @@ impl Default for PruneConfig {
     }
 }
 
+/// Shared lazy min-heap for expiry indexes.
+///
+/// The heap may contain stale entries. Callers keep the source of truth elsewhere and
+/// validate heap entries when peeking or popping.
+#[derive(Debug)]
+struct LazyExpiryHeap<K: Clone + Ord> {
+    heap: BinaryHeap<(Reverse<Instant>, K)>,
+    threshold: usize,
+}
+
+impl<K: Clone + Ord> LazyExpiryHeap<K> {
+    fn new(threshold: usize) -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            threshold,
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.heap.reserve(additional);
+    }
+
+    fn push(&mut self, key: K, expiry: Instant) {
+        self.heap.push((Reverse(expiry), key));
+    }
+
+    fn peek(&self) -> Option<(Instant, K)> {
+        self.heap
+            .peek()
+            .map(|(Reverse(expiry), key)| (*expiry, key.clone()))
+    }
+
+    fn pop(&mut self) -> Option<(Instant, K)> {
+        self.heap.pop().map(|(Reverse(expiry), key)| (expiry, key))
+    }
+
+    fn pop_if_top(&mut self, candidate: (Instant, &K)) -> bool {
+        let Some((expiry, key)) = self.peek() else {
+            return false;
+        };
+        if expiry == candidate.0 && key == *candidate.1 {
+            self.heap.pop();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn rebuild<I>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = (K, Instant)>,
+    {
+        self.heap = entries
+            .into_iter()
+            .map(|(key, expiry)| (Reverse(expiry), key))
+            .collect();
+    }
+
+    fn should_rebuild(&self, active_len: usize) -> bool {
+        active_len > 0 && self.heap.len() > active_len * self.threshold
+    }
+
+    fn peek_valid<F>(&mut self, mut is_valid: F) -> Option<(Instant, K)>
+    where
+        F: FnMut(&K, Instant) -> bool,
+    {
+        loop {
+            let (expiry, key) = self.peek()?;
+            if is_valid(&key, expiry) {
+                return Some((expiry, key));
+            }
+            self.heap.pop();
+        }
+    }
+
+    fn pop_due_valid<F>(&mut self, now: Instant, mut is_valid: F) -> Option<(Instant, K)>
+    where
+        F: FnMut(&K, Instant) -> bool,
+    {
+        loop {
+            let (expiry, _) = self.peek()?;
+            if expiry > now {
+                return None;
+            }
+
+            let (expiry, key) = self.pop().expect("expiry heap top disappeared");
+            if is_valid(&key, expiry) {
+                return Some((expiry, key));
+            }
+        }
+    }
+}
+
 /// A data structure to manage a collection of timers, addressable by a key.
 /// This is structured as a sort of "priority queue" of keys, where the priority is the expiration time.
 /// It supports insertion as well as updating the expiration time of a key.
-/// The [`PruneManager::expirations`] heap is lazily updated to reflect the true expiration times in [`PruneManager::timers`]
+/// The expiration heap is lazily updated to reflect the true expiration times in [`PruneManager::timers`]
 /// For now, we have a fixed expiration time for all keys.
 #[derive(Debug)]
 pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
     timers: FxHashMap<K, Instant>,
 
-    /// A max-heap of (Reverse<expiration_instant>, key) used to efficiently find the
-    /// next expiring timer. Reverse<Instant> makes earlier times pop first.
-    /// An entry in this heap is "stale" if the instant does not match the one in the `timers` map.
-    expirations: BinaryHeap<(Reverse<Instant>, K)>,
-
-    /// Threshold for rebuilding the heap.
-    /// The heap will be rebuilt from scratch to remove stale entries.
-    threshold: usize,
+    /// Lazily-stale heap used to efficiently find the next expiring timer.
+    expirations: LazyExpiryHeap<K>,
 
     /// The expiration duration of the timers.
     ttl: Duration,
@@ -92,19 +184,16 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         let ttl = prune_config.ttl;
         PruneManager {
             timers: FxHashMap::default(),
-            expirations: BinaryHeap::new(),
+            expirations: LazyExpiryHeap::new(threshold),
             ttl,
-            threshold,
         }
     }
 
     /// Rebuilds the expirations heap from the timers map, removing all stale entries.
     fn rebuild_heap(&mut self) {
-        self.expirations = self
-            .timers
-            .iter()
-            .map(|(key, &expiry)| (Reverse(expiry), key.clone()))
-            .collect();
+        let timers = &self.timers;
+        self.expirations
+            .rebuild(timers.iter().map(|(key, &expiry)| (key.clone(), expiry)));
     }
 
     /// Inserts a new timer or updates an existing one for the given key.
@@ -129,11 +218,11 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
             // Push the new expiration onto the heap. If the key was updated,
             // this leaves a "stale" entry on the heap for the old time,
             // which will be ignored when it's popped.
-            self.expirations.push((Reverse(expiry_time), key));
+            self.expirations.push(key, expiry_time);
         }
 
         // Check if we should rebuild the heap to remove stale entries
-        if !self.timers.is_empty() && self.expirations.len() > self.timers.len() * self.threshold {
+        if self.expirations.should_rebuild(self.timers.len()) {
             self.rebuild_heap();
         }
     }
@@ -148,20 +237,14 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     pub fn pop_expired(&mut self, now: Instant) -> Vec<K> {
         let mut expired_keys = Vec::new();
 
-        while let Some((Reverse(expiry_time), _)) = self.expirations.peek() {
-            // If the next timer in the heap is not yet expired, we can stop.
-            if *expiry_time > now {
-                break;
-            }
-
-            // The timer might be expired, so pop it from the heap.
-            let (Reverse(expiry_time), key) = self.expirations.pop().unwrap();
-
-            if self.timers.get(&key) == Some(&expiry_time) {
-                // This is a valid, non-stale, expired timer.
-                self.timers.remove(&key);
-                expired_keys.push(key);
-            }
+        while let Some((_, key)) = {
+            let timers = &self.timers;
+            self.expirations
+                .pop_due_valid(now, |key, expiry| timers.get(key) == Some(&expiry))
+        } {
+            // This is a valid, non-stale, expired timer.
+            self.timers.remove(&key);
+            expired_keys.push(key);
         }
 
         expired_keys
@@ -169,13 +252,10 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Returns the next non-stale expiry time, if it exists.
     pub fn peek_next_valid_expiry(&mut self) -> Option<Instant> {
-        while let Some((Reverse(expiry_time), key)) = self.expirations.peek() {
-            if self.timers.get(key) == Some(expiry_time) {
-                return Some(*expiry_time);
-            }
-            self.expirations.pop();
-        }
-        None
+        let timers = &self.timers;
+        self.expirations
+            .peek_valid(|key, expiry| timers.get(key) == Some(&expiry))
+            .map(|(expiry, _)| expiry)
     }
 
     pub fn len(&self) -> usize {
@@ -224,7 +304,7 @@ pub struct WorkerPruneManager {
 struct WorkerPruneManagerInner {
     config: PruneConfig,
     workers: DashMap<WorkerWithDpRank, Mutex<WorkerPruneState>, FxBuildHasher>,
-    next_expiries: Mutex<BinaryHeap<(Reverse<Instant>, WorkerWithDpRank)>>,
+    next_expiries: Mutex<LazyExpiryHeap<WorkerWithDpRank>>,
     pending_removes: Mutex<VecDeque<BlockEntry>>,
     ready_tx: watch::Sender<u64>,
     schedule_tx: watch::Sender<u64>,
@@ -244,7 +324,7 @@ impl WorkerPruneManager {
         let inner = Arc::new(WorkerPruneManagerInner {
             config,
             workers: DashMap::with_hasher(FxBuildHasher),
-            next_expiries: Mutex::new(BinaryHeap::new()),
+            next_expiries: Mutex::new(LazyExpiryHeap::new(WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD)),
             pending_removes: Mutex::new(VecDeque::new()),
             ready_tx,
             schedule_tx,
@@ -298,21 +378,67 @@ impl WorkerPruneManager {
             by_worker.entry(entry.worker).or_default().push(entry);
         }
 
+        let mut should_bump_schedule = false;
         for (worker, worker_entries) in by_worker {
-            let next_expiry = {
-                let state = self.inner.workers.entry(worker).or_insert_with(|| {
-                    Mutex::new(WorkerPruneState::new(self.inner.config.clone()))
-                });
-                let mut state = state.lock().expect("worker prune state mutex poisoned");
-                state.insert_block_entries(worker_entries, now);
-                state.peek_next_valid_expiry()
-            };
-            if let Some(next_expiry) = next_expiry {
-                self.inner.push_worker_expiry(worker, next_expiry);
-            }
+            should_bump_schedule |=
+                self.insert_worker_block_entries_at(worker, worker_entries, now);
         }
 
-        self.inner.bump_schedule();
+        if should_bump_schedule {
+            self.inner.bump_schedule();
+        }
+    }
+
+    pub fn insert_worker_block_entries(&self, worker: WorkerWithDpRank, entries: Vec<BlockEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+
+        if self.insert_worker_block_entries_at(worker, entries, Instant::now()) {
+            self.inner.bump_schedule();
+        }
+    }
+
+    fn insert_worker_block_entries_at(
+        &self,
+        worker: WorkerWithDpRank,
+        entries: Vec<BlockEntry>,
+        now: Instant,
+    ) -> bool {
+        let (old_next, new_next) = {
+            let state =
+                self.inner.workers.entry(worker).or_insert_with(|| {
+                    Mutex::new(WorkerPruneState::new(self.inner.config.clone()))
+                });
+            let mut state = state.lock().expect("worker prune state mutex poisoned");
+            let old_next = state.peek_next_valid_expiry();
+            state.insert_block_entries(entries, now);
+            let new_next = state.peek_next_valid_expiry();
+            (old_next, new_next)
+        };
+
+        match (old_next, new_next) {
+            (None, Some(next_expiry)) => {
+                self.inner.push_worker_expiry(worker, next_expiry);
+                true
+            }
+            (Some(old_next), Some(new_next)) if new_next < old_next => {
+                tracing::warn!(
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    ?old_next,
+                    ?new_next,
+                    "Approximate prune expiry moved earlier during insert; rescheduling"
+                );
+                debug_assert!(
+                    new_next >= old_next,
+                    "approximate prune expiry moved earlier during insert"
+                );
+                self.inner.push_worker_expiry(worker, new_next);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn remove_block_entries(&self, entries: &[BlockEntry]) {
@@ -423,7 +549,7 @@ impl WorkerPruneManagerInner {
         self.next_expiries
             .lock()
             .expect("worker expiry index mutex poisoned")
-            .push((Reverse(expiry), worker));
+            .push(worker, expiry);
         self.rebuild_worker_expiry_heap_if_needed();
     }
 
@@ -438,13 +564,13 @@ impl WorkerPruneManagerInner {
                 .next_expiries
                 .lock()
                 .expect("worker expiry index mutex poisoned");
-            expiries.len() > workers_len * WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD
+            expiries.should_rebuild(workers_len)
         };
         if !should_rebuild {
             return;
         }
 
-        let mut rebuilt = BinaryHeap::new();
+        let mut rebuilt = LazyExpiryHeap::new(WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD);
         for entry in self.workers.iter() {
             let worker = *entry.key();
             let next_expiry = entry
@@ -453,7 +579,7 @@ impl WorkerPruneManagerInner {
                 .expect("worker prune state mutex poisoned")
                 .peek_next_valid_expiry();
             if let Some(next_expiry) = next_expiry {
-                rebuilt.push((Reverse(next_expiry), worker));
+                rebuilt.push(worker, next_expiry);
             }
         }
 
@@ -469,9 +595,8 @@ impl WorkerPruneManagerInner {
                 .next_expiries
                 .lock()
                 .expect("worker expiry index mutex poisoned")
-                .peek()
-                .copied();
-            let (Reverse(expiry), worker) = candidate?;
+                .peek();
+            let (expiry, worker) = candidate?;
 
             let next_valid = self.workers.get(&worker).and_then(|state| {
                 state
@@ -488,11 +613,10 @@ impl WorkerPruneManagerInner {
                 .next_expiries
                 .lock()
                 .expect("worker expiry index mutex poisoned");
-            if expiries.peek().copied() == candidate {
-                expiries.pop();
-                if let Some(next_valid) = next_valid {
-                    expiries.push((Reverse(next_valid), worker));
-                }
+            if expiries.pop_if_top((expiry, &worker))
+                && let Some(next_valid) = next_valid
+            {
+                expiries.push(worker, next_valid);
             }
         }
     }
@@ -501,12 +625,12 @@ impl WorkerPruneManagerInner {
         let mut expired = Vec::new();
 
         loop {
-            let Some((Reverse(expiry), worker)) = ({
+            let Some((expiry, worker)) = ({
                 let mut expiries = self
                     .next_expiries
                     .lock()
                     .expect("worker expiry index mutex poisoned");
-                let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
+                let Some((expiry, _)) = expiries.peek() else {
                     break;
                 };
                 if expiry > now {

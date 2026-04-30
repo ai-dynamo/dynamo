@@ -590,11 +590,16 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             return Ok(());
         };
 
-        let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
-        let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+        tokens_with_hashes.get_or_compute_seq_hashes();
+        let local_hashes = tokens_with_hashes
+            .block_hashes()
+            .expect("block hashes missing after computing sequence hashes");
+        let sequence_hashes = tokens_with_hashes
+            .seq_hashes()
+            .expect("sequence hashes missing after computing sequence hashes");
         let event_id = Self::next_synthetic_event_id(&self.synthetic_event_id);
-        let event =
-            Self::stored_event_for_hashes(worker, &local_hashes, &sequence_hashes, event_id);
+        let event = Self::stored_event_for_hashes(worker, local_hashes, sequence_hashes, event_id);
+        let prune_entries = Self::block_entries_for_hashes(worker, sequence_hashes);
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
@@ -614,8 +619,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
         if applied {
-            prune_manager
-                .insert_block_entries(Self::block_entries_for_hashes(worker, &sequence_hashes));
+            prune_manager.insert_worker_block_entries(worker, prune_entries);
         }
 
         Ok(())
