@@ -38,9 +38,9 @@ const (
 	dgdrAliasBefore                 = "before"
 )
 
-func decodeDGDRHubSpecSaveForTest(t *testing.T, raw string) dgdrHubSpecPreservation {
+func decodeDGDRHubSpecSaveForTest(t *testing.T, raw string) dgdrHubSpecSave {
 	t.Helper()
-	var saved dgdrHubSpecPreservation
+	var saved dgdrHubSpecSave
 	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
 		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
 	}
@@ -67,7 +67,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 		"planner": map[string]interface{}{
 			"enable_load_scaling": false,
 		},
-		"extra_key": "preserved",
+		"extra_key": "saved",
 	}
 	blobRaw, _ := json.Marshal(profilingBlob)
 
@@ -282,7 +282,7 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 }
 
-// TestAlpha1RoundTrip verifies v1alpha1 → v1beta1 → v1alpha1 preserves all round-tripped fields.
+// TestAlpha1RoundTrip verifies v1alpha1 → v1beta1 → v1alpha1 keeps all round-tripped fields.
 func TestAlpha1RoundTrip(t *testing.T) {
 	original := newV1alpha1DGDR()
 
@@ -322,9 +322,9 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if slaMap["isl"] != float64(2048) {
 		t.Errorf("blob sla.isl: got %v, want 2048", slaMap["isl"])
 	}
-	// Verify unknown keys are preserved via the annotation round-trip
-	if blob["extra_key"] != "preserved" {
-		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
+	// Verify unknown keys are saved via the annotation round-trip.
+	if blob["extra_key"] != "saved" {
+		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "saved")
 	}
 	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
 	plannerMap, _ := blob["planner"].(map[string]interface{})
@@ -341,7 +341,7 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	}
 }
 
-// TestHubRoundTrip verifies v1beta1 → v1alpha1 → v1beta1 preserves all round-tripped fields.
+// TestHubRoundTrip verifies v1beta1 → v1alpha1 → v1beta1 keeps all round-tripped fields.
 func TestHubRoundTrip(t *testing.T) {
 	original := newV1beta1DGDR()
 
@@ -372,7 +372,7 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDGDR_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
+func TestDGDR_IntermediateHubEditsWinOverSavedSpoke(t *testing.T) {
 	const (
 		editedModel = "edited-model"
 		editedImage = "edited-image"
@@ -403,7 +403,7 @@ func TestDGDR_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	}
 }
 
-func TestDGDR_IntermediateHubStatusWinsOverPreservedSpokeStatus(t *testing.T) {
+func TestDGDR_IntermediateHubStatusWinsOverSavedSpokeStatus(t *testing.T) {
 	original := newV1alpha1DGDR()
 	hub := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := original.ConvertTo(hub); err != nil {
@@ -434,7 +434,7 @@ func TestDGDR_IntermediateHubStatusWinsOverPreservedSpokeStatus(t *testing.T) {
 	}
 }
 
-func TestDGDR_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+func TestDGDR_IntermediateHubOnlyEditsAreSavedWithSpokeSnapshot(t *testing.T) {
 	original := newV1alpha1DGDR()
 	hub := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := original.ConvertTo(hub); err != nil {
@@ -448,7 +448,7 @@ func TestDGDR_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T
 		t.Fatalf("ConvertFrom() error = %v", err)
 	}
 	if _, ok := spoke.Annotations[annDGDRHubSpec]; !ok {
-		t.Fatalf("expected current hub-only edit to be preserved in %q", annDGDRHubSpec)
+		t.Fatalf("expected current hub-only edit to be saved in %q", annDGDRHubSpec)
 	}
 
 	restored := &v1beta1.DynamoGraphDeploymentRequest{}
@@ -460,7 +460,7 @@ func TestDGDR_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T
 	}
 }
 
-func TestDGDR_IntermediateSpokeEditsWinOverPreservedHub(t *testing.T) {
+func TestDGDR_IntermediateSpokeEditsWinOverSavedHub(t *testing.T) {
 	original := newV1beta1DGDR()
 	spoke := &DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertFrom(original); err != nil {
@@ -490,7 +490,7 @@ func TestDGDR_IntermediateSpokeEditsWinOverPreservedHub(t *testing.T) {
 	}
 }
 
-func TestDGDR_IntermediateProfilingJobAnnotationWinsOverPreservedHub(t *testing.T) {
+func TestDGDR_IntermediateProfilingJobAnnotationWinsOverSavedHub(t *testing.T) {
 	original := newV1beta1DGDR()
 	spoke := &DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertFrom(original); err != nil {
@@ -508,7 +508,7 @@ func TestDGDR_IntermediateProfilingJobAnnotationWinsOverPreservedHub(t *testing.
 	}
 }
 
-func TestDGDR_IntermediateSpokeAlphaOnlyStatusEditsSurvivePreservedHub(t *testing.T) {
+func TestDGDR_IntermediateSpokeAlphaOnlyStatusEditsSurviveSavedHub(t *testing.T) {
 	original := newV1beta1DGDR()
 	spoke := &DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertFrom(original); err != nil {
@@ -548,7 +548,7 @@ func TestDGDR_IntermediateSpokeAlphaOnlyStatusEditsSurvivePreservedHub(t *testin
 	}
 }
 
-func TestDGDR_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
+func TestDGDR_IntermediateSpokeAlphaOnlyEditsSurviveSavedHub(t *testing.T) {
 	original := newV1beta1DGDR()
 	spoke := &DynamoGraphDeploymentRequest{}
 	if err := spoke.ConvertFrom(original); err != nil {
@@ -684,7 +684,7 @@ func TestDGDR_StaleProfilingConfigAnnotationDoesNotRestoreClearedHubFields(t *te
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "stale-blob",
 			Annotations: map[string]string{
-				annDGDRProfilingConfig: `{"sla":{"ttft":500,"isl":2048,"optimizationType":"throughput"},"planner":{"enabled":true},"deployment":{"modelCache":{"pvcName":"old-pvc"}},"extra":"preserved"}`,
+				annDGDRProfilingConfig: `{"sla":{"ttft":500,"isl":2048,"optimizationType":"throughput"},"planner":{"enabled":true},"deployment":{"modelCache":{"pvcName":"old-pvc"}},"extra":"saved"}`,
 			},
 		},
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
@@ -698,7 +698,7 @@ func TestDGDR_StaleProfilingConfigAnnotationDoesNotRestoreClearedHubFields(t *te
 		t.Fatalf("ConvertFrom() error = %v", err)
 	}
 	if spoke.Spec.ProfilingConfig.Config == nil {
-		t.Fatalf("ProfilingConfig.Config is nil, want unknown blob data preserved")
+		t.Fatalf("ProfilingConfig.Config is nil, want unknown blob data saved")
 	}
 	var blob map[string]interface{}
 	if err := json.Unmarshal(spoke.Spec.ProfilingConfig.Config.Raw, &blob); err != nil {
@@ -714,8 +714,8 @@ func TestDGDR_StaleProfilingConfigAnnotationDoesNotRestoreClearedHubFields(t *te
 	if _, ok := deployMap["modelCache"]; ok {
 		t.Fatalf("stale modelCache key survived in profiling config: %v", deployMap["modelCache"])
 	}
-	if blob["extra"] != "preserved" {
-		t.Fatalf("extra key = %v, want preserved", blob["extra"])
+	if blob["extra"] != "saved" {
+		t.Fatalf("extra key = %v, want saved", blob["extra"])
 	}
 
 	restored := &v1beta1.DynamoGraphDeploymentRequest{}
@@ -777,9 +777,9 @@ func TestDGDR_OptimizationTypeOnlyRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDGDR_OptimizationTypeWinsOverPreservedNilSLA(t *testing.T) {
+func TestDGDR_OptimizationTypeWinsOverSavedNilSLA(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "optimization-stale-preserved"},
+		ObjectMeta: metav1.ObjectMeta{Name: "optimization-stale-saved"},
 		Spec: DynamoGraphDeploymentRequestSpec{
 			Model:     "llama",
 			Backend:   "vllm",
@@ -971,7 +971,7 @@ func TestDGDR_ProfilingJobHubOnlyFieldsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDGDR_LiveProfilingFieldsOverridePreservedJob(t *testing.T) {
+func TestDGDR_LiveProfilingFieldsOverrideSavedJob(t *testing.T) {
 	original := &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "profiling-job-live-wins"},
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
@@ -1044,7 +1044,7 @@ func TestDGDR_LiveProfilingFieldsOverridePreservedJob(t *testing.T) {
 	}
 }
 
-func TestDGDR_ClearedSelectedConfigDoesNotRestorePreservedGeneratedDeployment(t *testing.T) {
+func TestDGDR_ClearedSelectedConfigDoesNotRestoreSavedGeneratedDeployment(t *testing.T) {
 	original := newV1alpha1DGDR()
 	original.Status.GeneratedDeployment = &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment"}`)}
 
@@ -1123,7 +1123,7 @@ func TestDGDR_SparseHubSpecOmitsRepresentableFields(t *testing.T) {
 	}
 	raw := spoke.Annotations[annDGDRHubSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve hub-only searchStrategy", annDGDRHubSpec)
+		t.Fatalf("expected %s to save hub-only searchStrategy", annDGDRHubSpec)
 	}
 	saved := decodeDGDRHubSpecSaveForTest(t, raw)
 	if saved.Spec.Model != "" || saved.Spec.Backend != "" || saved.Spec.Image != "" {
@@ -1151,7 +1151,7 @@ func TestDGDR_SparseHubSpecNilAutoApplyOmitsRepresentableFields(t *testing.T) {
 	}
 	raw := spoke.Annotations[annDGDRHubSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve nil AutoApply shape", annDGDRHubSpec)
+		t.Fatalf("expected %s to save nil AutoApply shape", annDGDRHubSpec)
 	}
 	saved := decodeDGDRHubSpecSaveForTest(t, raw)
 	if saved.Spec.Model != "" || saved.Spec.Backend != "" || saved.Spec.Image != "" {
@@ -1215,7 +1215,7 @@ func TestDGDR_SparseHubSpecWorkloadWithoutSLAOmitsRepresentableFields(t *testing
 	}
 	raw := spoke.Annotations[annDGDRHubSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve workload-without-sla shape", annDGDRHubSpec)
+		t.Fatalf("expected %s to save workload-without-sla shape", annDGDRHubSpec)
 	}
 	saved := decodeDGDRHubSpecSaveForTest(t, raw)
 	if saved.Spec.Model != "" || saved.Spec.Backend != "" || saved.Spec.Image != "" {
@@ -1343,9 +1343,9 @@ func TestDGDR_EmptyStateRoundTrips(t *testing.T) {
 	}
 }
 
-func TestDGDR_SpokeStatusPreservationDoesNotWriteFingerprint(t *testing.T) {
+func TestDGDR_SpokeStatusSaveDoesNotWriteLegacyStatusSnapshot(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "no-status-fingerprint"},
+		ObjectMeta: metav1.ObjectMeta{Name: "no-legacy-status-snapshot"},
 		Status: DynamoGraphDeploymentRequestStatus{
 			State: DGDRStateDeploymentDeleted,
 		},
@@ -1356,10 +1356,10 @@ func TestDGDR_SpokeStatusPreservationDoesNotWriteFingerprint(t *testing.T) {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
 	if _, ok := hub.Annotations[annDGDRSpokeStatus]; !ok {
-		t.Fatalf("expected %s to preserve lossy state", annDGDRSpokeStatus)
+		t.Fatalf("expected %s to save lossy state", annDGDRSpokeStatus)
 	}
-	if _, ok := hub.Annotations[annDGDRSpokeHubStatus]; ok {
-		t.Fatalf("unexpected fingerprint annotation %s: %v", annDGDRSpokeHubStatus, hub.Annotations)
+	if _, ok := hub.Annotations[annDGDRLegacyStatusSnapshot]; ok {
+		t.Fatalf("unexpected legacy status snapshot annotation %s: %v", annDGDRLegacyStatusSnapshot, hub.Annotations)
 	}
 }
 
@@ -1376,7 +1376,7 @@ func TestDGDR_OldFullSpokeSpecDoesNotRestoreClearedProfilingFields(t *testing.T)
 			NodeSelector: map[string]string{"old": "selector"},
 		},
 	}
-	envelope, err := json.Marshal(dgdrSpokeSpecPreservation{Spec: oldSpokeSpec})
+	envelope, err := json.Marshal(dgdrSpokeSpecSave{Spec: oldSpokeSpec})
 	if err != nil {
 		t.Fatalf("marshal old spoke spec: %v", err)
 	}
@@ -1409,7 +1409,7 @@ func TestDGDR_OldFullSpokeSpecDoesNotRestoreClearedProfilingFields(t *testing.T)
 }
 
 // TestConvertTo_InvalidProfilingConfigJSON verifies that malformed or arbitrary
-// RawExtension bytes in ProfilingConfig.Config are preserved rather than
+// RawExtension bytes in ProfilingConfig.Config are saved rather than
 // rejected. The v1alpha1 field is an opaque extension point; typed v1beta1
 // fields are projected only when the payload is a legacy JSON object we
 // understand.
@@ -1430,7 +1430,7 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 		t.Fatalf("ConvertFrom() error = %v", err)
 	}
 	if spoke.Spec.ProfilingConfig.Config == nil || string(spoke.Spec.ProfilingConfig.Config.Raw) != `{not valid json` {
-		t.Fatalf("ProfilingConfig.Config raw = %v, want preserved invalid payload", spoke.Spec.ProfilingConfig.Config)
+		t.Fatalf("ProfilingConfig.Config raw = %v, want saved invalid payload", spoke.Spec.ProfilingConfig.Config)
 	}
 }
 

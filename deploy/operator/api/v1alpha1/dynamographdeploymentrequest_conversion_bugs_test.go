@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestBugDGDR_HubClearsAlphaOnlySpecAnnotationsDropsPreservedSpokeSpec(t *testing.T) {
+func TestBugDGDR_HubClearsAlphaOnlySpecAnnotationsDropsSavedSpokeSpec(t *testing.T) {
 	enableGPUDiscovery := true
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-spec"},
@@ -77,7 +77,7 @@ func TestBugDGDR_HubClearsAlphaOnlySpecAnnotationsDropsPreservedSpokeSpec(t *tes
 	}
 }
 
-func TestBugDGDR_HubClearsAlphaOnlyStatusAnnotationsDropsPreservedSpokeStatus(t *testing.T) {
+func TestBugDGDR_HubClearsAlphaOnlyStatusAnnotationsDropsSavedSpokeStatus(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-status"},
 		Status: DynamoGraphDeploymentRequestStatus{
@@ -142,7 +142,7 @@ func TestBugDGDR_SparseHubSpecSaveOmitsRepresentableContextFields(t *testing.T) 
 	}
 	raw := spoke.Annotations[annDGDRHubSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve hub-only searchStrategy", annDGDRHubSpec)
+		t.Fatalf("expected %s to save hub-only searchStrategy", annDGDRHubSpec)
 	}
 	saved := decodeDGDRHubSpecSaveForTest(t, raw)
 	if saved.Spec.SearchStrategy != v1beta1.SearchStrategyThorough {
@@ -175,7 +175,7 @@ func TestBugDGDR_HubEmptyModelCacheShapeRoundTrips(t *testing.T) {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
 	if restored.Spec.ModelCache == nil {
-		t.Fatalf("ModelCache = nil, want empty object shape preserved")
+		t.Fatalf("ModelCache = nil, want empty object shape saved")
 	}
 }
 
