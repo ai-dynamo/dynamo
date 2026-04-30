@@ -170,7 +170,7 @@ jobs:
       framework: sglang
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
