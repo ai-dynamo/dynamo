@@ -5,13 +5,18 @@ title: Agent Context and Tracing
 subtitle: Attach workflow identity to agentic requests
 ---
 
-Dynamo can write a single local trace stream for agent workflows. The harness
-adds workflow identity to LLM requests and optionally sends tool lifecycle
-events to Dynamo. Dynamo owns LLM request metrics, trace normalization, and trace
-sinks.
+Agent workloads are easier to debug when model calls and tool calls share a
+common workflow identity. Dynamo agent tracing provides that view without asking
+the harness to measure serving internals itself.
 
-This is observability only. Agent context does not change routing, scheduling,
-or cache behavior.
+The harness adds lightweight workflow metadata to each LLM request and can
+publish tool lifecycle events over a local ZMQ socket. Dynamo then writes a
+single trace stream that combines harness-provided structure with Dynamo-owned
+request metrics such as token counts, timing, cache hit rate, queue depth, and
+worker placement.
+
+This is passive observability. Agent context does not change routing,
+scheduling, or cache behavior.
 
 ```text
 LLM request:
@@ -47,10 +52,12 @@ harness will publish on:
 
 ```bash
 export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
-export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC=
 ```
 
 Then start any Dynamo OpenAI-compatible backend.
+
+<details>
+<summary>Environment variable reference</summary>
 
 | Environment Variable | Required | Default | Description |
 |----------------------|:--------:|---------|-------------|
@@ -63,6 +70,8 @@ Then start any Dynamo OpenAI-compatible backend.
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES` | No | unset | Optional `jsonl_gz` segment roll threshold in records. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | No | unset | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | No | unset | Optional ZMQ topic filter for harness tool events. |
+
+</details>
 
 `DYN_AGENT_TRACE_SINKS` is the local output enable switch. Setting
 `DYN_AGENT_TRACE_OUTPUT_PATH` alone does not enable tracing. Setting only the ZMQ
