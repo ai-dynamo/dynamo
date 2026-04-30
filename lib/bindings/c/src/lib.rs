@@ -286,6 +286,7 @@ fn kv_event_create_stored_from_parts(
         data: KvCacheEventData::Stored(KvCacheStoreData {
             blocks,
             parent_hash: kv_params.parent_hash.map(ExternalSequenceBlockHash),
+            start_position: None,
         }),
         event_id: kv_params.event_id,
         dp_rank: 0,
@@ -455,7 +456,7 @@ impl RouterHandles {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<(u64, u32), QueryRouterResult> {
+    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
         }
@@ -882,12 +883,13 @@ pub unsafe extern "C" fn add_request(
                 }
             };
 
+            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
             decode_router
                 .add_request(
                     request_id_str.clone(),
                     &tokens,
                     None,
-                    overlap_blocks,
+                    cached_tokens,
                     None,
                     worker,
                     None, // lora_name
@@ -1116,7 +1118,14 @@ unsafe fn preprocess_request(
         }
     };
 
-    Ok(encoding.token_ids().to_vec())
+    let token_ids = encoding.token_ids().to_vec();
+    tracing::info!(
+        token_count = token_ids.len(),
+        first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+        "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
+    );
+
+    Ok(token_ids)
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1213,6 +1222,8 @@ pub unsafe extern "C" fn route_prefill_request(
         let (prefill_worker_id, prefill_dp_rank) = handles
             .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
             .await?;
+
+        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
 
         tracing::info!(
             prefill_worker_id = prefill_worker_id,

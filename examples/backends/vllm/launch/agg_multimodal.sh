@@ -97,6 +97,9 @@ case "$MODEL_NAME" in
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
+# Default KV cache cap from profiling (2x safety over min=461 MiB); ~9.6 GiB peak VRAM
+# Uses smallest profiled value across multimodal tests; profiler/test framework overrides via env
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=922354000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 # Start vLLM worker with vision model

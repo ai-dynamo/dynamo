@@ -44,6 +44,65 @@ pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
     xxhash_rust::xxh3::xxh3_64_with_seed(data, seed)
 }
 
+/// Custom serde codec that encodes a `u128` as a 16-byte big-endian byte sequence.
+///
+/// MessagePack (`rmp-serde`) has no native 128-bit integer type, so the default
+/// `u128` derive does not roundtrip reliably. Encoding as raw bytes is supported
+/// uniformly across msgpack, JSON, CBOR, etc.
+mod serde_bytes_u128 {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(val: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&val.to_be_bytes())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::{self, SeqAccess, Visitor};
+        use std::fmt;
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = [u8; 16];
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("16 bytes (msgpack bin) or a sequence of 16 u8 values")
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<[u8; 16], E> {
+                v.try_into()
+                    .map_err(|_| E::invalid_length(v.len(), &"16 bytes"))
+            }
+
+            fn visit_borrowed_bytes<E: de::Error>(self, v: &'de [u8]) -> Result<[u8; 16], E> {
+                self.visit_bytes(v)
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<[u8; 16], E> {
+                self.visit_bytes(&v)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u8; 16], A::Error> {
+                let mut arr = [0u8; 16];
+                for (i, slot) in arr.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(i, &"16 u8 elements"))?;
+                }
+                Ok(arr)
+            }
+        }
+
+        let arr = deserializer.deserialize_bytes(V)?;
+        Ok(u128::from_be_bytes(arr))
+    }
+}
+
 /// A 128-bit positional sequence hash combining traditional sequence hash with positional information.
 ///
 /// Layout:
@@ -56,7 +115,8 @@ pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
 /// - Mode 10: 24-bit position (max 16,777,215) + 38-bit LBH
 /// - Mode 11: 31-bit position (max 2,147,483,647) + 31-bit LBH
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
-pub struct PositionalSequenceHash(u128);
+#[serde(transparent)]
+pub struct PositionalSequenceHash(#[serde(with = "serde_bytes_u128")] u128);
 
 impl PositionalSequenceHash {
     /// Creates a new PositionalSequenceHash from components.
@@ -198,7 +258,8 @@ impl std::fmt::Debug for PositionalSequenceHash {
 /// This encoding enables backward traversal through the radix tree by matching
 /// parent fragments at position-1.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
-pub struct PositionalLineageHash(u128);
+#[serde(transparent)]
+pub struct PositionalLineageHash(#[serde(with = "serde_bytes_u128")] u128);
 
 impl PositionalLineageHash {
     /// Creates a new PositionalLineageHash from components.
@@ -344,6 +405,26 @@ impl std::fmt::Debug for PositionalLineageHash {
 impl std::fmt::Display for PositionalLineageHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.format_impl(f)
+    }
+}
+
+impl std::cmp::PartialOrd for PositionalLineageHash {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::cmp::Ord for PositionalLineageHash {
+    /// Lexicographic order: [`Self::position`], then [`Self::current_hash_fragment`],
+    /// then the full packed [`Self::as_u128`] so the order is total and consistent with [`Eq`].
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.position()
+            .cmp(&other.position())
+            .then_with(|| {
+                self.current_hash_fragment()
+                    .cmp(&other.current_hash_fragment())
+            })
+            .then_with(|| self.0.cmp(&other.0))
     }
 }
 
@@ -2427,6 +2508,64 @@ mod tests {
         assert_ne!(plh.as_u128(), plh3.as_u128());
     }
 
+    #[test]
+    fn test_positional_lineage_hash_ord_by_position_then_current_fragment() {
+        let at_5_low = PositionalLineageHash::new(0x10, Some(0x1111), 5);
+        let at_5_high = PositionalLineageHash::new(0x20, Some(0x1111), 5);
+        assert!(
+            at_5_low.current_hash_fragment() < at_5_high.current_hash_fragment(),
+            "test assumes distinct current fragments at the same position"
+        );
+        assert!(at_5_low < at_5_high);
+        assert!(at_5_high > at_5_low);
+
+        let at_3 = PositionalLineageHash::new(0x99, Some(0x2222), 3);
+        assert!(at_3 < at_5_low);
+        assert!(at_5_high < PositionalLineageHash::new(0x01, Some(0x3333), 6));
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_ord_tiebreak_parent_via_packed_u128() {
+        let same_pos_same_current = PositionalLineageHash::new(0x1234, Some(0x100), 10);
+        let same_pos_same_current_other_parent =
+            PositionalLineageHash::new(0x1234, Some(0x200), 10);
+        assert_eq!(same_pos_same_current.position(), 10);
+        assert_eq!(
+            same_pos_same_current.position(),
+            same_pos_same_current_other_parent.position()
+        );
+        assert_eq!(
+            same_pos_same_current.current_hash_fragment(),
+            same_pos_same_current_other_parent.current_hash_fragment()
+        );
+        assert_ne!(same_pos_same_current, same_pos_same_current_other_parent);
+        assert_ne!(
+            same_pos_same_current.cmp(&same_pos_same_current_other_parent),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_vec_sort_matches_ord() {
+        let a = PositionalLineageHash::new(0x30, None, 0);
+        let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
+        let c = PositionalLineageHash::new(0x20, Some(0x30), 2);
+        let mut v = vec![b, a, c];
+        v.sort();
+        assert_eq!(v, vec![a, b, c]);
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_itertools_sorted() {
+        use itertools::Itertools;
+
+        let a = PositionalLineageHash::new(0x30, None, 0);
+        let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
+        let c = PositionalLineageHash::new(0x20, Some(0x30), 2);
+        let sorted: Vec<_> = vec![b, a, c].into_iter().sorted().collect();
+        assert_eq!(sorted, vec![a, b, c]);
+    }
+
     // === Tokens From Impls ===
 
     #[test]
@@ -2580,5 +2719,46 @@ mod tests {
         let last = seq.last_complete_block();
         assert!(last.is_some());
         assert_eq!(last.unwrap().tokens().as_ref(), &[5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_positional_hashes_msgpack_roundtrip() {
+        let psh = PositionalSequenceHash::new(0xDEAD_BEEF_CAFE_BABE, 12345, 0x0123_4567_89AB_CDEF);
+        let bytes = rmp_serde::to_vec(&psh).expect("psh serialize");
+        let decoded: PositionalSequenceHash =
+            rmp_serde::from_slice(&bytes).expect("psh deserialize");
+        assert_eq!(psh, decoded);
+        assert_eq!(psh.as_u128(), decoded.as_u128());
+
+        let plh =
+            PositionalLineageHash::new(0x1111_2222_3333_4444, Some(0x5555_6666_7777_8888), 256);
+        let bytes = rmp_serde::to_vec(&plh).expect("plh serialize");
+        let decoded: PositionalLineageHash =
+            rmp_serde::from_slice(&bytes).expect("plh deserialize");
+        assert_eq!(plh, decoded);
+        assert_eq!(plh.as_u128(), decoded.as_u128());
+
+        // Vec roundtrip — exercises the codec inside a container.
+        let vec = vec![psh, PositionalSequenceHash::default(), psh];
+        let bytes = rmp_serde::to_vec(&vec).expect("vec serialize");
+        let decoded: Vec<PositionalSequenceHash> =
+            rmp_serde::from_slice(&bytes).expect("vec deserialize");
+        assert_eq!(vec, decoded);
+    }
+
+    #[test]
+    fn test_positional_hashes_json_roundtrip() {
+        // Confirm the byte-array codec also roundtrips through JSON (array of u8).
+        let psh = PositionalSequenceHash::new(0xAAAA_BBBB_CCCC_DDDD, 7, 0xEEEE_FFFF_0000_1111);
+        let json = serde_json::to_string(&psh).expect("psh json serialize");
+        let decoded: PositionalSequenceHash =
+            serde_json::from_str(&json).expect("psh json deserialize");
+        assert_eq!(psh, decoded);
+
+        let plh = PositionalLineageHash::new(0x1234_5678, Some(0xABCD_EF01), 42);
+        let json = serde_json::to_string(&plh).expect("plh json serialize");
+        let decoded: PositionalLineageHash =
+            serde_json::from_str(&json).expect("plh json deserialize");
+        assert_eq!(plh, decoded);
     }
 }

@@ -4,6 +4,7 @@
 import logging
 import re
 from typing import Tuple
+from uuid import uuid4
 
 import yaml
 
@@ -91,7 +92,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "trtllm-agg"
+        cfg.metadata.name = f"trtllm-agg-{uuid4().hex[:8]}"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -275,8 +276,24 @@ class TrtllmConfigModifier(BaseConfigModifier):
     def get_kv_cache_size_from_dynamo_log(
         cls, dynamo_log_fn: str, attention_dp_size: int = 1
     ) -> int:
+        """Return TRT-LLM paged KV cache token capacity parsed from Dynamo logs.
+
+        TRT-LLM may emit multiple memory allocation lines for paged KV cache
+        during startup. This parser scans the full file and returns the token
+        value from the last matching entry, which reflects the effective
+        configured capacity.
+
+        Args:
+            dynamo_log_fn: Path to the Dynamo runtime log file.
+            attention_dp_size: Unused for TRT-LLM; included for interface parity.
+
+        Returns:
+            Parsed max token count for paged KV cache, or ``100000`` when no
+            matching log entry is found.
+        """
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
+        max_tokens: int | None = None
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -289,12 +306,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
                         match = re.search(r"paged KV cache \((\d+)\)", line)
                         if match:
                             max_tokens = int(match.group(1))
-                            logger.info(
-                                f"Found TRT-LLM KV cache max tokens: {max_tokens}"
-                            )
-                            return max_tokens
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
+
+        if max_tokens is not None:
+            logger.info(f"Found TRT-LLM KV cache max tokens: {max_tokens}")
+            return max_tokens
 
         # Return a reasonable default if we couldn't find the KV cache size in logs
         logger.warning(

@@ -15,6 +15,7 @@ pub use nvext::{NvExt, NvExtProvider};
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingRequest {
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateEmbeddingRequest,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,6 +31,7 @@ pub struct NvCreateEmbeddingRequest {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingResponse {
     #[serde(flatten)]
+    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateEmbeddingResponse,
 }
 

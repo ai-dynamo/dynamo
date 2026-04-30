@@ -9,6 +9,7 @@
 *.[Tt][Gg][Zz]      binary
 *.[Gg][Zz]          binary
 *.fatbin            binary
+*.mp4               binary
 
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored

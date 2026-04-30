@@ -947,7 +947,6 @@ mod tests {
     fn create_mock_response_with_logprobs(
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
@@ -984,7 +983,6 @@ mod tests {
     fn create_mock_response_with_multiple_choices(
         choices_logprobs: Vec<Vec<ChatCompletionTokenLogprob>>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         let choices = choices_logprobs
             .into_iter()
             .enumerate()
@@ -1339,7 +1337,6 @@ mod tests {
     #[test]
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
-        #[expect(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),

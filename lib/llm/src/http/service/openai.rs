@@ -94,6 +94,9 @@ pub(crate) struct ErrorMessage {
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        // 499 is not IANA-registered (nginx convention for client-closed-request),
+        // so canonical_reason() returns None. Use the de facto standard name.
+        None if code.as_u16() == 499 => "Client Closed Request".to_string(),
         None => "UnknownError".to_string(),
     }
 }
@@ -114,6 +117,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
         StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
     }
@@ -137,6 +141,29 @@ impl ErrorMessage {
                 code: code.as_u16(),
             }),
         )
+    }
+
+    /// Model exists but is temporarily unable to serve (e.g., prefill not activated,
+    /// no available workers). Returns 503 so clients can retry.
+    pub fn model_unavailable() -> ErrorResponse {
+        let code = StatusCode::SERVICE_UNAVAILABLE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: "Model temporarily unavailable".to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
+    /// Convert a ModelManagerError to the appropriate HTTP response.
+    pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
+        match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => Self::model_unavailable(),
+            _ => Self::model_not_found(),
+        }
     }
 
     /// Service Unavailable
@@ -216,6 +243,20 @@ impl ErrorMessage {
                     message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
+                }),
+            );
+        }
+
+        // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
+        if super::metrics::request_was_cancelled(err.as_ref()) {
+            let code = StatusCode::from_u16(499).unwrap();
+            tracing::debug!("Request cancelled before response: {err}");
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: err.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
                 }),
             );
         }
@@ -451,8 +492,8 @@ async fn completions_single(
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -591,8 +632,8 @@ async fn completions_batch(
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -772,8 +813,8 @@ async fn embeddings(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
     // todo - error handling should be more robust
-    let engine = state.manager().get_embeddings_engine(model).map_err(|_| {
-        let err_response = ErrorMessage::model_not_found();
+    let engine = state.manager().get_embeddings_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -1182,8 +1223,8 @@ async fn chat_completions(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1544,6 +1585,7 @@ async fn responses(
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,
+        parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
         tools: request.inner.tools.clone(),
         tool_choice: request.inner.tool_choice.clone(),
@@ -1553,6 +1595,18 @@ async fn responses(
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
         truncation: request.inner.truncation,
+        // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
+        // the response serializer can default to 0.0 without hardcoding at the
+        // build site. When upstream (or our shadow) adds the fields, sourcing
+        // from the request becomes a one-line change here.
+        presence_penalty: None,
+        frequency_penalty: None,
+        // Pass-through metadata — accepted on the request, echoed back on the
+        // response so the caller can confirm receipt. Dynamo doesn't act on
+        // these; see `validate_response_unsupported_fields` for rationale.
+        prompt_cache_key: request.inner.prompt_cache_key.clone(),
+        prompt_cache_retention: request.inner.prompt_cache_retention,
+        safety_identifier: request.inner.safety_identifier.clone(),
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -1593,8 +1647,8 @@ async fn responses(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1788,9 +1842,22 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
-    if inner.store == Some(true) {
+    // Reject directive fields that change semantics if silently dropped.
+    // `max_tool_calls` is a hard cap on tool invocations — accepting it
+    // without enforcement would let a caller send `max_tool_calls: 5` and
+    // see `max_tool_calls: null` in the response, assuming their limit was
+    // honored. Fail loud until real enforcement lands.
+    //
+    // Pass-through metadata fields (`prompt_cache_key`,
+    // `prompt_cache_retention`, `safety_identifier`) are deliberately
+    // accepted and echoed back on the response instead. They're hints for
+    // OpenAI's caching/moderation backends, not directives — Codex sends
+    // `prompt_cache_key` on every request — and the OpenResponses spec
+    // includes them on the response body, so echoing the caller's value
+    // makes receipt observable without needing a real backend.
+    if inner.max_tool_calls.is_some() {
         return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
+            VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
     None
@@ -1798,7 +1865,7 @@ pub fn validate_response_unsupported_fields(
 
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
-fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
     // if state.service_observer.stage() != ServiceStage::Ready {
     //     return Err(ErrorMessage::service_unavailable());
     // }
@@ -1827,15 +1894,34 @@ async fn list_models_openai(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
+    // Build context_length lookup from model deployment cards
+    let cards = state.manager().get_model_cards();
+    let card_map: HashMap<String, u32> = cards
+        .iter()
+        .map(|c| (c.display_name.clone(), c.context_length))
+        .collect();
+
+    // Env var overrides (take precedence over MDC values)
+    let cw_override: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let mot_override: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
     let mut data = Vec::new();
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
+        let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
-            object: "model", // Per OpenAI spec, this should be "model"
+            object: "model",
             created,
             owned_by: "nvidia".to_string(),
+            context_window,
+            max_output_tokens: mot_override,
         });
     }
 
@@ -1858,6 +1944,10 @@ struct ModelListing {
     object: &'static str, // always "model" per OpenAI spec
     created: u64,         // Seconds since epoch
     owned_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
@@ -1916,13 +2006,62 @@ pub fn list_models_router(
 ) -> (Vec<RouteDoc>, Router) {
     // Standard OpenAI compatible list models endpoint
     let openai_path = path.unwrap_or("/v1/models".to_string());
+    let retrieve_path = format!("{}/{{*model_id}}", openai_path);
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
+    let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
+        .route(&retrieve_path, get(get_model_openai))
         .with_state(state);
 
-    (vec![doc_for_openai], router)
+    (vec![doc_for_openai, doc_for_retrieve], router)
+}
+
+/// Retrieve a single model by ID (OpenAI format).
+///
+/// Per the OpenAI API spec: `GET /v1/models/{model}` returns a model object.
+/// Uses wildcard path to support model IDs with slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`).
+async fn get_model_openai(
+    State(state): State<Arc<service_v2::State>>,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(ErrorMessage::model_not_found());
+    }
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let cards = state.manager().get_model_cards();
+    let context_length = cards
+        .iter()
+        .find(|c| c.display_name == model_id)
+        .map(|c| c.context_length as u64);
+    let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or(context_length);
+    let max_output_tokens: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
+    Ok(Json(ModelListing {
+        id: model_id.to_string(),
+        object: "model",
+        created,
+        owned_by: "nvidia".to_string(),
+        context_window,
+        max_output_tokens,
+    })
+    .into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
@@ -1965,6 +2104,9 @@ async fn images(
         .map(|m| match m {
             dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
             dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
@@ -1976,7 +2118,7 @@ async fn images(
     let engine = state
         .manager()
         .get_images_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
@@ -2081,8 +2223,7 @@ async fn videos(
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
-    // Videos are typically not streamed, so we default to non-streaming
-    let streaming = false;
+    let streaming = request.stream.unwrap_or(false);
 
     // Get the model name from the request (video generation model)
     let model = request.model.clone();
@@ -2094,7 +2235,7 @@ async fn videos(
     let engine = state
         .manager()
         .get_videos_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
@@ -2118,30 +2259,69 @@ async fn videos(
         err_response
     })?;
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
-    let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_response_and_observe_metrics(
-            response,
-            &mut response_collector,
-            &mut http_queue_guard,
-        );
-    });
 
-    // Videos are typically returned as a single response (non-streaming)
-    // so we fold the stream into a single response
-    let response = NvVideosResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold videos stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    if streaming {
+        // [gluo TODO] revisit the cancellation handling here,
+        // should be unified with chat_completions.
+        let ctx = stream.context();
+        let (mut connection_handle, stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Videos.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
+        let stream = stream.flat_map(move |response| {
+            let sse_result = process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+            match sse_result {
+                Ok(Some(ev)) => stream::iter(vec![Ok(ev)]),
+                Ok(None) => stream::iter(vec![]),
+                Err(e) => stream::iter(vec![Err(e)]),
+            }
+        });
+        // monitor_for_disconnects: arms stream_handle, pre-marks inflight Cancelled,
+        // emits data:[DONE] on natural end, demotes to Internal on mid-stream Err,
+        // and kills the engine context when the client disconnects.
+        let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
 
-    inflight.mark_ok();
-    Ok(Json(response).into_response())
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        // Disarm immediately: we return the body directly, so disconnect detection
+        // transfers to stream_handle (armed inside monitor_for_disconnects).
+        connection_handle.disarm();
+        Ok(sse_stream.into_response())
+    } else {
+        let stream = stream.inspect(move |response| {
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response = NvVideosResponse::from_annotated_stream(stream)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+
+        inflight.mark_ok();
+        Ok(Json(response).into_response())
+    }
 }
 
 /// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
@@ -2167,7 +2347,7 @@ async fn video_stream(
     let engine = state
         .manager()
         .get_videos_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight =
         state
@@ -2321,7 +2501,6 @@ async fn audio_speech(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let response_format = request.response_format.clone();
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
@@ -2343,7 +2522,7 @@ async fn audio_speech(
     let engine = state
         .manager()
         .get_audios_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &model,
@@ -2382,13 +2561,14 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If response contains b64_json audio data, decode and return as binary
+    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
+    // decode and return binary with content-type from AudioData.output_format.
     // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
     if let Some(first) = response.data.first()
         && let Some(b64) = &first.b64_json
         && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
     {
-        let content_type = match response_format.as_deref().unwrap_or("wav") {
+        let content_type = match first.output_format.as_str() {
             "mp3" => "audio/mpeg",
             "flac" => "audio/flac",
             "pcm" => "audio/pcm",
@@ -2526,6 +2706,38 @@ mod tests {
     }
 
     #[test]
+    fn test_cancelled_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("Context id abc-123 is stopped or killed")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(
+            response.0.as_u16(),
+            499,
+            "Cancelled errors should return HTTP 499"
+        );
+        assert_eq!(response.1.code, 499);
+        assert_eq!(response.1.error_type, "Client Closed Request");
+        assert!(response.1.message.contains("stopped or killed"));
+    }
+
+    #[test]
+    fn test_cancelled_error_metrics_classification() {
+        // HTTP 499 should be classified as Cancelled for metrics
+        let error_type =
+            classify_error_for_metrics(StatusCode::from_u16(499).unwrap(), "cancelled request");
+        assert_eq!(
+            error_type,
+            ErrorType::Cancelled,
+            "HTTP 499 should map to ErrorType::Cancelled in metrics"
+        );
+    }
+
+    #[test]
     fn test_validate_unsupported_fields_accepts_clean_request() {
         let request = make_base_request();
         let result = validate_response_unsupported_fields(&request);
@@ -2538,6 +2750,17 @@ mod tests {
         request.inner.parallel_tool_calls = Some(true);
         let result = validate_response_unsupported_fields(&request);
         assert!(result.is_none(), "parallel_tool_calls should be supported");
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_accepts_store() {
+        let mut request = make_base_request();
+        request.inner.store = Some(true);
+        let result = validate_response_unsupported_fields(&request);
+        assert!(
+            result.is_none(),
+            "store should be supported for audit opt-in"
+        );
     }
 
     #[test]
@@ -2559,7 +2782,7 @@ mod tests {
                     })
                 }),
             ),
-            ("store", Box::new(|r| r.store = Some(true))),
+            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(5))),
         ];
 
         for (field, set_field) in unsupported_cases {
@@ -2567,6 +2790,43 @@ mod tests {
             (set_field)(&mut req.inner);
             let result = validate_response_unsupported_fields(&req);
             assert!(result.is_some(), "Expected rejection for `{field}`");
+        }
+    }
+
+    /// Pass-through metadata fields (`prompt_cache_key`,
+    /// `prompt_cache_retention`, `safety_identifier`) are accepted at the
+    /// validation layer; the response serializer echoes them back so the
+    /// caller can confirm receipt. Codex sends `prompt_cache_key` on every
+    /// request — rejecting it broke `codex exec` end-to-end.
+    #[test]
+    fn test_validate_unsupported_fields_accepts_passthrough_metadata() {
+        #[allow(clippy::type_complexity)]
+        let passthrough_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
+            (
+                "prompt_cache_key",
+                Box::new(|r| r.prompt_cache_key = Some("ck-1".into())),
+            ),
+            (
+                "prompt_cache_retention",
+                Box::new(|r| {
+                    r.prompt_cache_retention =
+                        Some(dynamo_protocols::types::responses::PromptCacheRetention::InMemory)
+                }),
+            ),
+            (
+                "safety_identifier",
+                Box::new(|r| r.safety_identifier = Some("user-hash".into())),
+            ),
+        ];
+
+        for (field, set_field) in passthrough_cases {
+            let mut req = make_base_request();
+            (set_field)(&mut req.inner);
+            let result = validate_response_unsupported_fields(&req);
+            assert!(
+                result.is_none(),
+                "Expected `{field}` to be accepted as pass-through metadata"
+            );
         }
     }
 
@@ -3267,6 +3527,30 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_error_type_from_response_unavailable() {
+        let response = ErrorMessage::model_unavailable();
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
+    }
+
+    #[test]
+    fn test_from_model_error_maps_correctly() {
+        let not_found = ModelManagerError::ModelNotFound("x".to_string());
+        assert_eq!(
+            ErrorMessage::from_model_error(&not_found).0,
+            StatusCode::NOT_FOUND
+        );
+
+        let unavailable = ModelManagerError::ModelUnavailable("x".to_string());
+        assert_eq!(
+            ErrorMessage::from_model_error(&unavailable).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
     fn test_extract_error_type_from_response_internal() {
         let response = ErrorMessage::internal_server_error("Something went wrong");
         assert_eq!(
@@ -3290,8 +3574,7 @@ mod tests {
 
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-        ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
-        FunctionCallStream,
+        CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, FunctionType,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -3444,7 +3727,7 @@ mod tests {
         let tool_call = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: id.map(|s| s.to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: name.map(|s| s.to_string()),
                 arguments: arguments.map(|s| s.to_string()),
@@ -3537,7 +3820,7 @@ mod tests {
         let tc1 = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_1".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
@@ -3546,7 +3829,7 @@ mod tests {
         let tc2 = ChatCompletionMessageToolCallChunk {
             index: 1,
             id: Some("call_2".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_time".to_string()),
                 arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
@@ -3609,7 +3892,7 @@ mod tests {
         let complete = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_complete".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
@@ -3618,7 +3901,7 @@ mod tests {
         let incomplete = ChatCompletionMessageToolCallChunk {
             index: 1,
             id: Some("call_partial".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("search".to_string()),
                 arguments: None, // still streaming
@@ -3658,7 +3941,7 @@ mod tests {
         let tool_call = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_999".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: None,
         };
         #[allow(deprecated)]

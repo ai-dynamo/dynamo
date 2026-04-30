@@ -11,8 +11,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    DumpRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    MatchRequest, RadixTree, RoutingDecisionRequest,
+    DumpRequest, EventKind, FlushRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics,
+    KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters,
+    RadixTree, RoutingDecisionRequest,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, PruneManager};
 use crate::protocols::*;
@@ -41,21 +42,21 @@ fn stored_block_entries(event: &RouterEvent) -> Option<Vec<BlockEntry>> {
 fn apply_event_with_prune_tracking(
     trie: &mut RadixTree,
     event: RouterEvent,
-    metrics: &KvIndexerMetrics,
+    counters: &PreBoundEventCounters,
     prune_manager: &mut Option<PruneManager<BlockEntry>>,
     prune_tx: &mpsc::Sender<()>,
 ) {
-    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+    let kind = EventKind::of(&event.event.data);
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
     let event_for_prune = prune_manager.is_some().then(|| event.clone());
-    let result = trie.apply_event(event);
+    let result = trie.apply_event_with_counters(event, Some(counters));
     let result_is_ok = result.is_ok();
     let tree_size = trie.current_size();
     tracing::trace!(
-        "Applied KV event to global radix tree: event_type={event_type}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
+        "Applied KV event to global radix tree: event_type={kind}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
     );
-    metrics.increment_event_applied(event_type, result);
+    counters.inc(kind, result);
 
     let Some(pm) = prune_manager.as_mut() else {
         return;
@@ -86,6 +87,112 @@ fn apply_event_with_prune_tracking(
     }
 }
 
+fn apply_routing_decision_with_prune_tracking(
+    trie: &mut RadixTree,
+    routing_req: RoutingDecisionRequest,
+    prune_manager: &mut Option<PruneManager<BlockEntry>>,
+    prune_tx: &mpsc::Sender<()>,
+    event_id_counter: &mut u64,
+) {
+    let Some(pm) = prune_manager.as_mut() else {
+        return;
+    };
+
+    *event_id_counter += 1;
+
+    let hashes = routing_req
+        .local_hashes
+        .iter()
+        .zip(routing_req.sequence_hashes.iter());
+    let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+        parent_hash: None,
+        start_position: None,
+        blocks: hashes
+            .map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                tokens_hash: *local_hash,
+                block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                mm_extra_info: None,
+            })
+            .collect(),
+    });
+
+    let event = RouterEvent::new(
+        routing_req.worker.worker_id,
+        KvCacheEvent {
+            event_id: *event_id_counter,
+            data: stored_event,
+            dp_rank: routing_req.worker.dp_rank,
+        },
+    );
+
+    if trie.apply_event(event).is_err() {
+        return;
+    }
+
+    let block_entries = routing_req
+        .sequence_hashes
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| BlockEntry {
+            key: ExternalSequenceBlockHash(*h),
+            worker: routing_req.worker,
+            seq_position: idx,
+        })
+        .collect();
+    pm.insert(block_entries);
+
+    let Some(ref pc) = pm.prune_config else {
+        return;
+    };
+    let current_size = trie.current_size();
+    if current_size > pc.max_tree_size {
+        tracing::info!(
+            "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+            current_size,
+            pc.max_tree_size
+        );
+        let _ = prune_tx.try_send(());
+    }
+}
+
+struct PendingMutationReceivers<'a> {
+    event_rx: &'a mut mpsc::Receiver<RouterEvent>,
+    remove_worker_rx: &'a mut mpsc::Receiver<WorkerId>,
+    remove_worker_dp_rank_rx: &'a mut mpsc::Receiver<(WorkerId, DpRank)>,
+    routing_rx: &'a mut mpsc::Receiver<RoutingDecisionRequest>,
+}
+
+fn drain_pending_mutations(
+    trie: &mut RadixTree,
+    receivers: PendingMutationReceivers<'_>,
+    counters: &PreBoundEventCounters,
+    prune_manager: &mut Option<PruneManager<BlockEntry>>,
+    prune_tx: &mpsc::Sender<()>,
+    event_id_counter: &mut u64,
+) {
+    while let Ok(worker) = receivers.remove_worker_rx.try_recv() {
+        trie.remove_worker(worker);
+    }
+
+    while let Ok((worker_id, dp_rank)) = receivers.remove_worker_dp_rank_rx.try_recv() {
+        trie.remove_worker_dp_rank(worker_id, dp_rank);
+    }
+
+    while let Ok(event) = receivers.event_rx.try_recv() {
+        apply_event_with_prune_tracking(trie, event, counters, prune_manager, prune_tx);
+    }
+
+    while let Ok(routing_req) = receivers.routing_rx.try_recv() {
+        apply_routing_decision_with_prune_tracking(
+            trie,
+            routing_req,
+            prune_manager,
+            prune_tx,
+            event_id_counter,
+        );
+    }
+}
+
 /// The KV Indexer, managing the KV store and handling events and match requests.
 #[derive(Clone)]
 pub struct KvIndexer {
@@ -95,6 +202,8 @@ pub struct KvIndexer {
     event_tx: mpsc::Sender<RouterEvent>,
     /// A sender for `MatchRequest`s.
     match_tx: mpsc::Sender<MatchRequest>,
+    /// A sender for `MatchDetailsRequest`s.
+    match_details_tx: mpsc::Sender<MatchDetailsRequest>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
     /// A sender for remove worker dp_rank requests.
@@ -103,6 +212,8 @@ pub struct KvIndexer {
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
+    /// A sender for flush requests.
+    flush_tx: mpsc::Sender<FlushRequest>,
     /// A sender for routing decision requests.
     routing_tx: mpsc::Sender<RoutingDecisionRequest>,
     /// The size of the KV block this indexer can handle.
@@ -132,13 +243,17 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        super::warn_on_unit_block_size("single", kv_block_size);
+
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
+        let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
+        let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
         let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
 
@@ -154,23 +269,26 @@ impl KvIndexer {
             runtime.block_on(async move {
                 let cancel = cancel_clone;
                 let mut match_rx = match_rx;
+                let mut match_details_rx = match_details_rx;
                 let mut event_rx = event_rx;
                 let mut remove_worker_rx = remove_worker_rx;
                 let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
                 let mut get_workers_rx = get_workers_rx;
                 let mut dump_rx = dump_rx;
+                let mut flush_rx = flush_rx;
                 let mut trie = RadixTree::new_with_frequency(expiration_duration);
 
                 // Create PruneManager if prune_config is specified
-                let mut prune_manager = prune_config.map(|config| {
-                    PruneManager::<BlockEntry>::new(50, config)
-                });
+                let mut prune_manager =
+                    prune_config.map(|config| PruneManager::<BlockEntry>::new(50, config));
                 let mut event_id_counter = 0u64;
+                let counters = metrics.prebind();
 
                 loop {
                     // Create a future that sleeps until the next expiration time
                     let expiry_fut = if let Some(ref pm) = prune_manager
-                        && let Some(next_expiry) = pm.peek_next_expiry() {
+                        && let Some(next_expiry) = pm.peek_next_expiry()
+                    {
                         tokio::time::sleep_until(next_expiry)
                     } else {
                         tokio::time::sleep(Duration::MAX)
@@ -222,76 +340,55 @@ impl KvIndexer {
                             apply_event_with_prune_tracking(
                                 &mut trie,
                                 event,
-                                &metrics,
+                                &counters,
                                 &mut prune_manager,
                                 &prune_tx,
                             );
                         }
 
                         Some(dump_req) = dump_rx.recv() => {
-                            // Flush pending events so tree is consistent with buffer
-                            while let Ok(event) = event_rx.try_recv() {
-                                apply_event_with_prune_tracking(
-                                    &mut trie,
-                                    event,
-                                    &metrics,
-                                    &mut prune_manager,
-                                    &prune_tx,
-                                );
-                            }
+                            drain_pending_mutations(
+                                &mut trie,
+                                PendingMutationReceivers {
+                                    event_rx: &mut event_rx,
+                                    remove_worker_rx: &mut remove_worker_rx,
+                                    remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
+                                    routing_rx: &mut routing_rx,
+                                },
+                                &counters,
+                                &mut prune_manager,
+                                &prune_tx,
+                                &mut event_id_counter,
+                            );
                             let events = trie.dump_tree_as_events();
                             let _ = dump_req.resp.send(events);
                         }
 
-                        Some(routing_req) = routing_rx.recv() => {
-                            // Process routing decisions when TTL/pruning is enabled
-                            let Some(ref mut pm) = prune_manager else { continue };
-
-                            event_id_counter += 1;
-
-                            let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
-                            let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash: None,
-                                blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
-                                    tokens_hash: *local_hash,
-                                    block_hash: ExternalSequenceBlockHash(*sequence_hash),
-                                mm_extra_info: None,
-                                }).collect(),
-                            });
-
-                            let event = RouterEvent::new(
-                                routing_req.worker.worker_id,
-                                KvCacheEvent {
-                                    event_id: event_id_counter,
-                                    data: stored_event,
-                                    dp_rank: routing_req.worker.dp_rank,
-                                }
+                        Some(flush_req) = flush_rx.recv() => {
+                            drain_pending_mutations(
+                                &mut trie,
+                                PendingMutationReceivers {
+                                    event_rx: &mut event_rx,
+                                    remove_worker_rx: &mut remove_worker_rx,
+                                    remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
+                                    routing_rx: &mut routing_rx,
+                                },
+                                &counters,
+                                &mut prune_manager,
+                                &prune_tx,
+                                &mut event_id_counter,
                             );
+                            let _ = flush_req.resp.send(());
+                        }
 
-                            if trie.apply_event(event).is_err() {
-                                continue;
-                            }
-
-                            let block_entries: Vec<BlockEntry> = routing_req.sequence_hashes.iter().enumerate().map(|(idx, h)| {
-                                BlockEntry {
-                                    key: ExternalSequenceBlockHash(*h),
-                                    worker: routing_req.worker,
-                                    seq_position: idx,
-                                }
-                            }).collect();
-                            pm.insert(block_entries);
-
-                            // Check if we need to prune due to tree size
-                            let Some(ref pc) = pm.prune_config else { continue };
-                            let current_size = trie.current_size();
-                            if current_size > pc.max_tree_size {
-                                tracing::info!(
-                                    "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
-                                    current_size,
-                                    pc.max_tree_size
-                                );
-                                let _ = prune_tx.try_send(());
-                            }
+                        Some(routing_req) = routing_rx.recv() => {
+                            apply_routing_decision_with_prune_tracking(
+                                &mut trie,
+                                routing_req,
+                                &mut prune_manager,
+                                &prune_tx,
+                                &mut event_id_counter,
+                            );
                         }
 
                         Some(req) = match_rx.recv() => {
@@ -313,6 +410,11 @@ impl KvIndexer {
                                 process_us = process_time.as_micros() as u64,
                                 "indexer: processed find_matches"
                             );
+                            let _ = req.resp.send(matches);
+                        }
+
+                        Some(req) = match_details_rx.recv() => {
+                            let matches = trie.find_match_details(req.sequence, req.early_exit);
                             let _ = req.resp.send(matches);
                         }
 
@@ -347,10 +449,12 @@ impl KvIndexer {
             cancel: token,
             event_tx,
             match_tx,
+            match_details_tx,
             remove_worker_tx,
             remove_worker_dp_rank_tx,
             get_workers_tx,
             dump_tx,
+            flush_tx,
             routing_tx,
             kv_block_size,
             _ref_count: Arc::new(()),
@@ -378,11 +482,22 @@ impl KvIndexer {
         self.event_tx.clone()
     }
 
-    /// Get a sender for dump requests (snapshot events).
-    ///
-    /// ### Returns
-    ///
-    /// A `mpsc::Sender` for `DumpRequest`s.
+    pub async fn find_match_details(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<MatchDetails, KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.match_details_tx
+            .send(MatchDetailsRequest::new(sequence, false, resp_tx))
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    #[cfg(test)]
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
     }
@@ -510,24 +625,27 @@ impl KvIndexerInterface for KvIndexer {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
 
-        self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
+        self.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
             .await
     }
     async fn flush(&self) -> usize {
         let curr_size = self.event_tx.max_capacity() - self.event_tx.capacity();
-        loop {
-            if self.event_tx.capacity() == self.event_tx.max_capacity() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let flush_req = FlushRequest { resp: resp_tx };
+
+        if let Err(error) = self.flush_tx.send(flush_req).await {
+            tracing::error!("Failed to send flush request: {:?}", error);
+            return curr_size;
         }
+
+        let _ = resp_rx.await;
         curr_size
     }
 }
 
 impl KvIndexer {
-    /// Internal method to process a routing decision with pre-computed hashes.
-    async fn process_routing_decision_internal(
+    /// Process a routing decision with pre-computed hashes.
+    pub async fn process_routing_decision_with_hashes(
         &self,
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,

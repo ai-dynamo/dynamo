@@ -25,7 +25,7 @@ spec:
   backend: trtllm
 
   # Image is the container image reference for the profiling job
-  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2"
 
   # SearchStrategy controls the profiling search depth
   # "rapid" for fast sweep; "thorough" for deeper exploration

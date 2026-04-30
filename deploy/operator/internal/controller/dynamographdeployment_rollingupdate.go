@@ -210,10 +210,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 ) error {
 	logger := log.FromContext(ctx)
 
-	// Get or create rollingUpdate status
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
-	// Compute hash information
 	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
@@ -247,25 +245,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress",
 			"hash", newWorkerHash,
 			"phase", rollingUpdateStatus.Phase)
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	}
 
 	switch rollingUpdateStatus.Phase {
 	case nvidiacomv1alpha1.RollingUpdatePhaseNone:
-		return r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.startRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhasePending:
 		rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseInProgress
-		if err := r.Status().Update(ctx, dgd); err != nil {
-			return fmt.Errorf("failed to update rolling update status to InProgress: %w", err)
-		}
-		return nil
+		return nil // deferred function in Reconcile() persists status
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
-		return r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
-		// Cleanup is now done atomically in completeRollingUpdate, nothing to do here
 		logger.Info("Rolling update already completed")
 		return nil
 	}
@@ -277,7 +271,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -289,6 +282,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"newHash", newWorkerHash)
 
 	now := metav1.Now()
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhasePending
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedServices = nil
@@ -296,18 +290,13 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from worker hash %s to %s", prevWorkerHash, newWorkerHash)
 
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to initialize rolling update status: %w", err)
-	}
-
-	return nil
+	return nil // deferred function in Reconcile() persists status
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -355,6 +344,7 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		}
 	}
 	sort.Strings(updatedServices)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.UpdatedServices = updatedServices
 
 	// Count total worker services
@@ -367,15 +357,10 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 
 	// Rolling update is complete when every worker service is individually updated
 	if len(updatedServices) == totalWorkerServices && totalWorkerServices > 0 {
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	}
 
-	// Persist updated services list mid-rolling update
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rolling update status with updated services: %w", err)
-	}
-
-	return nil
+	return nil // deferred function in Reconcile() persists UpdatedServices
 }
 
 // completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
@@ -383,22 +368,21 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
 
 	// Delete all non-current worker DCDs (any number of old generations)
 	if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-		logger.Error(err, "Failed to delete non-current worker DCDs", "newWorkerHash", newWorkerHash)
-		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
-			"Failed to delete some old worker DCDs: %v", err)
-		// Continue anyway - we don't want cleanup failures to block the rolling update completion
-	} else {
-		logger.Info("Old resources cleaned up", "newWorkerHash", newWorkerHash)
+		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
-	// Update rolling update status to Completed
+	r.setCurrentWorkerHash(dgd, newWorkerHash)
+	if err := r.Update(ctx, dgd); err != nil {
+		return fmt.Errorf("failed to update current worker hash: %w", err)
+	}
+
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseCompleted
 	now := metav1.Now()
 	rollingUpdateStatus.EndTime = &now
@@ -416,19 +400,31 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
 		"Rolling update completed, worker hash %s", newWorkerHash)
 
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rolling update status: %w", err)
-	}
-
-	// Update the current worker hash to the new hash
-	r.setCurrentWorkerHash(dgd, newWorkerHash)
-	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update current worker hash: %w", err)
-	}
-
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
 	return nil
+}
+
+// dcdServiceState holds replica signals extracted from a DCD's Spec and Status.
+type dcdServiceState struct {
+	Spec      int32 `json:"spec"`      // DCD Spec.Replicas (declared intent)
+	Available int32 `json:"available"` // Status.Service.AvailableReplicas (serving traffic)
+	Actual    int32 `json:"actual"`    // Status.Service.Replicas (non-terminated pods, excludes Terminating)
+}
+
+// dcdServiceStateFromDCD extracts replica signals from a single DCD.
+func dcdServiceStateFromDCD(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) dcdServiceState {
+	s := dcdServiceState{}
+	if dcd.Spec.Replicas != nil {
+		s.Spec = *dcd.Spec.Replicas
+	}
+	if dcd.Status.Service != nil {
+		s.Actual = dcd.Status.Service.Replicas
+		if dcd.Status.Service.AvailableReplicas != nil {
+			s.Available = *dcd.Status.Service.AvailableReplicas
+		}
+	}
+	return s
 }
 
 // workerServiceInfo holds ready replica count for a worker service.
@@ -533,6 +529,30 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerInfo(
 	}
 
 	return status, nil
+}
+
+// getOldWorkerServiceStates returns per-service old DCD state aggregated across all old generations.
+func (r *DynamoGraphDeploymentReconciler) getOldWorkerServiceStates(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	newWorkerHash string,
+) (map[string]dcdServiceState, error) {
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return nil, err
+	}
+
+	states := make(map[string]dcdServiceState)
+	for i := range oldDCDs {
+		s := dcdServiceStateFromDCD(&oldDCDs[i])
+		agg := states[oldDCDs[i].Spec.ServiceName]
+		agg.Spec += s.Spec
+		agg.Available += s.Available
+		agg.Actual += s.Actual
+		states[oldDCDs[i].Spec.ServiceName] = agg
+	}
+
+	return states, nil
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker services.
@@ -771,18 +791,12 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 }
 
 // buildRollingUpdateContext creates a RollingUpdateContext.
-// It computes namespaces and pre-calculates old and new worker replica counts.
-//
-// Replica calculation:
-//   - oldReplicas = max(0, desiredReplicas - newReadyReplicas - maxUnavailable)
-//   - newReplicas = min(desiredReplicas, desiredReplicas + maxSurge - oldReplicas)
 func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) dynamo.RollingUpdateContext {
+) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
-	// Compute hashes
 	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
@@ -791,10 +805,14 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			NewWorkerHash:     newWorkerHash,
 			OldWorkerReplicas: make(map[string]int32),
 			NewWorkerReplicas: make(map[string]int32),
-		}
+		}, nil
 	}
 
-	// Pre-calculate old and new worker replicas based on new worker readiness
+	oldStates, err := r.getOldWorkerServiceStates(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker service states: %w", err)
+	}
+
 	oldWorkerReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
@@ -803,59 +821,57 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			continue
 		}
 
-		// Get desired replicas from spec
-		desiredReplicas := int32(1)
+		desired := int32(1)
 		if spec.Replicas != nil {
-			desiredReplicas = *spec.Replicas
+			desired = *spec.Replicas
 		}
 
-		maxSurge, maxUnavailable := resolveRollingUpdateParams(spec.Annotations, desiredReplicas)
+		maxSurge, maxUnavailable := resolveRollingUpdateParams(spec.Annotations, desired)
+		minAvailable := desired - maxUnavailable
 
-		// Query new DCD to get ready replicas (using hash-based naming)
+		var newState dcdServiceState
 		newDCDName := dynamo.GetDCDResourceName(dgd, serviceName, newWorkerHash)
 		newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
-		err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD)
-
-		newReadyReplicas := int32(0)
-		if err == nil && newDCD.Status.Service != nil && newDCD.Status.Service.ReadyReplicas != nil {
-			newReadyReplicas = *newDCD.Status.Service.ReadyReplicas
+		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
+			newState = dcdServiceStateFromDCD(newDCD)
+		} else if !apierrors.IsNotFound(err) {
+			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
 
-		// Calculate old replicas: allow scaling down by maxUnavailable
-		// oldReplicas = max(0, desiredReplicas - newReadyReplicas - maxUnavailable)
-		oldNeeded := desiredReplicas - newReadyReplicas - maxUnavailable
-		if oldNeeded < 0 {
-			oldNeeded = 0
-		}
+		oldState := oldStates[serviceName]
 
-		// Calculate new replicas: stay within surge budget
-		// newReplicas = min(desiredReplicas, desiredReplicas + maxSurge - oldNeeded)
-		newNeeded := desiredReplicas + maxSurge - oldNeeded
-		if newNeeded > desiredReplicas {
-			newNeeded = desiredReplicas
-		}
-		if newNeeded < 0 {
-			newNeeded = 0
-		}
+		newUnavailable := max(int32(0), newState.Spec-newState.Available)
+		// maxScaledDown is the maximum number of old replicas that can be scaled down
+		maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
+		oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
+		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
+		availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+		oldTarget := max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
 
-		newWorkerReplicas[serviceName] = newNeeded
-		oldWorkerReplicas[serviceName] = oldNeeded
+		// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
+		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
+		newTarget := min(desired, newState.Spec+scaleUpBudget)
 
-		logger.V(1).Info("Calculated worker replicas for rollingUpdate",
+		oldWorkerReplicas[serviceName] = oldTarget
+		newWorkerReplicas[serviceName] = newTarget
+
+		logger.V(1).Info("Rolling update replica calculation",
 			"service", serviceName,
-			"desired", desiredReplicas,
-			"newReady", newReadyReplicas,
+			"desired", desired,
 			"maxSurge", maxSurge,
 			"maxUnavailable", maxUnavailable,
-			"newNeeded", newNeeded,
-			"oldNeeded", oldNeeded)
+			"minAvailable", minAvailable,
+			"old", oldState,
+			"new", newState,
+			"oldTarget", oldTarget,
+			"newTarget", newTarget)
 	}
 
 	return dynamo.RollingUpdateContext{
 		NewWorkerHash:     newWorkerHash,
 		OldWorkerReplicas: oldWorkerReplicas,
 		NewWorkerReplicas: newWorkerReplicas,
-	}
+	}, nil
 }
 
 // mergeWorkerServiceStatuses merges old worker service statuses into the existing service statuses.
