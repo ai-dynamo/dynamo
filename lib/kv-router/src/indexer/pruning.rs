@@ -188,47 +188,25 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 #[derive(Debug)]
 struct WorkerPruneState {
     timers: PruneManager<BlockEntry>,
-    by_hash: HashMap<ExternalSequenceBlockHash, HashSet<BlockEntry>>,
 }
 
 impl WorkerPruneState {
     fn new(config: PruneConfig) -> Self {
         Self {
             timers: PruneManager::new(HEAP_REBUILD_THRESHOLD, config),
-            by_hash: HashMap::new(),
         }
     }
 
     fn insert_block_entries(&mut self, entries: Vec<BlockEntry>, now: Instant) {
-        self.timers.insert_at(entries.clone(), now);
-        for entry in entries {
-            self.by_hash.entry(entry.key).or_default().insert(entry);
-        }
+        self.timers.insert_at(entries, now);
     }
 
     fn remove_block_entry(&mut self, entry: &BlockEntry) {
-        if !self.timers.remove(entry) {
-            return;
-        }
-        if let Some(entries) = self.by_hash.get_mut(&entry.key) {
-            entries.remove(entry);
-            if entries.is_empty() {
-                self.by_hash.remove(&entry.key);
-            }
-        }
+        self.timers.remove(entry);
     }
 
     fn pop_expired(&mut self, now: Instant) -> Vec<BlockEntry> {
-        let expired = self.timers.pop_expired(now);
-        for entry in &expired {
-            if let Some(entries) = self.by_hash.get_mut(&entry.key) {
-                entries.remove(entry);
-                if entries.is_empty() {
-                    self.by_hash.remove(&entry.key);
-                }
-            }
-        }
-        expired
+        self.timers.pop_expired(now)
     }
 
     fn peek_next_valid_expiry(&mut self) -> Option<Instant> {
