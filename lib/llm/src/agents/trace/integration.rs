@@ -141,6 +141,8 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
                 }
             }
         }
+        TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
+        tracing::info!("agent tool event ingest stopped");
     });
 
     Ok(())
