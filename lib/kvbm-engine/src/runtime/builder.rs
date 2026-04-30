@@ -10,7 +10,7 @@ use dynamo_memory::nixl::NixlAgent;
 use kvbm_config::KvbmConfig;
 use kvbm_observability::{KvbmObservability, SharedKvbmObservability};
 use tokio::runtime::{Handle, Runtime};
-use velo::Messenger;
+use velo::{Messenger, Velo};
 
 /// Runtime handle - either owned or borrowed.
 pub enum RuntimeHandle {
@@ -38,6 +38,7 @@ impl RuntimeHandle {
 pub struct KvbmRuntimeBuilder {
     config: KvbmConfig,
     runtime: Option<RuntimeHandle>,
+    velo: Option<Arc<Velo>>,
     messenger: Option<Arc<Messenger>>,
     nixl_agent: Option<NixlAgent>,
     observability: Option<SharedKvbmObservability>,
@@ -49,6 +50,7 @@ impl KvbmRuntimeBuilder {
         Self {
             config,
             runtime: None,
+            velo: None,
             messenger: None,
             nixl_agent: None,
             observability: None,
@@ -80,9 +82,19 @@ impl KvbmRuntimeBuilder {
         self
     }
 
-    /// Use an existing Messenger instance.
+    /// Use an existing Messenger instance. Resulting `KvbmRuntime` has no
+    /// Velo — conditional-disagg wiring will fail at init time. For CD,
+    /// inject a full Velo via [`with_velo`](Self::with_velo) instead.
     pub fn with_messenger(mut self, messenger: Arc<Messenger>) -> Self {
         self.messenger = Some(messenger);
+        self
+    }
+
+    /// Use an existing Velo instance. The runtime extracts the messenger
+    /// from it; later accessors (`messenger()`, `velo()`) both return the
+    /// derived components.
+    pub fn with_velo(mut self, velo: Arc<Velo>) -> Self {
+        self.velo = Some(velo);
         self
     }
 
@@ -115,10 +127,21 @@ impl KvbmRuntimeBuilder {
             None => RuntimeHandle::Owned(Arc::new(self.config.tokio.build_runtime()?)),
         };
 
-        // 2. Messenger - use provided or build from config (BEFORE NixL)
-        let messenger = match self.messenger {
-            Some(m) => m,
-            None => self.config.messenger.build_messenger().await?,
+        // 2. Messenger / Velo - resolve to (messenger, velo: Option) per
+        //    injection precedence: explicit velo wins; then explicit
+        //    messenger (no velo); else build a fresh Velo from config and
+        //    derive the messenger from it.
+        let (messenger, velo) = match (self.velo, self.messenger) {
+            (Some(velo), _) => {
+                let messenger = velo.messenger().clone();
+                (messenger, Some(velo))
+            }
+            (None, Some(m)) => (m, None),
+            (None, None) => {
+                let velo = self.config.messenger.build_velo().await?;
+                let messenger = velo.messenger().clone();
+                (messenger, Some(velo))
+            }
         };
 
         // 3. NixL - use provided or build from config (AFTER Messenger)
@@ -156,6 +179,7 @@ impl KvbmRuntimeBuilder {
             config: self.config,
             runtime,
             messenger,
+            velo,
             nixl_agent,
             observability,
         })

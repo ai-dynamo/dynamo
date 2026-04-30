@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_disagg_protocol::RemotePrefillParams;
@@ -36,7 +36,9 @@ use tokio::runtime::Handle;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::{BlockId, G2, SequenceHash};
 
+use super::peer_resolver::PeerResolver;
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
+use crate::InstanceId;
 
 /// Per-request prefill-side coordinator.
 ///
@@ -307,6 +309,15 @@ pub struct PrefillCoordinatorImpl {
     transport: Arc<dyn CdBlockTransport>,
     worker_hook: Arc<dyn CdWorkerHook>,
     session_factory: Arc<dyn SessionFactory>,
+    /// Resolves a remote `InstanceId` to a `PeerInfo` and registers it
+    /// on the local messenger. Production: hub-backed; tests: no-op.
+    /// Called once per (peer, request) before `factory.attach`; an
+    /// internal cache makes repeat resolves cheap.
+    peer_resolver: Arc<dyn PeerResolver>,
+    /// `InstanceId`s already resolved + registered locally. Skips the
+    /// resolver round-trip for subsequent requests targeting the same
+    /// peer.
+    known_peers: dashmap::DashSet<InstanceId>,
     runtime: Handle,
     states: DashMap<String, Arc<RequestState>>,
     /// Single observer instance, registered ONCE with the
@@ -321,6 +332,7 @@ impl PrefillCoordinatorImpl {
         transport: Arc<dyn CdBlockTransport>,
         worker_hook: Arc<dyn CdWorkerHook>,
         session_factory: Arc<dyn SessionFactory>,
+        peer_resolver: Arc<dyn PeerResolver>,
         runtime: Handle,
     ) -> Arc<Self> {
         let observer = ConditionalDecodeG2Observer::new();
@@ -329,6 +341,8 @@ impl PrefillCoordinatorImpl {
             transport,
             worker_hook,
             session_factory,
+            peer_resolver,
+            known_peers: dashmap::DashSet::new(),
             runtime,
             states: DashMap::new(),
             observer: Arc::clone(&observer),
@@ -418,7 +432,27 @@ impl PrefillCoordinatorImpl {
             )
         })?;
 
-        // 1. Attach.
+        // 1a. Resolve + register decode's velo peer info on our
+        //     messenger so `factory.attach` (which issues both unary
+        //     metadata RPC and a streaming-anchor open) can reach it.
+        //     Skip if we've already resolved this peer for an earlier
+        //     request — `register_peer` semantics across transports
+        //     vary, the local cache makes the call site idempotent
+        //     regardless.
+        if !self.known_peers.contains(&params.initiator_instance_id) {
+            self.peer_resolver
+                .resolve_and_register(params.initiator_instance_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "resolve+register decode peer {} for request {}",
+                        params.initiator_instance_id, request_id
+                    )
+                })?;
+            self.known_peers.insert(params.initiator_instance_id);
+        }
+
+        // 1b. Attach.
         let session = self
             .session_factory
             .attach(params.session_id, params.initiator_instance_id, endpoint)

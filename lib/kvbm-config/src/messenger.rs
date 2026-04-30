@@ -47,41 +47,37 @@ impl Default for MessengerConfig {
 }
 
 impl MessengerConfig {
-    /// Build a Messenger instance from this configuration.
+    /// Build a [`velo::Velo`] instance from this configuration.
     ///
-    /// This creates:
-    /// 1. A TCP transport bound to the configured address
-    /// 2. A discovery backend based on the configured type (if any)
-    /// 3. A Messenger instance combining both
-    pub async fn build_messenger(&self) -> Result<std::sync::Arc<velo::Messenger>> {
+    /// This is the production constructor — Velo wraps a Messenger plus the
+    /// streaming AnchorManager and RendezvousManager, which are required by
+    /// the conditional-disagg session machinery. Callers that only need the
+    /// underlying Messenger should call [`Velo::messenger`] on the returned
+    /// instance.
+    pub async fn build_velo(&self) -> Result<std::sync::Arc<velo::Velo>> {
         use std::net::TcpListener;
         use std::sync::Arc;
 
-        use velo::Messenger;
+        use velo::Velo;
         use velo::backend::tcp::TcpTransportBuilder;
 
         // 1. Build TCP transport
-        // Pre-bind listener to get OS-assigned port (if port is 0)
         let bind_addr = self.backend.resolve_bind_addr()?;
         let listener = TcpListener::bind(bind_addr)
             .with_context(|| format!("Failed to bind TCP listener to {}", bind_addr))?;
-
-        // Extract actual bound address (with real port if OS-assigned)
         let actual_addr = listener
             .local_addr()
             .context("Failed to get local address from listener")?;
-
         tracing::info!("Built TCP transport bound to {}", actual_addr);
 
-        // Build transport using from_listener to use the actual port
         let tcp_transport = TcpTransportBuilder::new()
             .from_listener(listener)?
             .build()
             .context("Failed to build TCP transport")?;
         let tcp_transport = Arc::new(tcp_transport);
 
-        // 2. Build discovery backend based on configuration
-        let mut builder = Messenger::builder().add_transport(tcp_transport);
+        // 2. Configure VeloBuilder with transport + optional discovery
+        let mut builder = Velo::builder().add_transport(tcp_transport);
 
         if let Some(discovery_config) = &self.discovery {
             match discovery_config {
@@ -103,10 +99,19 @@ impl MessengerConfig {
             }
         }
 
-        // 3. Build Messenger
-        let messenger = builder.build().await.context("Failed to build Messenger")?;
+        // 3. Build Velo
+        let velo = builder.build().await.context("Failed to build Velo")?;
+        Ok(velo)
+    }
 
-        Ok(messenger)
+    /// Build a [`velo::Messenger`] instance from this configuration.
+    ///
+    /// Convenience wrapper around [`build_velo`](Self::build_velo) that
+    /// returns just the messenger. Existing call sites that don't need
+    /// streaming/anchor support continue to work unchanged.
+    pub async fn build_messenger(&self) -> Result<std::sync::Arc<velo::Messenger>> {
+        let velo = self.build_velo().await?;
+        Ok(velo.messenger().clone())
     }
 }
 

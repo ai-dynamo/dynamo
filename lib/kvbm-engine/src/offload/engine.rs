@@ -48,7 +48,7 @@ use kvbm_physical::transfer::{PhysicalLayout, TransferOptions};
 use super::handle::{TransferHandle, TransferId, TransferState};
 use super::pipeline::{
     ChainOutput, ChainOutputRx, ObjectPipeline, ObjectPipelineConfig, Pipeline, PipelineConfig,
-    PipelineInput,
+    PipelineInput, RegisterObserver,
 };
 use super::queue::CancellableQueue;
 use super::source::SourceBlocks;
@@ -237,6 +237,22 @@ impl OffloadEngine {
     /// Check if G1→G2 pipeline is configured.
     pub fn has_g1_to_g2(&self) -> bool {
         self.g1_to_g2.is_some()
+    }
+
+    /// Register an observer on the G1→G2 pipeline. Returns `Err` if the
+    /// pipeline isn't configured. The observer fires after each batch's
+    /// destination-tier register step; see
+    /// [`Pipeline::add_register_observer`] for the contract.
+    pub fn add_g1_to_g2_register_observer(
+        &self,
+        observer: RegisterObserver<G2>,
+    ) -> Result<()> {
+        let pipeline = self
+            .g1_to_g2
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("G1→G2 pipeline not configured"))?;
+        pipeline.add_register_observer(observer);
+        Ok(())
     }
 
     /// Check if G2→G3 pipeline is configured.

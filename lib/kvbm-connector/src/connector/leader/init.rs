@@ -690,11 +690,132 @@ impl ConnectorLeader {
                 hub_url = %disagg_cfg.hub_url,
                 "Registering leader with kvbm-hub for conditional disaggregation"
             );
-            let (_hub, client, _hub_velo_id) =
+
+            use super::disagg::prefill_coordinator::PrefillCoordinatorImpl;
+            use super::disagg::{
+                AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggLeader,
+                ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim,
+                DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
+                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook,
+                PrefillDisaggLeader, RemotePrefillCoordinator, RemotePrefillQueue,
+            };
+            use kvbm_config::DisaggregationRole;
+            use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
+
+            let (hub, client, hub_velo_id) =
                 super::disagg::register_with_hub(&disagg_cfg, self.runtime.messenger().clone())
                     .await
                     .context("conditional-disagg hub registration failed")?;
-            let _ = self.disagg_client.set(client);
+            let _ = self.disagg_client.set(Arc::clone(&client));
+
+            // Resolve runtime components needed by CD wiring.
+            let velo_runtime = self
+                .runtime
+                .velo()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "conditional-disagg requires KvbmRuntime built with a Velo \
+                         (got bare Messenger only) — inject via \
+                         KvbmRuntimeBuilder::with_velo or omit injection \
+                         to let the builder construct one from config"
+                    )
+                })?
+                .clone();
+            let tokio_handle = self.runtime.tokio();
+
+            // Common building blocks used by both roles.
+            let inner_shim: Arc<dyn InnerLeaderShim> = ConnectorLeaderShim::new(self.clone());
+            let worker_hook: Arc<dyn CdWorkerHook> =
+                InnerLeaderWorkerHook::new(self.clone());
+            let transport: Arc<dyn CdBlockTransport> =
+                EngineCdBlockTransport::new(Arc::clone(&leader));
+            let session_factory: Arc<dyn SessionFactory> = VeloSessionFactory::new(
+                velo_runtime,
+                Arc::clone(&leader),
+                tokio_handle.clone(),
+            );
+
+            // Role-specific construction. Both arms produce
+            // Arc<dyn ConnectorLeaderApi>; the dispatcher wraps either.
+            let role_inner: Arc<dyn ConnectorLeaderApi> = match disagg_cfg.role {
+                DisaggregationRole::Decode => {
+                    // Production policy: AlwaysRemote (every CD-eligible
+                    // request goes remote). Threshold-based policies are
+                    // a Phase B.4 follow-up; the local-only path is
+                    // exercised by running with `disagg = None`, which
+                    // bypasses this whole block.
+                    let policy: Arc<dyn ConditionalDisaggPolicy> = Arc::new(AlwaysRemote);
+                    let queue: Arc<dyn RemotePrefillQueue> =
+                        HubRemotePrefillQueue::new(Arc::clone(&client));
+                    let coord = RemotePrefillCoordinator::new(
+                        policy,
+                        Arc::clone(&session_factory),
+                        queue,
+                        tokio_handle.clone(),
+                    );
+                    DecodeDisaggLeader::from_parts(
+                        Arc::clone(&inner_shim),
+                        &disagg_cfg,
+                        coord,
+                        Arc::clone(&transport),
+                        Arc::clone(&worker_hook),
+                        tokio_handle.clone(),
+                        Some(Arc::clone(&hub)),
+                        Some(Arc::clone(&client)),
+                        hub_velo_id,
+                    )
+                }
+                DisaggregationRole::Prefill => {
+                    let peer_resolver = HubPeerResolver::new(
+                        Arc::clone(&hub),
+                        self.runtime.messenger().clone(),
+                    );
+                    let coord = PrefillCoordinatorImpl::new(
+                        Arc::clone(&inner_shim),
+                        Arc::clone(&transport),
+                        Arc::clone(&worker_hook),
+                        Arc::clone(&session_factory),
+                        peer_resolver,
+                        tokio_handle.clone(),
+                    );
+
+                    // Wire the offload-pipeline observer once — captures
+                    // G1→G2 register events so output blocks flow back
+                    // to the session via commit + make_available.
+                    if let Some(engine) = self.offload_engine.get() {
+                        engine
+                            .add_g1_to_g2_register_observer(coord.observer_callback())
+                            .context(
+                                "registering CD output observer on G1→G2 pipeline",
+                            )?;
+                    } else {
+                        tracing::warn!(
+                            "CD prefill role configured but OffloadEngine missing — \
+                             G2 output capture disabled"
+                        );
+                    }
+
+                    PrefillDisaggLeader::from_parts(
+                        Arc::clone(&inner_shim),
+                        coord,
+                        Arc::clone(&worker_hook),
+                    )
+                }
+            };
+
+            let dispatcher: Arc<dyn ConnectorLeaderApi> = ConditionalDisaggLeader::new(
+                disagg_cfg.role,
+                role_inner,
+                Some(hub),
+                Some(client),
+                hub_velo_id,
+            );
+            self.set_cd_api(dispatcher).context("install CD dispatcher")?;
+
+            tracing::info!(
+                role = ?disagg_cfg.role,
+                "Conditional-disagg dispatcher installed"
+            );
         }
 
         Ok(())

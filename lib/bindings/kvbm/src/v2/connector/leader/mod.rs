@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use kvbm_connector::connector::leader::disagg::ConnectorLeaderApi;
 use kvbm_connector::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 use kvbm_connector::{BlockId, InstanceId, WorkerAddress};
 
@@ -46,6 +47,109 @@ impl PyConnectorLeader {
     pub fn inner(&self) -> Arc<ConnectorLeader> {
         self.inner.clone()
     }
+
+    /// Active `ConnectorLeaderApi` route.
+    ///
+    /// `Cd` when the conditional-disagg dispatcher is installed (CD-bound
+    /// requests intercepted by decode/prefill wrappers); `Direct`
+    /// otherwise (passthrough to the raw inner leader). Held as an enum
+    /// rather than `Arc<dyn ConnectorLeaderApi>` because the trait impl
+    /// for the inner leader lives on `Arc<ConnectorLeader>` (see
+    /// `disagg/mod.rs`); a trait-object cast from `Arc<ConnectorLeader>`
+    /// requires `ConnectorLeader: ConnectorLeaderApi`, which we
+    /// deliberately do not provide.
+    fn api(&self) -> ApiRoute<'_> {
+        match self.inner.cd_api() {
+            Some(cd) => ApiRoute::Cd(Arc::clone(cd)),
+            None => ApiRoute::Direct(&self.inner),
+        }
+    }
+}
+
+/// Adapter for routing scheduler-facing API calls either through the
+/// conditional-disagg dispatcher (when configured) or directly against
+/// the inner `Arc<ConnectorLeader>`.
+enum ApiRoute<'a> {
+    Cd(Arc<dyn ConnectorLeaderApi>),
+    Direct(&'a Arc<ConnectorLeader>),
+}
+
+impl<'a> ApiRoute<'a> {
+    fn create_slot(&self, request: Request) -> anyhow::Result<()> {
+        match self {
+            ApiRoute::Cd(api) => api.create_slot(request),
+            ApiRoute::Direct(leader) => leader.create_slot(request),
+        }
+    }
+    fn has_slot(&self, request_id: &str) -> bool {
+        match self {
+            ApiRoute::Cd(api) => api.has_slot(request_id),
+            ApiRoute::Direct(leader) => leader.has_slot(request_id),
+        }
+    }
+    fn extend_slot_tokens(&self, request_id: &str, tokens: Vec<u32>) -> anyhow::Result<()> {
+        match self {
+            ApiRoute::Cd(api) => api.extend_slot_tokens(request_id, tokens),
+            ApiRoute::Direct(leader) => leader.extend_slot_tokens(request_id, tokens),
+        }
+    }
+    fn get_num_new_matched_tokens(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> anyhow::Result<(Option<usize>, bool)> {
+        match self {
+            ApiRoute::Cd(api) => api.get_num_new_matched_tokens(request_id, num_computed_tokens),
+            ApiRoute::Direct(leader) => {
+                leader.get_num_new_matched_tokens(request_id, num_computed_tokens)
+            }
+        }
+    }
+    fn update_state_after_alloc(
+        &self,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> anyhow::Result<()> {
+        match self {
+            ApiRoute::Cd(api) => {
+                api.update_state_after_alloc(request_id, block_ids, num_external_tokens)
+            }
+            ApiRoute::Direct(leader) => kvbm_connector::connector::leader::ConnectorLeader::update_state_after_alloc(
+                leader,
+                request_id,
+                block_ids,
+                num_external_tokens,
+            ),
+        }
+    }
+    fn build_connector_meta(
+        &self,
+        output: kvbm_connector::connector::leader::scheduler::SchedulerOutput,
+    ) -> anyhow::Result<kvbm_connector::connector::leader::scheduler::KvConnectorMetadata> {
+        match self {
+            ApiRoute::Cd(api) => api.build_connector_meta(output),
+            ApiRoute::Direct(leader) => leader.build_connector_meta(output),
+        }
+    }
+    fn update_connector_output(
+        &self,
+        finished_sending: HashSet<String>,
+        finished_recving: HashSet<String>,
+    ) -> anyhow::Result<()> {
+        match self {
+            ApiRoute::Cd(api) => api.update_connector_output(finished_sending, finished_recving),
+            ApiRoute::Direct(leader) => {
+                leader.update_connector_output(finished_sending, finished_recving)
+            }
+        }
+    }
+    fn request_finished(&self, request_id: &str) -> FinishedStatus {
+        match self {
+            ApiRoute::Cd(api) => api.request_finished(request_id),
+            ApiRoute::Direct(leader) => leader.request_finished(request_id),
+        }
+    }
 }
 
 #[pymethods]
@@ -69,11 +173,11 @@ impl PyConnectorLeader {
     }
 
     pub fn has_slot(&self, request_id: &str) -> bool {
-        self.inner.has_slot(request_id)
+        self.api().has_slot(request_id)
     }
 
     pub fn create_slot(&self, request: PyRequest) -> PyResult<()> {
-        self.inner
+        self.api()
             .create_slot(request.inner.clone())
             .map_err(to_pyerr)
     }
@@ -109,7 +213,7 @@ impl PyConnectorLeader {
     /// Raises:
     ///     RuntimeError: If the slot is not found or extension fails
     pub fn extend_slot_tokens(&self, request_id: &str, tokens: Vec<u32>) -> PyResult<()> {
-        self.inner
+        self.api()
             .extend_slot_tokens(request_id, tokens)
             .map_err(to_pyerr)
     }
@@ -119,7 +223,7 @@ impl PyConnectorLeader {
         request_id: &str,
         num_computed_tokens: usize,
     ) -> PyResult<(Option<usize>, bool)> {
-        self.inner
+        self.api()
             .get_num_new_matched_tokens(request_id, num_computed_tokens)
             .map_err(to_pyerr)
     }
@@ -130,14 +234,14 @@ impl PyConnectorLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> PyResult<()> {
-        self.inner
+        self.api()
             .update_state_after_alloc(request_id, block_ids, num_external_tokens)
             .map_err(to_pyerr)
     }
 
     /// See [`ConnectorLeader::request_finished`] for more details.
     pub fn request_finished(&self, request_id: &str) -> bool {
-        match self.inner.request_finished(request_id) {
+        match self.api().request_finished(request_id) {
             FinishedStatus::Finished => false,
             FinishedStatus::Pending => true,
             FinishedStatus::UntrackedRequest => false,
@@ -153,7 +257,7 @@ impl PyConnectorLeader {
         let finished_sending: HashSet<String> = finished_sending.extract()?;
         let finished_recving: HashSet<String> = finished_recving.extract()?;
 
-        self.inner
+        self.api()
             .update_connector_output(finished_sending, finished_recving)
             .map_err(to_pyerr)?;
         Ok(())
@@ -172,7 +276,7 @@ impl PyConnectorLeader {
     pub fn build_connector_metadata(&self, output: &PySchedulerOutput) -> PyResult<Vec<u8>> {
         let rust_output = output.inner();
         let metadata = self
-            .inner
+            .api()
             .build_connector_meta(rust_output)
             .map_err(to_pyerr)?;
         let bytes = serde_json::to_vec(&metadata).map_err(to_pyerr)?;

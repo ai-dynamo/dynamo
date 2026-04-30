@@ -152,6 +152,7 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
         transport.clone(),
         workers.clone(),
         factory.clone(),
+        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
         tokio::runtime::Handle::current(),
     );
 

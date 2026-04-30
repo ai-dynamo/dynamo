@@ -60,6 +60,7 @@
 pub mod conditional_leader;
 pub mod decode;
 pub mod decode_leader;
+pub mod peer_resolver;
 pub mod prefill_coordinator;
 pub mod prefill_leader;
 pub mod queue;
@@ -82,6 +83,7 @@ use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 pub use conditional_leader::{ConditionalDisaggLeader, register_with_hub};
 pub use decode::{BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus};
 pub use decode_leader::DecodeDisaggLeader;
+pub use peer_resolver::{HubPeerResolver, PeerResolver};
 pub use prefill_coordinator::PrefillCoordinator;
 pub use prefill_leader::PrefillDisaggLeader;
 pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};

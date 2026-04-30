@@ -70,6 +70,12 @@ pub struct ConnectorLeader {
     /// `config.disagg` is present. Holds the hub registration alive for the
     /// life of this leader.
     disagg_client: OnceLock<Arc<ConditionalDisaggClient>>,
+    /// CD-role dispatcher (`Arc<ConditionalDisaggLeader>`) installed by
+    /// `initialize_async` when `config.disagg` is present. Bindings route
+    /// `ConnectorLeaderApi` methods through this when set so role-specific
+    /// wrappers (decode/prefill) can intercept GNMT/USAA/etc. without
+    /// changing the binding-side handle type.
+    cd_api: OnceLock<Arc<dyn disagg::ConnectorLeaderApi>>,
 }
 
 #[derive(Default, Clone)]
@@ -128,7 +134,22 @@ impl ConnectorLeader {
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
             forward_pass_samples: Mutex::new(None),
             disagg_client: OnceLock::new(),
+            cd_api: OnceLock::new(),
         }
+    }
+
+    /// Conditional-disagg dispatcher, populated in `initialize_async` when
+    /// `config.disagg` is present. Bindings consult this to route the
+    /// `ConnectorLeaderApi` method set through the CD wrapper.
+    pub fn cd_api(&self) -> Option<&Arc<dyn disagg::ConnectorLeaderApi>> {
+        self.cd_api.get()
+    }
+
+    /// Set the CD dispatcher. Called once from `initialize_async`.
+    pub(crate) fn set_cd_api(&self, api: Arc<dyn disagg::ConnectorLeaderApi>) -> Result<()> {
+        self.cd_api
+            .set(api)
+            .map_err(|_| anyhow!("cd_api already set"))
     }
 
     /// Conditional-disagg hub client, if this leader was configured with

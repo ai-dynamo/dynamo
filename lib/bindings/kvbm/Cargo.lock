@@ -3947,6 +3947,7 @@ dependencies = [
  "derive_builder",
  "dynamo-memory",
  "dynamo-tokens",
+ "figment",
  "futures",
  "kvbm-common",
  "kvbm-config",

@@ -147,6 +147,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         p_transport.clone(),
         p_workers.clone(),
         p_factory.clone(),
+        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
         tokio::runtime::Handle::current(),
     );
     let p_wrapper =

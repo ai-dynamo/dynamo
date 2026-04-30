@@ -42,7 +42,7 @@ use dynamo_memory::nixl::NixlAgent;
 use kvbm_config::KvbmConfig;
 use kvbm_observability::SharedKvbmObservability;
 use tokio::runtime::Handle;
-use velo::Messenger;
+use velo::{Messenger, Velo};
 
 /// KVBM Runtime - composed infrastructure for kvbm operations.
 ///
@@ -58,6 +58,12 @@ pub struct KvbmRuntime {
     pub(crate) config: KvbmConfig,
     pub(crate) runtime: RuntimeHandle,
     pub(crate) messenger: Arc<Messenger>,
+    /// Full Velo instance, present when the runtime built (or was given)
+    /// one. Required by the conditional-disagg session machinery (anchor
+    /// + rendezvous management). Test paths that inject only a bare
+    /// `Messenger` leave this `None` — CD wiring will fail loudly if
+    /// invoked against a runtime without a Velo.
+    pub(crate) velo: Option<Arc<Velo>>,
     pub(crate) nixl_agent: Option<NixlAgent>,
     pub(crate) observability: SharedKvbmObservability,
 }
@@ -96,6 +102,16 @@ impl KvbmRuntime {
     /// Get Messenger.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
+    }
+
+    /// Get the full Velo instance, if one is associated with this runtime.
+    ///
+    /// Production paths build a Velo (which carries the messenger plus
+    /// streaming/anchor/rendezvous managers needed by the
+    /// conditional-disagg session machinery). Test paths that inject only
+    /// a bare Messenger return `None` here — those tests don't use CD.
+    pub fn velo(&self) -> Option<&Arc<Velo>> {
+        self.velo.as_ref()
     }
 
     /// Get shared KVBM observability handles and registry.
