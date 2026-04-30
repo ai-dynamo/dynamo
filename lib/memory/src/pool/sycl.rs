@@ -37,7 +37,7 @@
 
 use anyhow::{Result, anyhow};
 use oneapi_rs::safe::SyclQueue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +62,9 @@ struct PoolInner {
     free_list: BTreeMap<usize, Vec<FreeBlock>>,
     /// Sum of all bytes currently sitting in the free-list.
     cached_bytes: usize,
+    /// Maps each outstanding device pointer to its real allocated size.
+    /// Needed because `pop_best_fit` may return a block larger than requested.
+    active_allocs: HashMap<u64, usize>,
 }
 
 impl PoolInner {
@@ -69,6 +72,7 @@ impl PoolInner {
         Self {
             free_list: BTreeMap::new(),
             cached_bytes: 0,
+            active_allocs: HashMap::new(),
         }
     }
 
@@ -260,12 +264,19 @@ impl SyclMemPool {
                 .lock()
                 .map_err(|e| anyhow!("mutex poisoned: {}", e))?;
             if let Some(block) = inner.pop_best_fit(size) {
+                inner.active_allocs.insert(block.ptr, block.size);
                 return Ok(block.ptr);
             }
         }
 
         // Cache miss — allocate from the SYCL runtime.
-        self.raw_alloc(size)
+        let ptr = self.raw_alloc(size)?;
+        self.inner
+            .lock()
+            .map_err(|e| anyhow!("mutex poisoned: {}", e))?
+            .active_allocs
+            .insert(ptr, size);
+        Ok(ptr)
     }
 
     /// Free memory back to the pool.
@@ -279,9 +290,10 @@ impl SyclMemPool {
     ///
     /// # Arguments
     /// * `ptr` - Device pointer previously obtained from [`alloc`](Self::alloc)
-    /// * `size` - Size in bytes of the allocation (must match the original alloc)
+    /// * `size` - Size in bytes of the allocation (hint; the pool tracks the real
+    ///   size internally and only falls back to this value if `ptr` is unknown)
     pub fn free(&self, ptr: u64, size: usize) -> Result<()> {
-        if ptr == 0 || size == 0 {
+        if ptr == 0 {
             return Ok(());
         }
 
@@ -290,7 +302,24 @@ impl SyclMemPool {
                 .inner
                 .lock()
                 .map_err(|e| anyhow!("mutex poisoned: {}", e))?;
-            inner.push(FreeBlock { ptr, size });
+            let real_size = match inner.active_allocs.remove(&ptr) {
+                Some(s) => s,
+                None => {
+                    // ptr was not produced by this pool (or is being double-freed).
+                    // In debug builds surface the bug; in release fall back to the
+                    // caller-provided hint to stay consistent with prior behavior.
+                    debug_assert!(
+                        false,
+                        "SyclMemPool::free: untracked ptr {:#x} (double-free or foreign ptr)",
+                        ptr
+                    );
+                    if size == 0 {
+                        return Ok(());
+                    }
+                    size
+                }
+            };
+            inner.push(FreeBlock { ptr, size: real_size });
 
             // Enforce release threshold.
             if inner.cached_bytes as u64 > self.release_threshold {
@@ -479,7 +508,7 @@ mod tests {
         assert_eq!(pool.cached_bytes(), 4096, "4K block should remain cached");
 
         // Clean up.
-        pool.free(ptr_5k, 8192).expect("free 5K (8K block)");
+        pool.free(ptr_5k, 5120).expect("free 5K (pool tracks real 8K size)");
         drop(pool);
     }
 
@@ -557,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_free_zero_size_noop() {
+    fn test_pool_free_null_ptr_noop() {
         let queue = match SyclQueue::new_for_device_ordinal(0) {
             Ok(q) => q,
             Err(e) => {
@@ -568,16 +597,40 @@ mod tests {
 
         let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
 
-        // free(_, 0) should be a no-op, not an error.
-        let ptr = pool.alloc(4096).expect("alloc");
-        let result = pool.free(ptr, 0);
-        assert!(result.is_ok(), "free with size=0 should succeed as no-op");
-        assert_eq!(pool.cached_bytes(), 0, "nothing should be cached after free(_, 0)");
+        // free(0, _) is a no-op, not an error.
+        let result = pool.free(0, 0);
+        assert!(result.is_ok(), "free(null) should succeed as no-op");
+        assert_eq!(pool.cached_bytes(), 0, "nothing should be cached");
 
-        // Clean up: free with actual size to avoid leak.
-        // Note: ptr was consumed by the zero-size free (no-op), so we raw_free it
-        // by freeing through a fresh alloc that reuses nothing (0 cached).
-        // In practice the Drop handler frees the pool's internal state correctly.
-        drop(pool);
+        let result = pool.free(0, 4096);
+        assert!(result.is_ok(), "free(null, nonzero) should succeed as no-op");
+        assert_eq!(pool.cached_bytes(), 0, "nothing should be cached");
+    }
+
+    #[test]
+    fn test_pool_free_ignores_size_hint() {
+        let queue = match SyclQueue::new_for_device_ordinal(0) {
+            Ok(q) => q,
+            Err(e) => {
+                eprintln!("Skipping test - no SYCL device: {e}");
+                return;
+            }
+        };
+
+        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+
+        // A tracked ptr must be recycled using its real size, regardless of the
+        // caller-supplied hint. This guards the size-accounting fix.
+        let ptr = pool.alloc(4096).expect("alloc");
+        pool.free(ptr, 0).expect("free with size=0 hint");
+        assert_eq!(
+            pool.cached_bytes(),
+            4096,
+            "tracked ptr must be recycled with its real size, not the hint"
+        );
+
+        // Allocating the same size should hit the cache and return the same ptr.
+        let ptr2 = pool.alloc(4096).expect("alloc reuse");
+        assert_eq!(ptr2, ptr, "should reuse the recycled block");
     }
 }
