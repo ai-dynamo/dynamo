@@ -121,7 +121,7 @@ Significantly reduces GPU compute costs by running on preemptible Spot VM node p
 kubectl delete dynamographdeployments.nvidia.com --all --all-namespaces
 
 # Uninstall Dynamo Platform
-export NAMESPACE=${NAMESPACE:-dynamo-system}
+export NAMESPACE="dynamo-system"
 helm uninstall dynamo-platform -n $NAMESPACE
 
 # If running Dynamo < 1.0 with a separate CRDs chart:
