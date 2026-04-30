@@ -21,8 +21,11 @@ fn commentary_block_regex() -> &'static Regex {
         // Name is `[\w.\-]+` (alphanumeric / dot / hyphen / underscore).
         // Between name and `<|message|>` we tolerate optional
         // `<|constrain|>json` and whitespace by using non-greedy `.*?`.
+        // Args end at either `<|call|>` (normal close) or end-of-string
+        // (`\z`, the bare-envelope CASE.5 variant where the model never
+        // emitted `<|call|>` before EOS / max_tokens).
         Regex::new(
-            r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
+            r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
         )
         .expect("commentary block regex")
     })
@@ -370,6 +373,22 @@ mod tests {
     #[tokio::test] // CASE.4 — gpt-oss
     async fn test_parse_harmony_truncated_json_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
+        let (tool_calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
+    }
+
+    // Bare-envelope CASE.5: no preceding `analysis` block, no `<|call|>`
+    // at the end. harmony's tokenizer rejects this; the regex fallback
+    // accepts EOS as a synthetic close.
+    #[tokio::test] // CASE.5 — gpt-oss
+    async fn test_parse_harmony_bare_envelope_no_call_token_recovers() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
         let (tool_calls, _normal) =
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
