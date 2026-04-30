@@ -1565,6 +1565,7 @@ dependencies = [
  "image",
  "ipnet",
  "json-five",
+ "libc",
  "minijinja",
  "minijinja-contrib",
  "modelexpress-client",

@@ -1,0 +1,302 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Multi-replica metadata-fetch tests via CPU-only mocker workers.
+
+Parametrized over the URI scheme the worker ends up advertising:
+
+* ``self_host`` (``http://``): ``DYN_SELF_HOST_METADATA=true`` → worker
+  rewrites CheckedFiles to ``http://<worker>/v1/metadata/...``.
+* ``hf`` (``hf://``): worker started with the repo ID as
+  ``--model-path``; origin's ``move_to_url("hf://...")`` branch fires
+  because the repo ID isn't a literal local path.
+* ``file`` (``file://``): worker started with a local snapshot dir as
+  ``--model-path``; CheckedFile stays ``Either::Left(PathBuf)`` and
+  the frontend synthesizes ``file://`` from it in
+  ``resolve_metadata_files``.
+
+All three converge on the same `resolve_uri` verify-and-cache path.
+A separate test pairs two frontends sharing ``$HOME`` to exercise
+cross-process flock on the metadata cache.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Generator, Tuple
+
+import pytest
+import requests
+
+from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
+from tests.utils.constants import QWEN, DefaultPort
+from tests.utils.managed_process import DynamoFrontendProcess
+from tests.utils.port_utils import ServicePorts, allocate_port, deallocate_port
+
+logger = logging.getLogger(__name__)
+
+TEST_MODEL = QWEN
+
+pytestmark = [
+    pytest.mark.gpu_0,  # mocker is CPU-only
+    pytest.mark.e2e,
+    pytest.mark.post_merge,
+    pytest.mark.model(TEST_MODEL),
+]
+
+
+def _mocker_model_arg_for_scheme(scheme: str) -> str:
+    """Value to pass as `--model-path` for each scheme.
+
+    `file` needs a real local-disk path to keep the worker's
+    CheckedFile as `Either::Left(PathBuf)` (so `move_to_url("hf://...")`
+    doesn't fire); `self_host` and `hf` use the repo ID directly.
+    """
+    if scheme in ("self_host", "hf"):
+        return TEST_MODEL
+    if scheme == "file":
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(
+            repo_id=TEST_MODEL,
+            allow_patterns=[
+                "config.json",
+                "tokenizer.json",
+                "tokenizer.model",
+                "tokenizer_config.json",
+                "chat_template.jinja",
+                "chat_template.json",
+                "generation_config.json",
+            ],
+        )
+    raise ValueError(f"unknown scheme: {scheme}")
+
+
+@pytest.fixture(scope="function")
+def multi_replica_services(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports: ServicePorts,
+    tmp_path,
+):
+    """Yields `start(scheme)` -> (ports, frontend_home). Spawns one
+    frontend with isolated $HOME plus two mocker workers configured
+    for `scheme` ∈ {"self_host", "hf", "file"}."""
+    _ = runtime_services_dynamic_ports
+    frontend_port = dynamo_dynamic_ports.frontend_port
+    sys_a, sys_b = dynamo_dynamic_ports.system_ports
+
+    frontend_home = tmp_path / "frontend-home"
+    frontend_home.mkdir(parents=True, exist_ok=True)
+
+    contexts: list = []
+
+    def start(scheme: str):
+        worker_env = {
+            "DYN_SELF_HOST_METADATA": "true" if scheme == "self_host" else "false"
+        }
+        model_arg = _mocker_model_arg_for_scheme(scheme)
+
+        # `file` passes a local dir as --model-path; without
+        # --model-name the display_name would become that path string
+        # and surface as the `/v1/models` id.
+        worker_extra_args = ["--model-name", TEST_MODEL] if scheme == "file" else None
+
+        frontend = DynamoFrontendProcess(
+            request,
+            frontend_port=frontend_port,
+            extra_env={"HOME": str(frontend_home)},
+            terminate_all_matching_process_names=False,
+        )
+        frontend.__enter__()
+        contexts.append(frontend)
+
+        for worker_id, sys_port in [("mocker-a", sys_a), ("mocker-b", sys_b)]:
+            worker = MockerWorkerProcess(
+                request,
+                model_arg,
+                frontend_port,
+                sys_port,
+                worker_id=worker_id,
+                extra_env=worker_env,
+                extra_args=worker_extra_args,
+            )
+            worker.__enter__()
+            contexts.append(worker)
+
+        return dynamo_dynamic_ports, frontend_home
+
+    try:
+        yield start
+    finally:
+        # Reverse order; swallow individual errors so every context
+        # gets its chance to clean up.
+        for ctx in reversed(contexts):
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                logger.exception("error tearing down %r", ctx)
+
+
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("scheme", ["self_host", "hf", "file"])
+@pytest.mark.timeout(300)
+def test_two_mocker_replicas_register(
+    multi_replica_services,
+    scheme: str,
+    predownload_tokenizers,
+) -> None:
+    ports, frontend_home = multi_replica_services(scheme)
+    base_url = f"http://localhost:{ports.frontend_port}"
+
+    response = requests.get(f"{base_url}/v1/models", timeout=30)
+    assert response.status_code == 200, response.text
+    model_ids = [m.get("id") for m in response.json().get("data", [])]
+    assert TEST_MODEL in model_ids, f"expected {TEST_MODEL} in {model_ids}"
+
+    completion = requests.post(
+        f"{base_url}/v1/completions",
+        json={"model": TEST_MODEL, "prompt": "hi", "max_tokens": 8},
+        timeout=60,
+    )
+    assert completion.status_code == 200, completion.text
+
+    # Two replicas advertising identical metadata should produce
+    # exactly one blob per file — flock collapses concurrent fetches
+    # to a single download per blake3.
+    blobs_dir = frontend_home / ".cache/dynamo/mdc/blobs"
+    assert blobs_dir.exists(), f"expected blobs dir at {blobs_dir}"
+    blobs = [
+        p
+        for p in blobs_dir.iterdir()
+        if p.is_file() and not p.name.endswith(".lock") and ".tmp" not in p.name
+    ]
+    assert len(blobs) > 0, f"expected at least one blob in {blobs_dir}"
+
+    leftover_tmps = [p for p in blobs_dir.iterdir() if ".tmp" in p.name]
+    assert (
+        not leftover_tmps
+    ), f"expected no leftover tmp files in cache, got {leftover_tmps}"
+
+    by_hex = {p.name for p in blobs}
+    assert len(by_hex) == len(blobs), (
+        f"expected unique blob filenames (one per blake3), got duplicates: "
+        f"{[p.name for p in blobs]}"
+    )
+    logger.info(
+        "multi-replica %s verified: %d blob(s) under %s "
+        "from concurrent registrations on system_ports=%s",
+        scheme,
+        len(blobs),
+        blobs_dir,
+        ports.system_ports,
+    )
+
+
+@pytest.fixture(scope="function")
+def shared_cache_two_frontends_one_worker(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports: ServicePorts,
+    tmp_path,
+) -> Generator[Tuple[int, int, Path], None, None]:
+    """Two frontends sharing $HOME plus one self-hosted mocker —
+    exercises cross-process flock on the shared metadata cache.
+    Yields ``(frontend_a_port, frontend_b_port, shared_home)``."""
+    _ = runtime_services_dynamic_ports
+    frontend_a_port = dynamo_dynamic_ports.frontend_port
+    system_port = dynamo_dynamic_ports.system_ports[0]
+    frontend_b_port = allocate_port(DefaultPort.FRONTEND.value)
+
+    shared_home = tmp_path / "shared-frontend-home"
+    shared_home.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with DynamoFrontendProcess(
+            request,
+            frontend_port=frontend_a_port,
+            extra_env={"HOME": str(shared_home)},
+            terminate_all_matching_process_names=False,
+            display_name="frontend-a",
+        ):
+            with DynamoFrontendProcess(
+                request,
+                frontend_port=frontend_b_port,
+                extra_env={"HOME": str(shared_home)},
+                terminate_all_matching_process_names=False,
+                display_name="frontend-b",
+            ):
+                with MockerWorkerProcess(
+                    request,
+                    TEST_MODEL,
+                    frontend_a_port,
+                    system_port,
+                    worker_id="mocker-shared-cache",
+                    extra_env={"DYN_SELF_HOST_METADATA": "true"},
+                ):
+                    yield frontend_a_port, frontend_b_port, shared_home
+    finally:
+        deallocate_port(frontend_b_port)
+
+
+@pytest.mark.timeout(300)
+def test_two_frontends_share_metadata_cache_via_flock(
+    shared_cache_two_frontends_one_worker: Tuple[int, int, Path],
+    predownload_tokenizers,
+) -> None:
+    (
+        frontend_a_port,
+        frontend_b_port,
+        shared_home,
+    ) = shared_cache_two_frontends_one_worker
+
+    # The mocker fixture only gates on frontend A's readiness; wait
+    # for B's discovery watcher to catch up before asserting.
+    wait_for_http_completions_ready(frontend_port=frontend_b_port, model=TEST_MODEL)
+
+    for port in (frontend_a_port, frontend_b_port):
+        response = requests.get(f"http://localhost:{port}/v1/models", timeout=30)
+        assert response.status_code == 200, response.text
+        model_ids = [m.get("id") for m in response.json().get("data", [])]
+        assert (
+            TEST_MODEL in model_ids
+        ), f"frontend on port {port} missing {TEST_MODEL}: {model_ids}"
+
+    for port in (frontend_a_port, frontend_b_port):
+        completion = requests.post(
+            f"http://localhost:{port}/v1/completions",
+            json={"model": TEST_MODEL, "prompt": "hi", "max_tokens": 8},
+            timeout=60,
+        )
+        assert (
+            completion.status_code == 200
+        ), f"completion on port {port}: {completion.text}"
+
+    blobs_dir = shared_home / ".cache/dynamo/mdc/blobs"
+    assert blobs_dir.exists(), f"expected blobs dir at {blobs_dir}"
+    blobs = [
+        p
+        for p in blobs_dir.iterdir()
+        if p.is_file() and not p.name.endswith(".lock") and ".tmp" not in p.name
+    ]
+    assert len(blobs) > 0, f"expected at least one blob in {blobs_dir}"
+
+    leftover_tmps = [p for p in blobs_dir.iterdir() if ".tmp" in p.name]
+    assert (
+        not leftover_tmps
+    ), f"expected no leftover tmp files in cache, got {leftover_tmps}"
+
+    by_hex = {p.name for p in blobs}
+    assert len(by_hex) == len(
+        blobs
+    ), f"expected unique blob filenames, got duplicates: {[p.name for p in blobs]}"
+
+    logger.info(
+        "two-frontend shared-cache verified: %d blob(s) under %s "
+        "served by frontends on ports %d, %d",
+        len(blobs),
+        blobs_dir,
+        frontend_a_port,
+        frontend_b_port,
+    )

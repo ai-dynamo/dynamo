@@ -17,11 +17,16 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct CheckedFile {
-    /// Either a path on local disk or a remote URL (usually nats object store)
+    /// Either a path on local disk or a remote URL.
     path: Either<PathBuf, Url>,
 
     /// Checksum of the contents of path
     checksum: Checksum,
+
+    /// File size in bytes. `None` when deserialized from a pre-size MDC
+    /// (legacy wire format) — used as a "this is a new-format MDC" discriminant
+    /// downstream so consumers can keep cross-version compat.
+    size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -48,11 +53,13 @@ impl CheckedFile {
         if !path.is_file() {
             anyhow::bail!("Not a file: {}", path.display());
         }
+        let size = std::fs::metadata(&path)?.len();
         let hash = b3sum(&path)?;
 
         Ok(CheckedFile {
             path: Either::Left(path),
             checksum: Checksum::blake3(hash),
+            size: Some(size),
         })
     }
 
@@ -84,6 +91,10 @@ impl CheckedFile {
 
     pub fn checksum(&self) -> &Checksum {
         &self.checksum
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.size
     }
 
     /// Does the given file checksum to the same value as this CheckedFile?
@@ -144,21 +155,28 @@ impl Serialize for CheckedFile {
     where
         S: Serializer,
     {
-        let mut cf = serializer.serialize_struct("CheckedFile", 2)?;
+        let n = if self.size.is_some() { 3 } else { 2 };
+        let mut cf = serializer.serialize_struct("CheckedFile", n)?;
         match &self.path {
             Either::Left(path) => cf.serialize_field("path", &path)?,
             Either::Right(url) => cf.serialize_field("path", &url)?,
         };
         cf.serialize_field("checksum", &self.checksum)?;
+        if let Some(size) = self.size {
+            cf.serialize_field("size", &size)?;
+        }
         cf.end()
     }
 }
 
-/// Internal type to simplify deserializing
+/// Internal type to simplify deserializing. `size` is `#[serde(default)]`
+/// so old MDC bytes (no size field) deserialize cleanly with `size = None`.
 #[derive(Deserialize)]
 struct WireCheckedFile {
     path: String,
     checksum: Checksum,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 // Convert from the temporary struct to CheckedFile with path type logic.
@@ -169,10 +187,12 @@ impl From<WireCheckedFile> for CheckedFile {
             Ok(url) => CheckedFile {
                 path: Either::Right(url),
                 checksum: temp.checksum,
+                size: temp.size,
             },
             Err(_) => CheckedFile {
                 path: Either::Left(PathBuf::from(temp.path)),
                 checksum: temp.checksum,
+                size: temp.size,
             },
         }
     }
@@ -218,6 +238,14 @@ impl Checksum {
             hash: hash.into(),
             algorithm,
         }
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn algorithm(&self) -> CryptographicHashMethods {
+        self.algorithm
     }
 }
 
@@ -362,5 +390,33 @@ mod tests {
         let expected =
             Checksum::blake3("62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2");
         assert_eq!(expected, *cf.checksum());
+        assert_eq!(Some(560), cf.size(), "TinyLlama config.json is 560 bytes");
+    }
+
+    /// Old MDC bytes (no `size` field) deserialize cleanly with
+    /// `size = None`, preserving cross-version compat.
+    #[test]
+    fn test_legacy_wire_format_omits_size() {
+        let legacy = r#"{"path":"/x/config.json","checksum":"blake3:abc"}"#;
+        let cf: CheckedFile = serde_json::from_str(legacy).unwrap();
+        assert_eq!(None, cf.size());
+        assert_eq!("/x/config.json", cf.path().unwrap().to_str().unwrap());
+    }
+
+    /// New-format CheckedFiles round-trip with the size field.
+    #[test]
+    fn test_new_wire_format_carries_size() {
+        let cf = CheckedFile {
+            path: Either::Left(PathBuf::from("/x/tokenizer.json")),
+            checksum: Checksum::blake3("abc"),
+            size: Some(12345),
+        };
+        let json = serde_json::to_string(&cf).unwrap();
+        assert!(
+            json.contains("\"size\":12345"),
+            "expected size field in serialization, got: {json}"
+        );
+        let back: CheckedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(Some(12345), back.size());
     }
 }
