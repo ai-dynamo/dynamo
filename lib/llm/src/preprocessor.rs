@@ -308,7 +308,23 @@ impl OpenAIPreprocessor {
 
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
-        builder.output_options(request.extract_output_options()?);
+
+        // Some parsers rely on `<|tool_call>`, `<|channel>`, etc. being
+        // visible in the decoded text. The default `skip_special_tokens=true`
+        // strips them and silently bypasses parsing. Mirror upstream's
+        // per-parser `adjust_request` hook by flipping the default to false
+        // for parsers that need special tokens preserved, unless the caller
+        // has explicitly set `skip_special_tokens`.
+        let mut output_options = request.extract_output_options()?;
+        if output_options.skip_special_tokens.is_none()
+            && Self::parser_requires_special_tokens(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            output_options.skip_special_tokens = Some(false);
+        }
+        builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
@@ -1223,6 +1239,20 @@ impl OpenAIPreprocessor {
         jail.apply_with_finish_reason(stream)
     }
 
+    /// Whether the selected tool-call or reasoning parser depends on the
+    /// engine emitting special tokens (e.g. Gemma 4's `<|tool_call>` /
+    /// `<|channel>`). Mirrors upstream vLLM's per-parser `adjust_request`
+    /// hooks. Used to flip the request default for `skip_special_tokens`
+    /// from `true` to `false` so the parsers actually see the markers
+    /// they're matching on.
+    fn parser_requires_special_tokens(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        matches!(tool_call_parser, Some("gemma4") | Some("gemma-4"))
+            || matches!(reasoning_parser, Some("gemma4") | Some("gemma-4"))
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
@@ -1702,6 +1732,37 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parser_requires_special_tokens() {
+        let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
+            (Some("gemma4"), None, true, "gemma4 tool-call only → required"),
+            (None, Some("gemma4"), true, "gemma4 reasoning only → required"),
+            (Some("gemma-4"), None, true, "gemma-4 hyphen alias (tool) → required"),
+            (None, Some("gemma-4"), true, "gemma-4 hyphen alias (reasoning) → required"),
+            (
+                Some("gemma4"),
+                Some("gemma4"),
+                true,
+                "gemma4 paired → required",
+            ),
+            (Some("hermes"), None, false, "hermes → not required"),
+            (
+                Some("kimi_k2"),
+                Some("kimi_k25"),
+                false,
+                "kimi_k2 paired → not required",
+            ),
+            (None, None, false, "no parsers → not required"),
+        ];
+        for (tool, reasoning, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::parser_requires_special_tokens(*tool, *reasoning),
+                *expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
 
     #[test]
     fn test_is_reasoning_disabled_by_request() {
