@@ -836,18 +836,14 @@ mod tests {
         );
     }
 
-    /// `CASE.11` — `tool_choice` (auto / required / named / none).
-    ///
-    /// TODO(CASE.11) — NOT EXERCISED AT PARSER UNIT LEVEL: the kimi_k2 parser
-    /// itself doesn't see `tool_choice`; the field is enforced at the request
-    /// handler / streaming layer. Cross-parser coverage lives in
-    /// `lib/llm/tests/tool_choice.rs`, which today only exercises hermes.
-    /// Needs to be parametrised across all top-7 parsers (Linear DIS-1842
-    /// work-item #1). Placeholder test asserts the parser parses the same
-    /// way regardless of an external "named" filter — caller is responsible
-    /// for filtering.
-    #[test] // CASE.11
-    fn test_parse_tool_choice_caller_filters_not_parser() {
+    /// Parser-level invariant: the kimi_k2 parser does NOT filter by
+    /// `tool_choice` — it returns every well-formed call it sees, and the
+    /// jail / response builder above this layer is responsible for filtering
+    /// per `tool_choice=named`/`required`/`none`. This test exists to
+    /// catch accidental in-parser filtering. Real CASE.11 coverage lives at
+    /// the integration layer (`lib/llm/tests/tool_choice.rs`).
+    #[test]
+    fn test_parser_does_not_filter_by_tool_choice() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -856,17 +852,13 @@ mod tests {
         assert_eq!(calls.len(), 2);
     }
 
-    /// `CASE.12` — `finish_reason` mapping (`stop` / `tool_calls` / `length`).
-    ///
-    /// TODO(CASE.12) — NOT EXERCISED AT PARSER UNIT LEVEL: the kimi_k2 parser
-    /// doesn't emit `finish_reason`; mapping happens in the chat-completions
-    /// jail / stream wrapper. Cross-parser coverage today only covers Qwen
-    /// (`test_streaming_tool_parsers::test_qwen_finish_reason_length_vllm`).
-    /// Needs equivalent fixtures for Kimi K2 covering all three reasons
-    /// (Linear DIS-1842 work-item #5). Placeholder asserts the parser still
-    /// returns the same calls regardless of how the upstream stream ended.
-    #[test] // CASE.12
-    fn test_parse_finish_reason_unaffected_at_parser_layer() {
+    /// Parser-level invariant: the kimi_k2 parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output for any upstream
+    /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
+    /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
+    /// belongs in DIS-1842 work-item #5.
+    #[test]
+    fn test_parser_output_independent_of_upstream_finish() {
         let config = default_config();
         // Same payload, two "logical" finish_reasons (stop vs length truncation):
         // the parser sees only the bytes, so behavior must be identical.
@@ -911,10 +903,8 @@ mod tests {
             calls[0].id, calls[1].id,
             "Duplicate calls must have distinct ids"
         );
-        let args0: serde_json::Value =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
-        let args1: serde_json::Value =
-            serde_json::from_str(&calls[1].function.arguments).unwrap();
+        let args0: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: serde_json::Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
         assert_eq!(args0["location"], "NYC");
         assert_eq!(args1["location"], "LA");
     }

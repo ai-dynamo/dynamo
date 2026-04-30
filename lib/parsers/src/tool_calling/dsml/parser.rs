@@ -296,11 +296,17 @@ mod tests {
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm)
     //   - CASE.10  reasoning-only         (test_parse_reasoning_only_no_tool_v4;
     //                                      reasoning/mod.rs :: test_deepseek_v4_detect_and_parse etc.)
-    //   - CASE.11  tool_choice            (test_parse_tool_choice_caller_filters_not_parser_v4
-    //                                      — placeholder; cross-parser parametrisation is DIS-1842 work-item #1)
-    //   - CASE.12  finish-reason          (test_parse_finish_reason_unaffected_at_parser_layer_v4
-    //                                      — placeholder; cross-parser parametrisation is DIS-1842 work-item #5;
-    //                                      lib/llm/tests/test_streaming_tool_parsers covers ToolCalls / Stop)
+    //   - CASE.11  tool_choice            (lib/llm/tests/tool_choice.rs ::
+    //                                      test_deepseek_v4_tool_choice_{auto,required_pins_current_behavior,
+    //                                      named_correct_tool_passes,named_wrong_tool_filtered};
+    //                                      parser-level invariant in
+    //                                      test_parser_does_not_filter_by_tool_choice_v4;
+    //                                      DIS-1842 work-item #1 covers full cross-parser parametrisation)
+    //   - CASE.12  finish-reason          (parser-level invariant in
+    //                                      test_parser_output_independent_of_upstream_finish_v4;
+    //                                      cross-parser stop/tool_calls/length mapping is
+    //                                      DIS-1842 work-item #5; lib/llm/tests/test_streaming_tool_parsers
+    //                                      covers ToolCalls / Stop on E2E fixtures)
     //   - CASE.13  interleaved-text       (test_parse_deepseek_v4_multiple_tool_calls prefix text;
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._content_before_tool_vllm)
     //   - CASE.14  empty/null             (test_parse_empty_and_whitespace_inputs_v4)
@@ -1041,10 +1047,7 @@ mod tests {
     fn test_streaming_chunk_boundary_split_v4() {
         let config = get_v4_test_config();
         // Detector should fire on a partial start fence (one char short).
-        assert!(detect_tool_call_start_dsml(
-            "<｜DSML｜tool_call",
-            &config
-        ));
+        assert!(detect_tool_call_start_dsml("<｜DSML｜tool_call", &config));
         // And on an empty buffer that ends with the very first char of the fence.
         assert!(detect_tool_call_start_dsml("<", &config));
         // End-position lookup must return chunk.len() when the end fence
@@ -1093,17 +1096,13 @@ mod tests {
         assert_eq!(normal_text.as_deref(), Some(input));
     }
 
-    /// `CASE.11` — `tool_choice` (auto / required / named / none).
-    ///
-    /// TODO(CASE.11) — NOT EXERCISED AT PARSER UNIT LEVEL: the dsml parser
-    /// itself doesn't see `tool_choice`; it's enforced at the request
-    /// handler / streaming layer. Cross-parser coverage in
-    /// `lib/llm/tests/tool_choice.rs` is hermes-only today; needs
-    /// parametrisation across all top-7 parsers (Linear DIS-1842 work-item
-    /// #1). Placeholder pins the parser-level invariant: parser returns
-    /// every well-formed invoke, caller filters per `tool_choice`.
-    #[test] // CASE.11
-    fn test_parse_tool_choice_caller_filters_not_parser_v4() {
+    /// Parser-level invariant: the dsml parser does NOT filter by
+    /// `tool_choice` — it returns every well-formed invoke, and the jail /
+    /// response builder above this layer is responsible for filtering per
+    /// `tool_choice=named`/`required`/`none`. Real CASE.11 coverage lives
+    /// at the integration layer (`lib/llm/tests/tool_choice.rs`).
+    #[test]
+    fn test_parser_does_not_filter_by_tool_choice_v4() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"get_weather\">\n\
 <｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
@@ -1117,16 +1116,13 @@ mod tests {
         assert_eq!(calls.len(), 2);
     }
 
-    /// `CASE.12` — `finish_reason` mapping (`stop` / `tool_calls` / `length`).
-    ///
-    /// TODO(CASE.12) — NOT EXERCISED AT PARSER UNIT LEVEL: the dsml parser
-    /// doesn't emit `finish_reason`; mapping happens in the
-    /// chat-completions jail / stream wrapper. Cross-parser coverage today
-    /// is Qwen-only; DSv4 needs equivalent fixtures covering all three
-    /// reasons (Linear DIS-1842 work-item #5). Placeholder asserts the
-    /// parser's output is byte-identical regardless of upstream finish.
-    #[test] // CASE.12
-    fn test_parse_finish_reason_unaffected_at_parser_layer_v4() {
+    /// Parser-level invariant: the dsml parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output for any upstream
+    /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
+    /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
+    /// belongs in DIS-1842 work-item #5.
+    #[test]
+    fn test_parser_output_independent_of_upstream_finish_v4() {
         let input = "<｜DSML｜tool_calls>\n\
 <｜DSML｜invoke name=\"get_weather\">\n\
 <｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
@@ -1174,10 +1170,17 @@ mod tests {
 </｜DSML｜tool_calls>";
         let config = get_v4_test_config();
         let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
-        assert_eq!(calls.len(), 2, "Both duplicate-name invokes must be returned");
+        assert_eq!(
+            calls.len(),
+            2,
+            "Both duplicate-name invokes must be returned"
+        );
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[1].function.name, "get_weather");
-        assert_ne!(calls[0].id, calls[1].id, "Duplicate calls must have distinct ids");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
         let (_, args0) = extract_name_and_args(calls[0].clone());
         let (_, args1) = extract_name_and_args(calls[1].clone());
         assert_eq!(args0["city"], "NYC");
