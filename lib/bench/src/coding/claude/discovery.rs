@@ -147,7 +147,6 @@ fn is_ignored_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::iter_ancestor_roots;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -159,6 +158,10 @@ mod tests {
         let roots = iter_ancestor_roots(&nested);
         assert_eq!(roots.first().unwrap(), &nested.canonicalize().unwrap());
         let last = roots.last().unwrap();
-        assert_eq!(last, &PathBuf::from("/"));
+        assert!(
+            last.parent().is_none(),
+            "expected filesystem root, got {}",
+            last.display()
+        );
     }
 }

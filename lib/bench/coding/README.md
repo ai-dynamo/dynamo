@@ -43,7 +43,7 @@ Use `--input-path` to restrict the export to a specific file or directory:
 
 ```bash
 cargo run -p dynamo-bench --bin claude_trace_export -- \
-  --input-path /Users/peabrane/.claude/projects/-Users-peabrane-Documents-codes-dynamo \
+  --input-path ~/.claude/projects/<encoded-path> \
   --output-file /tmp/claude_trace.jsonl
 ```
 
@@ -58,7 +58,7 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 
 ```bash
 cargo run -p dynamo-bench --bin claude_trace_export -- \
-  --input-path /Users/peabrane/.claude/projects/-Users-peabrane-Documents-codes-dynamo \
+  --input-path ~/.claude/projects/<encoded-path> \
   --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --block-size 64 \
   --delta-overlap-words 50 \

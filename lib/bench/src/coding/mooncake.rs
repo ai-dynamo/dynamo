@@ -107,6 +107,13 @@ pub fn write_streamed_mooncake_rows<F>(
 where
     F: TokenizerFactory,
 {
+    if config.block_size == 0 {
+        bail!("block_size must be greater than 0");
+    }
+    if config.tokenizer_workers == 0 {
+        bail!("tokenizer_workers must be greater than 0");
+    }
+
     let mut parser_tokenizer = tokenizer_factory.create_worker()?;
     let mut states = FxHashMap::default();
     let mut heap = BinaryHeap::new();

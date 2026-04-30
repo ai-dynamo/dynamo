@@ -474,7 +474,7 @@ fn sanitize_structure(value: &Value, normalizer: &mut ToolIdNormalizer) -> Value
             for (key, item) in map {
                 if matches!(
                     key.as_str(),
-                    "id" | "tool_use_id" | "toolUseID" | "parentToolUseID"
+                    "tool_use_id" | "toolUseID" | "parentToolUseID"
                 ) && let Some(raw_id) = item.as_str()
                     && let Some(normalized) = normalizer.normalize(Some(raw_id))
                 {
@@ -959,7 +959,7 @@ fn summarize_progress_indices(indices: &[usize], records: &[TraceRecord]) -> Cac
     }
 
     CachedProgressMetrics {
-        progress_event_count: tool_intervals.len() + tool_start_times.len(),
+        progress_event_count: indices.len(),
         agent_ids,
         assistant_text_blocks,
         tool_counts,
