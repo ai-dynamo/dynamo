@@ -52,12 +52,6 @@ This chart explains why "error rate" was non-zero pre-kill: ITL drifts steadily 
 
 ![itl_avg_per_window](demo-failover/itl_avg_per_window.png)
 
-### Goodput per 30-second window
-
-Successful (SLA-meeting) request count per 30 s. Pre-kill both setups deliver ~10–14 successes per 30 s. Post-kill: baseline holds at zero for the entire ~5-min cold restart window, then surfaces a few late completions; failover dips briefly and re-establishes a steady ~5–7 successes/30 s.
-
-![goodput_per_window](demo-failover/goodput_per_window.png)
-
 > **Bin choice (30 s)**: Kimi 50 K-token completions arrive ~once every 5-10 s, so 1-second bins were mostly 0/1 spikes. 30 s captures 3-6 completions per bin in steady state — smooth enough to read while keeping pre-kill and post-kill regions clearly separated.
 
 Raw aggregates in [demo-failover/summary.csv](demo-failover/summary.csv).
