@@ -26,6 +26,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -90,6 +91,7 @@ sglang_configs = {
             completion_payload_default(),
             responses_payload_default(),
             responses_stream_payload_default(),
+            guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
@@ -111,6 +113,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": SGLangConfig(
