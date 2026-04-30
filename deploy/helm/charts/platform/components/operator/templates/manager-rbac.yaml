@@ -161,8 +161,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - apps
-- apiGroups:
   - autoscaling
   resources:
   - horizontalpodautoscalers
@@ -274,8 +272,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - networking.k8s.io
 - apiGroups:
   - resource.k8s.io
   resources:
