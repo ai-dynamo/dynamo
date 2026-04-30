@@ -1,0 +1,3 @@
+label,total_requests,successful_requests,error_count,kill_ns,first_request_after_kill_s,ttft_ms_p50_pre_kill,ttft_ms_p50_post_kill
+baseline (failover OFF),486,98,388,1777577475403107144,284.202509592,455.637726,532.474806
+failover ON,271,131,140,1777578203989775891,46.102856357,518.602309,627.309364
