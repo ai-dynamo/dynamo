@@ -25,3 +25,5 @@ except Exception:
         __version__ = "0.0.0+unknown"
 
 __all__ = ["__version__", "config_dump", "constants", "utils"]
+
+# ci-health probe cc1af6a90c3 2026-04-30T05:03:58Z
