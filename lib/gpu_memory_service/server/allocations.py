@@ -127,7 +127,7 @@ class GMSAllocationManager:
 
             # Visibility while retrying. Logged every iteration with elapsed
             # time + free GPU memory, so a stuck retry loop is observable
-            # rather than silent. (Was previously gated by reported_oom — see #8919.)
+            # rather than silent.
             try:
                 free_b, total_b = torch.cuda.mem_get_info(self._device)
             except RuntimeError:

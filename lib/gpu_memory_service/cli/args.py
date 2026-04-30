@@ -66,7 +66,7 @@ def parse_args() -> Config:
         type=float,
         default=60.0,
         help="Max seconds to wait for allocation retries before failing (default: 60.0). "
-        "Pass an explicit large value if you need essentially-unbounded retry. See #8919.",
+        "Pass an explicit large value if you need essentially-unbounded retry.",
     )
 
     args = parser.parse_args()

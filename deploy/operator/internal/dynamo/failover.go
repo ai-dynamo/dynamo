@@ -461,7 +461,7 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	// Env vars to remove: replaced by failover-specific values or intentionally omitted.
 	// DYN_FORWARDPASS_METRIC_PORT is removed here so we can override it per engine
 	// below — both engines share the pod network namespace, so the base value
-	// stamped by component_worker.go (PR #8817) collides on bind. See #8919.
+	// stamped by component_worker.go collides on bind.
 	removeSet := map[string]bool{
 		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": true,
 		"DYN_SYSTEM_PORT":                       true,
