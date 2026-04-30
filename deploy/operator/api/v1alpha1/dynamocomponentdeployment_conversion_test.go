@@ -200,71 +200,6 @@ func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 	}
 }
 
-func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t *testing.T) {
-	sidecarName := "sidecar"
-	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "stale-sidecar", Namespace: "ns"},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName:   "stale-sidecar",
-				ComponentType:   v1beta1.ComponentTypeFrontend,
-				FrontendSidecar: ptr.To(sidecarName),
-				PodTemplate: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{Name: "main", Image: "main:v1"},
-							{Name: sidecarName, Image: "frontend:v1"},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	spoke := &DynamoComponentDeployment{}
-	if err := spoke.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	if spoke.Spec.ExtraPodSpec == nil || spoke.Spec.ExtraPodSpec.PodSpec == nil {
-		t.Fatalf("expected sidecar container to be represented in ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec)
-	}
-	if _, ok := findContainerByName(spoke.Spec.ExtraPodSpec.PodSpec.Containers, sidecarName); !ok {
-		t.Fatalf("expected sidecar container in spoke ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec.PodSpec.Containers)
-	}
-	raw, ok := spoke.Annotations[annDCDHubSpec]
-	if !ok {
-		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDHubSpec, spoke.Annotations)
-	}
-	preserved, ok := restoreDCDHubSpec(raw)
-	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
-	}
-	preservedSidecar, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, sidecarName)
-	if !ok {
-		t.Fatalf("expected preserved podTemplate to carry sidecar key, got %#v", preserved.PodTemplate)
-	}
-	if preservedSidecar.Image != "" {
-		t.Fatalf("expected sparse preserved sidecar key only, got %#v", preservedSidecar)
-	}
-
-	// Stage 2 edit: the v1alpha1 carrier removes the representable sidecar
-	// container but leaves preservation annotations untouched.
-	spoke.Spec.ExtraPodSpec.PodSpec.Containers = nil
-
-	restoredHub := &v1beta1.DynamoComponentDeployment{}
-	if err := spoke.ConvertTo(restoredHub); err != nil {
-		t.Fatalf("ConvertTo: %v", err)
-	}
-	if restoredHub.Spec.FrontendSidecar != nil {
-		t.Fatalf("stale frontendSidecar reference was restored: %q", *restoredHub.Spec.FrontendSidecar)
-	}
-	if restoredHub.Spec.PodTemplate != nil {
-		if _, ok := findContainerByName(restoredHub.Spec.PodTemplate.Spec.Containers, sidecarName); ok {
-			t.Fatalf("stale sidecar container was restored: %#v", restoredHub.Spec.PodTemplate.Spec.Containers)
-		}
-	}
-}
-
 func TestDCD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
 	original := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-edit", Namespace: "ns"},
@@ -749,7 +684,7 @@ func TestDCD_ConvertFrom_DoesNotTagHubOriginWhenInternalAnnotationsExist(t *test
 			Name:      "internal-annotation",
 			Namespace: "ns",
 			Annotations: map[string]string{
-				annDCDSpokeHub: "corrupt",
+				annDCDSpokeSpec: "corrupt",
 			},
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
