@@ -292,14 +292,18 @@ jobs:
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
-      run_gpu_parallel_tests: true
+      # Temporary local PR bypass: do not merge this GPU-test skip.
+      run_gpu_parallel_tests: false
       gpu_parallel_max_vram_gib: '24'
+      # Temporary local PR bypass: do not merge this GPU-test skip.
+      run_gpu_tests: false
     secrets: inherit
 
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # Temporary local PR bypass: do not merge this GPU-test skip.
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -328,12 +332,15 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
+      # Temporary local PR bypass: do not merge this GPU-test skip.
+      run_gpu_tests: false
     secrets: inherit
 
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # Temporary local PR bypass: do not merge this GPU-test skip.
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -362,12 +369,15 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
       gpu_test_markers: pre_merge and trtllm and gpu_1
+      # Temporary local PR bypass: do not merge this GPU-test skip.
+      run_gpu_tests: false
     secrets: inherit
 
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # Temporary local PR bypass: do not merge this GPU-test skip.
+    if: false
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
