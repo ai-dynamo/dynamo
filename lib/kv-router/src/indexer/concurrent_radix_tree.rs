@@ -670,6 +670,18 @@ impl SyncIndexer for ConcurrentRadixTree {
                         c.inc(kind, result);
                     }
                 }
+                WorkerTask::EventWithAck { event, resp } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    let applied = result.is_ok();
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                    let _ = resp.send(applied);
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
                 }

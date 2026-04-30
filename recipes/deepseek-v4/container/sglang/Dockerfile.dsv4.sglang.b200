@@ -38,6 +38,10 @@ ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src
 ENV SGLANG_JIT_DEEPGEMM_PRECOMPILE=0 \
     SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1
 
+# TODO: move this up (consolidate with the apt-get block above) after the release.
+RUN apt-get purge -y libx264-164 libx265-199 libde265-0 libavcodec60 libxvidcore4 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace
 
 ENTRYPOINT []

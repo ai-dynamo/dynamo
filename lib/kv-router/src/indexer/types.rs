@@ -386,6 +386,10 @@ pub struct GetWorkersRequest {
 
 pub enum WorkerTask {
     Event(RouterEvent),
+    EventWithAck {
+        event: RouterEvent,
+        resp: oneshot::Sender<bool>,
+    },
     /// Permanently remove a worker from tracking (keep_worker: false).
     RemoveWorker(WorkerId),
     /// Remove a single dp_rank for a worker.
