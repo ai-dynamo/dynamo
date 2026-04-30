@@ -865,6 +865,7 @@ class FpmDirectPublisher:
 
     def publish(
         self,
+        *,
         dp_rank: int,
         scheduled_num_prefill_requests: int,
         scheduled_sum_prefill_tokens: int,
@@ -879,6 +880,11 @@ class FpmDirectPublisher:
     ) -> None:
         """
         Publish one iteration's FPM snapshot for the given DP rank.
+
+        All parameters are keyword-only on the Python side: adjacent ints
+        with similar units (``scheduled_*`` vs ``queued_*``, ``*_prefill_*``
+        vs ``*_decode_*``) cannot be distinguished by the type system, so
+        a transposition would silently corrupt every published snapshot.
 
         Variance fields (var_prefill_length, var_decode_kv_tokens,
         var_queued_prefill_length, var_queued_decode_kv_tokens) are defaulted

@@ -80,7 +80,11 @@ impl FpmEventRelay {
 /// for `IDLE_HEARTBEAT_INTERVAL` (matches vLLM's `HEARTBEAT_INTERVAL = 1.0`).
 #[pyclass]
 pub(crate) struct FpmDirectPublisher {
-    _inner: llm_rs::fpm_publisher::FpmDirectPublisher,
+    // Owns the CancellationToken that drives Drop-based shutdown of all
+    // per-rank serialization tasks and the event-plane publisher task. Held
+    // by reference only — keep the field non-underscored so a future cleanup
+    // pass does not delete it as "dead", which would leak every spawned task.
+    inner: llm_rs::fpm_publisher::FpmDirectPublisher,
     publishers: Vec<FpmPublisher>,
 }
 
@@ -103,13 +107,16 @@ impl FpmDirectPublisher {
                 llm_rs::fpm_publisher::FpmDirectPublisher::new(component, worker_id, dp_size).await
             })
             .map_err(to_pyerr)?;
-        Ok(Self {
-            _inner: inner,
-            publishers,
-        })
+        Ok(Self { inner, publishers })
     }
 
     /// Publish one iteration's FPM snapshot for the given DP rank.
+    ///
+    /// All parameters are keyword-only on the Python side — adjacent ints
+    /// with similar units (`scheduled_*` vs `queued_*`, `*_prefill_*` vs
+    /// `*_decode_*`) cannot be distinguished by the type system, so a
+    /// transposition would silently corrupt every published snapshot.
+    /// Forcing kwargs at the boundary is a zero-cost guard.
     ///
     /// Variance fields (`var_prefill_length`, `var_decode_kv_tokens`,
     /// `var_queued_prefill_length`, `var_queued_decode_kv_tokens`) are
@@ -117,6 +124,7 @@ impl FpmDirectPublisher {
     /// consume them on origin/main. A follow-up PR can add Welford-based
     /// variance computation in TRT-LLM's PyExecutor and a new overload here.
     #[pyo3(signature = (
+        *,
         dp_rank,
         scheduled_num_prefill_requests,
         scheduled_sum_prefill_tokens,
@@ -172,7 +180,7 @@ impl FpmDirectPublisher {
 
     /// Shut down the publisher and its per-rank serialization tasks.
     fn shutdown(&self) {
-        self._inner.shutdown();
+        self.inner.shutdown();
     }
 }
 

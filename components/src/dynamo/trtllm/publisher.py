@@ -55,21 +55,43 @@ _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
 
-# IterationStats fields that TensorRT-LLM#13199 adds and that the FPM
-# publisher consumes. The first-stat schema probe in handle_stat requires
-# ALL of these to be present; any missing field disables the publisher so
-# we do not emit all-zero snapshots that the Planner would misread as
-# "worker idle" and act on.
-_FPM_REQUIRED_STAT_FIELDS = (
-    "scheduledNumPrefillRequests",
-    "scheduledSumPrefillTokens",
-    "scheduledSumPrefillKvTokens",
-    "scheduledNumDecodeRequests",
-    "scheduledSumDecodeKvTokens",
-    "queuedNumPrefillRequests",
-    "queuedSumPrefillTokens",
-    "queuedNumDecodeRequests",
-    "queuedSumDecodeKvTokens",
+# InflightBatchingStats fields the FPM publisher consumes. As of
+# NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
+# inside iterationStats["inflightBatchingStats"]. The first-stat schema
+# probe requires the nested dict to be present and to carry every key
+# below; any missing field disables the publisher so we do not emit
+# all-zero snapshots that the Planner would misread as "worker idle".
+#
+# Mapping to the Dynamo planner-level fields:
+#   numContextRequests        -> scheduled_num_prefill_requests
+#   numCtxTokens              -> scheduled_sum_prefill_tokens (compute this
+#                                iter; excludes KV-read tokens, matches
+#                                vLLM TTFT-prediction semantics)
+#   numCtxKvTokens            -> scheduled_sum_prefill_kv_tokens
+#   numGenRequests            -> scheduled_num_decode_requests
+#   numGenKvTokens            -> scheduled_sum_decode_kv_tokens
+#   numQueuedContextRequests  -> queued_num_prefill_requests
+#   numQueuedCtxTokens        -> queued_sum_prefill_tokens
+#   numPausedRequests
+#     + numQueuedGenRequests  -> queued_num_decode_requests   (composite)
+#   numPausedKvTokens
+#     + numQueuedGenKvTokens  -> queued_sum_decode_kv_tokens  (composite)
+# Paused-request double-counting (also present in numScheduledRequests
+# upstream) is intentional: the Planner reads queued_decode as a
+# KV-pressure preemption signal where paused-decodes carry the same
+# semantic weight as queued-gen-only requests.
+_FPM_REQUIRED_IBS_FIELDS = (
+    "numContextRequests",
+    "numCtxTokens",
+    "numCtxKvTokens",
+    "numGenRequests",
+    "numGenKvTokens",
+    "numQueuedContextRequests",
+    "numQueuedCtxTokens",
+    "numQueuedGenRequests",
+    "numQueuedGenKvTokens",
+    "numPausedRequests",
+    "numPausedKvTokens",
 )
 
 
@@ -424,7 +446,11 @@ class Publisher:
                 logging.info(
                     f"FpmDirectPublisher initialized with dp_size={self.attention_dp_size}"
                 )
-            except Exception as e:
+            except RuntimeError as e:
+                # PyO3 surfaces all FpmDirectPublisher::new failures as
+                # PyRuntimeError (Endpoint missing, tokio runtime missing,
+                # etc.). Catch only that — any other exception here would
+                # signal a programming error worth surfacing.
                 logging.warning(
                     f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
                 )
@@ -527,34 +553,47 @@ class Publisher:
                 sleep_s = min_sleep
 
     def _check_fpm_schema(self, stat: dict) -> None:
-        """One-shot probe: disable FPM publisher if any required TRT-LLM
-        IterationStats field is missing.
+        """One-shot probe: disable FPM publisher if the TRT-LLM IterationStats
+        nested ``inflightBatchingStats`` dict is missing or incomplete.
 
         Runs exactly once (gated by ``self._fpm_schema_checked``). Strict: if
-        any field in ``_FPM_REQUIRED_STAT_FIELDS`` is missing, the publisher
-        is shut down and set to ``None`` so the subsequent
-        ``if self.fpm_publisher is not None:`` short-circuit suppresses all
-        FPM emission for the lifetime of this worker. This prevents silent
-        planner poison when running against a TRT-LLM that predates
-        NVIDIA/TensorRT-LLM#13199 — otherwise every field would default to 0
-        and the emitted snapshot would be byte-identical to the idle
-        heartbeat, making the Planner treat a loaded worker as idle.
+        the nested dict is absent or any field in ``_FPM_REQUIRED_IBS_FIELDS``
+        is missing, the publisher is shut down and set to ``None`` so the
+        subsequent ``if self.fpm_publisher is not None:`` short-circuit
+        suppresses all FPM emission for the lifetime of this worker. This
+        prevents silent planner poison when running against a TRT-LLM that
+        predates NVIDIA/TensorRT-LLM#13199 — otherwise every field would
+        default to 0 and the emitted snapshot would be byte-identical to the
+        idle heartbeat, making the Planner treat a loaded worker as idle.
         """
         self._fpm_schema_checked = True
         if self.fpm_publisher is None:
             return
-        missing = [f for f in _FPM_REQUIRED_STAT_FIELDS if f not in stat]
+        ibs = stat.get("inflightBatchingStats")
+        if not isinstance(ibs, dict):
+            logging.warning(
+                "TRT-LLM IterationStats has no 'inflightBatchingStats' dict; "
+                "disabling FpmDirectPublisher. Upgrade TRT-LLM past "
+                "NVIDIA/TensorRT-LLM#13199 to enable FPM."
+            )
+            self._disable_fpm_publisher()
+            return
+        missing = [f for f in _FPM_REQUIRED_IBS_FIELDS if f not in ibs]
         if not missing:
             return
         logging.warning(
-            "TRT-LLM IterationStats is missing required FPM fields %s; "
+            "TRT-LLM inflightBatchingStats is missing required FPM fields %s; "
             "disabling FpmDirectPublisher to prevent planner poison. "
             "Upgrade TRT-LLM past NVIDIA/TensorRT-LLM#13199 to enable FPM.",
             missing,
         )
+        self._disable_fpm_publisher()
+
+    def _disable_fpm_publisher(self) -> None:
+        """Shut down ``self.fpm_publisher`` (best effort) and None it out."""
         try:
             self.fpm_publisher.shutdown()
-        except Exception as e:
+        except RuntimeError as e:
             logging.warning(
                 f"FpmDirectPublisher shutdown after schema mismatch failed: {e}"
             )
@@ -600,41 +639,70 @@ class Publisher:
                     logging.warning(f"Failed to log iteration stats: {e}")
 
             # Publish ForwardPassMetrics. TRT-LLM tags each stat dict with
-            # attentionDpRank inside BaseWorker._stats_serializer; when
-            # attention DP is off, the tag defaults to 0. The 9 flat FPM
-            # fields live at the top level of the dict (camelCase from
+            # top-level attentionDpRank inside BaseWorker._stats_serializer;
+            # under non-attention-DP it defaults to 0. The FPM source fields
+            # live nested under stat["inflightBatchingStats"] (camelCase from
             # NLOHMANN serialization). Variance fields are not yet computed
-            # in TRT-LLM's PyExecutor and default to 0.0 in the Rust
-            # snapshot.
+            # in TRT-LLM's PyExecutor and default to 0.0 on the Rust side.
             #
             # The first stat delivered here triggers a one-shot schema probe:
-            # if any required field is missing (e.g. running against a
-            # TRT-LLM that predates #13199) the probe shuts down the
-            # publisher, which flips the guard below to short-circuit FPM
-            # emission for the rest of this worker's lifetime.
+            # if the nested IBS dict is missing or any required field is
+            # absent (e.g. running against a TRT-LLM that predates #13199)
+            # the probe shuts down the publisher, which flips the guard
+            # below to short-circuit FPM emission for the rest of this
+            # worker's lifetime.
             if self.fpm_publisher is not None and not self._fpm_schema_checked:
                 self._check_fpm_schema(stat)
             if self.fpm_publisher is not None:
                 try:
-                    dp_rank = int(stat.get("attentionDpRank", 0))
+                    ibs = stat.get("inflightBatchingStats") or {}
+                    # numCtxTokens is the prefill compute volume *this iter*
+                    # (excludes prefix-cache/chunked carryover counted in
+                    # numCtxKvTokens). Mapped to scheduled_sum_prefill_tokens
+                    # to match vLLM's TTFT-prediction semantics on the
+                    # planner side.
+                    sched_num_prefill = int(ibs.get("numContextRequests", 0))
+                    sched_sum_prefill_tokens = int(ibs.get("numCtxTokens", 0))
+                    sched_sum_prefill_kv_tokens = int(ibs.get("numCtxKvTokens", 0))
+                    sched_num_decode = int(ibs.get("numGenRequests", 0))
+                    sched_sum_decode_kv_tokens = int(ibs.get("numGenKvTokens", 0))
+                    queued_num_prefill = int(ibs.get("numQueuedContextRequests", 0))
+                    queued_sum_prefill_tokens = int(ibs.get("numQueuedCtxTokens", 0))
+                    # Composite: paused-decodes + queued-gen-only requests.
+                    # Both represent decode work blocked from progressing
+                    # this iter due to KV pressure or pending KV transfer.
+                    # numPausedRequests is also counted in numScheduledRequests
+                    # upstream — the double-count is intentional because the
+                    # Planner reads queued_decode as a preemption-pressure
+                    # signal where paused-decodes carry the same weight as
+                    # queued-gen-only requests.
+                    queued_num_decode = int(ibs.get("numPausedRequests", 0)) + int(
+                        ibs.get("numQueuedGenRequests", 0)
+                    )
+                    queued_sum_decode_kv_tokens = int(
+                        ibs.get("numPausedKvTokens", 0)
+                    ) + int(ibs.get("numQueuedGenKvTokens", 0))
                     # iterLatencyMS is ms; the Rust snapshot expects seconds.
-                    iter_latency_ms = float(stat.get("iterLatencyMS", 0.0))
+                    wall_time_secs = float(stat.get("iterLatencyMS", 0.0)) / 1000.0
                     self.fpm_publisher.publish(
-                        dp_rank,
-                        int(stat.get("scheduledNumPrefillRequests", 0)),
-                        int(stat.get("scheduledSumPrefillTokens", 0)),
-                        int(stat.get("scheduledSumPrefillKvTokens", 0)),
-                        int(stat.get("scheduledNumDecodeRequests", 0)),
-                        int(stat.get("scheduledSumDecodeKvTokens", 0)),
-                        int(stat.get("queuedNumPrefillRequests", 0)),
-                        int(stat.get("queuedSumPrefillTokens", 0)),
-                        int(stat.get("queuedNumDecodeRequests", 0)),
-                        int(stat.get("queuedSumDecodeKvTokens", 0)),
-                        iter_latency_ms / 1000.0,
+                        dp_rank=int(stat.get("attentionDpRank", 0)),
+                        scheduled_num_prefill_requests=sched_num_prefill,
+                        scheduled_sum_prefill_tokens=sched_sum_prefill_tokens,
+                        scheduled_sum_prefill_kv_tokens=sched_sum_prefill_kv_tokens,
+                        scheduled_num_decode_requests=sched_num_decode,
+                        scheduled_sum_decode_kv_tokens=sched_sum_decode_kv_tokens,
+                        queued_num_prefill_requests=queued_num_prefill,
+                        queued_sum_prefill_tokens=queued_sum_prefill_tokens,
+                        queued_num_decode_requests=queued_num_decode,
+                        queued_sum_decode_kv_tokens=queued_sum_decode_kv_tokens,
+                        wall_time_secs=wall_time_secs,
                     )
                 except Exception as e:
-                    # Defensive: don't let FPM publish failures break the
-                    # ActiveLoad / Prometheus pipeline above.
+                    # Defensive (broad on purpose): the FPM publish path is
+                    # cold compared to ActiveLoad/Prometheus and we'd rather
+                    # drop a single FPM snapshot than poison the existing
+                    # metrics pipeline if TRT-LLM ever emits an unexpected
+                    # stat shape.
                     logging.warning(f"FPM publish failed: {e}")
 
         await self._polling_loop(
@@ -872,11 +940,13 @@ class Publisher:
             self.zmq_kv_event_publisher.shutdown()
 
         # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
-        # and the event-plane publisher task on the Rust side).
+        # and the event-plane publisher task on the Rust side). PyO3 surfaces
+        # shutdown failures as PyRuntimeError; narrower catch keeps real
+        # programming errors visible.
         if self.fpm_publisher is not None:
             try:
                 self.fpm_publisher.shutdown()
-            except Exception as e:
+            except RuntimeError as e:
                 logging.warning(f"FpmDirectPublisher shutdown failed: {e}")
 
     def update_max_window_size(self, event: dict) -> None:
