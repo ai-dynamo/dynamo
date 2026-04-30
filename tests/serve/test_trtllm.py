@@ -64,8 +64,19 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         delayed_start=5,
+        # TRT-LLM blocks greedy n>1 by default. Keep the request OpenAI-shaped
+        # with only "n", and enable TRT-LLM's backend guard for this E2E.
+        env={"TLLM_ALLOW_N_GREEDY_DECODING": "1"},
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
         ],
@@ -554,7 +565,9 @@ def test_deployment(
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
-        trtllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+        trtllm_config_test,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        env=dict(trtllm_config_test.env or {}),
     )
     # Non-port env stays here; ports are wired by run_serve_deployment(ports=...).
     config.env.update(
