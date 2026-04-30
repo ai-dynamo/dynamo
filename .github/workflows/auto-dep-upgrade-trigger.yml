@@ -32,6 +32,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.OPS_BOT_PAT }}
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -80,8 +81,8 @@ jobs:
       - name: Commit + push upgrade branch
         if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
         run: |
-          git config user.name  "dynamo-dep-bot"
-          git config user.email "dynamo-dep-bot@users.noreply.github.com"
+          git config user.name  "dynamo-ops"
+          git config user.email "dynamo-ops@users.noreply.github.com"
           git checkout -b "${{ steps.branch.outputs.name }}"
           git add container/context.yaml pyproject.toml docs/reference/support-matrix.md
           git commit -s -m "chore: bump ${{ matrix.framework }} to v${{ steps.detect.outputs.latest }}"
@@ -90,7 +91,7 @@ jobs:
       - name: Dispatch post-merge-ci on upgrade branch
         if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
         run: |
           gh workflow run post-merge-ci.yml \
             --ref "${{ steps.branch.outputs.name }}" \
