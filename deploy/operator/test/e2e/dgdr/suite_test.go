@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"testing"
 
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,22 +36,22 @@ import (
 
 // CLI flags — mirrors the Python --dgdr-* options.
 var (
-	flagNamespace         string
-	flagImage             string
-	flagModel             string
-	flagBackend           string
-	flagNoMocker          bool
-	flagProfilingTimeout  int
-	flagDeployTimeout     int
-	flagKubeconfig        string
+	flagNamespace        string
+	flagImage            string
+	flagModel            string
+	flagBackend          string
+	flagNoMocker         bool
+	flagProfilingTimeout int
+	flagDeployTimeout    int
+	flagKubeconfig       string
 )
 
 // Package-level clients initialised in BeforeSuite.
 var (
-	k8sClient  client.Client
+	k8sClient   client.Client
 	typedClient kubernetes.Interface
-	ctx        context.Context
-	cancel     context.CancelFunc
+	ctx         context.Context
+	cancel      context.CancelFunc
 )
 
 func init() {
@@ -94,6 +95,7 @@ var _ = BeforeSuite(func() {
 	// Register CRD scheme
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 	Expect(v1beta1.AddToScheme(scheme)).To(Succeed())
 
 	// controller-runtime typed client (for DGDR CRs)

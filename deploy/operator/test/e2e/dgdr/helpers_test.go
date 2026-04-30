@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -218,4 +219,57 @@ func plannerRawExtension(m map[string]interface{}) *k8sruntime.RawExtension {
 	raw, err := json.Marshal(m)
 	Expect(err).NotTo(HaveOccurred())
 	return &k8sruntime.RawExtension{Raw: raw}
+}
+
+// waitForDGDSuccessful polls until the DynamoGraphDeployment reaches state=successful or times out.
+func waitForDGDSuccessful(name string, timeout time.Duration) *v1alpha1.DynamoGraphDeployment {
+	var dgd v1alpha1.DynamoGraphDeployment
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{
+			Namespace: flagNamespace,
+			Name:      name,
+		}, &dgd)).To(Succeed())
+		g.Expect(dgd.Status.State).To(Equal(v1alpha1.DGDStateSuccessful),
+			"DGD %s state is %s, waiting for successful (conditions: %+v)",
+			name, dgd.Status.State, dgd.Status.Conditions)
+	}, timeout, 10*time.Second).Should(Succeed())
+	return &dgd
+}
+
+// ServiceExpectation defines expected properties for a DGD service.
+type ServiceExpectation struct {
+	MinReplicas int32
+	ExpectGPUs  bool // verify nvidia.com/gpu resource requests exist
+}
+
+// verifyDGDServices checks that each expected service exists in the DGD status
+// and has the expected replica counts.
+func verifyDGDServices(dgdName string, expectations map[string]ServiceExpectation) {
+	var dgd v1alpha1.DynamoGraphDeployment
+	Expect(k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: flagNamespace,
+		Name:      dgdName,
+	}, &dgd)).To(Succeed())
+
+	for svcName, expected := range expectations {
+		By(fmt.Sprintf("Verifying service %q in DGD %s", svcName, dgdName))
+		svcStatus, ok := dgd.Status.Services[svcName]
+		Expect(ok).To(BeTrue(), "service %q not found in DGD status.services", svcName)
+		Expect(svcStatus.Replicas).To(BeNumerically(">=", expected.MinReplicas),
+			"service %q replicas %d < expected minimum %d", svcName, svcStatus.Replicas, expected.MinReplicas)
+
+		// Check readiness based on component kind
+		switch svcStatus.ComponentKind {
+		case v1alpha1.ComponentKindPodCliqueScalingGroup:
+			if svcStatus.AvailableReplicas != nil {
+				Expect(*svcStatus.AvailableReplicas).To(Equal(svcStatus.Replicas),
+					"service %q availableReplicas should match replicas", svcName)
+			}
+		default:
+			if svcStatus.ReadyReplicas != nil {
+				Expect(*svcStatus.ReadyReplicas).To(Equal(svcStatus.Replicas),
+					"service %q readyReplicas should match replicas", svcName)
+			}
+		}
+	}
 }
