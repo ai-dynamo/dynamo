@@ -12,7 +12,6 @@ import (
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -30,10 +29,9 @@ const (
 	EnvPodUID = "GMS_POD_UID"
 )
 
-// EnsureGMSRestoreSidecars appends GMS server + loader containers to the pod
-// spec for a checkpoint restore. They are regular containers so Kubernetes can
-// start them in parallel with the restore target; snapshot-agent only needs the
-// restore target's container ID before it can launch nsrestore.
+// EnsureGMSRestoreSidecars adds the GMS server init sidecar and restore loader.
+// The server startup probe gates socket readiness before the regular containers
+// start; the loader then overlaps GMS weight loading with snapshot restore.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -43,10 +41,9 @@ func EnsureGMSRestoreSidecars(
 		return
 	}
 
-	gms.EnsureSharedVolume(podSpec, mainContainer)
+	podSpec.InitContainers = removeGMSManagedContainers(podSpec.InitContainers, gms.ServerContainerName, GMSLoaderContainer)
+	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
-
-	server := gms.Container(gms.ServerContainerName, gms.ServerModule, mainContainer.Image)
 
 	loader := gms.Container(GMSLoaderContainer, GMSCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
@@ -55,13 +52,12 @@ func EnsureGMSRestoreSidecars(
 		PodUIDEnvVar(),
 	)
 
-	podSpec.InitContainers = removeGMSRestoreSidecars(podSpec.InitContainers)
-	podSpec.Containers = removeGMSRestoreSidecars(podSpec.Containers)
-	podSpec.Containers = append(podSpec.Containers, server, loader)
+	podSpec.Containers = removeGMSManagedContainers(podSpec.Containers, gms.ServerContainerName, GMSLoaderContainer)
+	podSpec.Containers = append(podSpec.Containers, loader)
 }
 
-// EnsureGMSCheckpointJobSidecars adds GMS server (init) + saver containers
-// to the pod spec for a checkpoint job.
+// EnsureGMSCheckpointJobSidecars adds the GMS server init sidecar and checkpoint
+// saver. The saver is a regular Job container so the Job completes after save.
 func EnsureGMSCheckpointJobSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -79,6 +75,7 @@ func EnsureGMSCheckpointJobSidecars(
 
 	gmsArtifactDir := ResolveGMSArtifactDir(storage)
 
+	podSpec.InitContainers = removeGMSManagedContainers(podSpec.InitContainers, gms.ServerContainerName, GMSSaverContainer)
 	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
 
@@ -88,11 +85,8 @@ func EnsureGMSCheckpointJobSidecars(
 		corev1.EnvVar{Name: EnvCheckpointDir, Value: gmsArtifactDir},
 		PodUIDEnvVar(),
 	)
-	// The saver is an init sidecar (restartPolicy=Always) so it doesn't
-	// affect pod Ready (only the worker's probe matters) and doesn't block
-	// Job completion. It saves, then sleeps until the pod terminates.
-	saver.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
-	podSpec.InitContainers = append(podSpec.InitContainers, saver)
+	podSpec.Containers = removeGMSManagedContainers(podSpec.Containers, gms.ServerContainerName, GMSSaverContainer)
+	podSpec.Containers = append(podSpec.Containers, saver)
 	return nil
 }
 
@@ -116,10 +110,15 @@ func ResolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
 	return filepath.Join(storage.BasePath, "gms", checkpointID, "versions", artifactVersion)
 }
 
-func removeGMSRestoreSidecars(containers []corev1.Container) []corev1.Container {
+func removeGMSManagedContainers(containers []corev1.Container, names ...string) []corev1.Container {
+	managed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		managed[name] = struct{}{}
+	}
+
 	filtered := containers[:0]
 	for _, container := range containers {
-		if container.Name == gms.ServerContainerName || container.Name == GMSLoaderContainer {
+		if _, ok := managed[container.Name]; ok {
 			continue
 		}
 		filtered = append(filtered, container)

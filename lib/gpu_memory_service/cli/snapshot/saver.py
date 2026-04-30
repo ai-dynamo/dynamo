@@ -3,23 +3,20 @@
 
 """GMS checkpoint saver entry point.
 
-Waits for committed GMS weights on each device, then saves GPU memory state
-to the checkpoint directory. Runs as an init sidecar — sleeps after saving
-until the pod terminates.
+Saves committed GMS weights from each device to the checkpoint directory.
+Devices are saved in parallel to saturate PVC bandwidth.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import signal
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from gpu_memory_service.common.cuda_utils import list_devices
-from gpu_memory_service.common.utils import get_socket_path, wait_for_weights_socket
+from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 
 logging.basicConfig(
@@ -34,7 +31,6 @@ GMS_POD_UID_ENV = "GMS_POD_UID"
 
 
 def _save_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
-    wait_for_weights_socket(device)
     output_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info("Saving GMS checkpoint: device=%d output_dir=%s", device, output_dir)
     t0 = time.monotonic()
@@ -95,11 +91,7 @@ def main() -> None:
     elapsed = time.monotonic() - t0
     logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
     _write_completion_sentinel(checkpoint_dir)
-
-    logger.info("Save complete; sleeping until pod terminates")
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    while True:
-        time.sleep(3600)
+    logger.info("Save complete; exiting")
 
 
 if __name__ == "__main__":
