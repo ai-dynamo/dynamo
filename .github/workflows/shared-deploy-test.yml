@@ -34,7 +34,7 @@ on:
         description: 'Storage version for alpha-storage Dynamo CRDs'
         type: string
         required: false
-        default: v1alpha1
+        default: v1beta1
 
 jobs:
   deploy-test:

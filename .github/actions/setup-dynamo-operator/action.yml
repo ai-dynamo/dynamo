@@ -39,7 +39,7 @@ inputs:
   storage_version:
     description: 'Storage version for alpha-storage Dynamo CRDs: DGD, DCD, and DGDSA (v1alpha1 or v1beta1)'
     required: false
-    default: 'v1alpha1'
+    default: 'v1beta1'
 
 outputs:
   namespace:

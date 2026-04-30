@@ -572,7 +572,7 @@ jobs:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
-          storage_version: ${{ vars.DYNAMO_OPERATOR_STORAGE_VERSION || 'v1alpha1' }}
+          storage_version: ${{ vars.DYNAMO_OPERATOR_STORAGE_VERSION || 'v1beta1' }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
