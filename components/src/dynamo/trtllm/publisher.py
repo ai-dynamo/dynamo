@@ -585,53 +585,62 @@ class Publisher:
 
         data = event["data"]
         if data["type"] == "stored":
+            # Tighter per-block walk: inner per-token .append() loop replaced
+            # with extend(comprehension); attribute lookups
+            # (`self.kv_block_size`, `self.partial_block_hashes`) hoisted to
+            # locals so the tight loop avoids LOAD_ATTR per iteration. mm_keys
+            # handling skipped entirely when absent. For ISL=2048 / 32-token
+            # blocks this trims ~64x32=2048 Python ops per prefill to ~64 ops
+            # plus a single fused comprehension, reducing GIL-held time on
+            # the publisher thread (which would otherwise contend with HTTP
+            # request handling under load).
             self.processing_initial_created_events = False
             parent_hash = _to_signed_i64(data["parent_hash"])
             token_ids: list[int] = []
             num_block_tokens: list[int] = []
             block_hashes: list[int] = []
             block_mm_infos: list[dict | None] = []
+            kv_block_size = self.kv_block_size
+            partial_block_hashes = self.partial_block_hashes
             for block in data["blocks"]:
-                token_num_in_block = len(block["tokens"])
-                block_hash = _to_signed_i64(block["block_hash"])
-                if token_num_in_block > self.kv_block_size:
+                block_tokens = block["tokens"]
+                token_num_in_block = len(block_tokens)
+                if token_num_in_block > kv_block_size:
                     logging.error(
-                        f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self.kv_block_size}"
+                        f"Block contains {token_num_in_block} tokens, which is greater than kv_block_size {kv_block_size}"
                     )
                     return
+                block_hash = _to_signed_i64(block["block_hash"])
                 if block_hash is None:
                     logging.warning(
                         f"Skipping block with None hash containing {token_num_in_block} tokens"
                     )
                     continue
-                if token_num_in_block < self.kv_block_size:
-                    logging.debug(
-                        f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self.kv_block_size}"
-                    )
-                    self.partial_block_hashes.add(block_hash)
+                if token_num_in_block < kv_block_size:
+                    partial_block_hashes.add(block_hash)
                     break
                 num_block_tokens.append(token_num_in_block)
                 block_hashes.append(block_hash)
-                for token in block["tokens"]:
-                    token_ids.append(int(token["token_id"]))
+                token_ids.extend(int(t["token_id"]) for t in block_tokens)
 
-                # Extract multimodal hash info for this block
-                # {"mm_keys": [{"type":"mm_key","hash":"<hex>","start_offset":N}]}
-                mm_keys = block.get("mm_keys", [])
-                mm_hashes = [
-                    int(mm_key["hash"][:16], 16)
-                    for mm_key in mm_keys
-                    if mm_key.get("type") == "mm_key" and mm_key.get("hash")
-                ]
-                if mm_hashes:
-                    block_mm_infos.append(
-                        {
-                            "mm_objects": [
-                                {"mm_hash": mm_hash, "offsets": []}
-                                for mm_hash in mm_hashes
-                            ]
-                        }
-                    )
+                mm_keys = block.get("mm_keys")
+                if mm_keys:
+                    mm_hashes = [
+                        int(mk["hash"][:16], 16)
+                        for mk in mm_keys
+                        if mk.get("type") == "mm_key" and mk.get("hash")
+                    ]
+                    if mm_hashes:
+                        block_mm_infos.append(
+                            {
+                                "mm_objects": [
+                                    {"mm_hash": h, "offsets": []}
+                                    for h in mm_hashes
+                                ]
+                            }
+                        )
+                    else:
+                        block_mm_infos.append(None)
                 else:
                     block_mm_infos.append(None)
 
