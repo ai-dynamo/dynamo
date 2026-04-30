@@ -296,13 +296,12 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     ) {
         if let Some(header_map) = &hdr.headers {
             for h in &header_map.headers {
+                let key = h.key.to_ascii_lowercase();
                 let value = envoy_helpers::get_header_value(h);
-                if h.key.eq_ignore_ascii_case("content-type")
-                    && value.contains("text/event-stream")
-                {
+                if key == "content-type" && value.contains("text/event-stream") {
                     ctx.model_server_streaming = true;
                 }
-                ctx.response_headers.insert(h.key.clone(), value);
+                ctx.response_headers.insert(key, value);
             }
         }
 

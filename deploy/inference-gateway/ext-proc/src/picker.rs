@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 /// Endpoint represents a model server pod endpoint available for serving requests.
-/// Mirrors Go `epplight.Endpoint`.
+/// Mirrors Go `epplight.Endpoint` in pkg/lwepp/datastore/datastore.go
 #[derive(Debug, Clone)]
 pub struct Endpoint {
     /// Pod name

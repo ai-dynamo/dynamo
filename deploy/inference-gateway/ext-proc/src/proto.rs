@@ -19,7 +19,7 @@ pub mod envoy {
 
     pub mod r#type {
         pub mod v3 {
-            tonic::include_proto!("envoy.r#type.v3");
+            tonic::include_proto!("envoy.type.v3");
         }
     }
 

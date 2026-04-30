@@ -7,17 +7,16 @@
 use std::collections::HashMap;
 
 use crate::proto::envoy::config::core::v3::{
-    header_value_option::HeaderAppendAction, HeaderMap, HeaderValue, HeaderValueOption,
+    HeaderMap, HeaderValue, HeaderValueOption, header_value_option::HeaderAppendAction,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
-    BodyMutation, BodyResponse, CommonResponse, HeaderMutation, HeadersResponse,
-    ImmediateResponse, ProcessingRequest, ProcessingResponse, StreamedBodyResponse,
-    TrailersResponse,
+    BodyMutation, BodyResponse, CommonResponse, HeaderMutation, HeadersResponse, ImmediateResponse,
+    ProcessingRequest, ProcessingResponse, StreamedBodyResponse, TrailersResponse,
 };
 use crate::proto::envoy::r#type::v3::{HttpStatus, StatusCode};
 
 /// EPP protocol constants from proposal 004-endpoint-picker-protocol.
-/// These match both the full EPP and the LW-EPP from GAIE (issue #2834).
+/// These match both the full EPP and the LW-EPP from GAIE (issue #2834[https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2834]).
 pub mod metadata {
     pub const SUBSET_FILTER_NAMESPACE: &str = "envoy.lb.subset_hint";
     pub const SUBSET_FILTER_KEY: &str = "x-gateway-destination-endpoint-subset";
@@ -121,12 +120,16 @@ pub fn build_request_header_response(
     content_length: Option<usize>,
     extra_headers: &[(String, String)],
 ) -> ProcessingResponse {
-    let mut set_headers: Vec<HeaderValueOption> = vec![
-        header_overwrite(metadata::DESTINATION_ENDPOINT_KEY, target_endpoint.as_bytes()),
-    ];
+    let mut set_headers: Vec<HeaderValueOption> = vec![header_overwrite(
+        metadata::DESTINATION_ENDPOINT_KEY,
+        target_endpoint.as_bytes(),
+    )];
 
     if let Some(len) = content_length {
-        set_headers.push(header_overwrite("Content-Length", len.to_string().as_bytes()));
+        set_headers.push(header_overwrite(
+            "Content-Length",
+            len.to_string().as_bytes(),
+        ));
     }
 
     for (key, value) in extra_headers {
@@ -318,7 +321,7 @@ fn build_chunked_body_responses(body: &[u8], set_eos: bool) -> Vec<CommonRespons
 /// Build the `dynamic_metadata` Struct that tells Envoy the target endpoint.
 /// Layout: `{"envoy.lb": {"x-gateway-destination-endpoint": "<endpoint>"}}`
 fn build_endpoint_metadata(endpoint: &str) -> prost_types::Struct {
-    use prost_types::{value::Kind, Struct, Value};
+    use prost_types::{Struct, Value, value::Kind};
 
     let inner = Struct {
         fields: [(
@@ -345,10 +348,7 @@ fn build_endpoint_metadata(endpoint: &str) -> prost_types::Struct {
 /// (client-facing) model name in the response body bytes. No-op when names
 /// match or either is empty.
 pub fn rewrite_model_name(body: &[u8], target_model: &str, incoming_model: &str) -> Vec<u8> {
-    if target_model.is_empty()
-        || incoming_model.is_empty()
-        || target_model == incoming_model
-    {
+    if target_model.is_empty() || incoming_model.is_empty() || target_model == incoming_model {
         return body.to_vec();
     }
 

@@ -520,20 +520,34 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 // EndpointPicker trait implementation (mirrors Go LW-EPP from GAIE #2834)
 // ---------------------------------------------------------------------------
 
-/// Build a worker_id → Endpoint mapping and an allowed-ID set from the
-/// endpoint list provided by the ext_proc server. Uses `hash_pod_name` to
-/// convert pod names to Dynamo worker IDs.
-fn build_worker_map(endpoints: &[Endpoint]) -> (HashSet<u64>, Vec<(u64, &Endpoint)>) {
-    let mut ids = HashSet::new();
-    let mut mapping = Vec::new();
+/// Build a worker_id → Endpoint mapping from the given endpoint slice.
+/// Uses `hash_pod_name` to convert pod names to Dynamo worker IDs.
+fn build_worker_map(endpoints: &[Endpoint]) -> Vec<(u64, &Endpoint)> {
+    endpoints
+        .iter()
+        .map(|ep| (hash_pod_name(&ep.pod_name), ep))
+        .collect()
+}
 
-    for ep in endpoints {
-        let worker_id = hash_pod_name(&ep.pod_name);
-        ids.insert(worker_id);
-        mapping.push((worker_id, ep));
+/// Narrow `endpoints` down to only those whose address (or address:port)
+/// appears in the `candidate_subset` sent via `envoy.lb.subset_hint`.
+/// If `candidate_subset` is empty, returns the full list unchanged.
+fn apply_subset_filter<'a>(
+    endpoints: &'a [Endpoint],
+    candidate_subset: &[String],
+) -> Vec<&'a Endpoint> {
+    if candidate_subset.is_empty() {
+        return endpoints.iter().collect();
     }
 
-    (ids, mapping)
+    let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
+    endpoints
+        .iter()
+        .filter(|ep| {
+            candidates.contains(ep.address_port().as_str())
+                || candidates.contains(ep.address.as_str())
+        })
+        .collect()
 }
 
 #[tonic::async_trait]
@@ -547,13 +561,27 @@ impl EndpointPicker for Router {
             return Err(PickError::NoEndpoints);
         }
 
-        // Build allowed worker ID set from the provided endpoints
-        let (allowed_worker_ids, worker_to_endpoint) = build_worker_map(endpoints);
+        let subset_filtered = apply_subset_filter(endpoints, &req.candidate_subset);
+        let effective = if subset_filtered.is_empty() && !req.candidate_subset.is_empty() {
+            tracing::warn!(
+                subset = ?req.candidate_subset,
+                total_endpoints = endpoints.len(),
+                "No endpoints match subset hint, falling back to full list"
+            );
+            endpoints.iter().collect::<Vec<_>>()
+        } else {
+            subset_filtered
+        };
 
-        // If no body, fall back to first endpoint (GET-style request)
+        let worker_map: Vec<(u64, &Endpoint)> = effective
+            .iter()
+            .map(|ep| (hash_pod_name(&ep.pod_name), *ep))
+            .collect();
+        let allowed_worker_ids: HashSet<u64> = worker_map.iter().map(|(id, _)| *id).collect();
+
         if req.body.is_empty() {
             return Ok(PickResult {
-                endpoint: endpoints[0].address_port(),
+                endpoint: effective[0].address_port(),
                 fallbacks: vec![],
             });
         }
@@ -576,17 +604,19 @@ impl EndpointPicker for Router {
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
-        // Map selected worker_id back to an endpoint address
-        let endpoint = worker_to_endpoint
+        let endpoint = worker_map
             .iter()
             .find(|(wid, _)| *wid == decode_worker.worker_id)
             .map(|(_, ep)| ep.address_port())
             .unwrap_or_else(|| {
                 tracing::warn!(
                     worker_id = decode_worker.worker_id,
-                    "Selected worker not in provided endpoints, using first"
+                    "Selected worker not in endpoint list, using first available"
                 );
-                endpoints[0].address_port()
+                effective.first().map_or_else(
+                    || endpoints[0].address_port(),
+                    |ep| ep.address_port(),
+                )
             });
 
         tracing::info!(
@@ -595,6 +625,7 @@ impl EndpointPicker for Router {
             endpoint = %endpoint,
             token_count = tokens.len(),
             model = %req.model,
+            subset_active = !req.candidate_subset.is_empty(),
             "Picked endpoint"
         );
 
