@@ -305,6 +305,7 @@ impl KvPushRouter {
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
+            let _sysprofile_kv = dynamo_sysprofile::range("dynamo.router.kv_lookup");
             let selection = self
                 .chooser
                 .find_best_match_details(
@@ -523,6 +524,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let _sysprofile_route = dynamo_sysprofile::range("dynamo.router.schedule");
 
         let block_size = self.chooser.block_size() as usize;
         let selection = self
@@ -614,7 +616,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // End route stage — worker has been selected and routing metrics recorded.
         // Dispatch stage starts immediately so there is no gap between stages.
         drop(route_guard);
+        drop(_sysprofile_route);
         let stage_dispatch_guard = StageGuard::new(STAGE_DISPATCH, &phase_label);
+        let _sysprofile_dispatch = dynamo_sysprofile::range("dynamo.router.dispatch");
 
         // Dispatch to worker
         let isl_tokens = request.token_ids.len();

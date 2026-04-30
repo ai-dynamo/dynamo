@@ -54,6 +54,35 @@ impl Runtime {
         // Initialise NVTX toggle once from environment (no-op when feature is off)
         crate::nvtx::init();
 
+        // Initialise sysprofile distributed tracing from DYN_SYSPROFILE_* env vars
+        dynamo_sysprofile::config::init();
+        if dynamo_sysprofile::config::enabled() {
+            let cfg = dynamo_sysprofile::config::global_config();
+            let run_dir = cfg.run_dir();
+            let component = std::env::var("DYN_COMPONENT_NAME")
+                .unwrap_or_else(|_| "unknown".into());
+            let host = std::env::var("HOSTNAME")
+                .unwrap_or_else(|_| "localhost".into());
+            match dynamo_sysprofile::writer::TraceWriter::new(
+                run_dir.join(format!("{component}.pftrace.gz")),
+                &component,
+                &host,
+                std::process::id(),
+                1,
+            ) {
+                Ok(writer) => {
+                    dynamo_sysprofile::range::init_writer(writer);
+                    tracing::info!(
+                        %component, dir = %run_dir.display(),
+                        "sysprofile trace writer initialized"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "failed to initialize sysprofile writer");
+                }
+            }
+        }
+
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 

@@ -167,6 +167,7 @@ where
         payload: Bytes,
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
+        let _sysprofile = dynamo_sysprofile::range("dynamo.transport.recv");
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

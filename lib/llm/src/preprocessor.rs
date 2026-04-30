@@ -236,6 +236,7 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+        let _sysprofile = dynamo_sysprofile::range("dynamo.frontend.preprocess");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
 
@@ -690,6 +691,7 @@ impl OpenAIPreprocessor {
         request: &NvCreateEmbeddingRequest,
     ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+        let _sysprofile = dynamo_sysprofile::range("dynamo.frontend.preprocess");
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
@@ -1492,6 +1494,7 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+        let _sysprofile = dynamo_sysprofile::range("dynamo.frontend.preprocess");
 
         // unpack the request
         let (mut request, context) = request.into_parts();

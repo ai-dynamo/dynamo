@@ -42,6 +42,7 @@ dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 dynamo-config = { workspace = true }
+dynamo-sysprofile = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }

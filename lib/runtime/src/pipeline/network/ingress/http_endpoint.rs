@@ -248,6 +248,10 @@ async fn handle_shared_request(
     let instance_id = handler.instance_id;
 
     tokio::spawn(async move {
+        let _sysprofile = match traceparent.trace_id.as_deref() {
+            Some(tid) => dynamo_sysprofile::range_with("dynamo.frontend.recv", tid),
+            None => dynamo_sysprofile::range("dynamo.frontend.recv"),
+        };
         tracing::trace!(instance_id, "handling new HTTP request");
         let result = service_handler
             .handle_payload(body, traceparent.request_id.clone())

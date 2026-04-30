@@ -131,6 +131,7 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+        let _sysprofile = dynamo_sysprofile::range("dynamo.backend.generate");
         let stop_conditions = request.stop_conditions.clone();
 
         let prompt_token_ids = request.token_ids.clone();
@@ -472,6 +473,7 @@ impl Decoder {
         let detokenize_start = Instant::now();
         let token = {
             let _nvtx = dynamo_nvtx_range!("detokenize");
+            let _sysprofile_detok = dynamo_sysprofile::range("dynamo.backend.detokenize");
             self.decode_stream.step(token_id)?
         };
         let detokenize_elapsed = detokenize_start.elapsed();
