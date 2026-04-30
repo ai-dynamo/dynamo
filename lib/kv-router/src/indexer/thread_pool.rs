@@ -4,7 +4,6 @@
 use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
     thread::JoinHandle,
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -144,19 +143,20 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Arc::clone(&self.backend)
     }
 
-    /// Wait for all worker channels to drain.
+    /// Wait until all previously queued worker tasks have completed.
     ///
-    /// Used primarily for testing and benchmarking to ensure all queued events
-    /// have been picked up by workers before checking results.
+    /// Used primarily for testing and benchmarking to ensure writes are visible
+    /// before checking results.
     pub async fn flush(&self) {
-        loop {
-            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
-
-            if all_empty {
-                break;
+        let mut receivers = Vec::new();
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
+                receivers.push(resp_rx);
             }
-
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        for receiver in receivers {
+            let _ = receiver.await;
         }
     }
 
@@ -365,14 +365,15 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
 
     async fn flush(&self) -> usize {
         let curr_size: usize = self.worker_event_channels.iter().map(|ch| ch.len()).sum();
-        loop {
-            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
-
-            if all_empty {
-                break;
+        let mut receivers = Vec::new();
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
+                receivers.push(resp_rx);
             }
-
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        for receiver in receivers {
+            let _ = receiver.await;
         }
         curr_size
     }

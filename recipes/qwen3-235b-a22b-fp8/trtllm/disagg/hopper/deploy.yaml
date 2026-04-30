@@ -24,10 +24,6 @@ data:
       max_batch_size: 2
     disable_overlap_scheduler: true
     print_iter_log: false
-    # DEEPGEMM requires Blackwell (SM100+). Remove moe_config block to run on Hopper (SM90).
-    moe_config:
-      backend: DEEPGEMM
-      max_num_tokens: 8192
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -53,10 +49,6 @@ data:
       max_batch_size: 512
     disable_overlap_scheduler: false
     print_iter_log: false
-    # DEEPGEMM requires Blackwell (SM100+). Remove moe_config block to run on Hopper (SM90).
-    moe_config:
-      backend: DEEPGEMM
-      max_num_tokens: 8192
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment

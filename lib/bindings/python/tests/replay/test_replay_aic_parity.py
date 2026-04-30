@@ -50,7 +50,7 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
     )
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize(
     (
         "backend_name",

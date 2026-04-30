@@ -267,12 +267,8 @@ fn make_indexer_with_metrics(
     (indexer, metrics)
 }
 
-/// Ensure queued indexer work is drained, then give a short settle window.
-/// This is intentionally conservative for tests that assert immediately
-/// after asynchronous event ingestion.
 async fn flush_and_settle(index: &dyn KvIndexerInterface) {
     index.flush().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 async fn query_scores(index: &dyn KvIndexerInterface, query: &[u64]) -> OverlapScores {

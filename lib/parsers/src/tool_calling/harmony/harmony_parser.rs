@@ -270,7 +270,50 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[tokio::test] // CASE.4, CASE.19
+    // Harmony's `<|call|>` plays the role of an outer end-token. When
+    // max_tokens fires before it lands, the existing `analysis ... <|end|>`
+    // envelope still gives the parser enough context to recover the call —
+    // this test pins that recovery behavior. The bare-envelope variant
+    // (no preceding analysis block) currently does NOT recover, but adding
+    // a test for that is a parser-change discussion.
+    // Pin current behavior on two back-to-back commentary blocks. The
+    // harmony parser today does NOT extract both calls — the second
+    // `<|start|>assistant<|channel|>commentary` block is left in normal
+    // content. Same failure class as CASE.5: parser drops in-flight work,
+    // customer sees HTTP 200 with fewer tool_calls than the model emitted.
+    // Promoting this to recovery is a parser change.
+    #[tokio::test] // CASE.2 — gpt-oss
+    async fn test_parse_harmony_multiple_calls_silent_drop() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
+        let (tool_calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(
+            tool_calls.len(),
+            0,
+            "harmony today drops both calls when two commentary blocks appear back-to-back"
+        );
+    }
+
+    // Pin current behavior on truncated JSON args. harmony today drops the
+    // call entirely rather than falling back to a string-form arguments or
+    // surfacing an explicit error.
+    #[tokio::test] // CASE.4 — gpt-oss
+    async fn test_parse_harmony_truncated_json_silent_drop() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
+        let (tool_calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(
+            tool_calls.len(),
+            0,
+            "harmony today drops the call when JSON args are truncated mid-value"
+        );
+    }
+
+    #[tokio::test] // CASE.4, CASE.5, CASE.19
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
