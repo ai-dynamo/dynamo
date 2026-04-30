@@ -50480,7 +50480,7 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 **License Type(s)**: Zlib
 ### License: https://raw.githubusercontent.com/trifectatechfoundation/zlib-rs/HEAD/LICENSE
 ```
-(C) 2024 Trifecta Tech Foundation 
+(C) 2024 Trifecta Tech Foundation
 
 This software is provided 'as-is', without any express or implied
 warranty. In no event will the authors be held liable for any damages
