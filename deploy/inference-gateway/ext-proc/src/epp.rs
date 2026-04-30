@@ -348,6 +348,24 @@ async fn fetch_preprocessor_from_discovery(
 
     let mut model_card: Option<(ModelDeploymentCard, String)> = None;
 
+    let discovered_namespaces: Vec<String> = instances
+        .iter()
+        .filter_map(|i| {
+            if let DiscoveryInstance::Model { namespace, .. } = i {
+                Some(namespace.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        ?discovered_namespaces,
+        target_namespace,
+        "Discovery returned {} model instances",
+        discovered_namespaces.len()
+    );
+
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
             if !namespace.starts_with(target_namespace) {
@@ -376,8 +394,12 @@ async fn fetch_preprocessor_from_discovery(
 
     let (mut card, actual_namespace) = model_card.ok_or_else(|| {
         anyhow::anyhow!(
-            "No model found in namespace '{}' via discovery",
-            target_namespace
+            "No model found in namespace '{}' via discovery. \
+             Found {} instances in namespaces: {:?}. \
+             Set DYNAMO_EPP_NAMESPACE to match your workers' registration namespace.",
+            target_namespace,
+            discovered_namespaces.len(),
+            discovered_namespaces,
         )
     })?;
 

@@ -11,6 +11,10 @@ homepage.workspace = true
 repository.workspace = true
 description = "Envoy ext_proc gRPC server for Dynamo inference routing"
 
+[[bin]]
+name = "dynamo-ext-proc"
+path = "src/main.rs"
+
 [dependencies]
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-llm = { path = "../../../lib/llm" }
