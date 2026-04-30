@@ -352,38 +352,34 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 
 	var legacyLWSList leaderworkersetv1.LeaderWorkerSetList
 	if err := r.List(ctx, &legacyLWSList, legacyListOpts...); err != nil {
-		logger.Error(err, "Failed to list legacy LeaderWorkerSets for cleanup")
-	} else {
-		for i := range legacyLWSList.Items {
-			legacy := &legacyLWSList.Items[i]
-			if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
-				continue
-			}
-			logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
-			if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", legacy.Name)
-				continue
-			}
-			anyModified = true
+		return ComponentReconcileResult{}, fmt.Errorf("list legacy LeaderWorkerSets for cleanup: %w", err)
+	}
+	for i := range legacyLWSList.Items {
+		legacy := &legacyLWSList.Items[i]
+		if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
+			continue
 		}
+		logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
+		if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
+			return ComponentReconcileResult{}, fmt.Errorf("delete legacy LeaderWorkerSet %q: %w", legacy.Name, err)
+		}
+		anyModified = true
 	}
 
 	var legacyPGList volcanov1beta1.PodGroupList
 	if err := r.List(ctx, &legacyPGList, legacyListOpts...); err != nil {
-		logger.Error(err, "Failed to list legacy PodGroups for cleanup")
-	} else {
-		for i := range legacyPGList.Items {
-			legacy := &legacyPGList.Items[i]
-			if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
-				continue
-			}
-			logger.Info("Deleting legacy PodGroup", "name", legacy.Name)
-			if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete legacy PodGroup", "name", legacy.Name)
-				continue
-			}
-			anyModified = true
+		return ComponentReconcileResult{}, fmt.Errorf("list legacy PodGroups for cleanup: %w", err)
+	}
+	for i := range legacyPGList.Items {
+		legacy := &legacyPGList.Items[i]
+		if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
+			continue
 		}
+		logger.Info("Deleting legacy PodGroup", "name", legacy.Name)
+		if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
+			return ComponentReconcileResult{}, fmt.Errorf("delete legacy PodGroup %q: %w", legacy.Name, err)
+		}
+		anyModified = true
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
