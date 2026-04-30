@@ -125,6 +125,11 @@ struct RequestState {
     /// Onboard kick was scheduled (idempotent).
     onboarding_scheduled: AtomicBool,
     status: Mutex<PrefillStatus>,
+    /// RAII observer-eviction handle. Dropping `RequestState`
+    /// (last Arc) drops this, which evicts the residual entry
+    /// from `ConditionalDecodeG2Observer::pending`. No explicit
+    /// untrack call is needed in any failure path.
+    _observer_handle: ObserverHandle,
 }
 
 impl RequestState {
@@ -132,6 +137,7 @@ impl RequestState {
         num_external_tokens: usize,
         expected_hashes: Vec<SequenceHash>,
         computed_blocks_offset: usize,
+        observer_handle: ObserverHandle,
     ) -> Self {
         Self {
             num_external_tokens,
@@ -144,6 +150,7 @@ impl RequestState {
             pulls_complete: AtomicBool::new(false),
             onboarding_scheduled: AtomicBool::new(false),
             status: Mutex::new(PrefillStatus::Attaching),
+            _observer_handle: observer_handle,
         }
     }
 }
@@ -186,14 +193,28 @@ impl ConditionalDecodeG2Observer {
         *self.coordinator.lock() = coord;
     }
 
-    /// Track a new request's expected output hashes. Idempotent —
-    /// re-tracking with a different set replaces the prior entry.
-    pub fn track_request(&self, request_id: String, expected: HashSet<SequenceHash>) {
-        self.pending.lock().insert(request_id, expected);
+    /// Track a request's expected output hashes; returns an RAII
+    /// [`ObserverHandle`] whose drop evicts the residual entry.
+    /// Production calls this at `ensure_started` time and stashes
+    /// the handle in `RequestState`. Re-tracking with a different
+    /// set replaces the prior entry.
+    pub fn track(
+        self: &Arc<Self>,
+        request_id: String,
+        expected: HashSet<SequenceHash>,
+    ) -> ObserverHandle {
+        self.pending.lock().insert(request_id.clone(), expected);
+        ObserverHandle {
+            request_id,
+            observer: Arc::downgrade(self),
+        }
     }
 
-    /// Drop residual entry for a request (e.g. on
-    /// `on_request_finished`). No-op if not tracked.
+    /// Drop residual entry for a request. Production no longer
+    /// calls this directly — the [`ObserverHandle`] returned by
+    /// [`track`](Self::track) handles it on drop. Kept public for
+    /// test scenarios that exercise manual eviction; idempotent
+    /// against auto-drop-on-full-match.
     pub fn untrack_request(&self, request_id: &str) {
         self.pending.lock().remove(request_id);
     }
@@ -259,6 +280,23 @@ impl ConditionalDecodeG2Observer {
                     );
                 }
             }
+        }
+    }
+}
+
+/// RAII handle returned by [`ConditionalDecodeG2Observer::track`].
+/// On drop, evicts the per-request residual entry. Held by
+/// `RequestState`, so any path that drops the request's state
+/// (success, failure, panic mid-pipeline) cleans up automatically.
+pub struct ObserverHandle {
+    request_id: String,
+    observer: Weak<ConditionalDecodeG2Observer>,
+}
+
+impl Drop for ObserverHandle {
+    fn drop(&mut self) {
+        if let Some(observer) = self.observer.upgrade() {
+            observer.untrack_request(&self.request_id);
         }
     }
 }
@@ -597,30 +635,31 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         let block_size = self.inner.block_size();
         let num_external_tokens = params.sequence_hashes.len() * block_size;
         let computed_blocks_offset = params.num_computed_tokens / block_size;
-        let state = Arc::new(RequestState::new(
-            num_external_tokens,
-            params.sequence_hashes.clone(),
-            computed_blocks_offset,
-        ));
-        self.states
-            .insert(request_id.to_string(), Arc::clone(&state));
 
         // Compute prefill's expected output hashes and track them
         // in the offload observer. Output hashes = full sequence
         // hashes ⊖ what we pulled from decode (params.sequence_hashes).
         // The observer pops matches as the offload pipeline
-        // registers G2 blocks.
+        // registers G2 blocks; the returned RAII handle is stashed
+        // in `RequestState` so any drop path evicts the residual.
         let split = self.inner.slot_match_split(request_id)?;
-        let pulled: HashSet<SequenceHash> =
-            params.sequence_hashes.iter().copied().collect();
+        let pulled: HashSet<SequenceHash> = params.sequence_hashes.iter().copied().collect();
         let expected_outputs: HashSet<SequenceHash> = split
             .all_sequence_hashes
             .iter()
             .filter(|h| !pulled.contains(h))
             .copied()
             .collect();
-        self.observer
-            .track_request(request_id.to_string(), expected_outputs);
+        let observer_handle = self.observer.track(request_id.to_string(), expected_outputs);
+
+        let state = Arc::new(RequestState::new(
+            num_external_tokens,
+            params.sequence_hashes.clone(),
+            computed_blocks_offset,
+            observer_handle,
+        ));
+        self.states
+            .insert(request_id.to_string(), Arc::clone(&state));
 
         let coord = self
             .arc_self()
@@ -715,12 +754,13 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         let mut status = state.status.lock();
         *status = PrefillStatus::Released;
         drop(status);
+        // Drops the last `Arc<RequestState>` (assuming no
+        // in-flight task still holds one); RAII observer-handle
+        // drop evicts the residual entry. Any in-flight task that
+        // still holds a clone keeps the entry alive until it
+        // finishes — that's intentional, we don't want to evict
+        // mid-pipeline.
         self.states.remove(request_id);
-        // Evict any residual observer entry for this request.
-        // Auto-drop on full match handles the happy path; this
-        // covers failure paths where some expected outputs never
-        // landed.
-        self.observer.untrack_request(request_id);
 
         // Suppress unused warning on the unused field — it's
         // checked in `on_usaa` via `pulls_complete` already.
@@ -788,8 +828,8 @@ mod tests {
         let a_hashes: HashSet<_> = a_blocks.iter().map(|b| b.sequence_hash()).collect();
         let b_hashes: HashSet<_> = b_blocks.iter().map(|b| b.sequence_hash()).collect();
 
-        observer.track_request("a".into(), a_hashes.clone());
-        observer.track_request("b".into(), b_hashes.clone());
+        let _h_a = observer.track("a".into(), a_hashes.clone());
+        let _h_b = observer.track("b".into(), b_hashes.clone());
         assert_eq!(observer.tracked_count(), 2);
 
         // Mixed batch: 1 of "a"'s blocks, "b"'s block, unrelated.
@@ -827,13 +867,56 @@ mod tests {
         let blocks = make_blocks(&mgr, 3, 200);
         let hashes: HashSet<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
 
-        observer.track_request("req-fail".into(), hashes);
+        // Hold the handle alive so RAII drop doesn't pre-empt
+        // the manual untrack we're testing.
+        let _h = observer.track("req-fail".into(), hashes);
         // Observe only 1 of 3 — residual non-empty.
         observer.observe(&[blocks[0].clone()]);
         assert_eq!(observer.pending_for("req-fail").unwrap().len(), 2);
 
         observer.untrack_request("req-fail");
         assert!(observer.pending_for("req-fail").is_none());
+    }
+
+    /// RAII observer handle: dropping the handle evicts the
+    /// residual entry from `pending`. Models the production drop
+    /// path where `RequestState::_observer_handle` is dropped
+    /// alongside the per-request state.
+    #[test]
+    fn observer_handle_drop_evicts_pending_entry() {
+        let observer = ConditionalDecodeG2Observer::new();
+        let mgr = make_g2_manager(4);
+        let blocks = make_blocks(&mgr, 2, 400);
+        let hashes: HashSet<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+
+        let handle = observer.track("req-raii".into(), hashes);
+        assert_eq!(observer.tracked_count(), 1);
+        assert!(observer.pending_for("req-raii").is_some());
+
+        drop(handle);
+
+        assert_eq!(observer.tracked_count(), 0);
+        assert!(observer.pending_for("req-raii").is_none());
+    }
+
+    /// Dropping a handle whose entry was already auto-removed
+    /// (full match) is a safe no-op — the underlying
+    /// `untrack_request` is idempotent.
+    #[test]
+    fn observer_handle_drop_after_auto_remove_is_noop() {
+        let observer = ConditionalDecodeG2Observer::new();
+        let mgr = make_g2_manager(2);
+        let blocks = make_blocks(&mgr, 1, 500);
+        let hash = blocks[0].sequence_hash();
+
+        let handle = observer.track("a".into(), [hash].into_iter().collect());
+        // Full match — entry auto-drops from `pending`.
+        observer.observe(&[blocks[0].clone()]);
+        assert_eq!(observer.tracked_count(), 0);
+
+        // Handle drop should not panic, observer state unchanged.
+        drop(handle);
+        assert_eq!(observer.tracked_count(), 0);
     }
 
     /// re-observing an already-popped block is a no-op
@@ -845,7 +928,7 @@ mod tests {
         let blocks = make_blocks(&mgr, 1, 300);
         let hash = blocks[0].sequence_hash();
 
-        observer.track_request("a".into(), [hash].into_iter().collect());
+        let _h = observer.track("a".into(), [hash].into_iter().collect());
         observer.observe(&[blocks[0].clone()]);
         // Auto-dropped after full match.
         assert_eq!(observer.tracked_count(), 0);
