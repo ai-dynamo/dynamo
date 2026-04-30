@@ -155,10 +155,15 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
             _ => {}
         }
     }
-    if !in_string && stack.is_empty() {
+    if !escape && !in_string && stack.is_empty() {
         return None;
     }
     let mut repaired = s.to_string();
+    // EOF mid-escape sequence: pair the trailing `\` with another `\` so the
+    // closing quote we append next isn't itself escaped.
+    if escape {
+        repaired.push('\\');
+    }
     if in_string {
         repaired.push('"');
     }
@@ -474,6 +479,24 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
     });
 
     has_partial_token || trimmed.contains('{') || trimmed.contains('[')
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    // EOF inside an escape sequence (`{"k":"a\` → `{"k":"a\\"}`). Without
+    // the `escape` guard, the appended `"` would itself be escaped and the
+    // resulting JSON would still be invalid.
+    #[test]
+    fn test_repair_eof_after_backslash() {
+        let repaired = try_repair_truncated_json(r#"{"k":"a\"#).expect("must repair");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&repaired).is_ok(),
+            "repaired must parse: {:?}",
+            repaired
+        );
+    }
 }
 
 #[cfg(test)]

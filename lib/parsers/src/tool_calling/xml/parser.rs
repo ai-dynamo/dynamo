@@ -145,11 +145,20 @@ fn extract_tool_calls(
                 // `<tool_call>` is preserved verbatim.
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
+                let function_end = &config.function_end_token;
                 if block.contains(function_start.as_str())
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
                 {
                     calls.append(&mut parsed_calls);
+                    // Preserve any suffix after the last function close so
+                    // non-tool trailing content isn't dropped.
+                    if let Some(last_end) = block.rfind(function_end.as_str()) {
+                        let suffix_start = abs_start + last_end + function_end.len();
+                        if suffix_start < text.len() {
+                            normal_parts.push(&text[suffix_start..]);
+                        }
+                    }
                     break;
                 }
                 normal_parts.push(&text[abs_start..]);
@@ -934,6 +943,23 @@ NYC
         assert_eq!(calls[0].function.name, "get_weather");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["city"], "NYC");
+    }
+
+    // After EOF-recovery, any non-tool suffix following the last
+    // `</function>` close must surface as normal_text rather than being
+    // dropped along with the recovered call.
+    #[test]
+    fn test_parse_qwen3_no_outer_close_preserves_suffix() {
+        let input = "<tool_call>\n<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\nTRAILING NOTE";
+
+        let (calls, normal) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 1);
+        let normal = normal.unwrap_or_default();
+        assert!(
+            normal.contains("TRAILING NOTE"),
+            "normal must keep suffix after </function>: {normal:?}"
+        );
     }
 
     #[test] // CASE.5 — minimax_m2

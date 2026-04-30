@@ -13,9 +13,9 @@ use std::sync::OnceLock;
 
 static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 
-/// Regex fallback for inputs harmony's tokenizer rejects: parallel commentary
-/// blocks, truncated JSON args. Matches each commentary→call slice and
-/// extracts the function name + raw args payload.
+/// Regex fallback used only when `openai_harmony`'s tokenizer rejects the
+/// input — alternative on this path is silent-drop. Worst case is missing
+/// a call, never fabricating one (full structural signature required).
 fn commentary_block_regex() -> &'static Regex {
     COMMENTARY_BLOCK_REGEX.get_or_init(|| {
         // Name is `[\w.\-]+` (alphanumeric / dot / hyphen / underscore).
@@ -33,11 +33,20 @@ fn commentary_block_regex() -> &'static Regex {
 
 /// Extract calls via regex when harmony's strict tokenizer rejects the input
 /// (truncated JSON, multiple back-to-back commentary blocks, etc.).
-fn extract_calls_via_regex(text: &str) -> Vec<ToolCallResponse> {
+/// Returns (calls, residual_text) where residual_text is everything not
+/// consumed by a matched commentary block — preserved so analysis prose and
+/// non-tool suffixes aren't dropped.
+fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
     let mut out = Vec::new();
+    let mut residual = String::new();
+    let mut cursor = 0;
     for (i, cap) in commentary_block_regex().captures_iter(text).enumerate() {
-        let name = cap.name("name").map(|m| m.as_str()).unwrap_or("");
-        let raw_args = cap.name("args").map(|m| m.as_str().trim()).unwrap_or("{}");
+        let m = cap.get(0).expect("regex match has full span");
+        residual.push_str(&text[cursor..m.start()]);
+        cursor = m.end();
+
+        let name = cap.name("name").map(|x| x.as_str()).unwrap_or("");
+        let raw_args = cap.name("args").map(|x| x.as_str().trim()).unwrap_or("{}");
         if name.is_empty() {
             continue;
         }
@@ -59,7 +68,8 @@ fn extract_calls_via_regex(text: &str) -> Vec<ToolCallResponse> {
             },
         });
     }
-    out
+    residual.push_str(&text[cursor..]);
+    (out, residual.trim().to_string())
 }
 
 static GLOBAL_HARMONY_GPTOSS_ENCODING: tokio::sync::OnceCell<
@@ -123,9 +133,9 @@ pub async fn parse_tool_calls_harmony_complete(
             // truncated JSON. The regex fallback extracts each commentary
             // block independently and runs the same JSON repair as
             // base_json_parser.
-            let calls = extract_calls_via_regex(text);
+            let (calls, residual) = extract_calls_via_regex(text);
             if !calls.is_empty() {
-                return Ok((calls, Some(String::new())));
+                return Ok((calls, Some(residual)));
             }
             return Ok((vec![], Some(text.to_string())));
         }
@@ -397,6 +407,27 @@ mod tests {
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "NYC");
+    }
+
+    // The regex fallback must preserve any non-tool spans (prose before
+    // the call, suffix after `<|call|>`) as `normal_text`, not zero them.
+    #[tokio::test]
+    async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
+        let text = r#"PREFIX <|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
+        let (tool_calls, normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let normal = normal.unwrap_or_default();
+        assert!(
+            normal.contains("PREFIX"),
+            "normal must keep prefix: {normal:?}"
+        );
+        assert!(
+            normal.contains("SUFFIX"),
+            "normal must keep suffix: {normal:?}"
+        );
     }
 
     #[tokio::test] // CASE.4, CASE.5, CASE.19
