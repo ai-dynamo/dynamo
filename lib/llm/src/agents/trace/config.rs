@@ -3,12 +3,15 @@
 
 use std::sync::OnceLock;
 
-use dynamo_runtime::config::environment_names::llm::agent_trace as env_agent_trace;
+use dynamo_runtime::config::{
+    env_is_falsey, environment_names::llm::agent_trace as env_agent_trace,
+};
 
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
 const DEFAULT_JSONL_GZ_ROLL_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_REPLAY_BLOCK_SIZE: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct AgentTracePolicy {
@@ -20,6 +23,8 @@ pub struct AgentTracePolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
+    pub replay_hashes_enabled: bool,
+    pub replay_block_size: usize,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
 }
@@ -81,6 +86,12 @@ fn load_from_env() -> AgentTracePolicy {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0);
+    let replay_hashes_enabled = !env_is_falsey(env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES);
+    let replay_block_size = std::env::var(env_agent_trace::DYN_AGENT_TRACE_REPLAY_BLOCK_SIZE)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_REPLAY_BLOCK_SIZE);
 
     AgentTracePolicy {
         enabled: !sinks.is_empty() || tool_events_zmq_endpoint.is_some(),
@@ -91,6 +102,8 @@ fn load_from_env() -> AgentTracePolicy {
         jsonl_flush_interval_ms,
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
+        replay_hashes_enabled,
+        replay_block_size,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
     }

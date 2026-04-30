@@ -33,6 +33,39 @@ debugging Perfetto nesting or label rendering.
 Stage slice boundaries are normalized to avoid same-thread overlap caused by
 independent metric rounding. Raw timing fields remain available in event args.
 
+## Convert to Mooncake Replay
+
+Agent traces with request replay hashes can be converted to Mooncake JSONL for
+the Dynamo replay/mocker path:
+
+```bash
+cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
+  --input-path /tmp/dynamo-agent-trace.*.jsonl.gz \
+  --output-file /tmp/dynamo-agent-trace.mooncake.jsonl
+```
+
+The converter accepts `.jsonl`, `.jsonl.gz`, repeated `--input-path` flags, and
+recorder-envelope records of the form `{"timestamp": ..., "event": ...}`. It
+groups turns by
+`workflow_id:program_id`, emits `timestamp` on the first turn in each session,
+and emits `delay` on later turns based on the gap from the previous request end
+to the next request start. Stable trace `input_sequence_hashes` are compacted to
+Mooncake `hash_ids` during conversion.
+
+Aggregate mocker replay uses each row's `input_length`, `output_length`, and the
+next turn's `hash_ids` to infer any full KV blocks materialized by decode. This
+models same-session prefix reuse across agent turns without storing output token
+IDs or prompt/response text.
+
+Replay the output with the same block size recorded in the converter output:
+
+```bash
+python -m dynamo.replay \
+  --trace-file /tmp/dynamo-agent-trace.mooncake.jsonl \
+  --trace-format mooncake \
+  --trace-block-size 64
+```
+
 ## Validate Converter
 
 The converter has a local self-check that is intentionally not wired into the

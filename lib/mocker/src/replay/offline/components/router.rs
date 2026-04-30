@@ -10,8 +10,9 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+    KvCacheStoredBlockData, OverlapScores, PrefillLoadHint, RouterEvent, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
@@ -42,6 +43,7 @@ type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 #[derive(Debug, Clone, Copy)]
 struct AdmitOutcome {
     worker_idx: usize,
+    reused_input_tokens: usize,
     overlap_blocks: u32,
     isl_blocks: u32,
 }
@@ -293,6 +295,7 @@ impl OfflineReplayRouter {
             admissions: vec![WorkerAdmission {
                 uuid,
                 worker_idx: outcome.worker_idx,
+                reused_input_tokens: outcome.reused_input_tokens,
                 overlap_blocks: outcome.overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             }],
@@ -304,6 +307,56 @@ impl OfflineReplayRouter {
             self.indexer.apply_event(event)?;
         }
         Ok(RouterEffects::default())
+    }
+
+    pub(crate) fn on_replay_generated_blocks(
+        &mut self,
+        worker_idx: usize,
+        replay_hashes: &ReplayRequestHashes,
+    ) -> Result<()> {
+        if replay_hashes.generated_sequence_hashes.is_empty() {
+            return Ok(());
+        }
+
+        if replay_hashes.generated_local_block_hashes.len()
+            != replay_hashes.generated_sequence_hashes.len()
+        {
+            return Err(anyhow!(
+                "generated replay local/sequence hash lengths differ: {} vs {}",
+                replay_hashes.generated_local_block_hashes.len(),
+                replay_hashes.generated_sequence_hashes.len()
+            ));
+        }
+
+        let parent_hash = replay_hashes
+            .sequence_hashes
+            .last()
+            .copied()
+            .map(ExternalSequenceBlockHash);
+        let blocks = replay_hashes
+            .generated_sequence_hashes
+            .iter()
+            .zip(&replay_hashes.generated_local_block_hashes)
+            .map(|(&sequence_hash, &local_hash)| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(sequence_hash),
+                tokens_hash: local_hash,
+                mm_extra_info: None,
+            })
+            .collect();
+        let event = RouterEvent::new(
+            worker_idx as WorkerId,
+            KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash,
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank: 0,
+            },
+        );
+        self.indexer.apply_event(event)?;
+        Ok(())
     }
 
     pub(crate) fn on_prefill_completed(
@@ -569,6 +622,7 @@ impl OfflineReplayRouter {
 
         Ok(AdmitOutcome {
             worker_idx,
+            reused_input_tokens: selection.cached_tokens,
             overlap_blocks,
             isl_blocks,
         })
@@ -589,6 +643,7 @@ impl OfflineReplayRouter {
             admissions.push(WorkerAdmission {
                 uuid,
                 worker_idx: outcome.worker_idx,
+                reused_input_tokens: outcome.reused_input_tokens,
                 overlap_blocks: outcome.overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             });
@@ -834,6 +889,7 @@ mod tests {
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 3,
+                reused_input_tokens: 0,
                 overlap_blocks: 0,
                 isl_blocks: 1,
             }]
@@ -888,6 +944,7 @@ mod tests {
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(2),
                 worker_idx: 1,
+                reused_input_tokens: 0,
                 overlap_blocks: 0,
                 isl_blocks: 1,
             }]

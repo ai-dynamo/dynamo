@@ -101,7 +101,7 @@ impl WorkloadDriver {
                     DriverMode::Trace => session.first_arrival_timestamp_ms.unwrap_or(0.0),
                     DriverMode::Concurrency => 0.0,
                 });
-                let turns = session
+                let mut turns = session
                     .turns
                     .into_iter()
                     .map(|turn| -> Result<TurnRuntime> {
@@ -114,6 +114,7 @@ impl WorkloadDriver {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
+                infer_generated_hashes(&mut turns, engine_block_size);
                 Ok(SessionRuntime {
                     session_id: session.session_id,
                     turns,
@@ -312,6 +313,49 @@ impl WorkloadDriver {
     }
 }
 
+fn infer_generated_hashes(turns: &mut [TurnRuntime], engine_block_size: usize) {
+    if engine_block_size == 0 {
+        return;
+    }
+
+    for idx in 0..turns.len().saturating_sub(1) {
+        let input_tokens = turns[idx].tokens.len();
+        let after_decode_tokens = input_tokens.saturating_add(turns[idx].max_output_tokens);
+        // Output token ids are not recorded in the Mooncake row. For ordered agent
+        // sessions, the next turn's prompt already contains the previous turn's
+        // model output, so full KV blocks materialized by decode can be recovered
+        // as the next prompt's block hashes in the range [ISL, ISL + OSL).
+        let generated_start_block = input_tokens / engine_block_size;
+        let generated_end_block = after_decode_tokens / engine_block_size;
+        if generated_end_block <= generated_start_block {
+            continue;
+        }
+
+        let next_hashes = &turns[idx + 1].replay_hashes;
+        if next_hashes.local_block_hashes.len() < generated_end_block
+            || next_hashes.sequence_hashes.len() < generated_end_block
+        {
+            continue;
+        }
+
+        let current_hashes = &turns[idx].replay_hashes;
+        let prefix_blocks = generated_start_block.min(current_hashes.local_block_hashes.len());
+        if current_hashes.local_block_hashes[..prefix_blocks]
+            != next_hashes.local_block_hashes[..prefix_blocks]
+        {
+            continue;
+        }
+
+        let generated_local_block_hashes =
+            next_hashes.local_block_hashes[generated_start_block..generated_end_block].to_vec();
+        let generated_sequence_hashes =
+            next_hashes.sequence_hashes[generated_start_block..generated_end_block].to_vec();
+
+        turns[idx].replay_hashes.generated_local_block_hashes = generated_local_block_hashes;
+        turns[idx].replay_hashes.generated_sequence_hashes = generated_sequence_hashes;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +511,44 @@ mod tests {
         assert!(
             driver.is_drained(),
             "is_drained must become true so run_workload can exit"
+        );
+    }
+
+    #[test]
+    fn infers_generated_blocks_from_next_turn_prompt_hashes() {
+        let trace = Trace {
+            block_size: 2,
+            sessions: vec![SessionTrace {
+                session_id: "session".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 3,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 3],
+                        delay_after_previous_ms: 0.0,
+                    },
+                ],
+            }],
+        };
+
+        let driver = WorkloadDriver::new_trace(trace, 2).unwrap();
+        let first_turn = &driver.sessions[0].turns[0];
+        let second_turn = &driver.sessions[0].turns[1];
+
+        assert_eq!(
+            first_turn.replay_hashes.generated_local_block_hashes,
+            second_turn.replay_hashes.local_block_hashes[1..2]
+        );
+        assert_eq!(
+            first_turn.replay_hashes.generated_sequence_hashes,
+            second_turn.replay_hashes.sequence_hashes[1..2]
         );
     }
 }
