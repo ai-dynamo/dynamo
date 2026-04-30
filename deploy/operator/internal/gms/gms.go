@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	// ServerContainerName is the name of the GMS server init sidecar.
+	// ServerContainerName is the name of the GMS server sidecar.
 	ServerContainerName = "gms-server"
 
 	// SharedVolumeName is the emptyDir volume shared between the GMS server

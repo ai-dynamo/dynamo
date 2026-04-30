@@ -1241,6 +1241,20 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		require.NotNil(t, gmsServer)
 		loader := find(checkpoint.GMSLoaderContainer)
 		require.NotNil(t, loader)
+		if got := podTemplateSpec.Spec.Containers[0].Name; got != commonconsts.MainContainerName {
+			t.Fatalf("expected main container to stay first, got %q", got)
+		}
+		if got := podTemplateSpec.Spec.Containers[1].Name; got != gms.ServerContainerName {
+			t.Fatalf("expected gms-server to be a regular sidecar after main, got %q", got)
+		}
+		if got := podTemplateSpec.Spec.Containers[2].Name; got != checkpoint.GMSLoaderContainer {
+			t.Fatalf("expected gms-loader to be a regular sidecar after gms-server, got %q", got)
+		}
+		for _, container := range podTemplateSpec.Spec.InitContainers {
+			if container.Name == gms.ServerContainerName || container.Name == checkpoint.GMSLoaderContainer {
+				t.Fatalf("expected restore GMS containers to be regular containers, found init container %#v", container)
+			}
+		}
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
@@ -1252,15 +1266,17 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
 			t.Fatalf("expected weights server to run python module, got %#v", got)
 		}
-		// Restore: gms-server and loader are init sidecars (restartPolicy=Always)
-		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-			t.Fatalf("expected restore gms-server to have RestartPolicy=Always, got %#v", gmsServer.RestartPolicy)
+		if gmsServer.RestartPolicy != nil {
+			t.Fatalf("expected restore gms-server to be a regular container, got RestartPolicy=%#v", gmsServer.RestartPolicy)
 		}
 		if gmsServer.StartupProbe != nil {
 			t.Fatalf("expected restore gms-server to have no StartupProbe")
 		}
 		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.snapshot.loader" {
 			t.Fatalf("expected loader to run python module, got %#v", got)
+		}
+		if loader.RestartPolicy != nil {
+			t.Fatalf("expected restore gms-loader to be a regular container, got RestartPolicy=%#v", loader.RestartPolicy)
 		}
 	})
 
@@ -1301,8 +1317,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		// User's extra sidecar should remain in Containers, unchanged.
-		// GMS loader is now an init sidecar, so the user's container stays
-		// at Containers[0] and main at Containers[1].
 		if got := podTemplateSpec.Spec.Containers[0]; got.Name != "gms-loader" || len(got.Command) != 1 || got.Command[0] != "python3" {
 			t.Fatalf("expected user sidecar container to remain unchanged, got %#v", got)
 		}

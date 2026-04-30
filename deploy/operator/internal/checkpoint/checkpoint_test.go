@@ -335,12 +335,14 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, 1, serverCount)
 		assert.Equal(t, 1, loaderCount)
 
-		// Restore: server and loader are init sidecars (restartPolicy=Always)
-		assert.NotNil(t, gmsServer.RestartPolicy, "restore gms-server should have RestartPolicy")
-		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
+		require.Len(t, podSpec.Containers, 3)
+		assert.Equal(t, gms.ServerContainerName, podSpec.Containers[1].Name)
+		assert.Equal(t, GMSLoaderContainer, podSpec.Containers[2].Name)
+		assert.Nil(t, findInitContainer(podSpec, gms.ServerContainerName))
+		assert.Nil(t, findInitContainer(podSpec, GMSLoaderContainer))
+		assert.Nil(t, gmsServer.RestartPolicy, "restore gms-server should be a regular container")
 		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
-		assert.NotNil(t, loader.RestartPolicy, "restore gms-loader should have RestartPolicy")
-		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *loader.RestartPolicy)
+		assert.Nil(t, loader.RestartPolicy, "restore gms-loader should be a regular container")
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
@@ -628,6 +630,15 @@ func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
 			return &podSpec.Containers[i]
 		}
 	}
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == name {
+			return &podSpec.InitContainers[i]
+		}
+	}
+	return nil
+}
+
+func findInitContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == name {
 			return &podSpec.InitContainers[i]
