@@ -718,6 +718,29 @@ impl Session for VeloSession {
         let session = self.clone();
         let runtime = Handle::current();
         runtime.spawn(async move {
+            // close() implies finish_commits + finish_availability —
+            // send terminators on the wire if not already sent so the
+            // peer's commit/availability streams close cleanly.
+            let need_commits_closed = {
+                let mut flag = session.inner.commits_closed.lock();
+                let was_open = !*flag;
+                *flag = true;
+                was_open
+            };
+            if need_commits_closed {
+                let _ = session.send_frame(Frame::CommitsClosed).await;
+            }
+
+            let need_drained = {
+                let mut flag = session.inner.avail_drained.lock();
+                let was_open = !*flag;
+                *flag = true;
+                was_open
+            };
+            if need_drained {
+                let _ = session.send_frame(Frame::Drained).await;
+            }
+
             // Best-effort: send Detach. Ignore errors because
             // close is called even when the peer is gone.
             let _ = session.send_frame(Frame::Detach).await;

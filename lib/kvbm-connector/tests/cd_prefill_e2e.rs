@@ -25,9 +25,7 @@ use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisag
 use kvbm_disagg_protocol::{
     DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
 };
-use kvbm_engine::disagg::session::{
-    AvailabilityDelta, CommitDelta, CommittedBlock, MockSession, MockSessionFactory, Session,
-};
+use kvbm_engine::disagg::session::{CommittedBlock, MockSession, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::blocks::ImmutableBlock;

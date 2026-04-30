@@ -3,17 +3,13 @@
 
 //! Block-transport seam for the conditional-disaggregation wrapper.
 //!
-//! The decode-side wrapper drives two kinds of transfers during the
-//! USAA-1 → `BlockSetsAdded` → completion pipeline:
+//! The wrapper drives only one kind of transfer through this seam now:
+//! **Local G2 → G1** — copy already-resident G2 data into vLLM's G1
+//! destination block_ids. (The remote pull path was subsumed by
+//! `Session::pull` in the symmetric session refactor.)
 //!
-//! - **Remote pull** — RDMA-pull a peer's published G2 block set into our
-//!   pre-allocated G2 destinations.
-//! - **Local G2 → G1** — copy already-resident G2 data into vLLM's G1
-//!   destination block_ids.
-//!
-//! These are factored behind a trait so the decode-side end-to-end test
-//! can swap in a scriptable mock without spinning up real workers, RDMA,
-//! or velo sessions.
+//! This is factored behind a trait so the wrapper E2E tests can swap
+//! in a scriptable mock without spinning up real workers.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -21,8 +17,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use kvbm_common::LogicalLayoutHandle;
-use kvbm_disagg_protocol::{SessionEndpoint, SessionId, TransferParams};
-use kvbm_engine::disagg::{DisaggSession, PrefillSession, RemoteBlockSet};
+use kvbm_disagg_protocol::TransferParams;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use kvbm_physical::TransferOptions;
@@ -33,22 +28,10 @@ use crate::connector::leader::{
 };
 use crate::{BlockId, G2, InstanceId};
 
-/// Transport seam used by the conditional-disagg decode wrapper to drive
-/// RDMA pulls and local G2→G1 transfers.
+/// Transport seam used by the conditional-disagg wrapper to drive
+/// local G2→G1 transfers (decode's local-match kick at USAA-1, and
+/// the per-chunk onboard after pulling remote outputs).
 pub trait CdBlockTransport: Send + Sync {
-    /// RDMA-pull peer-published G2 block sets into local G2 destinations.
-    ///
-    /// `local_dst_g2_block_ids` length must equal the sum of `block_sets`'
-    /// `blocks.len()`. Block sets are pulled in order; within a set, the
-    /// source `RemoteBlockRef` at index `i` lands in
-    /// `local_dst_g2_block_ids[offset + i]`.
-    fn pull_remote(
-        &self,
-        remote_instance: InstanceId,
-        block_sets: Vec<RemoteBlockSet>,
-        local_dst_g2_block_ids: Vec<BlockId>,
-    ) -> BoxFuture<'static, Result<()>>;
-
     /// Local G2 → G1 transfer for already-resident G2 blocks.
     ///
     /// `src_g2_block_ids` and `dst_g1_block_ids` must have equal length;
@@ -61,8 +44,7 @@ pub trait CdBlockTransport: Send + Sync {
 }
 
 /// Production transport that bridges `CdBlockTransport` to the engine's
-/// `InstanceLeader` (for remote pulls) and `parallel_worker` (for local
-/// G2→G1 transfers).
+/// `InstanceLeader::parallel_worker` for local G2→G1 transfers.
 pub struct EngineCdBlockTransport {
     instance_leader: Arc<InstanceLeader>,
 }
@@ -74,22 +56,6 @@ impl EngineCdBlockTransport {
 }
 
 impl CdBlockTransport for EngineCdBlockTransport {
-    fn pull_remote(
-        &self,
-        remote_instance: InstanceId,
-        block_sets: Vec<RemoteBlockSet>,
-        local_dst_g2_block_ids: Vec<BlockId>,
-    ) -> BoxFuture<'static, Result<()>> {
-        let leader = self.instance_leader.clone();
-        Box::pin(async move {
-            let notification = leader
-                .pull_remote_block_sets(remote_instance, &block_sets, &local_dst_g2_block_ids)
-                .await?;
-            notification.await?;
-            Ok(())
-        })
-    }
-
     fn local_g2_to_g1(
         &self,
         src_g2_block_ids: Vec<BlockId>,
@@ -230,45 +196,6 @@ pub trait InnerLeaderShim: Send + Sync {
         &self,
         blocks: Vec<CompleteBlock<G2>>,
     ) -> Result<Vec<ImmutableBlock<G2>>>;
-}
-
-/// Prefill-side session-attach seam.
-///
-/// The prefill wrapper attaches to a decode session using the
-/// `decode_endpoint` carried on the request's transfer_params.
-/// Production wraps `DisaggSession::attach_prefill` over real velo.
-/// Tests inject [`super::testing::MockPrefillSessionAttacher`].
-pub trait PrefillSessionAttacher: Send + Sync {
-    fn attach(
-        &self,
-        session_id: SessionId,
-        decode_endpoint: SessionEndpoint,
-    ) -> BoxFuture<'static, Result<Arc<dyn PrefillSession>>>;
-}
-
-/// Production attacher backed by a real velo handle.
-pub struct VeloPrefillSessionAttacher {
-    velo: Arc<velo::Velo>,
-}
-
-impl VeloPrefillSessionAttacher {
-    pub fn new(velo: Arc<velo::Velo>) -> Arc<Self> {
-        Arc::new(Self { velo })
-    }
-}
-
-impl PrefillSessionAttacher for VeloPrefillSessionAttacher {
-    fn attach(
-        &self,
-        session_id: SessionId,
-        decode_endpoint: SessionEndpoint,
-    ) -> BoxFuture<'static, Result<Arc<dyn PrefillSession>>> {
-        let velo = Arc::clone(&self.velo);
-        Box::pin(async move {
-            let session = DisaggSession::attach_prefill(velo, session_id, &decode_endpoint).await?;
-            Ok(session as Arc<dyn PrefillSession>)
-        })
-    }
 }
 
 /// Production [`InnerLeaderShim`] that wraps a concrete `ConnectorLeader`.

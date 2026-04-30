@@ -356,8 +356,7 @@ impl DecodeDisaggLeader {
         // keep the local-match G2 entries pinned for the local-kick.
         // `session.make_available` will get its own clones inside
         // `coordinator.begin_remote_prefill`.
-        let session_local_g2: Vec<ImmutableBlock<G2>> =
-            local_g2.iter().cloned().collect();
+        let session_local_g2: Vec<ImmutableBlock<G2>> = local_g2.to_vec();
 
         let token_ids = self.inner.slot_token_ids(request_id)?;
 
@@ -617,14 +616,25 @@ impl DecodeDisaggLeader {
         state: Arc<CdRequestState>,
         session: Arc<dyn Session>,
     ) -> Result<()> {
-        // 1. Drain commits — purely informational. The wrapper
-        //    plans against `expected_remote_hashes` from
-        //    `slot_match_split`; commits arrive on the wire as
-        //    confirmation, not as the source of truth.
+        // 1. Drain commits opportunistically — informational only.
+        //    Break as soon as we've seen all expected remote hashes
+        //    OR the peer signals Closed. The wrapper plans against
+        //    `expected_remote_hashes` from `slot_match_split`;
+        //    commits arrive on the wire as confirmation, not as
+        //    the source of truth.
+        let expected_count = state.remote_slots.len();
+        let mut commit_seen: HashSet<SequenceHash> = HashSet::new();
         let mut commits = session.commits();
         while let Some(d) = commits.next().await {
             match d {
-                CommitDelta::Added(_) => {}
+                CommitDelta::Added(hashes) => {
+                    for h in hashes {
+                        commit_seen.insert(h);
+                    }
+                    if commit_seen.len() >= expected_count {
+                        break;
+                    }
+                }
                 CommitDelta::Closed => break,
             }
         }

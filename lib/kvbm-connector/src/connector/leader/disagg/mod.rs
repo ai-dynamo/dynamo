@@ -22,13 +22,17 @@
 //! 4. `update_state_after_alloc` — for CD-bound requests, capture the G1
 //!    destination block IDs and `num_external_tokens`; do **not** call the
 //!    inner USAA. The bytes will land via the `BlockSetsAdded` path.
-//! 5. The prefill peer attaches, requests D's matched G2 block sets, RDMA-
-//!    pulls them, runs prefill, publishes output block sets on the session.
-//! 6. On `SessionEvent::BlockSetsAdded` the wrapper pulls P's output back
-//!    into D's local memory (currently to G1 via the engine's
-//!    `pull_remote_block_sets`), then sends `PullComplete` to P, awaits
-//!    the `PullAck`, calls `mark_onboarding_complete` on the inner leader,
-//!    and releases the inflight budget reservation.
+//! 5. The prefill peer attaches via `factory.attach`, drains D's
+//!    `commits()`/`availability()` to learn which blocks D will serve,
+//!    calls `session.pull(...)` to RDMA-pull them, runs prefill, then
+//!    `session.commit(...)` + `session.make_available(...)` to publish
+//!    the output blocks back to D.
+//! 6. The decode wrapper's per-request task drains P's
+//!    `commits()`/`availability()` and `session.pull(...)`s the output
+//!    blocks. Once both the local kick (G2→G1 for the local-match
+//!    slice) and the remote pull pipeline complete, the wrapper calls
+//!    `mark_onboarding_complete` and releases the inflight budget
+//!    reservation.
 //!
 //! # No partial transfers
 //!
@@ -56,11 +60,9 @@
 pub mod conditional_leader;
 pub mod decode;
 pub mod decode_leader;
-pub mod metadata;
 pub mod prefill_coordinator;
 pub mod prefill_leader;
 pub mod queue;
-pub mod session;
 pub mod transport;
 
 #[cfg(any(test, feature = "testing"))]
@@ -84,14 +86,7 @@ pub use decode::{
 pub use decode_leader::DecodeDisaggLeader;
 pub use prefill_coordinator::PrefillCoordinator;
 pub use prefill_leader::PrefillDisaggLeader;
-pub use metadata::{
-    CoalescingPeerMetadataCache, EnginePeerMetadataCache, NoopPeerMetadataCache, PeerMetadataCache,
-};
 pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
-pub use session::{
-    CONDITIONAL_DISAGG_STREAM_SCHEMA, DisaggSession, PrefillSession, PrefillSessionFactory,
-    SessionBlocks, SessionEvent, SessionEventStream, VeloPrefillSessionFactory,
-};
 pub use transport::{
     CdBlockTransport, CdWorkerHook, ConnectorLeaderShim, EngineCdBlockTransport, InnerLeaderShim,
     InnerLeaderWorkerHook,

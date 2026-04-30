@@ -28,7 +28,7 @@ use kvbm_disagg_protocol::RemotePrefillParams;
 use kvbm_engine::disagg::session::{
     AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
-use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
+use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 

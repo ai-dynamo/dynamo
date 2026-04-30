@@ -31,8 +31,10 @@
 //! wire won't generate this; tests that do it have a bug.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use dashmap::DashMap;
 
 use anyhow::{Result, anyhow};
 use futures::FutureExt;
@@ -204,6 +206,13 @@ pub struct MockSession {
     peer_instance_id: Mutex<Option<InstanceId>>,
     inner: Mutex<MockSessionInner>,
     pull_index: AtomicU64,
+    /// Cross-wired partner session (paired-mode). When set,
+    /// every holder-side action (`commit`, `make_available`,
+    /// `finish_*`, `close`) pushes the equivalent peer-side
+    /// delta onto the partner's puller streams, and `pull`
+    /// auto-resolves Ok by dropping the partner's pins for
+    /// the pulled hashes.
+    partner: Mutex<Option<Weak<MockSession>>>,
 }
 
 impl MockSession {
@@ -222,7 +231,27 @@ impl MockSession {
             peer_instance_id: Mutex::new(peer_instance_id),
             inner: Mutex::new(MockSessionInner::new()),
             pull_index: AtomicU64::new(0),
+            partner: Mutex::new(None),
         })
+    }
+
+    /// Cross-wire this session with a partner. Mutual: the
+    /// partner is also linked back to this session.
+    /// Subsequent holder-side actions on either side
+    /// auto-deliver to the other's puller streams. Any
+    /// committed / made-available state already published on
+    /// either side at pair time is replayed onto the partner's
+    /// peer streams so late-attach matches the velo
+    /// replay-on-subscribe semantics.
+    pub fn pair_with(self: &Arc<Self>, partner: &Arc<MockSession>) {
+        *self.partner.lock() = Some(Arc::downgrade(partner));
+        *partner.partner.lock() = Some(Arc::downgrade(self));
+        replay_to_partner(self, partner);
+        replay_to_partner(partner, self);
+    }
+
+    fn partner(&self) -> Option<Arc<MockSession>> {
+        self.partner.lock().as_ref().and_then(Weak::upgrade)
     }
 
     /// Test accessor for `peer_instance_id` (set on attach or
@@ -404,6 +433,47 @@ impl MockSession {
     }
 }
 
+/// Replay `holder`'s already-published state onto `puller`'s peer
+/// streams. Called from `pair_with` so a late-attach puller
+/// observes the holder's pre-attach commits/availability — same
+/// semantics velo's replay-on-subscribe gives us on the wire.
+fn replay_to_partner(holder: &Arc<MockSession>, puller: &Arc<MockSession>) {
+    let (committed, available, finish_commits, finish_avail, closed_reason) = {
+        let h = holder.inner.lock();
+        let committed: Vec<SequenceHash> = h.committed.iter().copied().collect();
+        let available: Vec<CommittedBlock> = h
+            .available_pins
+            .iter()
+            .map(|(hash, block)| CommittedBlock {
+                hash: *hash,
+                peer_block_id: block.block_id(),
+            })
+            .collect();
+        (
+            committed,
+            available,
+            h.finish_commits_called,
+            h.finish_availability_called,
+            h.closed_reason.clone(),
+        )
+    };
+    if !committed.is_empty() {
+        puller.inject_peer_commit(committed);
+    }
+    if finish_commits {
+        puller.inject_peer_finish_commits();
+    }
+    if !available.is_empty() {
+        puller.inject_peer_available(available);
+    }
+    if finish_avail {
+        puller.inject_peer_drained();
+    }
+    if let Some(reason) = closed_reason {
+        puller.inject_lifecycle(LifecycleEvent::Detached { reason });
+    }
+}
+
 // ============================================================================
 // Replay-buffer helpers
 // ============================================================================
@@ -450,40 +520,63 @@ impl Session for MockSession {
     }
 
     fn commit(&self, hashes: Vec<SequenceHash>) -> Result<()> {
-        let mut inner = self.inner.lock();
-        inner.commit_calls.push(hashes.clone());
-        for h in hashes {
-            inner.committed.insert(h);
+        {
+            let mut inner = self.inner.lock();
+            inner.commit_calls.push(hashes.clone());
+            for h in &hashes {
+                inner.committed.insert(*h);
+            }
+        }
+        if let Some(partner) = self.partner() {
+            partner.inject_peer_commit(hashes);
         }
         Ok(())
     }
 
     fn finish_commits(&self) -> Result<()> {
         self.inner.lock().finish_commits_called = true;
+        if let Some(partner) = self.partner() {
+            partner.inject_peer_finish_commits();
+        }
         Ok(())
     }
 
     fn make_available(&self, blocks: Vec<ImmutableBlock<G2>>) -> Result<()> {
         // Validate and mutate under a single lock guard (no TOCTOU gap).
-        let mut inner = self.inner.lock();
-        for block in &blocks {
-            let hash = block.sequence_hash();
-            if !inner.committed.contains(&hash) {
-                return Err(anyhow!(
-                    "make_available: hash {hash:?} not in committed set"
-                ));
+        let mut peer_committed_blocks: Vec<CommittedBlock> = Vec::with_capacity(blocks.len());
+        {
+            let mut inner = self.inner.lock();
+            for block in &blocks {
+                let hash = block.sequence_hash();
+                if !inner.committed.contains(&hash) {
+                    return Err(anyhow!(
+                        "make_available: hash {hash:?} not in committed set"
+                    ));
+                }
+            }
+            let hashes: Vec<SequenceHash> = blocks.iter().map(|b| b.sequence_hash()).collect();
+            inner.make_available_calls.push(hashes);
+            for block in blocks {
+                let hash = block.sequence_hash();
+                let block_id = block.block_id();
+                inner.available_pins.insert(hash, block);
+                peer_committed_blocks.push(CommittedBlock {
+                    hash,
+                    peer_block_id: block_id,
+                });
             }
         }
-        let hashes: Vec<SequenceHash> = blocks.iter().map(|b| b.sequence_hash()).collect();
-        inner.make_available_calls.push(hashes);
-        for block in blocks {
-            inner.available_pins.insert(block.sequence_hash(), block);
+        if let Some(partner) = self.partner() {
+            partner.inject_peer_available(peer_committed_blocks);
         }
         Ok(())
     }
 
     fn finish_availability(&self) -> Result<()> {
         self.inner.lock().finish_availability_called = true;
+        if let Some(partner) = self.partner() {
+            partner.inject_peer_drained();
+        }
         Ok(())
     }
 
@@ -525,16 +618,9 @@ impl Session for MockSession {
 
         // Assign a monotonic index before taking the lock (atomic, no contention).
         let index = self.pull_index.fetch_add(1, Ordering::SeqCst) as usize;
-
-        // Two oneshoots:
-        //   resolver_rx — awaited by the future; test signals Ok or Err here.
-        //   dst_tx/dst_rx — used to ship dst back on Ok.
-        let (resolver_tx, resolver_rx) = oneshot::channel::<Result<()>>();
-        let (dst_tx, dst_rx) = oneshot::channel::<Vec<MutableBlock<G2>>>();
-
-        // Validate peer_available and mutate state under a single lock guard (no
-        // TOCTOU gap between the check and the pending-pull installation).
         let dst_block_ids: Vec<BlockId> = dst.iter().map(|b| b.block_id()).collect();
+
+        // Validate peer_available and record the call.
         {
             let mut inner = self.inner.lock();
             for hash in &hashes {
@@ -546,7 +632,27 @@ impl Session for MockSession {
                     .boxed();
                 }
             }
-            inner.pull_calls.push((hashes, dst_block_ids));
+            inner.pull_calls.push((hashes.clone(), dst_block_ids));
+        }
+
+        // Paired-mode auto-resolution: drop partner pins for the
+        // pulled hashes and immediately return dst.
+        if let Some(partner) = self.partner() {
+            {
+                let mut p_inner = partner.inner.lock();
+                for h in &hashes {
+                    p_inner.available_pins.remove(h);
+                }
+            }
+            return async move { Ok(dst) }.boxed();
+        }
+
+        // Manual mode: install a PendingPull for the test to
+        // resolve via `resolve_pull(index, ...)`.
+        let (resolver_tx, resolver_rx) = oneshot::channel::<Result<()>>();
+        let (dst_tx, dst_rx) = oneshot::channel::<Vec<MutableBlock<G2>>>();
+        {
+            let mut inner = self.inner.lock();
             while inner.pending_pulls.len() <= index {
                 inner.pending_pulls.push(None);
             }
@@ -558,12 +664,10 @@ impl Session for MockSession {
         }
 
         async move {
-            // Await test's Ok/Err signal.
             let result = resolver_rx
                 .await
                 .map_err(|_| anyhow!("pull resolver dropped"))?;
             result?;
-            // On Ok, collect the dst blocks shipped back by resolve_pull.
             dst_rx
                 .await
                 .map_err(|_| anyhow!("pull dst channel dropped"))
@@ -576,27 +680,35 @@ impl Session for MockSession {
     }
 
     fn close(&self, reason: Option<String>) {
-        let mut inner = self.inner.lock();
-        inner.closed_reason = Some(reason.clone());
-        // Imply finish_commits and finish_availability.
-        inner.finish_commits_called = true;
-        inner.finish_availability_called = true;
-        // Drive commit/availability stream terminators.
-        if !inner.commits_state.is_terminated() {
-            inner.commits_state.push(CommitDelta::Closed);
-            inner.commits_state.terminate();
+        {
+            let mut inner = self.inner.lock();
+            inner.closed_reason = Some(reason.clone());
+            // Imply finish_commits and finish_availability.
+            inner.finish_commits_called = true;
+            inner.finish_availability_called = true;
+            // Drive commit/availability stream terminators.
+            if !inner.commits_state.is_terminated() {
+                inner.commits_state.push(CommitDelta::Closed);
+                inner.commits_state.terminate();
+            }
+            if !inner.availability_state.is_terminated() {
+                inner.availability_state.push(AvailabilityDelta::Drained);
+                inner.availability_state.terminate();
+            }
+            // Push a Detached lifecycle event if a reason was given.
+            if let Some(r) = reason.clone() {
+                inner
+                    .lifecycle_state
+                    .push(LifecycleEvent::Detached { reason: Some(r) });
+            }
+            inner.lifecycle_state.terminate();
         }
-        if !inner.availability_state.is_terminated() {
-            inner.availability_state.push(AvailabilityDelta::Drained);
-            inner.availability_state.terminate();
+        // Paired mode: deliver terminators + Detached to partner.
+        if let Some(partner) = self.partner() {
+            partner.inject_peer_finish_commits();
+            partner.inject_peer_drained();
+            partner.inject_lifecycle(LifecycleEvent::Detached { reason });
         }
-        // Push a Detached lifecycle event if a reason was given.
-        if let Some(r) = reason {
-            inner
-                .lifecycle_state
-                .push(LifecycleEvent::Detached { reason: Some(r) });
-        }
-        inner.lifecycle_state.terminate();
     }
 }
 
@@ -614,11 +726,47 @@ pub struct MockSessionFactory {
     last_opened: Mutex<Option<Arc<MockSession>>>,
     last_attached: Mutex<Option<Arc<MockSession>>>,
     attach_records: Mutex<Vec<AttachRecord>>,
+    /// Shared registry for paired-mode. When two factories are
+    /// constructed via `make_paired()`, they share this Arc; on
+    /// `attach`, the factory looks up the partner factory's
+    /// previously-`open`ed session and cross-wires the new
+    /// attach session with it.
+    paired_registry: Option<Arc<DashMap<SessionId, Arc<MockSession>>>>,
 }
 
 impl MockSessionFactory {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Build a pair of factories that cross-wire opened/attached
+    /// sessions in-process. Use this for higher-level wrapper
+    /// composition tests where a real velo wire is overkill.
+    ///
+    /// Returns `(holder_factory, puller_factory)`. The holder
+    /// calls `open(session_id)` and the puller calls
+    /// `attach(session_id, ...)` with the same id; the two
+    /// `MockSession`s are then linked so that any holder-side
+    /// action (`commit`, `make_available`, `finish_*`, `close`)
+    /// pushes the equivalent peer-side delta onto the puller's
+    /// streams, and `pull(...)` auto-resolves Ok by dropping the
+    /// partner's pins for the pulled hashes.
+    pub fn make_paired() -> (Arc<Self>, Arc<Self>) {
+        let registry = Arc::new(DashMap::new());
+        (
+            Arc::new(Self {
+                last_opened: Mutex::new(None),
+                last_attached: Mutex::new(None),
+                attach_records: Mutex::new(Vec::new()),
+                paired_registry: Some(Arc::clone(&registry)),
+            }),
+            Arc::new(Self {
+                last_opened: Mutex::new(None),
+                last_attached: Mutex::new(None),
+                attach_records: Mutex::new(Vec::new()),
+                paired_registry: Some(registry),
+            }),
+        )
     }
 
     /// The session created by the most recent `open` call.
@@ -648,6 +796,7 @@ impl Default for MockSessionFactory {
             last_opened: Mutex::new(None),
             last_attached: Mutex::new(None),
             attach_records: Mutex::new(Vec::new()),
+            paired_registry: None,
         }
     }
 }
@@ -662,6 +811,9 @@ fn mock_endpoint() -> SessionEndpoint {
 impl SessionFactory for MockSessionFactory {
     fn open(&self, session_id: SessionId) -> Result<Arc<dyn Session>> {
         let session = MockSession::new(session_id, Some(mock_endpoint()));
+        if let Some(registry) = &self.paired_registry {
+            registry.insert(session_id, Arc::clone(&session));
+        }
         *self.last_opened.lock() = Some(Arc::clone(&session));
         Ok(session)
     }
@@ -673,6 +825,15 @@ impl SessionFactory for MockSessionFactory {
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>> {
         let session = MockSession::new_with_peer(session_id, None, Some(peer_instance_id));
+        if let Some(registry) = &self.paired_registry {
+            if let Some(holder) = registry.get(&session_id).map(|e| Arc::clone(e.value())) {
+                session.pair_with(&holder);
+                // Mirror velo: holder receives `Frame::Attach` →
+                // pushes `LifecycleEvent::Attached` on its own
+                // lifecycle stream.
+                holder.inject_lifecycle(LifecycleEvent::Attached { peer_instance_id });
+            }
+        }
         *self.last_attached.lock() = Some(Arc::clone(&session));
         self.attach_records.lock().push(AttachRecord {
             session_id,
@@ -869,12 +1030,11 @@ mod tests {
         session.inject_peer_available(committed.clone());
 
         let hashes = vec![committed[0].hash];
-        let session_clone = Arc::clone(&session);
         let pull_fut = session.pull(hashes, dst);
         let handle = tokio::spawn(async move { pull_fut.await });
 
-        session_clone.wait_pull_count(1).await;
-        session_clone.resolve_pull(0, Ok(()));
+        session.wait_pull_count(1).await;
+        session.resolve_pull(0, Ok(()));
 
         let returned = handle.await.unwrap().expect("pull should succeed");
         assert_eq!(returned.len(), 1, "expected 1 dst block returned");
