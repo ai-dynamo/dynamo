@@ -318,30 +318,17 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		gmsServer := findContainer(podSpec, gms.ServerContainerName)
+		gmsServer := findInitContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := findContainer(podSpec, GMSLoaderContainer)
 		require.NotNil(t, loader)
-		serverCount := 0
-		loaderCount := 0
-		for _, container := range podSpec.InitContainers {
-			switch container.Name {
-			case gms.ServerContainerName:
-				serverCount++
-			case GMSLoaderContainer:
-				loaderCount++
-			}
-		}
-		assert.Equal(t, 1, serverCount)
-		assert.Equal(t, 1, loaderCount)
 
-		require.Len(t, podSpec.Containers, 3)
-		assert.Equal(t, gms.ServerContainerName, podSpec.Containers[1].Name)
-		assert.Equal(t, GMSLoaderContainer, podSpec.Containers[2].Name)
-		assert.Nil(t, findInitContainer(podSpec, gms.ServerContainerName))
+		require.Len(t, podSpec.Containers, 2)
+		assert.Equal(t, GMSLoaderContainer, podSpec.Containers[1].Name)
 		assert.Nil(t, findInitContainer(podSpec, GMSLoaderContainer))
-		assert.Nil(t, gmsServer.RestartPolicy, "restore gms-server should be a regular container")
-		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
+		require.NotNil(t, gmsServer.RestartPolicy)
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
+		assert.NotNil(t, gmsServer.StartupProbe)
 		assert.Nil(t, loader.RestartPolicy, "restore gms-loader should be a regular container")
 
 		mounts := map[string]string{}
