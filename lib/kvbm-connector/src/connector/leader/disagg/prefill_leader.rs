@@ -64,6 +64,7 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         self.inner.extend_slot_tokens(request_id, tokens)
     }
 
+    #[tracing::instrument(level = "info", skip(self))]
     fn get_num_new_matched_tokens(
         &self,
         request_id: &str,
@@ -74,17 +75,33 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
             .inner
             .slot_transfer_params(request_id)
             .with_context(|| format!("read transfer_params for {}", request_id))?;
+        tracing::info!(
+            has_transfer_params = params.is_some(),
+            "prefill_gnmt: transfer_params lookup"
+        );
         let Some(remote) = params.as_ref().and_then(remote_prefill_marker) else {
             // Non-CD request: passthrough to inner.
+            tracing::info!("prefill_gnmt: non-CD request — passthrough to inner");
             return self
                 .inner
                 .get_num_new_matched_tokens(request_id, num_computed_tokens);
         };
 
+        tracing::info!(
+            num_sequence_hashes = remote.sequence_hashes.len(),
+            num_computed_tokens = remote.num_computed_tokens,
+            initiator = %remote.initiator_instance_id,
+            session_id = %remote.session_id,
+            "prefill_gnmt: CD-bound — ensure_started"
+        );
         // Idempotent: first call installs state and spawns
         // attach/diff/pull; subsequent calls just return the
         // cached external-token count.
         let n = self.coordinator.ensure_started(request_id, remote)?;
+        tracing::info!(
+            external_tokens = n,
+            "prefill_gnmt: ensure_started returned (Some(N), true)"
+        );
         Ok((Some(n), true))
     }
 

@@ -270,6 +270,7 @@ impl DecodeDisaggLeader {
     // GNMT
     // ------------------------------------------------------------------
 
+    #[tracing::instrument(level = "info", skip(self), fields(role = ?self.role))]
     fn decode_gnmt(
         &self,
         request_id: &str,
@@ -278,13 +279,19 @@ impl DecodeDisaggLeader {
         let inner_result = self
             .inner
             .get_num_new_matched_tokens(request_id, num_computed_tokens)?;
+        tracing::info!(?inner_result, "decode_gnmt: inner returned");
 
         if let Some(state) = self.cd_request_state.get(request_id) {
+            tracing::info!(
+                reserved_tokens = state.reserved_tokens,
+                "decode_gnmt: idempotent — already CD-tracked"
+            );
             return Ok((Some(state.reserved_tokens), true));
         }
 
         let (count, _async_flag) = inner_result;
         let Some(matched_tokens) = count else {
+            tracing::info!("decode_gnmt: inner returned None — passthrough");
             return Ok(inner_result);
         };
 
@@ -297,21 +304,39 @@ impl DecodeDisaggLeader {
             transfer_params: None,
         };
 
-        match self.coordinator.evaluate(&inputs) {
-            PrefillSelection::Local => Ok(inner_result),
+        let selection = self.coordinator.evaluate(&inputs);
+        tracing::info!(
+            ?selection,
+            total_tokens,
+            block_size,
+            matched_tokens,
+            "decode_gnmt: policy decision"
+        );
+        match selection {
+            PrefillSelection::Local => {
+                tracing::info!(?inner_result, "decode_gnmt: Local — passthrough");
+                Ok(inner_result)
+            }
             PrefillSelection::Remote => {
                 let prefill_window = total_tokens.saturating_sub(num_computed_tokens);
                 let full_block_external_tokens = (prefill_window / block_size) * block_size;
+                tracing::info!(
+                    prefill_window,
+                    full_block_external_tokens,
+                    "decode_gnmt: Remote — sized window"
+                );
                 if full_block_external_tokens == 0 {
+                    tracing::info!(
+                        "decode_gnmt: Remote but no full block to send — passthrough"
+                    );
                     return Ok(inner_result);
                 }
 
                 if !self.inflight_budget.try_reserve(full_block_external_tokens) {
-                    tracing::debug!(
-                        request_id,
+                    tracing::warn!(
                         full_block_external_tokens,
                         available = self.inflight_available(),
-                        "remote prefill rejected: inflight token budget exhausted"
+                        "decode_gnmt: remote prefill rejected — inflight budget exhausted"
                     );
                     return Ok((None, false));
                 }
@@ -319,10 +344,15 @@ impl DecodeDisaggLeader {
                 if let Err(err) =
                     self.commit_gnmt_remote(request_id, full_block_external_tokens, &inputs)
                 {
+                    tracing::error!(error = %err, "decode_gnmt: commit_gnmt_remote failed");
                     self.inflight_budget.release(full_block_external_tokens);
                     return Err(err);
                 }
 
+                tracing::info!(
+                    full_block_external_tokens,
+                    "decode_gnmt: queued remote prefill — returning (Some(N), true)"
+                );
                 Ok((Some(full_block_external_tokens), true))
             }
         }
@@ -332,6 +362,7 @@ impl DecodeDisaggLeader {
     /// `coordinator.begin_remote_prefill` (which opens the session,
     /// commits + makes-available the local-match, and queues the
     /// request), and stash the wrapper's per-request CD state.
+    #[tracing::instrument(level = "info", skip(self, inputs), fields(role = ?self.role))]
     fn commit_gnmt_remote(
         &self,
         request_id: &str,
@@ -339,8 +370,18 @@ impl DecodeDisaggLeader {
         inputs: &PolicyInputs,
     ) -> Result<()> {
         let split = self.inner.slot_match_split(request_id)?;
+        tracing::info!(
+            local_match_blocks = split.local_match_blocks,
+            computed_blocks = split.computed_blocks,
+            total_blocks = split.total_blocks,
+            "commit_gnmt_remote: slot_match_split"
+        );
 
         let local_g2 = self.inner.take_local_match_g2_blocks(request_id)?;
+        tracing::info!(
+            local_g2_len = local_g2.len(),
+            "commit_gnmt_remote: took local-match G2 blocks"
+        );
         if local_g2.len() != split.local_match_blocks {
             anyhow::bail!(
                 "GNMT split says {} local-match blocks but find_session yielded {}",
@@ -373,6 +414,12 @@ impl DecodeDisaggLeader {
             .insert(request_id.to_string(), Arc::clone(&new_state));
 
         let initiator = self.inner.local_instance_id();
+        tracing::info!(
+            %initiator,
+            num_token_ids = token_ids.len(),
+            num_session_local_g2 = session_local_g2.len(),
+            "commit_gnmt_remote: begin_remote_prefill"
+        );
         match self.coordinator.begin_remote_prefill(
             request_id,
             inputs,
@@ -380,8 +427,15 @@ impl DecodeDisaggLeader {
             session_local_g2,
             token_ids,
         ) {
-            Ok(_) => Ok(()),
+            Ok(outcome) => {
+                tracing::info!(
+                    session_id = %outcome.session_id,
+                    "commit_gnmt_remote: begin_remote_prefill ok"
+                );
+                Ok(())
+            }
             Err(err) => {
+                tracing::error!(error = %err, "commit_gnmt_remote: begin_remote_prefill failed");
                 self.cd_request_state.remove(request_id);
                 Err(err)
             }

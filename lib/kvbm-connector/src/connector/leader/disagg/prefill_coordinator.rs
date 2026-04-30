@@ -419,12 +419,18 @@ impl PrefillCoordinatorImpl {
     /// commits, drain availability (pull each chunk as it lands),
     /// register pulled G2 blocks, kick onboard if USAA already
     /// arrived.
+    #[tracing::instrument(level = "info", skip(self, params, state), fields(initiator = %params.initiator_instance_id, session_id = %params.session_id))]
     async fn run_setup(
         self: Arc<Self>,
         request_id: String,
         params: RemotePrefillParams,
         state: Arc<RequestState>,
     ) -> Result<()> {
+        tracing::info!(
+            num_expected_hashes = state.expected_hashes.len(),
+            num_external_tokens = state.num_external_tokens,
+            "prefill run_setup: start"
+        );
         let endpoint = params.decode_endpoint.clone().ok_or_else(|| {
             anyhow!(
                 "RemotePrefillParams.decode_endpoint missing for {}",
@@ -440,6 +446,7 @@ impl PrefillCoordinatorImpl {
         //     vary, the local cache makes the call site idempotent
         //     regardless.
         if !self.known_peers.contains(&params.initiator_instance_id) {
+            tracing::info!("prefill run_setup: resolving decode peer via hub");
             self.peer_resolver
                 .resolve_and_register(params.initiator_instance_id)
                 .await
@@ -450,14 +457,17 @@ impl PrefillCoordinatorImpl {
                     )
                 })?;
             self.known_peers.insert(params.initiator_instance_id);
+            tracing::info!("prefill run_setup: peer registered");
         }
 
         // 1b. Attach.
+        tracing::info!("prefill run_setup: factory.attach");
         let session = self
             .session_factory
             .attach(params.session_id, params.initiator_instance_id, endpoint)
             .await?;
         *state.session.lock() = Some(Arc::clone(&session));
+        tracing::info!("prefill run_setup: attached, draining commits");
 
         // 2. Drain commit stream until Closed (or until we have
         //    the expected set). Informational; the coordinator
@@ -468,18 +478,33 @@ impl PrefillCoordinatorImpl {
         while let Some(d) = commits.next().await {
             match d {
                 CommitDelta::Added(hashes) => {
+                    let n = hashes.len();
                     for h in hashes {
                         commit_seen.insert(h);
                     }
+                    tracing::info!(
+                        added = n,
+                        seen = commit_seen.len(),
+                        expected = expected_count,
+                        "prefill run_setup: commits Added"
+                    );
                     if commit_seen.len() >= expected_count {
                         // Don't break — peer may still send Closed,
                         // but we have what we need to plan against.
                         break;
                     }
                 }
-                CommitDelta::Closed => break,
+                CommitDelta::Closed => {
+                    tracing::info!(
+                        seen = commit_seen.len(),
+                        expected = expected_count,
+                        "prefill run_setup: commits Closed"
+                    );
+                    break;
+                }
             }
         }
+        tracing::info!("prefill run_setup: commits drained, draining availability");
 
         // 3. Drain availability and pull chunks as they land.
         *state.status.lock() = PrefillStatus::Pulling;
@@ -495,6 +520,11 @@ impl PrefillCoordinatorImpl {
                         .into_iter()
                         .filter(|b| remaining.contains(&b.hash))
                         .collect();
+                    tracing::info!(
+                        chunk_size = chunk.len(),
+                        remaining_before = remaining.len(),
+                        "prefill run_setup: availability Available chunk"
+                    );
                     if chunk.is_empty() {
                         continue;
                     }
@@ -509,15 +539,30 @@ impl PrefillCoordinatorImpl {
                     for b in registered.iter() {
                         remaining.remove(&b.sequence_hash());
                     }
+                    tracing::info!(
+                        registered = registered.len(),
+                        remaining_after = remaining.len(),
+                        "prefill run_setup: chunk pulled+registered"
+                    );
                     if remaining.is_empty() {
                         break;
                     }
                 }
-                AvailabilityDelta::Drained => break,
+                AvailabilityDelta::Drained => {
+                    tracing::info!(
+                        remaining = remaining.len(),
+                        "prefill run_setup: availability Drained"
+                    );
+                    break;
+                }
             }
         }
 
         if !remaining.is_empty() {
+            tracing::error!(
+                remaining = remaining.len(),
+                "prefill run_setup: availability drained with hashes still missing"
+            );
             anyhow::bail!(
                 "availability drained with {} hashes still missing for {}",
                 remaining.len(),
@@ -527,11 +572,18 @@ impl PrefillCoordinatorImpl {
 
         *state.status.lock() = PrefillStatus::Registered;
         state.pulls_complete.store(true, Ordering::Release);
+        tracing::info!("prefill run_setup: all pulls complete, marking registered");
 
         // 4. If USAA already happened, kick onboard now.
         let g1 = state.pending_g1.lock().take();
         if let Some(g1_ids) = g1 {
+            tracing::info!(
+                num_g1 = g1_ids.len(),
+                "prefill run_setup: USAA already arrived, kicking onboard"
+            );
             self.kick_onboard(&request_id, &state, g1_ids).await?;
+        } else {
+            tracing::info!("prefill run_setup: awaiting USAA for onboard kick");
         }
 
         Ok(())

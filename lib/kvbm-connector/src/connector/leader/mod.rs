@@ -297,6 +297,11 @@ impl ConnectorLeader {
     /// Non-destructive — does not consume G2 blocks. The wrapper uses this
     /// to decide how many of the vLLM-allocated G1 blocks point at
     /// already-resident local data versus remote-prefill output.
+    ///
+    /// Slots whose inner GNMT yielded zero local matches don't have an
+    /// onboarding state installed — for those the split is degenerate
+    /// (`local_match_blocks=0`, `computed_blocks=0`) and the wrapper can
+    /// still proceed with a fully-remote prefill.
     #[allow(dead_code)]
     pub(crate) fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit> {
         let slot = self.get_slot(request_id)?;
@@ -305,21 +310,18 @@ impl ConnectorLeader {
         let total_blocks = slot.sequence.blocks().len();
         let all_sequence_hashes = slot.all_sequence_hashes();
 
-        let onboarding = slot
-            .onboarding_state()
-            .ok_or_else(|| anyhow!("slot {} has no active onboarding state", request_id))?;
-        let breakdown = onboarding.find_session.match_breakdown();
-        let local_match_blocks =
-            breakdown.host_blocks + breakdown.disk_blocks + breakdown.object_blocks;
-        let computed_blocks = onboarding.num_computed_tokens / block_size;
+        let onboarding = slot.onboarding_state().map(|o| {
+            let breakdown = o.find_session.match_breakdown();
+            let local = breakdown.host_blocks + breakdown.disk_blocks + breakdown.object_blocks;
+            (local, o.num_computed_tokens)
+        });
 
-        Ok(SlotMatchSplit {
+        Ok(compute_slot_match_split(
             block_size,
-            computed_blocks,
-            local_match_blocks,
             total_blocks,
             all_sequence_hashes,
-        })
+            onboarding,
+        ))
     }
 
     /// Take ownership of the local-match G2 blocks staged by the slot's
@@ -329,6 +331,10 @@ impl ConnectorLeader {
     /// G2 blocks left to give. The wrapper hands these to
     /// [`CdBlockTransport::local_g2_to_g1`] for the matched portion of the
     /// G1 destination slice.
+    ///
+    /// Returns an empty vec when the slot has no onboarding state — that
+    /// case corresponds to a 0-local-match request (fully remote prefill);
+    /// there's no G2 to take. Mirrors `slot_match_split`'s degenerate case.
     #[allow(dead_code)]
     pub(crate) fn take_local_match_g2_blocks(
         &self,
@@ -336,12 +342,9 @@ impl ConnectorLeader {
     ) -> Result<Vec<ImmutableBlock<G2>>> {
         let slot = self.get_slot(request_id)?;
         let mut slot = slot.lock();
-        let onboarding = slot.onboarding_state_mut().ok_or_else(|| {
-            anyhow!(
-                "slot {} has no active onboarding state for take_local_match_g2_blocks",
-                request_id
-            )
-        })?;
+        let Some(onboarding) = slot.onboarding_state_mut() else {
+            return Ok(Vec::new());
+        };
         onboarding
             .find_session
             .take_g2_blocks()
@@ -460,6 +463,31 @@ pub struct SlotMatchSplit {
     pub local_match_blocks: usize,
     pub total_blocks: usize,
     pub all_sequence_hashes: Vec<crate::SequenceHash>,
+}
+
+/// Pure split-computation. Extracted for unit-testing the
+/// no-onboarding-state degenerate case (cold-cache prefill request)
+/// without standing up a full `ConnectorLeader` fixture.
+///
+/// `onboarding` carries `(local_match_blocks, num_computed_tokens)`
+/// when the slot has an onboarding state attached, `None` otherwise.
+fn compute_slot_match_split(
+    block_size: usize,
+    total_blocks: usize,
+    all_sequence_hashes: Vec<crate::SequenceHash>,
+    onboarding: Option<(usize, usize)>,
+) -> SlotMatchSplit {
+    let (local_match_blocks, computed_blocks) = match onboarding {
+        Some((local, num_computed)) => (local, num_computed / block_size),
+        None => (0, 0),
+    };
+    SlotMatchSplit {
+        block_size,
+        computed_blocks,
+        local_match_blocks,
+        total_blocks,
+        all_sequence_hashes,
+    }
 }
 
 #[allow(dead_code)]
@@ -993,5 +1021,67 @@ impl Deref for ConnectorLeader {
 
     fn deref(&self) -> &Self::Target {
         self.instance_leader.get().expect("InstanceLeader not set")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SequenceHash;
+
+    /// Regression for the B.2 disagg-bringup smoke failure:
+    /// `commit_gnmt_remote → slot_match_split` panicked with
+    /// "slot has no active onboarding state" on cold-cache requests
+    /// because the inner GNMT path doesn't install onboarding state
+    /// when there's nothing to match locally. The wrapper must still
+    /// be able to compute a (degenerate) split and proceed with a
+    /// fully-remote prefill.
+    #[test]
+    fn slot_match_split_handles_no_onboarding_state() {
+        let block_size = 16;
+        let total_blocks = 8;
+        let hashes: Vec<SequenceHash> = (0..total_blocks)
+            .map(|i| SequenceHash::new(i as u64, None, i as u64))
+            .collect();
+
+        // No onboarding state — the cold-cache path that crashed.
+        let split =
+            compute_slot_match_split(block_size, total_blocks, hashes.clone(), None);
+
+        assert_eq!(split.local_match_blocks, 0);
+        assert_eq!(split.computed_blocks, 0);
+        assert_eq!(split.total_blocks, total_blocks);
+        assert_eq!(split.block_size, block_size);
+        assert_eq!(split.all_sequence_hashes, hashes);
+        // The wrapper relies on these range helpers for slicing the
+        // prefill request — confirm they're sensible in the
+        // degenerate case.
+        assert_eq!(split.local_match_range(), 0..0);
+        assert_eq!(split.remote_range(), 0..total_blocks);
+        assert_eq!(split.remote_blocks(), total_blocks);
+    }
+
+    /// Onboarding-state present: split reflects local + computed.
+    #[test]
+    fn slot_match_split_with_onboarding_state() {
+        let block_size = 16;
+        let total_blocks = 10;
+        let hashes: Vec<SequenceHash> = (0..total_blocks)
+            .map(|i| SequenceHash::new(i as u64, None, i as u64))
+            .collect();
+
+        // 2 blocks already computed (32 tokens), 3 blocks matched locally.
+        let split = compute_slot_match_split(
+            block_size,
+            total_blocks,
+            hashes.clone(),
+            Some((3, 32)),
+        );
+
+        assert_eq!(split.computed_blocks, 2);
+        assert_eq!(split.local_match_blocks, 3);
+        assert_eq!(split.local_match_range(), 2..5);
+        assert_eq!(split.remote_range(), 5..total_blocks);
+        assert_eq!(split.remote_blocks(), 5);
     }
 }

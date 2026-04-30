@@ -354,3 +354,54 @@ async fn pull_validation_synchronous_error() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Case: sync trait methods invoked from a non-Tokio caller
+// ============================================================================
+//
+// Regression for B.2 smoke failure: vLLM's scheduler calls
+// `connector.update_state_after_alloc` (and other sync hooks) from a
+// thread that has no current Tokio runtime. The CD wrapper layer
+// reaches `VeloSession::commit / make_available / finish_commits /
+// finish_availability / close`, all of which used `Handle::current()`
+// to spawn outbound sends — which panics outside a runtime context.
+//
+// This test exercises the lifecycle from a `std::thread::spawn` (no
+// tokio context) and asserts none of the sync trait methods panic.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sync_methods_callable_from_non_tokio_thread() -> Result<()> {
+    let (h, _p) = paired_sides().await;
+    let session_id = uuid::Uuid::new_v4();
+    let session = h.factory.open(session_id)?;
+
+    let g2_manager = h.g2_manager.clone();
+    let blocks = make_blocks(&g2_manager, 2, 700);
+    let hashes: Vec<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+
+    // Move the session into a non-tokio thread and exercise every
+    // sync trait method that previously called Handle::current().
+    let join = std::thread::spawn(move || -> std::result::Result<(), String> {
+        // commit + make_available — both spawn outbound sends.
+        session
+            .commit(hashes.clone())
+            .map_err(|e| format!("commit: {e}"))?;
+        session
+            .make_available(blocks)
+            .map_err(|e| format!("make_available: {e}"))?;
+        session
+            .finish_commits()
+            .map_err(|e| format!("finish_commits: {e}"))?;
+        session
+            .finish_availability()
+            .map_err(|e| format!("finish_availability: {e}"))?;
+        session.close(Some("non-tokio close".to_string()));
+        Ok(())
+    });
+
+    // Surface the worker-thread panic with a clear message instead of
+    // the cryptic JoinError.
+    let result = join.join().expect("worker thread panicked — sync methods must not require Handle::current()");
+    result.map_err(|e| anyhow::anyhow!("sync method failed: {}", e))?;
+    Ok(())
+}

@@ -94,6 +94,7 @@ impl RemotePrefillCoordinator {
     /// from us).  This is the symmetric meaning the new
     /// `Session` API enforces — the prefill side reads it as
     /// `params.sequence_hashes.len() * block_size == external`.
+    #[tracing::instrument(level = "info", skip(self, inputs, local_match_g2, token_ids))]
     pub fn begin_remote_prefill(
         self: &Arc<Self>,
         request_id: &str,
@@ -102,6 +103,13 @@ impl RemotePrefillCoordinator {
         local_match_g2: Vec<ImmutableBlock<G2>>,
         token_ids: Vec<u32>,
     ) -> Result<BeginOutcome> {
+        tracing::info!(
+            num_local_match = local_match_g2.len(),
+            num_token_ids = token_ids.len(),
+            num_computed_tokens = inputs.num_computed_tokens,
+            %initiator_instance_id,
+            "begin_remote_prefill"
+        );
         if self.states.contains_key(request_id) {
             anyhow::bail!(
                 "begin_remote_prefill called twice for request_id={}",
@@ -114,6 +122,7 @@ impl RemotePrefillCoordinator {
 
         let session_id = uuid::Uuid::new_v4();
         let session = self.session_factory.open(session_id)?;
+        tracing::info!(%session_id, "session opened (holder side)");
 
         // Holder side: publish the committed set + make blocks
         // available, then close both terminator streams.  Decode
@@ -133,12 +142,15 @@ impl RemotePrefillCoordinator {
         self.states
             .insert(request_id.to_string(), Arc::new(Mutex::new(state)));
 
+        let endpoint = session.endpoint();
+        tracing::info!(?endpoint, "decode endpoint published; enqueueing remote prefill request");
+
         let request = RemotePrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: request_id.to_string(),
             session_id,
             initiator_instance_id,
-            decode_endpoint: session.endpoint(),
+            decode_endpoint: endpoint,
             sequence_hashes: local_match_hashes,
             token_ids,
             num_computed_tokens: inputs.num_computed_tokens,
@@ -152,10 +164,23 @@ impl RemotePrefillCoordinator {
         let request_id_owned = request_id.to_string();
         let queue = Arc::clone(&self.queue);
         self.tokio_handle.spawn(async move {
-            if let Err(err) = queue.enqueue(request).await {
-                let reason = format!("remote prefill enqueue failed: {err}");
-                tracing::error!(request_id = request_id_owned, error = %err, "enqueue failed");
-                coord.mark_failed(&request_id_owned, reason);
+            tracing::info!(request_id = request_id_owned, "enqueue remote prefill on hub");
+            match queue.enqueue(request).await {
+                Ok(()) => {
+                    tracing::info!(
+                        request_id = request_id_owned,
+                        "enqueue ok — awaiting prefill peer pull"
+                    );
+                }
+                Err(err) => {
+                    let reason = format!("remote prefill enqueue failed: {err}");
+                    tracing::error!(
+                        request_id = request_id_owned,
+                        error = %err,
+                        "enqueue failed"
+                    );
+                    coord.mark_failed(&request_id_owned, reason);
+                }
             }
         });
 

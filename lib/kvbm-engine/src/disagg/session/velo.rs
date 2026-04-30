@@ -153,6 +153,16 @@ struct VeloSessionInner {
 
     /// Set when monitor detects shutdown, used to short-circuit.
     closed: Mutex<bool>,
+
+    /// Owned tokio `Handle` for spawning outbound sends.
+    ///
+    /// Sync trait methods (`commit`, `make_available`, `finish_*`,
+    /// `close`) may be invoked from a thread that has no current
+    /// tokio runtime — e.g. vLLM's scheduler calling into the
+    /// connector via PyO3. Using `Handle::current()` panics in that
+    /// case; this owned handle (provided by the factory) lets those
+    /// methods spawn safely from any caller context.
+    runtime: Handle,
 }
 
 // ============================================================================
@@ -182,6 +192,7 @@ impl VeloSession {
         velo: Arc<velo::Velo>,
         leader: Arc<InstanceLeader>,
         local_endpoint: Option<SessionEndpoint>,
+        runtime: Handle,
     ) -> Arc<VeloSessionInner> {
         Arc::new(VeloSessionInner {
             session_id,
@@ -204,6 +215,7 @@ impl VeloSession {
             commits_closed: Mutex::new(false),
             avail_drained: Mutex::new(false),
             closed: Mutex::new(false),
+            runtime,
         })
     }
 
@@ -377,7 +389,7 @@ impl VeloSession {
     /// connection.
     #[cfg(any(test, feature = "testing"))]
     pub fn test_inject_inbound_frame(&self, frame: Frame) {
-        dispatch_frame(&self.inner, frame, &Handle::current());
+        dispatch_frame(&self.inner, frame, &self.inner.runtime);
     }
 
     /// Test-only: count of pins currently held in
@@ -533,7 +545,7 @@ impl Session for VeloSession {
         let frame = Frame::Commit { hashes };
         // Spawn-send so commit is non-blocking; if the outbound
         // isn't yet installed, the spawned task will wait.
-        let runtime = Handle::current();
+        let runtime = self.inner.runtime.clone();
         runtime.spawn(async move {
             if let Err(err) = session.send_frame(frame).await {
                 tracing::error!(error = %err, "send Commit failed");
@@ -551,7 +563,7 @@ impl Session for VeloSession {
             *closed = true;
         }
         let session = self.clone();
-        let runtime = Handle::current();
+        let runtime = self.inner.runtime.clone();
         runtime.spawn(async move {
             if let Err(err) = session.send_frame(Frame::CommitsClosed).await {
                 tracing::error!(error = %err, "send CommitsClosed failed");
@@ -592,7 +604,7 @@ impl Session for VeloSession {
         }
 
         let session = self.clone();
-        let runtime = Handle::current();
+        let runtime = self.inner.runtime.clone();
         runtime.spawn(async move {
             if let Err(err) = session
                 .send_frame(Frame::Available { blocks: payload })
@@ -613,7 +625,7 @@ impl Session for VeloSession {
             *drained = true;
         }
         let session = self.clone();
-        let runtime = Handle::current();
+        let runtime = self.inner.runtime.clone();
         runtime.spawn(async move {
             if let Err(err) = session.send_frame(Frame::Drained).await {
                 tracing::error!(error = %err, "send Drained failed");
@@ -765,7 +777,7 @@ impl Session for VeloSession {
 
     fn close(&self, reason: Option<String>) {
         let session = self.clone();
-        let runtime = Handle::current();
+        let runtime = self.inner.runtime.clone();
         runtime.spawn(async move {
             // close() implies finish_commits + finish_availability —
             // send terminators on the wire if not already sent so the
@@ -865,6 +877,7 @@ impl VeloSessionFactory {
             Arc::clone(&self.velo),
             Arc::clone(&self.leader),
             Some(endpoint),
+            self.runtime.clone(),
         );
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
         Ok(Arc::new(VeloSession { inner }))
@@ -880,6 +893,7 @@ impl SessionFactory for VeloSessionFactory {
             Arc::clone(&self.velo),
             Arc::clone(&self.leader),
             Some(endpoint),
+            self.runtime.clone(),
         );
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
         Ok(Arc::new(VeloSession { inner }))
@@ -939,6 +953,7 @@ impl SessionFactory for VeloSessionFactory {
                 Arc::clone(&velo),
                 leader,
                 Some(local_endpoint.clone()),
+                runtime.clone(),
             );
             // Puller knows peer's identity out-of-band.
             *inner.peer_instance_id.lock() = Some(peer_instance_id);
