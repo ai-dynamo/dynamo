@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal extra-engine-args used by router e2e tests that run dynamo.trtllm
+# in disaggregated mode. TRT-LLM 1.3+ asserts that a transceiver backend is
+# configured whenever disaggregation is active; without this the first
+# request fails with "kv_cache_transceiver is disabled".
+cache_transceiver_config:
+  backend: DEFAULT

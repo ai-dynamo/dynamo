@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 TRTLLM_BLOCK_SIZE = 32  # fixed internally to 32
 
+# YAML supplying cache_transceiver_config; required by TRT-LLM whenever
+# --disaggregation-mode is set, otherwise the engine asserts on the first
+# request with "kv_cache_transceiver is disabled".
+DISAGG_EXTRA_ENGINE_ARGS = os.path.join(
+    os.path.dirname(__file__), "configs", "trtllm_disagg_transceiver.yaml"
+)
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.router,
@@ -151,6 +158,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
+                command.extend(["--extra-engine-args", DISAGG_EXTRA_ENGINE_ARGS])
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if free_gpu_memory_fraction is not None:
@@ -302,7 +310,6 @@ def test_router_decisions_trtllm_multiple_workers(
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2609")
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
