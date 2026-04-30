@@ -53,20 +53,23 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
                     return Some(format!("[{}]", matches.join(",")));
                 }
             }
-            // Recovery: outer end-token absent (max_tokens / EOS truncation). If
-            // the start token is present and the trailing slice looks like JSON,
-            // treat EOF as the end token. Downstream `serde_json::from_str` is
-            // the validator: well-formed payloads recover, malformed ones still
-            // fall through to the normal-text path.
-            if let Some(start_pos) = input.find(start_token) {
-                let tail = input[start_pos + start_token.len()..].trim();
-                if tail.starts_with('{') || tail.starts_with('[') {
-                    return Some(tail.to_string());
-                }
-            }
             None
         }
         Err(_) => None,
+    }
+}
+
+/// EOF-as-end-token recovery — finalize-only path. Returns the JSON-looking
+/// tail after `start_token` when the outer end-token never arrived. Gated on
+/// `JsonParserConfig::allow_eof_recovery` so streaming early-exit doesn't
+/// fire mid-stream before the end-token has shown up.
+fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Option<String> {
+    let start_pos = input.find(start_token)?;
+    let tail = input[start_pos + start_token.len()..].trim();
+    if tail.starts_with('{') || tail.starts_with('[') {
+        Some(tail.to_string())
+    } else {
+        None
     }
 }
 
@@ -298,7 +301,17 @@ pub fn try_tool_call_parse_basic_json(
                     }
                     (false, false) => {
                         // Start and end token case
-                        let result = extract_tool_call_content(&json, start_token, end_token);
+                        let mut result = extract_tool_call_content(&json, start_token, end_token);
+                        // EOF recovery: only when explicitly opted in (finalize
+                        // path). Streaming jails leave `allow_eof_recovery=false`
+                        // so the parser doesn't claim a complete call before
+                        // the end-token has actually arrived.
+                        if result.is_none()
+                            && config.allow_eof_recovery
+                            && json.contains(start_token.as_str())
+                        {
+                            result = extract_tool_call_content_eof_recovery(&json, start_token);
+                        }
                         if let Some(content) = result {
                             // Check if we found a start token but got empty JSON back
                             // This indicates the token was found but no valid JSON followed
@@ -391,8 +404,12 @@ pub fn try_tool_call_parse_basic_json(
     }
 
     // Truncation recovery: balance unclosed strings/braces (common
-    // max_tokens / EOS pattern) and retry the same three parses.
-    if let Some(repaired) = try_repair_truncated_json(json) {
+    // max_tokens / EOS pattern) and retry the same three parses. Gated on
+    // `allow_eof_recovery` so streaming jails don't claim a complete tool
+    // call while the model is still emitting JSON tokens.
+    if config.allow_eof_recovery
+        && let Some(repaired) = try_repair_truncated_json(json)
+    {
         let repaired = repaired.as_str();
         if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(repaired) {
             return Ok((

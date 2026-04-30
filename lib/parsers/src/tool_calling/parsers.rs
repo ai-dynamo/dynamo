@@ -115,6 +115,54 @@ pub async fn try_tool_call_parse(
     }
 }
 
+/// Same as [`detect_and_parse_tool_call`] but flips `allow_eof_recovery=true`
+/// on the JSON / XML / GLM-4.7 configs so finalize / non-streaming aggregate
+/// paths recover from missing-end-token / truncated-JSON instead of silently
+/// dropping the call. Streaming jails MUST keep using the non-recovery
+/// variant — otherwise `should_exit_jail_early` fires before the end-token
+/// has actually arrived (see jail.rs).
+pub async fn detect_and_parse_tool_call_with_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    let parser_map = get_tool_parser_map();
+    let parser_key = match parser_str {
+        Some(s) if !s.is_empty() => s,
+        _ => "default",
+    };
+    let base = parser_map.get(parser_key).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Parser '{}' is not implemented. Available parsers: {:?}",
+            parser_key,
+            get_available_tool_parsers()
+        )
+    })?;
+    let recovery_config = match &base.parser_config {
+        ParserConfig::Json(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Json(c)
+        }
+        ParserConfig::Xml(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Xml(c)
+        }
+        ParserConfig::Glm47(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Glm47(c)
+        }
+        // Other parsers don't have an EOF-recovery flag — pass through.
+        other => other.clone(),
+    };
+    let cfg = ToolCallConfig {
+        parser_config: recovery_config,
+    };
+    try_tool_call_parse(message, &cfg, tools).await
+}
+
 // Base Detector to call for all tool parsing
 pub async fn detect_and_parse_tool_call(
     message: &str,

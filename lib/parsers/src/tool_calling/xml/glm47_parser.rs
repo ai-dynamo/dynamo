@@ -105,13 +105,13 @@ fn extract_tool_calls(
                 cursor = abs_end;
             } else {
                 // Recovery: outer </tool_call> absent (max_tokens / EOS
-                // truncation). Only attempt recovery when the trailing slice
-                // contains an `<arg_key>` opener — that's the structural
-                // signal a real tool call was emitted, so we don't promote
-                // plain text that happens to start with `<tool_call>`.
+                // truncation). Gated on `allow_eof_recovery` so streaming
+                // early-exit doesn't fire mid-stream. Also requires an
+                // `<arg_key>` opener in the trailing slice as the structural
+                // signal that a real tool call was emitted.
                 let block = &text[abs_start..];
                 let arg_key_start = &config.arg_key_start;
-                if block.contains(arg_key_start.as_str()) {
+                if config.allow_eof_recovery && block.contains(arg_key_start.as_str()) {
                     match parse_tool_call_block(block, config, tools) {
                         Ok(parsed_call) => {
                             calls.push(parsed_call);
@@ -475,7 +475,10 @@ mod tests {
     // that happens to start with `<tool_call>` is still preserved verbatim.
     #[test] // CASE.5
     fn test_parse_no_end_tag_complete_args_recovers() {
-        let config = get_test_config();
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
         // Args complete, only outer </tool_call> missing.
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>";
 
@@ -488,7 +491,10 @@ mod tests {
 
     #[test] // CASE.5
     fn test_parse_no_end_tag_multiple_calls_recovers() {
-        let config = get_test_config();
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
         // Two complete inner calls, missing only the trailing </tool_call> on the second.
         let message = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>EST</arg_value>";
 

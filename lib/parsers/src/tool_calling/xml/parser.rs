@@ -139,14 +139,16 @@ fn extract_tool_calls(
                 cursor = abs_end;
             } else {
                 // Recovery: outer end token absent (max_tokens / EOS truncation).
-                // Only attempt recovery when the trailing slice contains a
-                // function-start opener — that's the structural signal a real
-                // tool call was emitted, so plain text starting with
+                // Gated on `allow_eof_recovery` so streaming early-exit doesn't
+                // fire mid-stream. Recovery also requires the trailing slice
+                // to contain a function-start opener — structural signal that
+                // a real tool call was emitted, so plain text starting with
                 // `<tool_call>` is preserved verbatim.
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
                 let function_end = &config.function_end_token;
-                if block.contains(function_start.as_str())
+                if config.allow_eof_recovery
+                    && block.contains(function_start.as_str())
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
                 {
@@ -938,7 +940,11 @@ NYC
 </parameter>
 </function>"#;
 
-        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        let config = XmlParserConfig {
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
@@ -952,8 +958,11 @@ NYC
     fn test_parse_qwen3_no_outer_close_preserves_suffix() {
         let input = "<tool_call>\n<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\nTRAILING NOTE";
 
-        let (calls, normal) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        let config = XmlParserConfig {
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, normal) = try_tool_call_parse_xml(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         let normal = normal.unwrap_or_default();
         assert!(
@@ -971,6 +980,7 @@ NYC
             function_end_token: "</invoke>".to_string(),
             parameter_start_token: "<parameter name=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: true,
         };
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
 

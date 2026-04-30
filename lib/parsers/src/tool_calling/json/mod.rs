@@ -158,6 +158,7 @@ mod tests {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            allow_eof_recovery: true,
             ..Default::default()
         };
         // JSON array fully complete; only outer </TOOLCALL> missing.
@@ -202,6 +203,7 @@ mod tests {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            allow_eof_recovery: true,
             ..Default::default()
         };
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC</TOOLCALL>"#;
