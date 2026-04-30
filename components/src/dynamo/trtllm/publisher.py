@@ -591,8 +591,11 @@ class Publisher:
 
     def _disable_fpm_publisher(self) -> None:
         """Shut down ``self.fpm_publisher`` (best effort) and None it out."""
+        publisher = self.fpm_publisher
+        if publisher is None:
+            return
         try:
-            self.fpm_publisher.shutdown()
+            publisher.shutdown()
         except RuntimeError as e:
             logging.warning(
                 f"FpmDirectPublisher shutdown after schema mismatch failed: {e}"
