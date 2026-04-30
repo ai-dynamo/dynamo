@@ -329,9 +329,7 @@ def _longest_grove_combined_length(
         # where N = node_count - 1 for multinode GMS.
         longest_pclq = f"{lower}-{_GROVE_ROLE_SUFFIX_GMS}-0"
         if is_multinode:
-            worker_pclq = (
-                f"{lower}-{_GROVE_ROLE_SUFFIX_WORKER}-{node_count - 1}"
-            )
+            worker_pclq = f"{lower}-{_GROVE_ROLE_SUFFIX_WORKER}-{node_count - 1}"
             if len(worker_pclq) > len(longest_pclq):
                 longest_pclq = worker_pclq
         combined = len(dgd_name) + len(lower) + len(longest_pclq)
@@ -352,9 +350,7 @@ def _longest_grove_combined_length(
 
     # Single-node, non-GMS: only DGD + PodClique.
     combined = len(dgd_name) + len(lower)
-    formula = (
-        f"DGD ({len(dgd_name)}) + PodClique '{lower}' ({len(lower)})"
-    )
+    formula = f"DGD ({len(dgd_name)}) + PodClique '{lower}' ({len(lower)})"
     return combined, formula
 
 
@@ -396,9 +392,7 @@ def _validate_dgd_service_name_lengths(
     services = dgd_spec.get("spec", {}).get("services", {})
     violations = []
     for svc_name, svc_spec in services.items():
-        combined, formula = _longest_grove_combined_length(
-            dgd_name, svc_name, svc_spec
-        )
+        combined, formula = _longest_grove_combined_length(dgd_name, svc_name, svc_spec)
         if combined > _MAX_COMBINED_RESOURCE_NAME_LENGTH:
             violations.append(f"'{svc_name}': {formula} = {combined}")
 

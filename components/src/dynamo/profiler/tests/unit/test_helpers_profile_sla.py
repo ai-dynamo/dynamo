@@ -1259,9 +1259,7 @@ class TestValidateDgdServiceNameLengths:
             backend="trtllm",
             hardware=HardwareSpec(totalGpus=1),
             model="meta-llama/Llama-2-7b",
-            overrides=OverridesSpec(
-                dgd={"metadata": {"name": "trtllm-disagg"}}
-            ),
+            overrides=OverridesSpec(dgd={"metadata": {"name": "trtllm-disagg"}}),
         )
         config = {
             "spec": {
@@ -1291,11 +1289,7 @@ class TestValidateDgdServiceNameLengths:
             model="meta-llama/Llama-2-7b",
             overrides=OverridesSpec(dgd={"metadata": {"name": "short"}}),
         )
-        config = {
-            "spec": {
-                "services": {"decode": {"multinode": {"nodeCount": 4}}}
-            }
-        }
+        config = {"spec": {"services": {"decode": {"multinode": {"nodeCount": 4}}}}}
         _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
 
     def test_gms_uses_longest_podclique_with_high_node_count(self, monkeypatch):
@@ -1414,9 +1408,7 @@ class TestValidateDgdServiceNameLengths:
             backend="trtllm",
             hardware=HardwareSpec(totalGpus=1),
             model="meta-llama/Llama-2-7b",
-            overrides=OverridesSpec(
-                dgd={"metadata": {"name": "trtllm-disagg"}}
-            ),
+            overrides=OverridesSpec(dgd={"metadata": {"name": "trtllm-disagg"}}),
         )
         config = {
             "spec": {
