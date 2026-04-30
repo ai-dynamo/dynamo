@@ -212,6 +212,12 @@ class ZmqKvEventPublisher:
 class ManagedThread(threading.Thread):
     """
     A thread that runs a task and handles errors.
+
+    Each ManagedThread owns a private asyncio event loop. Previously the thread
+    submitted its coroutine to a captured request-handler loop via
+    run_coroutine_threadsafe(), making publisher work compete with HTTP request
+    handling on the same event loop. Now the publisher's polling work runs on
+    a dedicated loop in a real OS thread, decoupled from the request loop.
     """
 
     def __init__(
@@ -226,59 +232,86 @@ class ManagedThread(threading.Thread):
         self.task = task
         self.error_queue = error_queue
         self.kwargs = kwargs
+        # `loop` is accepted for ABI compatibility but is no longer used: the
+        # thread constructs and owns its own loop in run().
         self.loop = loop
         self.daemon = True
-        self._current_future: Optional[concurrent.futures.Future] = None
+        self._owned_loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._stop_event = threading.Event()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        # ABI-preserving no-op; see class docstring.
         self.loop = loop
 
     def run(self) -> None:
-        while not self._stop_event.is_set():
-            task: Optional[
-                Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]
-            ] = self.task
-            if isinstance(task, weakref.WeakMethod):
-                task = task()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._owned_loop = loop
+
+        try:
+            while not self._stop_event.is_set():
+                task: Optional[
+                    Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]
+                ] = self.task
+                if isinstance(task, weakref.WeakMethod):
+                    task = task()
+                    if task is None:
+                        # Normally, this should not happen.
+                        logging.warning("WeakMethod is expired.")
+                        break
+
                 if task is None:
-                    # Normally, this should not happen.
-                    logging.warning("WeakMethod is expired.")
                     break
 
-            if task is None:
-                break
+                try:
+                    coro = task(**self.kwargs)
+                    if not asyncio.iscoroutine(coro):
+                        logging.error(f"Task {task} did not return a coroutine")
+                        break
 
+                    loop.run_until_complete(coro)
+                except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                    logging.debug(f"Thread {self.name} was cancelled")
+                    break
+                except Exception as e:
+                    logging.error(
+                        f"Error in thread {self.name}: {e}\n{traceback.format_exc()}"
+                    )
+                    if self.error_queue is not None:
+                        self.error_queue.put(e)
+        finally:
             try:
-                if self.loop is None:
-                    logging.error("[ManagedThread] Loop not initialized!")
-                    break
-
-                # Call the task function to get the coroutine
-                coro = task(**self.kwargs)
-                if not asyncio.iscoroutine(coro):
-                    logging.error(f"Task {task} did not return a coroutine")
-                    break
-
-                self._current_future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-                _ = self._current_future.result()
-            except (asyncio.CancelledError, concurrent.futures.CancelledError):
-                logging.debug(f"Thread {self.name} was cancelled")
-                break
-            except Exception as e:
-                logging.error(
-                    f"Error in thread {self.name}: {e}\n{traceback.format_exc()}"
-                )
-                if self.error_queue is not None:
-                    self.error_queue.put(e)
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
+            self._owned_loop = None
 
         logging.info(f"Thread {self.name} stopped.")
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._current_future and not self._current_future.done():
-            self._current_future.cancel()
+        # If the owned loop is still alive, schedule a task cancellation onto it
+        # so any in-flight polling coroutine breaks out of `await sleep()`. This
+        # is only needed when the upstream Publisher._stop_event hasn't been set
+        # before stop() — normally cleanup() sets that first and the coroutine
+        # exits naturally on its next iteration check.
+        owned_loop = self._owned_loop
+        if owned_loop is not None and not owned_loop.is_closed():
+            try:
+                owned_loop.call_soon_threadsafe(self._cancel_running_tasks)
+            except RuntimeError:
+                # Loop already stopped/closed; nothing more to do.
+                pass
+
+    def _cancel_running_tasks(self) -> None:
+        """Cancel any running task on the owned loop. Runs in the loop's thread."""
+        loop = self._owned_loop
+        if loop is None:
+            return
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
 
 
 class Publisher:
@@ -685,20 +718,18 @@ class Publisher:
             self.update_max_window_size(event)
 
     def start(self) -> None:
+        # Each ManagedThread owns its own asyncio loop now, so we no longer
+        # capture the request-handler loop and pass it via set_loop(). The
+        # threads run their polling coroutines on private loops, off the
+        # request loop.
         if (
             self.publish_kv_cache_events_thread
             and not self.publish_kv_cache_events_thread.is_alive()
         ):
-            # REVISIT
-            # [NOTE:] TRTLLM needs the stats to be collected on the same loop as the request handler.
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_kv_cache_events_thread.set_loop(self._stats_loop)
             self.publish_kv_cache_events_thread.start()
             logging.debug("Started kv cache events thread")
 
         if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_stats_thread.set_loop(self._stats_loop)
             self.publish_stats_thread.start()
             logging.debug("Started stats thread")
 
