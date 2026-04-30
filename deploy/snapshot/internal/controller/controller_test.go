@@ -112,6 +112,9 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 		Status: corev1.PodStatus{
 			Phase:      phase,
 			Conditions: conditions,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Ready: ready, ContainerID: "containerd://" + testContainerID},
+			},
 		},
 	}
 }
