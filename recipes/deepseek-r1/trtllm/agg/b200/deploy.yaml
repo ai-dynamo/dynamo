@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-R1 NVFP4 aggregated, 1x8 B200, TP=8 EP=8 ADP, CUTLASS MoE,
+# FP8 KV cache, no speculative decoding. Tuned for ISL/OSL=1024/1024.
+#
+# Instructions:
+# 1. kubectl apply -f ../../../model-cache/model-cache.yaml -n <namespace>
+# 2. kubectl apply -f ../../../model-cache/model-download.yaml -n <namespace>
+# 3. kubectl apply -f deploy.yaml -n <namespace>
+# 4. (optional) kubectl apply -f perf.yaml -n <namespace>
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsr1-agg-b200-config
+data:
+  config.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    pipeline_parallel_size: 1
+    enable_attention_dp: true
+    attention_dp_config:
+      enable_balance: true
+      batching_wait_iters: 0
+      timeout_iters: 60
+    max_batch_size: 8192
+    max_num_tokens: 8192
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 8192
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.8
+    moe_config:
+      backend: CUTLASS
+    print_iter_log: true
+    stream_interval: 10
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsr1-agg-b200
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  envs:
+    - name: TRTLLM_ENABLE_PDL
+      value: "1"
+    - name: TLLM_LOG_LEVEL
+      value: "INFO"
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-graph-deployment-name
+                      operator: In
+                      values:
+                        - dsr1-agg-b200-frontend
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+    TrtllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 256Gi
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: nvidia.com/gpu.present
+                      operator: In
+                      values:
+                        - "true"
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          workingDir: /workspace/components/backends/trtllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m dynamo.trtllm
+              --model-path /model-cache/deepseek-r1-fp4
+              --served-model-name deepseek-ai/DeepSeek-R1
+              --extra-engine-args /config/config.yaml
+          env:
+            - name: HF_HOME
+              value: /model-cache
+          volumeMounts:
+            - name: dsr1-agg-b200-config-volume
+              mountPath: /config
+              readOnly: true
+        volumes:
+          - name: dsr1-agg-b200-config-volume
+            configMap:
+              name: dsr1-agg-b200-config

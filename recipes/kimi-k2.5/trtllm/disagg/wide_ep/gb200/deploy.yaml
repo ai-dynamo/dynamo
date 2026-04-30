@@ -1,61 +1,66 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# DeepSeek-R1 NVFP4 disaggregated WideEP on 10x GB200 (40 GPUs), tuned for ISL/OSL=8192/1024.
+# Kimi-K2.5 NVFP4 disaggregated WideEP on 10x GB200 (40 GPUs), tuned for ISL/OSL=8192/1024.
 #
 # Topology: 2 prefill (CTX) workers, each on 1 GB200 node, DEP4 (TP=4 EP=4 ADP).
 #           1 decode  (GEN) worker on 8 GB200 nodes, DEP32 (TP=32 EP=32 ADP).
-# GEN MoE: CUTEDSL with EPLB. CTX MoE: default backend.
-# KV cache: FP8. Speculative decoding: MTP with 1 next-N predict layer.
+# MoE: CUTEDSL on both CTX and GEN. KV cache: FP8. No speculative decoding
+# (Kimi-K2.5 has no MTP layers).
 #
 # Instructions:
 # 1. kubectl apply -f ../../../../model-cache/model-cache.yaml -n <namespace>
-# 2. kubectl apply -f ../../../../model-cache/model-download.yaml -n <namespace>
+# 2. kubectl apply -f ../../../../model-cache/nvidia/model-download.yaml -n <namespace>
 # 3. kubectl apply -f deploy.yaml -n <namespace>
 # 4. kubectl apply -f perf.yaml -n <namespace>
 
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: prefill-config
+  name: kimi-prefill-config
 data:
-  prefill_config.yaml: |
-    max_batch_size: 1
-    max_num_tokens: 8448
-    max_seq_len: 9423
+  prefill.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    max_batch_size: 2
+    max_num_tokens: 8768
+    max_seq_len: 9216
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
-    enable_attention_dp: true
     pipeline_parallel_size: 1
+    enable_attention_dp: true
+    enable_lm_head_tp_in_adp: true
+    disable_overlap_scheduler: true
     cuda_graph_config: null
     print_iter_log: true
-    disable_overlap_scheduler: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.75
+      free_gpu_memory_fraction: 0.6
       dtype: fp8
+    moe_config:
+      backend: CUTEDSL
+      use_low_precision_moe_combine: true
     cache_transceiver_config:
-      max_tokens_in_buffer: 8448
+      max_tokens_in_buffer: 16384
       backend: DEFAULT
-    speculative_config:
-      decoding_type: MTP
-      num_nextn_predict_layers: 1
 ---
 
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: decode-config
+  name: kimi-decode-config
 data:
-  decode_config_dep32.yaml: |
+  decode.yaml: |
+    backend: pytorch
+    trust_remote_code: true
     tensor_parallel_size: 32
     moe_expert_parallel_size: 32
+    pipeline_parallel_size: 1
     enable_attention_dp: true
     enable_lm_head_tp_in_adp: true
-    pipeline_parallel_size: 1
     max_batch_size: 256
-    max_num_tokens: 512
-    max_seq_len: 9423
+    max_num_tokens: 256
+    max_seq_len: 9216
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
@@ -71,39 +76,34 @@ data:
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.6
+      free_gpu_memory_fraction: 0.8
       dtype: fp8
     moe_config:
       backend: CUTEDSL
-      load_balancer:
-        num_slots: 288
-        layer_updates_per_iter: 1
+      use_low_precision_moe_combine: true
     cache_transceiver_config:
-      max_tokens_in_buffer: 8448
+      max_tokens_in_buffer: 16384
       backend: DEFAULT
     stream_interval: 100
     num_postprocess_workers: 4
-    speculative_config:
-      decoding_type: MTP
-      num_nextn_predict_layers: 1
 ---
 
 # numNodes = prefill_replicas + decode_nodeCount = 2 + 8 = 10.
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: trtllm-test-compute-domain
+  name: kimi-k25-disagg-compute-domain
 spec:
   numNodes: 10
   channel:
     resourceClaimTemplate:
-      name: trtllm-test-compute-domain-channel
+      name: kimi-k25-disagg-compute-domain-channel
 ---
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: trtllm-disagg-multinode
+  name: kimi-k25-disagg
 spec:
   pvcs:
     - name: model-cache
@@ -123,8 +123,6 @@ spec:
       value: "1"
     - name: TRTLLM_WORKER_DISABLE_GC
       value: "1"
-    - name: MIMALLOC_PURGE_DELAY
-      value: "0"
   backendFramework: trtllm
   services:
     Frontend:
@@ -132,7 +130,7 @@ spec:
       replicas: 1
       volumeMounts:
         - name: model-cache
-          mountPoint: /model-cache
+          mountPoint: /opt/models
       extraPodSpec:
         tolerations: []
         affinity: {}
@@ -140,7 +138,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
           env:
             - name: HF_HOME
-              value: /model-cache
+              value: /opt/models
           args:
           - |
             python3 -m dynamo.frontend --http-port 8000
@@ -151,9 +149,10 @@ spec:
       componentType: worker
       subComponentType: prefill
       replicas: 2
+      envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /model-cache
+          mountPoint: /opt/models
       sharedMemory:
         size: 800Gi
       resources:
@@ -180,6 +179,9 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 600
+          env:
+            - name: HF_HOME
+              value: /opt/models
           volumeMounts:
             - name: prefill-config-volume
               mountPath: /config
@@ -189,24 +191,27 @@ spec:
           args:
           - >-
             python3 -m dynamo.trtllm
-            --model-path /model-cache/deepseek-r1-fp4
-            --served-model-name deepseek-ai/DeepSeek-R1
-            --extra-engine-args /config/prefill_config.yaml
+            --model-path nvidia/Kimi-K2.5-NVFP4
+            --served-model-name nvidia/Kimi-K2.5-NVFP4
+            --extra-engine-args /config/prefill.yaml
             --disaggregation-mode prefill
+            --dyn-reasoning-parser kimi_k25
+            --dyn-tool-call-parser kimi_k2
         resourceClaims:
           - name: compute-domain-channel
-            resourceClaimTemplateName: trtllm-test-compute-domain-channel
+            resourceClaimTemplateName: kimi-k25-disagg-compute-domain-channel
         volumes:
           - name: prefill-config-volume
             configMap:
-              name: prefill-config
+              name: kimi-prefill-config
     decode:
       componentType: worker
       subComponentType: decode
       replicas: 1
+      envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /model-cache
+          mountPoint: /opt/models
       multinode:
         nodeCount: 8
       sharedMemory:
@@ -235,6 +240,9 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 600
+          env:
+            - name: HF_HOME
+              value: /opt/models
           volumeMounts:
             - name: decode-config-volume
               mountPath: /config
@@ -244,14 +252,16 @@ spec:
           args:
           - >-
             python3 -m dynamo.trtllm
-            --model-path /model-cache/deepseek-r1-fp4
-            --served-model-name deepseek-ai/DeepSeek-R1
-            --extra-engine-args /config/decode_config_dep32.yaml
+            --model-path nvidia/Kimi-K2.5-NVFP4
+            --served-model-name nvidia/Kimi-K2.5-NVFP4
+            --extra-engine-args /config/decode.yaml
             --disaggregation-mode decode
+            --dyn-reasoning-parser kimi_k25
+            --dyn-tool-call-parser kimi_k2
         resourceClaims:
           - name: compute-domain-channel
-            resourceClaimTemplateName: trtllm-test-compute-domain-channel
+            resourceClaimTemplateName: kimi-k25-disagg-compute-domain-channel
         volumes:
           - name: decode-config-volume
             configMap:
-              name: decode-config
+              name: kimi-decode-config
