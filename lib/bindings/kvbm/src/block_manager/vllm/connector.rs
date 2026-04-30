@@ -4,6 +4,7 @@
 use dynamo_llm::block_manager::{
     block::BlockId, connector::protocol::WorkerTransferRequest, pool::BlockPoolError,
 };
+use dynamo_llm::tokens::SequenceHash;
 
 pub mod leader;
 pub mod trtllm_leader;
@@ -42,7 +43,7 @@ impl SchedulerOutput {
 
     // I am surprised that vLLM's NewRequestData does not include the salt hash.
     // It has almost everything else to compute the block hashes worker side.
-    #[pyo3(signature = (request_id, prompt_token_ids, block_ids, num_computed_tokens, priorities=None))]
+    #[pyo3(signature = (request_id, prompt_token_ids, block_ids, num_computed_tokens, priorities=None, external_sequence_hashes=None))]
     pub fn add_new_request(
         &mut self,
         request_id: String,
@@ -50,6 +51,7 @@ impl SchedulerOutput {
         block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
         priorities: Option<Vec<u32>>,
+        external_sequence_hashes: Option<Vec<SequenceHash>>,
     ) {
         self.new_requests.push(NewRequestData {
             request_id,
@@ -57,11 +59,13 @@ impl SchedulerOutput {
             block_ids,
             num_computed_tokens,
             priorities,
+            external_sequence_hashes,
         });
     }
 
     /// This is called by the leader to update the cached requests
-    #[pyo3(signature = (request_id, resumed_from_preemption, new_token_ids, new_block_ids, num_computed_tokens, priorities=None))]
+    #[pyo3(signature = (request_id, resumed_from_preemption, new_token_ids, new_block_ids, num_computed_tokens, priorities=None, external_sequence_hashes=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn add_cached_request(
         &mut self,
         request_id: String,
@@ -70,6 +74,7 @@ impl SchedulerOutput {
         new_block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
         priorities: Option<Vec<u32>>,
+        external_sequence_hashes: Option<Vec<SequenceHash>>,
     ) {
         self.cached_requests.push(CachedRequestData {
             request_id,
@@ -78,6 +83,7 @@ impl SchedulerOutput {
             new_block_ids,
             num_computed_tokens,
             priorities,
+            external_sequence_hashes,
         });
     }
 
@@ -108,6 +114,8 @@ pub struct NewRequestData {
     /// Retention priorities for each block (same length as block_ids).
     /// Used for priority-based offload filtering.
     pub priorities: Option<Vec<u32>>,
+    /// TRT-LLM cumulative external sequence-hash chain for all completed blocks.
+    pub external_sequence_hashes: Option<Vec<SequenceHash>>,
 }
 
 impl std::fmt::Debug for NewRequestData {
@@ -131,6 +139,8 @@ pub struct CachedRequestData {
     /// Retention priorities for each new block (same length as new_block_ids).
     /// Used for priority-based offload filtering.
     pub priorities: Option<Vec<u32>>,
+    /// TRT-LLM cumulative external sequence-hash chain for all completed blocks.
+    pub external_sequence_hashes: Option<Vec<SequenceHash>>,
 }
 
 impl std::fmt::Debug for CachedRequestData {
@@ -186,5 +196,42 @@ impl ConnectorMetadata {
 
     pub fn add_operations(&mut self, xfer_reqs: Vec<WorkerTransferRequest>) {
         self.operations.extend(xfer_reqs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scheduler_output_preserves_external_sequence_hashes() {
+        let mut output = SchedulerOutput::new();
+
+        output.add_new_request(
+            "req-1".to_string(),
+            vec![1, 2, 3, 4],
+            vec![10],
+            4,
+            None,
+            Some(vec![101]),
+        );
+        output.add_cached_request(
+            "req-1".to_string(),
+            false,
+            vec![5, 6, 7, 8],
+            vec![11],
+            8,
+            None,
+            Some(vec![101, 202]),
+        );
+
+        assert_eq!(
+            output.new_requests[0].external_sequence_hashes,
+            Some(vec![101])
+        );
+        assert_eq!(
+            output.cached_requests[0].external_sequence_hashes,
+            Some(vec![101, 202])
+        );
     }
 }

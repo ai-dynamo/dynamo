@@ -41,7 +41,7 @@ RUN export FLASH_ATTN_CUDA_ARCHS=$(echo "${TORCH_CUDA_ARCH_LIST}" | sed 's/ /;/g
  && rm -rf ../flash-attention
 
 # Install Dynamo with /v1/videos support.
-RUN uv pip install ai-dynamo==1.0.0
+RUN uv pip install ai-dynamo==1.0.2
 
 # Install FastVideo directly from the public upstream repository.
 # Checkout with --recurse-submodules to get the required submodules as well.

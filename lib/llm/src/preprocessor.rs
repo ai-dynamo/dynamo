@@ -564,7 +564,13 @@ impl OpenAIPreprocessor {
                             // Completions will use raw_prompt, no template
                             let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
-                            // Check if backend_instance_id is present and token_data is provided
+                            // If nvext.token_data is present, use the pre-computed tokens
+                            // directly and skip tokenization.  This avoids redundant
+                            // tokenization when an external component (e.g. the GAIE EPP
+                            // KV-router) has already tokenized the prompt.
+                            // When backend_instance_id is set without token_data, warn
+                            // but fall back to tokenization (backward compat for non-GAIE
+                            // routers that set the header without providing tokens).
                             let has_backend_instance_id = request
                                 .nvext()
                                 .and_then(|ext| ext.backend_instance_id)
@@ -573,23 +579,22 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
-                                if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
-                                        tokens.len()
-                                    );
-                                    // need ownership for the builder, so clone.
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
-                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                    (encoding.token_ids().to_vec(), false)
-                                }
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
+                                token_data
+                            {
+                                tracing::info!(
+                                    token_count = tokens.len(),
+                                    first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+                                );
+                                (tokens.clone(), true)
+                            } else if has_backend_instance_id {
+                                tracing::warn!(
+                                    "backend_instance_id provided but no token_data; tokenizing prompt"
+                                );
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
                             } else {
-                                // No backend_instance_id provided, continue the normal flow.
                                 let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
@@ -750,12 +755,38 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Try to parse reasoning content only if parser is configured
+        // Tool-continuation turns (last message role=tool) gate the force-
+        // reasoning flag off: the model produces the final user-facing answer
+        // directly from the tool result and typically does not re-enter
+        // reasoning, so leaving the parser in forced-reasoning mode would
+        // mislabel the final answer as reasoning_content. Matches SGLang's
+        // observed behavior for Kimi K2.5 tool-result follow-ups.
+        let last_is_tool = matches!(
+            request.inner.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(_))
+        );
+        let prompt_injected_reasoning = prompt_injected_reasoning && !last_is_tool;
+
+        // tool_choice=required/named forces the backend into guided decoding,
+        // which constrains output to a bare JSON shape with no reasoning
+        // wrapper. Running the reasoning parser on that output is both
+        // pointless (nothing to extract) and actively harmful for parsers
+        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
+        // append-think), because the prefix would contaminate the
+        // tool-call JSON fed into the jail.
+        let tool_choice_forces_guided_json = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+
+        // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !Self::is_reasoning_disabled_by_request(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
-            );
+            )
+            && !tool_choice_forces_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -1155,33 +1186,27 @@ impl OpenAIPreprocessor {
 
         // Configure jail based on tool_choice
         //
-        // When a tool_call_parser is configured, always use marker-based mode
-        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
-        // Immediate JSON mode is only a fallback for required/named when no
-        // parser exists (the model is expected to emit raw JSON in that case).
+        // For tool_choice=required or named we mirror SGLang / vLLM: assume the
+        // backend applied guided decoding and emit a bare JSON shape, so parse
+        // via the JSON array parser (base_json_parser) rather than the model's
+        // native-format parser.  If a parser is also configured we still carry
+        // it so the Immediate branch can fall back to marker-based parsing for
+        // backends that do not honor guided decoding (e.g. XML-native models
+        // like qwen3_coder — see regression test_tool_choice_required_with_
+        // qwen3_coder_parser).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                builder = builder
+                    .tool_choice_named(named.function.name.clone())
+                    .named_tool_filter(named.function.name.clone());
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
-                    // Also install a named-tool filter so that if the model emits
-                    // the wrong tool, the parsed call is rejected before emission.
-                    builder = builder
-                        .tool_call_parser(parser)
-                        .named_tool_filter(named.function.name.clone());
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_named(named.function.name.clone());
+                    builder = builder.tool_call_parser(parser);
                 }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
+                builder = builder.tool_choice_required();
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
                     builder = builder.tool_call_parser(parser);
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_required();
                 }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
@@ -1202,8 +1227,9 @@ impl OpenAIPreprocessor {
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
     ///   or "force_nonempty_content": true.
-    /// For deepseek_r1: disabled when chat_template_args contains "thinking": false
-    ///   or "thinking_mode": "chat".
+    /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
+    ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
+    ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -1232,14 +1258,17 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("deepseek_r1") => {
-                if let Some(args) = chat_template_args {
-                    if let Some(thinking) = args.get("thinking") {
-                        return thinking == &serde_json::Value::Bool(false);
-                    }
-                    if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                        return mode == "chat";
-                    }
+            Some("deepseek_r1") | Some("deepseek_v4") | Some("deepseek-v4")
+            | Some("deepseekv4") => {
+                if let Some(enabled) =
+                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
+                {
+                    return !enabled;
+                }
+                if let Some(args) = chat_template_args
+                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+                {
+                    return mode == "chat";
                 }
                 false
             }
@@ -1803,6 +1832,62 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "nemotron_nano + empty args → enabled",
+            ),
+            // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
+            // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_false),
+                true,
+                "deepseek_v4 + thinking=false → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_true),
+                false,
+                "deepseek_v4 + thinking=true → enabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseek_v4 + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_mode_thinking),
+                false,
+                "deepseek_v4 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                None,
+                false,
+                "deepseek_v4 + no args → enabled",
+            ),
+            (
+                Some("deepseek-v4"),
+                Some(&thinking_false),
+                true,
+                "deepseek-v4 (hyphen alias) + thinking=false → disabled",
+            ),
+            (
+                Some("deepseekv4"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseekv4 (joined alias) + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&enable_thinking_false),
+                true,
+                "deepseek_v4 + enable_thinking=false → disabled (vLLM alias)",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&enable_thinking_true),
+                false,
+                "deepseek_v4 + enable_thinking=true → enabled (vLLM alias)",
             ),
         ];
 

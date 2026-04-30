@@ -113,7 +113,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
+| Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
@@ -512,6 +512,22 @@ Long-running tests **must** have an explicit timeout. A test that hangs (e.g., w
 ### Time Budgets
 
 - If a test exceeds its time budget (see [Test Types and Locations](#test-types-and-locations)), profile it with `pytest --durations=0` and consider mocking heavy dependencies, using a smaller model checkpoint, or moving it to a nightly/weekly pipeline with `@pytest.mark.slow`.
+
+### Pipeline Time Budgets
+
+Each lifecycle marker corresponds to a CI pipeline with an aggregate wall-clock budget. When adding or marking a test, the pipeline it lands in must continue to fit under its budget:
+
+| Marker       | Pipeline budget | Rationale                                                                 |
+|--------------|-----------------|---------------------------------------------------------------------------|
+| `pre_merge`  | < 30 min        | Runs on every PR; fast feedback is required to keep developers unblocked. |
+| `post_merge` | < 1 hr          | Runs after merge to `main`; catches regressions quickly without gating PRs.|
+| `nightly`    | < 3 hr          | Runs once per day; covers longer integration and multi-GPU scenarios.     |
+
+Guidance when adding a test:
+
+- Pick the **lightest** lifecycle marker the test can live in. A test that only needs to run daily should not be marked `pre_merge`.
+- Before marking a new test `pre_merge`, check the test's expected runtime and confirm the pre-merge pipeline still fits under 30 min. If it wouldn't, move the test to `post_merge` or `nightly`, or shrink it (mock heavy dependencies, smaller checkpoint, fewer cases).
+- If a pipeline is already near its budget, prefer downgrading existing slow tests (`pre_merge` → `post_merge`, `post_merge` → `nightly`) over adding more.
 
 ### Time Budget Industry Practices
 

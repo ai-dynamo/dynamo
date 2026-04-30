@@ -1595,6 +1595,18 @@ async fn responses(
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
         truncation: request.inner.truncation,
+        // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
+        // the response serializer can default to 0.0 without hardcoding at the
+        // build site. When upstream (or our shadow) adds the fields, sourcing
+        // from the request becomes a one-line change here.
+        presence_penalty: None,
+        frequency_penalty: None,
+        // Pass-through metadata — accepted on the request, echoed back on the
+        // response so the caller can confirm receipt. Dynamo doesn't act on
+        // these; see `validate_response_unsupported_fields` for rationale.
+        prompt_cache_key: request.inner.prompt_cache_key.clone(),
+        prompt_cache_retention: request.inner.prompt_cache_retention,
+        safety_identifier: request.inner.safety_identifier.clone(),
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
@@ -1828,6 +1840,24 @@ pub fn validate_response_unsupported_fields(
     if inner.prompt.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
+        ));
+    }
+    // Reject directive fields that change semantics if silently dropped.
+    // `max_tool_calls` is a hard cap on tool invocations — accepting it
+    // without enforcement would let a caller send `max_tool_calls: 5` and
+    // see `max_tool_calls: null` in the response, assuming their limit was
+    // honored. Fail loud until real enforcement lands.
+    //
+    // Pass-through metadata fields (`prompt_cache_key`,
+    // `prompt_cache_retention`, `safety_identifier`) are deliberately
+    // accepted and echoed back on the response instead. They're hints for
+    // OpenAI's caching/moderation backends, not directives — Codex sends
+    // `prompt_cache_key` on every request — and the OpenResponses spec
+    // includes them on the response body, so echoing the caller's value
+    // makes receipt observable without needing a real backend.
+    if inner.max_tool_calls.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
     None
@@ -2193,8 +2223,7 @@ async fn videos(
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
-    // Videos are typically not streamed, so we default to non-streaming
-    let streaming = false;
+    let streaming = request.stream.unwrap_or(false);
 
     // Get the model name from the request (video generation model)
     let model = request.model.clone();
@@ -2230,30 +2259,69 @@ async fn videos(
         err_response
     })?;
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
-    let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_response_and_observe_metrics(
-            response,
-            &mut response_collector,
-            &mut http_queue_guard,
-        );
-    });
 
-    // Videos are typically returned as a single response (non-streaming)
-    // so we fold the stream into a single response
-    let response = NvVideosResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold videos stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    if streaming {
+        // [gluo TODO] revisit the cancellation handling here,
+        // should be unified with chat_completions.
+        let ctx = stream.context();
+        let (mut connection_handle, stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Videos.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
+        let stream = stream.flat_map(move |response| {
+            let sse_result = process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+            match sse_result {
+                Ok(Some(ev)) => stream::iter(vec![Ok(ev)]),
+                Ok(None) => stream::iter(vec![]),
+                Err(e) => stream::iter(vec![Err(e)]),
+            }
+        });
+        // monitor_for_disconnects: arms stream_handle, pre-marks inflight Cancelled,
+        // emits data:[DONE] on natural end, demotes to Internal on mid-stream Err,
+        // and kills the engine context when the client disconnects.
+        let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
 
-    inflight.mark_ok();
-    Ok(Json(response).into_response())
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        // Disarm immediately: we return the body directly, so disconnect detection
+        // transfers to stream_handle (armed inside monitor_for_disconnects).
+        connection_handle.disarm();
+        Ok(sse_stream.into_response())
+    } else {
+        let stream = stream.inspect(move |response| {
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response = NvVideosResponse::from_annotated_stream(stream)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+
+        inflight.mark_ok();
+        Ok(Json(response).into_response())
+    }
 }
 
 /// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
@@ -2433,7 +2501,6 @@ async fn audio_speech(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let response_format = request.response_format.clone();
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
@@ -2494,13 +2561,14 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If response contains b64_json audio data, decode and return as binary
+    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
+    // decode and return binary with content-type from AudioData.output_format.
     // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
     if let Some(first) = response.data.first()
         && let Some(b64) = &first.b64_json
         && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
     {
-        let content_type = match response_format.as_deref().unwrap_or("wav") {
+        let content_type = match first.output_format.as_str() {
             "mp3" => "audio/mpeg",
             "flac" => "audio/flac",
             "pcm" => "audio/pcm",
@@ -2714,6 +2782,7 @@ mod tests {
                     })
                 }),
             ),
+            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(5))),
         ];
 
         for (field, set_field) in unsupported_cases {
@@ -2721,6 +2790,43 @@ mod tests {
             (set_field)(&mut req.inner);
             let result = validate_response_unsupported_fields(&req);
             assert!(result.is_some(), "Expected rejection for `{field}`");
+        }
+    }
+
+    /// Pass-through metadata fields (`prompt_cache_key`,
+    /// `prompt_cache_retention`, `safety_identifier`) are accepted at the
+    /// validation layer; the response serializer echoes them back so the
+    /// caller can confirm receipt. Codex sends `prompt_cache_key` on every
+    /// request — rejecting it broke `codex exec` end-to-end.
+    #[test]
+    fn test_validate_unsupported_fields_accepts_passthrough_metadata() {
+        #[allow(clippy::type_complexity)]
+        let passthrough_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
+            (
+                "prompt_cache_key",
+                Box::new(|r| r.prompt_cache_key = Some("ck-1".into())),
+            ),
+            (
+                "prompt_cache_retention",
+                Box::new(|r| {
+                    r.prompt_cache_retention =
+                        Some(dynamo_protocols::types::responses::PromptCacheRetention::InMemory)
+                }),
+            ),
+            (
+                "safety_identifier",
+                Box::new(|r| r.safety_identifier = Some("user-hash".into())),
+            ),
+        ];
+
+        for (field, set_field) in passthrough_cases {
+            let mut req = make_base_request();
+            (set_field)(&mut req.inner);
+            let result = validate_response_unsupported_fields(&req);
+            assert!(
+                result.is_none(),
+                "Expected `{field}` to be accepted as pass-through metadata"
+            );
         }
     }
 

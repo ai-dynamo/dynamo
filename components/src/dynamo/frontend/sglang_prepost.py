@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import copy
+import inspect
 import json
 import logging
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, TypeAlias
 
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
@@ -64,16 +67,55 @@ def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None
 
 
 def _materialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    """Convert message objects to plain dicts for apply_chat_template."""
-    normalized = []
+    """Convert message objects to plain dicts for apply_chat_template.
+
+    Returns deep-copied dicts so subsequent in-place normalization (e.g.
+    _normalize_assistant_tool_call_arguments) does not leak back into
+    the caller-owned request object.
+    """
+    normalized: list[dict[str, Any]] = []
     for msg in messages:
         if hasattr(msg, "model_dump"):
+            # model_dump() already returns a fresh dict tree.
             normalized.append(msg.model_dump(exclude_none=False))
         elif isinstance(msg, dict):
-            normalized.append(msg)
+            normalized.append(copy.deepcopy(msg))
         else:
-            normalized.append(dict(msg))
+            normalized.append(copy.deepcopy(dict(msg)))
+    _normalize_assistant_tool_call_arguments(normalized)
     return normalized
+
+
+def _normalize_assistant_tool_call_arguments(messages: list[dict[str, Any]]) -> None:
+    """Parse assistant tool_call ``arguments`` from JSON string to dict in place.
+
+    Some chat templates (notably qwen3-coder) call ``arguments | items`` on
+    assistant tool_calls, which requires ``arguments`` to be a mapping rather
+    than the JSON string carried by the OpenAI wire format.  Mirror SGLang
+    native's behaviour (``serving_chat.py``) so multi-turn conversations
+    containing prior tool calls render correctly.
+
+    Malformed JSON is left untouched so the chat-template error remains
+    visible to the caller instead of being silently corrupted.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str) and args:
+                try:
+                    fn["arguments"] = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
 
 def create_parsers(
@@ -129,6 +171,127 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
     )
 
 
+def _normalize_deepseek_v4_hint(value: Any) -> str:
+    return str(value or "").lower().replace("-", "").replace("_", "")
+
+
+def _should_use_deepseek_v4_encoding(
+    request: dict[str, Any],
+    *,
+    tokenizer,
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> bool:
+    if getattr(tokenizer, "chat_template", None) is not None:
+        return False
+
+    return any(
+        "deepseekv4" in _normalize_deepseek_v4_hint(value)
+        for value in (
+            request.get("model"),
+            tool_call_parser_name,
+            reasoning_parser_name,
+        )
+    )
+
+
+def _filter_template_tools(
+    request: dict[str, Any],
+    *,
+    exclude_tools_when_tool_choice_none: bool,
+) -> list[dict[str, Any]] | None:
+    raw_tools = request.get("tools") or []
+    if not raw_tools:
+        return None
+
+    tool_choice = request.get("tool_choice", "auto")
+    if exclude_tools_when_tool_choice_none and tool_choice == "none":
+        return None
+
+    if _is_named_tool_choice(tool_choice):
+        chosen_name = tool_choice["function"]["name"]
+        return [
+            copy.deepcopy(tool)
+            for tool in raw_tools
+            if tool.get("function", {}).get("name") == chosen_name
+        ]
+
+    return copy.deepcopy(raw_tools)
+
+
+def _render_deepseek_v4_prompt_token_ids(
+    request: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    tokenizer,
+    template_tools: list[dict[str, Any]] | None,
+) -> list[int]:
+    try:
+        from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
+    except ImportError as exc:
+        raise ValueError(
+            "DeepSeek-V4 preprocessing requires SGLang's "
+            "sglang.srt.entrypoints.openai.encoding_dsv4 encoder. "
+            "Install an SGLang build that includes the DeepSeek-V4 integration."
+        ) from exc
+
+    encoding_messages = copy.deepcopy(messages)
+    for msg in encoding_messages:
+        if msg.get("content") is None:
+            msg["content"] = ""
+
+    if template_tools:
+        if not encoding_messages or encoding_messages[0].get("role") != "system":
+            encoding_messages.insert(0, {"role": "system", "content": ""})
+        encoding_messages[0]["tools"] = template_tools
+
+    chat_template_kwargs = request.get("chat_template_kwargs") or {}
+    thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
+    reasoning_effort = (
+        request.get("reasoning_effort")
+        or chat_template_kwargs.get("reasoning_effort")
+        or None
+    )
+    if reasoning_effort not in ("max", "high", None):
+        reasoning_effort = None
+
+    prompt = encode_messages(
+        encoding_messages,
+        thinking_mode=thinking_mode,
+        reasoning_effort=reasoning_effort,
+    )
+    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
+
+
+@lru_cache(maxsize=64)
+def _callable_accepts_kwarg(func: Any, kwarg: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+
+    for name, param in signature.parameters.items():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if name == kwarg and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
+def _call_with_optional_parallel_tool_calls(
+    func: Any,
+    *args: Any,
+    parallel_tool_calls: Any,
+) -> Any:
+    """Call SGLang helpers across versions with/without parallel_tool_calls."""
+    if _callable_accepts_kwarg(func, "parallel_tool_calls"):
+        return func(*args, parallel_tool_calls=parallel_tool_calls)
+    return func(*args)
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
@@ -161,7 +324,8 @@ def build_tool_call_guided_decoding(
             )
         constraint = (
             "json_schema",
-            get_json_schema_constraint(
+            _call_with_optional_parallel_tool_calls(
+                get_json_schema_constraint,
                 sglang_tools,
                 sglang_tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
@@ -172,7 +336,8 @@ def build_tool_call_guided_decoding(
             tools=sglang_tools,
             tool_call_parser=tool_call_parser_name,
         )
-        constraint = parser.get_structure_constraint(
+        constraint = _call_with_optional_parallel_tool_calls(
+            parser.get_structure_constraint,
             tool_choice,
             parallel_tool_calls=parallel_tool_calls,
         )
@@ -239,30 +404,38 @@ def preprocess_chat_request(
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )
 
-    # Build template kwargs -- single call for rendering + tokenization
-    template_kwargs: dict[str, Any] = {
-        "add_generation_prompt": True,
-        "tokenize": True,
-    }
-    # Strip tools from template when tool_choice=none so the model doesn't
-    # see them and generate raw XML tool calls in its response.
-    # When tool_choice names a specific function, only include that tool
-    # in the template so the model doesn't see irrelevant definitions.
-    if sglang_tools and not (
-        exclude_tools_when_tool_choice_none and tool_choice == "none"
-    ):
-        if _is_named_tool_choice(tool_choice):
-            chosen_name = tool_choice["function"]["name"]
-            template_kwargs["tools"] = [
-                t.model_dump() for t in sglang_tools if t.function.name == chosen_name
-            ]
-        else:
-            template_kwargs["tools"] = [t.model_dump() for t in sglang_tools]
-
-    prompt_token_ids = _normalize_prompt_token_ids(
-        tokenizer.apply_chat_template(messages, **template_kwargs)
+    template_tools = _filter_template_tools(
+        request,
+        exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
+    if _should_use_deepseek_v4_encoding(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    ):
+        prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
+            request,
+            messages=messages,
+            tokenizer=tokenizer,
+            template_tools=template_tools,
+        )
+    else:
+        # Build template kwargs -- single call for rendering + tokenization
+        template_kwargs: dict[str, Any] = {
+            "add_generation_prompt": True,
+            "tokenize": True,
+        }
+        if template_tools:
+            template_kwargs["tools"] = template_tools
+
+        prompt_token_ids = _normalize_prompt_token_ids(
+            tokenizer.apply_chat_template(messages, **template_kwargs)
+        )
+
+    # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
+    # while still sharing the existing Dynamo parser/guided-decoding behavior.
     tool_call_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_call_parser_name,
@@ -674,6 +847,23 @@ class SglangStreamingPostProcessor:
                             self._tool_call_names[seq_idx] = tc.name
                         if tc.parameters:
                             self._tool_call_args[seq_idx] = [tc.parameters]
+
+            # Do not emit partial tool calls. A streaming parser can detect a
+            # tool name before the model finishes malformed JSON; if the
+            # finish-time re-parse cannot recover valid arguments, treat the
+            # response as plain text instead of surfacing name + empty args.
+            dropped_names = []
+            for idx in list(self._tool_call_names):
+                if not "".join(self._tool_call_args.get(idx, [])):
+                    dropped_names.append(self._tool_call_names[idx])
+                    del self._tool_call_names[idx]
+                    self._tool_call_ids.pop(idx, None)
+                    self._tool_call_args.pop(idx, None)
+            if dropped_names:
+                logger.warning(
+                    "Dropping incomplete SGLang tool calls with no valid arguments: %s",
+                    dropped_names,
+                )
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []

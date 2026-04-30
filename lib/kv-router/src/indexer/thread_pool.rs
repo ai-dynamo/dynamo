@@ -4,7 +4,6 @@
 use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
     thread::JoinHandle,
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -12,7 +11,9 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
-use super::{KvIndexerInterface, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerTask};
+use super::{
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
@@ -133,19 +134,29 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         &self.backend
     }
 
-    /// Wait for all worker channels to drain.
+    /// Get a cloned `Arc` to the underlying backend.
     ///
-    /// Used primarily for testing and benchmarking to ensure all queued events
-    /// have been picked up by workers before checking results.
+    /// Useful when a caller needs to hand off an owned `Arc<T>` to a blocking
+    /// task (e.g. `tokio::task::spawn_blocking`) without cloning the backend
+    /// itself.
+    pub fn backend_arc(&self) -> Arc<T> {
+        Arc::clone(&self.backend)
+    }
+
+    /// Wait until all previously queued worker tasks have completed.
+    ///
+    /// Used primarily for testing and benchmarking to ensure writes are visible
+    /// before checking results.
     pub async fn flush(&self) {
-        loop {
-            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
-
-            if all_empty {
-                break;
+        let mut receivers = Vec::new();
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
+                receivers.push(resp_rx);
             }
-
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        for receiver in receivers {
+            let _ = receiver.await;
         }
     }
 
@@ -354,15 +365,29 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
 
     async fn flush(&self) -> usize {
         let curr_size: usize = self.worker_event_channels.iter().map(|ch| ch.len()).sum();
-        loop {
-            let all_empty = self.worker_event_channels.iter().all(|ch| ch.is_empty());
-
-            if all_empty {
-                break;
+        let mut receivers = Vec::new();
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
+                receivers.push(resp_rx);
             }
-
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        for receiver in receivers {
+            let _ = receiver.await;
         }
         curr_size
+    }
+
+    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        vec![ShardSizeSnapshot {
+            shard_idx: 0,
+            worker_count: self.backend.worker_count(),
+            block_count: self.backend.block_count(),
+            node_count: self.backend.node_count(),
+        }]
+    }
+
+    fn node_edge_lengths(&self) -> Vec<usize> {
+        self.backend.node_edge_lengths()
     }
 }

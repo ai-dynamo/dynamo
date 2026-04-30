@@ -24,7 +24,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	dto "github.com/prometheus/client_model/go"
@@ -229,6 +232,90 @@ func TestDiscoverGPUs_NoNodes(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, gpuInfo)
 	assert.Contains(t, err.Error(), "no nodes found")
+}
+
+func TestDiscoverGPUsFiltered_MixedSKU(t *testing.T) {
+	ctx := context.Background()
+
+	h100Node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	a100Node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "a100-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "4",
+				LabelGPUProduct: "A100-SXM4-40GB",
+				LabelGPUMemory:  "40960",
+			},
+		},
+	}
+	k8sClient := newFakeClient(h100Node, a100Node)
+
+	t.Run("unfiltered selects best and counts only matching SKU", func(t *testing.T) {
+		info, err := DiscoverGPUsFiltered(ctx, k8sClient, "")
+		require.NoError(t, err)
+		// H100 wins (8 GPUs > 4 GPUs)
+		assert.Equal(t, 8, info.GPUsPerNode)
+		assert.Equal(t, "H100-SXM5-80GB", info.Model)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUType("h100_sxm"), info.System)
+		// Only 1 node with matching H100 SKU
+		assert.Equal(t, 1, info.NodesWithGPUs)
+	})
+
+	t.Run("filter by a100_sxm selects A100 node", func(t *testing.T) {
+		info, err := DiscoverGPUsFiltered(ctx, k8sClient, "a100_sxm")
+		require.NoError(t, err)
+		assert.Equal(t, 4, info.GPUsPerNode)
+		assert.Equal(t, "A100-SXM4-40GB", info.Model)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUType("a100_sxm"), info.System)
+		assert.Equal(t, 1, info.NodesWithGPUs)
+	})
+
+	t.Run("filter by nonexistent SKU returns error", func(t *testing.T) {
+		_, err := DiscoverGPUsFiltered(ctx, k8sClient, "l40s")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "l40s")
+	})
+}
+
+func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
+	ctx := context.Background()
+
+	// Two H100 nodes
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-1",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-2",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	k8sClient := newFakeClient(node1, node2)
+
+	info, err := DiscoverGPUsFiltered(ctx, k8sClient, "")
+	require.NoError(t, err)
+	assert.Equal(t, 8, info.GPUsPerNode)
+	assert.Equal(t, 2, info.NodesWithGPUs)
 }
 
 func TestDiscoverGPUs_NoGPUNodes(t *testing.T) {
@@ -449,6 +536,43 @@ func TestInferHardwareSystem(t *testing.T) {
 			name:     "MI200",
 			input:    "MI200",
 			expected: nvidiacomv1beta1.GPUSKUTypeMI200,
+		},
+
+		// --- Bare DCGM model names (no form factor suffix) ---
+		// DCGM often reports "NVIDIA H200" / "NVIDIA B200" with system="" because
+		// there is no SXM/HGX/DGX token in the string. GPUs that have no PCIe
+		// variant must still resolve to their SXM SKU.
+		{
+			name:     "NVIDIA H200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA H200",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+		{
+			name:     "NVIDIA B200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA B200",
+			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
+		},
+		{
+			name:     "NVIDIA GB200 bare (DCGM format, no SXM suffix)",
+			input:    "NVIDIA GB200",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+		},
+		{
+			name:     "H200 bare without vendor prefix",
+			input:    "H200",
+			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		},
+		// H100/A100 still default to PCIe when no form factor indicator is present,
+		// because those GPUs have a real PCIe variant.
+		{
+			name:     "H100 bare still defaults to PCIe (has PCIe variant)",
+			input:    "H100",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
+		},
+		{
+			name:     "A100 bare still defaults to PCIe (has PCIe variant)",
+			input:    "A100",
+			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
 		},
 
 		// --- Normalization tests ---
@@ -807,6 +931,160 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	require.Equal(t, 1, callCount)
 
 	require.Equal(t, info1, info2)
+}
+
+func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
+	ctx := context.Background()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-exporter-1",
+			Namespace: "gpu-operator",
+			Labels: map[string]string{
+				LabelApp: LabelValueNvidiaDCGMExporter,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		Build()
+
+	var callCount atomic.Int32
+	scrapeStarted := make(chan struct{})
+	releaseScrape := make(chan struct{})
+
+	mockScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		if callCount.Add(1) == 1 {
+			close(scrapeStarted)
+		}
+		<-releaseScrape
+		return &GPUInfo{
+			NodeName:    "node-a",
+			GPUsPerNode: 4,
+			Model:       "A100",
+			VRAMPerGPU:  40960,
+			MIGEnabled:  false,
+			MIGProfiles: map[string]int{},
+		}, nil
+	}
+
+	discovery := NewGPUDiscovery(mockScraper)
+	cache := NewGPUDiscoveryCache()
+
+	const callers = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var attempted atomic.Int32
+	errs := make(chan error, callers)
+	infos := make(chan *GPUInfo, callers)
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			attempted.Add(1)
+			info, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+			if err != nil {
+				errs <- err
+				return
+			}
+			infos <- info
+		}()
+	}
+
+	close(start)
+	select {
+	case <-scrapeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first scrape to start")
+	}
+	require.Eventually(t, func() bool { return attempted.Load() == callers }, time.Second, 5*time.Millisecond)
+	close(releaseScrape)
+	wg.Wait()
+	close(errs)
+	close(infos)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Len(t, infos, callers)
+	require.Equal(t, int32(1), callCount.Load())
+	for info := range infos {
+		require.NotNil(t, info)
+		assert.Equal(t, "a100_pcie", string(info.System))
+	}
+}
+
+func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
+	ctx := context.Background()
+
+	// Two DCGM pods, one per node
+	pods := []client.Object{
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "dcgm-h100", Namespace: "gpu-operator",
+				Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "dcgm-a100", Namespace: "gpu-operator",
+				Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pods...).Build()
+
+	// Return different GPU models per pod IP. H100 has more VRAM to win tie-breaking.
+	mockScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		if strings.Contains(endpoint, "10.0.0.1") {
+			return &GPUInfo{NodeName: "node-h100", GPUsPerNode: 8, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920}, nil
+		}
+		return &GPUInfo{NodeName: "node-a100", GPUsPerNode: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 40960}, nil
+	}
+
+	discovery := NewGPUDiscovery(mockScraper)
+
+	t.Run("unfiltered selects best and counts only matching SKU", func(t *testing.T) {
+		info, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "")
+		require.NoError(t, err)
+		assert.Equal(t, "h100_sxm", string(info.System))
+		assert.Equal(t, 1, info.NodesWithGPUs, "should count only H100 nodes")
+	})
+
+	t.Run("filter by a100_sxm", func(t *testing.T) {
+		info, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "a100_sxm")
+		require.NoError(t, err)
+		assert.Equal(t, "a100_sxm", string(info.System))
+		assert.Equal(t, 1, info.NodesWithGPUs)
+		assert.Equal(t, "A100-SXM4-80GB", info.Model)
+	})
+
+	t.Run("filter by nonexistent SKU", func(t *testing.T) {
+		_, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "l40s")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no GPU nodes matching SKU")
+	})
+
+	t.Run("cache is per SKU", func(t *testing.T) {
+		cache := NewGPUDiscoveryCache()
+		info1, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, "")
+		require.NoError(t, err)
+		info2, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, "a100_sxm")
+		require.NoError(t, err)
+		assert.NotEqual(t, info1.System, info2.System, "different SKU filters should return different results")
+	})
 }
 
 func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) {

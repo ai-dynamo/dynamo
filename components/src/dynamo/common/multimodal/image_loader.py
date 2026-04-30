@@ -19,7 +19,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from .http_client import get_http_client
+from .http_client import get_http_client, get_http_semaphore
 from .url_validator import (
     UrlValidationPolicy,
     fetch_with_revalidation,
@@ -102,13 +102,14 @@ class ImageLoader:
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 http_client = get_http_client(self._http_timeout)
-                response = await fetch_with_revalidation(
-                    http_client, image_url, self._url_policy
-                )
-                response.raise_for_status()
-                if not response.content:
-                    raise ValueError("Empty response content from image URL")
-                image_data = BytesIO(response.content)
+                async with get_http_semaphore():
+                    response = await fetch_with_revalidation(
+                        http_client, image_url, self._url_policy
+                    )
+                    response.raise_for_status()
+                    if not response.content:
+                        raise ValueError("Empty response content from image URL")
+                    image_data = BytesIO(response.content)
 
             return await self._open_image(image_data)
 
@@ -136,6 +137,17 @@ class ImageLoader:
             return image
         finally:
             self._inflight.pop(key, None)
+
+    async def _read_and_convert_nixl_image(
+        self, metadata: Dict[str, Any]
+    ) -> Image.Image:
+        """Read decoded image via NIXL and convert numpy array to PIL Image."""
+        assert self._nixl_connector is not None
+        arr = await read_decoded_media_via_nixl(self._nixl_connector, metadata)
+        # TRT-LLM's input processor requires PIL Images (accesses .height/.width
+        # for token count calculation). fromarray() is near-zero-cost: it wraps
+        # the existing numpy buffer without copying pixel data.
+        return Image.fromarray(arr)
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
@@ -222,9 +234,7 @@ class ImageLoader:
                     metadata = item[DECODED_VARIANT_KEY]
                     if self._nixl_connector is None:
                         raise RuntimeError("NIXL connector is not initialized")
-                    image_futures.append(
-                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
-                    )
+                    image_futures.append(self._read_and_convert_nixl_image(metadata))
                 else:
                     logger.error(
                         "Received Decoded multimodal data but enable_frontend_decoding=False. "

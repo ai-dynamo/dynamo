@@ -1147,6 +1147,7 @@ mod integration_tests {
                             namespace: "test_namespace".to_string(),
                             instance_id: 1,
                             transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                            device_type: None,
                         },
                         health_check_payload.clone(),
                     );
