@@ -29,7 +29,14 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { version = "0.13.1" }
+tonic-health = { version = "0.13.1" }
 tracing = { workspace = true }
+rcgen = { version = "0.13" }
+tokio-rustls = { version = "0.26" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = { version = "2" }
+hyper-util = { version = "0.1", features = ["tokio", "http2", "server-auto"] }
+http = { version = "1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { workspace = true }
 
