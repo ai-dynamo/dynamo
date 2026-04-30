@@ -19,7 +19,6 @@ package v1alpha1
 
 import (
 	"encoding/json"
-	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -70,6 +69,34 @@ func roundTripFromV1alpha1(t *testing.T, src *DynamoGraphDeployment) *DynamoGrap
 		t.Fatalf("ConvertFrom: %v", err)
 	}
 	return out
+}
+
+func assertOnlyKnownDGDAnnotations(t *testing.T, annotations map[string]string) {
+	t.Helper()
+	for key := range annotations {
+		switch key {
+		case annDGDHubSpec, annDGDSpokeSpec, annDGDSpokeStatus:
+		default:
+			t.Fatalf("unexpected annotation %q in %v", key, annotations)
+		}
+	}
+}
+
+func mustRestoreDGDSpokeServiceSave(t *testing.T, hub *v1beta1.DynamoGraphDeployment, serviceName string) *DynamoComponentDeploymentSharedSpec {
+	t.Helper()
+	raw := hub.Annotations[annDGDSpokeSpec]
+	if raw == "" {
+		t.Fatalf("expected %q in annotations, got %v", annDGDSpokeSpec, hub.Annotations)
+	}
+	saved, ok := restoreDGDSpokeSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpokeSpec, raw)
+	}
+	service := saved.Services[serviceName]
+	if service == nil {
+		t.Fatalf("expected service %q in sparse save, got %#v", serviceName, saved.Services)
+	}
+	return service
 }
 
 func TestDGD_RoundTrip_Empty(t *testing.T) {
@@ -165,12 +192,14 @@ func TestDGD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 		if len(preserved.Components) != 1 {
 			t.Fatalf("expected one preserved component, got %#v", preserved.Components)
 		}
-		main, ok := findContainerByName(preserved.Components[0].PodTemplate.Spec.Containers, mainContainerName)
-		if !ok {
-			t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.Components[0].PodTemplate)
-		}
-		if main.Image != "" {
-			t.Fatalf("representable main-container image was preserved: %#v", main)
+		if preserved.Components[0].PodTemplate != nil {
+			main, ok := findContainerByName(preserved.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+			if !ok {
+				t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.Components[0].PodTemplate)
+			}
+			if main.Image != "" {
+				t.Fatalf("representable main-container image was preserved: %#v", main)
+			}
 		}
 	}
 	component := spoke.Spec.Services["worker"]
@@ -229,6 +258,91 @@ func TestDGD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
 	}
 	if diff := cmp.Diff(spoke.Spec.PVCs, restoredSpoke.Spec.PVCs); diff != "" {
 		t.Fatalf("PVCs mismatch after preserving alpha-only edit (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_SpokeSaveCarriesAlphaOnlyFieldsSparsely(t *testing.T) {
+	createTrue := true
+	name := "models"
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "sparse-spoke-save", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			PVCs: []PVC{{
+				Create:           &createTrue,
+				Name:             &name,
+				StorageClass:     "standard",
+				Size:             resource.MustParse("10Gi"),
+				VolumeAccessMode: corev1.ReadWriteOnce,
+			}},
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(v1beta1.ComponentTypeWorker),
+					Autoscaling: &Autoscaling{
+						Enabled:     true,
+						MinReplicas: 1,
+						MaxReplicas: 4,
+					},
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	assertOnlyKnownDGDAnnotations(t, hub.Annotations)
+	raw := hub.Annotations[annDGDSpokeSpec]
+	if raw == "" {
+		t.Fatalf("expected alpha-only fields in %q, got %v", annDGDSpokeSpec, hub.Annotations)
+	}
+	saved, ok := restoreDGDSpokeSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpokeSpec, raw)
+	}
+	if diff := cmp.Diff(src.Spec.PVCs, saved.PVCs); diff != "" {
+		t.Fatalf("PVC save mismatch (-want +got):\n%s", diff)
+	}
+	if saved.Services["worker"] == nil || saved.Services["worker"].Autoscaling == nil {
+		t.Fatalf("expected autoscaling in sparse spoke save, got %#v", saved.Services)
+	}
+}
+
+func TestDGD_SpokeSaveCarriesNilServicesSparsely(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "nil-service-save", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"nil-service": nil,
+				"worker": {
+					ComponentType: string(v1beta1.ComponentTypeWorker),
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	raw := hub.Annotations[annDGDSpokeSpec]
+	if raw == "" {
+		t.Fatalf("expected sparse nil-service save in %q, got %v", annDGDSpokeSpec, hub.Annotations)
+	}
+	saved, ok := restoreDGDSpokeSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpokeSpec, raw)
+	}
+	if len(saved.Services) != 1 || saved.Services["nil-service"] != nil {
+		t.Fatalf("expected only nil-service in sparse save, got %#v", saved.Services)
+	}
+
+	restored := &DynamoGraphDeployment{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if _, ok := restored.Spec.Services["nil-service"]; !ok || restored.Spec.Services["nil-service"] != nil {
+		t.Fatalf("nil service did not round-trip: %#v", restored.Spec.Services)
 	}
 }
 
@@ -549,7 +663,7 @@ func TestDGD_RoundTrip_ScalingAdapter(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_PVCsPreserved verifies that legacy v1alpha1 PVCs survive
-// a v1alpha1 -> v1beta1 -> v1alpha1 round-trip via the origin annotation.
+// a v1alpha1 -> v1beta1 -> v1alpha1 round-trip via sparse spec preservation.
 func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 	createTrue := true
 	name := testModelPVCName
@@ -575,7 +689,7 @@ func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 
 // TestDGD_FromV1alpha1_DisabledExperimental verifies that v1alpha1
 // GMS/Failover/Checkpoint with Enabled=false and payloads survive the
-// round-trip via origin annotations.
+// round-trip via sparse spec preservation.
 func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "disabled", Namespace: "ns"},
@@ -604,7 +718,7 @@ func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_SubComponentType verifies that a v1alpha1-only
-// subComponentType string survives via origin annotation.
+// subComponentType string survives via sparse spec preservation.
 func TestDGD_FromV1alpha1_SubComponentType(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sub", Namespace: "ns"},
@@ -891,7 +1005,7 @@ func TestDGD_RoundTrip_SharedMemoryDisabledZero(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_SharedMemoryEdgeCases covers the two v1alpha1-only
-// SharedMemorySpec shapes that need origin annotations to round-trip:
+// SharedMemorySpec shapes that need sparse spec preservation to round-trip:
 // Disabled=true and the empty struct &SharedMemorySpec{}.
 func TestDGD_FromV1alpha1_SharedMemoryEdgeCases(t *testing.T) {
 	cases := []struct {
@@ -923,8 +1037,7 @@ func TestDGD_FromV1alpha1_SharedMemoryEdgeCases(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_ScalingAdapterDisabled checks that the otherwise-unreachable
-// &ScalingAdapter{Enabled:false} shape round-trips via the scaling-adapter-disabled
-// annotation.
+// &ScalingAdapter{Enabled:false} shape round-trips via sparse spec preservation.
 func TestDGD_FromV1alpha1_ScalingAdapterDisabled(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sad", Namespace: "ns"},
@@ -944,7 +1057,7 @@ func TestDGD_FromV1alpha1_ScalingAdapterDisabled(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_CheckpointDisabled checks that Checkpoint{Enabled:false}
-// with a non-trivial payload survives via annotation.
+// with a non-trivial payload survives via sparse spec preservation.
 func TestDGD_FromV1alpha1_CheckpointDisabled(t *testing.T) {
 	ref := "my-ckpt"
 	src := &DynamoGraphDeployment{
@@ -969,7 +1082,7 @@ func TestDGD_FromV1alpha1_CheckpointDisabled(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_DynamoNamespaceAndServiceName verifies the two simple
-// v1alpha1-only string fields round-trip via annotations.
+// v1alpha1-only string fields round-trip via sparse spec preservation.
 func TestDGD_FromV1alpha1_DynamoNamespaceAndServiceName(t *testing.T) {
 	ns := "legacy-dyn-ns"
 	src := &DynamoGraphDeployment{
@@ -993,7 +1106,7 @@ func TestDGD_FromV1alpha1_DynamoNamespaceAndServiceName(t *testing.T) {
 // TestDGD_FromV1alpha1_PerServiceAnnotationsAndLabels verifies that v1alpha1
 // per-service Annotations/Labels (which target Pod+Service+Ingress in the
 // v1alpha1 reconcile model and cannot be faithfully placed in
-// podTemplate.metadata alone) are preserved via origin annotations.
+// podTemplate.metadata alone) are preserved via sparse spec preservation.
 func TestDGD_FromV1alpha1_PerServiceAnnotationsAndLabels(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pa", Namespace: "ns"},
@@ -1089,65 +1202,83 @@ func TestDGD_FromV1alpha1_Resources_ForwardOnly(t *testing.T) {
 	}
 }
 
-// TestDGD_ConvertFrom_ScrubsLingeringAnnotations asserts that a stale
-// "nvidia.com/dgd-comp-*" annotation that does not correspond to any current
-// component is dropped by ConvertFrom. This protects users from leaking
-// origin annotations across deletions.
-func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
-	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "scrub",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				"nvidia.com/dgd-comp-deleted-dynamo-namespace": "stale-value",
-				"user/keep-me": "kept",
+func TestDGD_FromV1alpha1_EmptyResourcesRoundTrip(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-resources", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					Resources:     &Resources{Claims: []corev1.ResourceClaim{}},
+				},
 			},
 		},
 	}
-	a := &DynamoGraphDeployment{}
-	if err := a.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	if _, stale := a.ObjectMeta.Annotations["nvidia.com/dgd-comp-deleted-dynamo-namespace"]; stale {
-		t.Errorf("stale dgd-comp- annotation was not scrubbed: %v", a.ObjectMeta.Annotations)
-	}
-	if v, ok := a.ObjectMeta.Annotations["user/keep-me"]; !ok || v != "kept" {
-		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
+
+	got := roundTripFromV1alpha1(t, src)
+	if got.Spec.Services["worker"].Resources == nil {
+		t.Fatalf("empty Resources pointer did not round-trip: %#v", got.Spec.Services["worker"])
 	}
 }
 
-func TestDGD_ConvertFrom_ScrubsLegacySpokeHubAnnotation(t *testing.T) {
-	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "legacy-spoke-hub",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				annDGDSpokeHubLegacy: `{"spec":{},"status":{}}`,
-				"user/keep-me":       "kept",
+func TestDGD_FromV1alpha1_UnrepresentableResourcesRoundTrip(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "unrepresentable-resources", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					Resources: &Resources{
+						Requests: &ResourceItem{CPU: "not-a-quantity"},
+						Claims:   []corev1.ResourceClaim{{Name: "gpu-claim", Request: "gpu"}},
+					},
+				},
 			},
 		},
 	}
 
-	spoke := &DynamoGraphDeployment{}
-	if err := spoke.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
+	got := roundTripFromV1alpha1(t, src)
+	if diff := cmp.Diff(src.Spec.Services["worker"].Resources, got.Spec.Services["worker"].Resources, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("resources mismatch (-want +got):\n%s", diff)
 	}
-	if _, ok := spoke.Annotations[annDGDSpokeHubLegacy]; ok {
-		t.Fatalf("legacy annotation was not scrubbed from spoke: %v", spoke.Annotations)
-	}
-	if v, ok := spoke.Annotations["user/keep-me"]; !ok || v != "kept" {
-		t.Fatalf("user annotations must be preserved, got %v", spoke.Annotations)
+}
+
+func TestDGD_FromV1alpha1_EnvFromSecretRoundTrip(t *testing.T) {
+	secret := "worker-secret"
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					EnvFromSecret: &secret,
+				},
+			},
+		},
 	}
 
-	hub := &v1beta1.DynamoGraphDeployment{}
-	if err := spoke.ConvertTo(hub); err != nil {
-		t.Fatalf("ConvertTo: %v", err)
+	got := roundTripFromV1alpha1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
 	}
-	if _, ok := hub.Annotations[annDGDSpokeHubLegacy]; ok {
-		t.Fatalf("legacy annotation leaked back to hub: %v", hub.Annotations)
+}
+
+func TestDGD_FromV1alpha1_EmptyExtraPodSpecRoundTrip(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-extra-pod-spec", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					ExtraPodSpec:  &ExtraPodSpec{},
+				},
+			},
+		},
 	}
-	if v, ok := hub.Annotations["user/keep-me"]; !ok || v != "kept" {
-		t.Fatalf("user annotations must be preserved, got %v", hub.Annotations)
+
+	got := roundTripFromV1alpha1(t, src)
+	if got.Spec.Services["worker"].ExtraPodSpec == nil {
+		t.Fatalf("empty ExtraPodSpec pointer did not round-trip: %#v", got.Spec.Services["worker"])
 	}
 }
 
@@ -1175,99 +1306,6 @@ func TestDGD_ConvertFrom_DuplicateComponentNames(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate component name") {
 		t.Errorf("error message should mention duplicate component name, got %q", err.Error())
-	}
-}
-
-// TestScrubStaleDGDAnnotations_HyphenatedNames directly exercises
-// scrubStaleDGDAnnotations on cases where either the component name or the
-// origin suffix (or both) contain "-". This is a regression test for a
-// previous bug where the function split the key on the first "-" after the
-// "nvidia.com/dgd-comp-" prefix and used the leading segment as the
-// component name; that approach silently dropped origin annotations for
-// hyphenated active components such as "aa-frontend" or "bb-worker".
-func TestScrubStaleDGDAnnotations_HyphenatedNames(t *testing.T) {
-	type tc struct {
-		name       string
-		components map[string]*DynamoComponentDeploymentSharedSpec
-		anns       map[string]string
-		wantKept   []string
-		wantGone   []string
-	}
-	cases := []tc{
-		{
-			name: "active hyphen-name component with multi-hyphen suffix is kept",
-			components: map[string]*DynamoComponentDeploymentSharedSpec{
-				"aa-frontend": {},
-			},
-			anns: map[string]string{
-				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref": "ref",
-				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace":     "ns",
-				"user/keep-me": "kept",
-			},
-			wantKept: []string{
-				"nvidia.com/dgd-comp-aa-frontend-frontend-sidecar-ref",
-				"nvidia.com/dgd-comp-aa-frontend-dynamo-namespace",
-				"user/keep-me",
-			},
-		},
-		{
-			name: "stale hyphen-name annotations are scrubbed when no match",
-			components: map[string]*DynamoComponentDeploymentSharedSpec{
-				"keeper": {},
-			},
-			anns: map[string]string{
-				"nvidia.com/dgd-comp-old-worker-frontend-sidecar-ref": "stale",
-				"nvidia.com/dgd-comp-deleted-dynamo-namespace":        "stale",
-				"nvidia.com/dgd-comp-keeper-dynamo-namespace":         "active",
-			},
-			wantKept: []string{"nvidia.com/dgd-comp-keeper-dynamo-namespace"},
-			wantGone: []string{
-				"nvidia.com/dgd-comp-old-worker-frontend-sidecar-ref",
-				"nvidia.com/dgd-comp-deleted-dynamo-namespace",
-			},
-		},
-		{
-			name: "shorter active prefix does not falsely match longer stale name",
-			components: map[string]*DynamoComponentDeploymentSharedSpec{
-				// "aa" is active; "aa-frontend" is NOT. An annotation key
-				// like "...-aa-frontend-..." is ambiguous (could be "aa"
-				// + suffix "frontend-..." OR "aa-frontend" + suffix). The
-				// scrub function treats it as "for aa" and keeps it; that
-				// is acceptable because the encoding cannot distinguish.
-				"aa": {},
-			},
-			anns: map[string]string{
-				"nvidia.com/dgd-comp-aa-frontend-sidecar-ref": "ambiguous-keep",
-				"nvidia.com/dgd-comp-zz-dynamo-namespace":     "stale",
-			},
-			wantKept: []string{"nvidia.com/dgd-comp-aa-frontend-sidecar-ref"},
-			wantGone: []string{"nvidia.com/dgd-comp-zz-dynamo-namespace"},
-		},
-		{
-			name:       "non-dgd-comp annotations are never touched",
-			components: map[string]*DynamoComponentDeploymentSharedSpec{},
-			anns: map[string]string{
-				"foo":                      "bar",
-				"nvidia.com/dcd-something": "kept",
-			},
-			wantKept: []string{"foo", "nvidia.com/dcd-something"},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			obj := &metav1.ObjectMeta{Annotations: maps.Clone(c.anns)}
-			scrubStaleDGDAnnotations(obj, c.components)
-			for _, k := range c.wantKept {
-				if _, ok := obj.Annotations[k]; !ok {
-					t.Errorf("expected %q to be kept; got annotations: %v", k, obj.Annotations)
-				}
-			}
-			for _, k := range c.wantGone {
-				if _, ok := obj.Annotations[k]; ok {
-					t.Errorf("expected %q to be scrubbed; got annotations: %v", k, obj.Annotations)
-				}
-			}
-		})
 	}
 }
 
@@ -1323,11 +1361,9 @@ func intstrFromInt32(v int32) intstr.IntOrString {
 }
 
 // TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip exercises the v1alpha1-first
-// FrontendSidecar path: the full FrontendSidecarSpec is stashed under the
-// suffixFrontendSidecar origin annotation on ConvertTo (covers
-// buildPodTemplateTo's "full spec -> name reference" branch) and restored from
-// that annotation on ConvertFrom (covers decomposePodTemplate's
-// "annotation present -> unmarshal + drop container from other" branch).
+// FrontendSidecar path: the full FrontendSidecarSpec is saved sparsely on
+// ConvertTo and restored on ConvertFrom while v1beta1 carries only the name
+// reference.
 func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	secret := "frontend-secret"
 	src := &DynamoGraphDeployment{
@@ -1376,9 +1412,10 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	if sidecar.Image != "dynamo-frontend:1.2.3" {
 		t.Errorf("sidecar image: got %q, want %q", sidecar.Image, "dynamo-frontend:1.2.3")
 	}
-	want := "nvidia.com/dgd-comp-epp-" + suffixFrontendSidecar
-	if _, ok := b.Annotations[want]; !ok {
-		t.Errorf("expected origin annotation %q to be set, got %v", want, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
+	saved := mustRestoreDGDSpokeServiceSave(t, b, "epp")
+	if saved.FrontendSidecar == nil {
+		t.Fatalf("expected frontendSidecar in sparse spoke save, got %#v", saved)
 	}
 
 	got := &DynamoGraphDeployment{}
@@ -1388,16 +1425,14 @@ func TestDGD_FromV1alpha1_FrontendSidecarFullRoundTrip(t *testing.T) {
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("FrontendSidecar round-trip mismatch (-want +got):\n%s", diff)
 	}
-	if _, leaked := got.Annotations["nvidia.com/dgd-comp-epp-"+suffixFrontendSidecar]; leaked {
-		t.Errorf("origin annotation was not consumed: %v", got.Annotations)
-	}
+	assertOnlyKnownDGDAnnotations(t, got.Annotations)
 }
 
 // TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload targets the
-// "Enabled=false with zero-valued payload -> `{}` annotation" branch in
+// "Enabled=false with zero-valued payload -> sparse save" branch in
 // convertExperimentalTo for GPUMemoryService. The v1alpha1 pointer
 // &GPUMemoryServiceSpec{} (no Mode, no DeviceClassName) must round-trip
-// through the annotation without being collapsed to nil.
+// through sparse spec preservation without being collapsed to nil.
 func TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "gms-empty", Namespace: "ns"},
@@ -1414,9 +1449,10 @@ func TestDGD_FromV1alpha1_GMSEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-comp-worker-" + suffixGMSDisabled
-	if v, ok := b.Annotations[key]; !ok || v != `{}` {
-		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
+	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
+	if saved.GPUMemoryService == nil || saved.GPUMemoryService.Enabled {
+		t.Fatalf("expected disabled GPUMemoryService in sparse save, got %#v", saved.GPUMemoryService)
 	}
 
 	got := roundTripFromV1alpha1(t, src)
@@ -1443,9 +1479,10 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-comp-worker-" + suffixFailoverDisabled
-	if v, ok := b.Annotations[key]; !ok || v != `{}` {
-		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
+	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
+	if saved.Failover == nil || saved.Failover.Enabled {
+		t.Fatalf("expected disabled Failover in sparse save, got %#v", saved.Failover)
 	}
 
 	got := roundTripFromV1alpha1(t, src)
@@ -1455,7 +1492,7 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload covers the same
-// "Enabled=false with zero-valued payload -> `{}` annotation" branch for the
+// "Enabled=false with zero-valued payload -> sparse save" branch for the
 // Checkpoint sibling in convertExperimentalTo.
 func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
@@ -1473,9 +1510,10 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	key := "nvidia.com/dgd-comp-worker-" + suffixCheckpointDisabled
-	if v, ok := b.Annotations[key]; !ok || v != `{}` {
-		t.Errorf("expected annotation %q=%q, got %v", key, `{}`, b.Annotations)
+	assertOnlyKnownDGDAnnotations(t, b.Annotations)
+	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
+	if saved.Checkpoint == nil || saved.Checkpoint.Enabled {
+		t.Fatalf("expected disabled Checkpoint in sparse save, got %#v", saved.Checkpoint)
 	}
 
 	got := roundTripFromV1alpha1(t, src)
@@ -1590,18 +1628,18 @@ func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
 }
 
 // TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin pins the twin invariant for
-// the `&SharedMemorySpec{}` -> v1beta1 empty-origin annotation path. The empty
+// the `&SharedMemorySpec{}` -> v1beta1 sparse-save path. The empty
 // struct has `Size: resource.Quantity{}` which serializes to "0" (Quantity is
 // a non-pointer struct, so encoding/json's omitempty does not drop it); after
 // the etcd JSON round-trip the Size becomes a canonical zero Quantity that is
 // not reflect.DeepEqual to the Go zero value. Without the fix in
 // convertSharedMemoryFrom, every reapply of a v1beta1 object carrying the
-// empty-origin annotation would bump .metadata.generation.
+// sparse save would bump .metadata.generation.
 func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	// Seed a v1alpha1 object whose only non-default bit is SharedMemory =
 	// &SharedMemorySpec{}, then run it through ConvertTo once so the
-	// produced v1beta1 carries the "shared-memory-origin=empty" annotation
-	// we need to exercise the empty branch of convertSharedMemoryFrom.
+	// produced v1beta1 carries the sparse save we need to exercise the empty
+	// branch of convertSharedMemoryFrom.
 	a1 := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "shm-empty", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{
@@ -1617,10 +1655,12 @@ func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	if err := a1.ConvertTo(b1); err != nil {
 		t.Fatalf("seed ConvertTo: %v", err)
 	}
-	// Sanity: the empty-origin annotation is what triggers the path we want
-	// to cover; fail loudly if future refactors break the assumption.
-	if _, ok := b1.Annotations["nvidia.com/dgd-comp-worker-shared-memory-origin"]; !ok {
-		t.Fatalf("expected shared-memory-origin=empty annotation on v1beta1, got: %#v", b1.Annotations)
+	// Sanity: the sparse spoke save is what triggers the path we want to
+	// cover; fail loudly if future refactors break the assumption.
+	assertOnlyKnownDGDAnnotations(t, b1.Annotations)
+	saved := mustRestoreDGDSpokeServiceSave(t, b1, "worker")
+	if saved.SharedMemory == nil {
+		t.Fatalf("expected sharedMemory in sparse spoke save, got: %#v", saved)
 	}
 
 	// First apply: ConvertFrom takes the empty branch and produces the

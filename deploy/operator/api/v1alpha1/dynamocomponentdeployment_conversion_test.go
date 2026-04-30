@@ -46,6 +46,17 @@ func dcdRoundTripFromV1beta1(t *testing.T, src *v1beta1.DynamoComponentDeploymen
 	return out
 }
 
+func assertOnlyKnownDCDAnnotations(t *testing.T, annotations map[string]string) {
+	t.Helper()
+	for key := range annotations {
+		switch key {
+		case annDCDHubSpec, annDCDSpokeSpec, annDCDSpokeStatus:
+		default:
+			t.Fatalf("unexpected annotation %q in %v", key, annotations)
+		}
+	}
+}
+
 func TestDCD_RoundTrip_Empty(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "ns"},
@@ -124,8 +135,13 @@ func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
 	if hub.Spec.ComponentName != "default-name" {
 		t.Fatalf("expected omitted serviceName to default to metadata.name, got %q", hub.Spec.ComponentName)
 	}
-	if v, ok := hub.Annotations[annDCDPrefix+suffixServiceName]; !ok || v != "" {
-		t.Fatalf("expected empty service-name origin annotation, got %v", hub.Annotations)
+	assertOnlyKnownDCDAnnotations(t, hub.Annotations)
+	raw := hub.Annotations[annDCDSpokeSpec]
+	if raw == "" {
+		t.Fatalf("expected empty serviceName marker in %q, got %v", annDCDSpokeSpec, hub.Annotations)
+	}
+	if _, emptyServiceName, ok := restoreDCDSpokeSpec(raw); !ok || !emptyServiceName {
+		t.Fatalf("expected empty serviceName marker in %q payload: %s", annDCDSpokeSpec, raw)
 	}
 
 	roundTripped := &DynamoComponentDeployment{}
@@ -176,12 +192,14 @@ func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 		if !ok {
 			t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
 		}
-		main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
-		if !ok {
-			t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.PodTemplate)
-		}
-		if main.Image != "" {
-			t.Fatalf("representable main-container image was preserved: %#v", main)
+		if preserved.PodTemplate != nil {
+			main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+			if !ok {
+				t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.PodTemplate)
+			}
+			if main.Image != "" {
+				t.Fatalf("representable main-container image was preserved: %#v", main)
+			}
 		}
 	}
 	if spoke.Spec.ExtraPodSpec == nil || spoke.Spec.ExtraPodSpec.MainContainer == nil {
@@ -670,13 +688,12 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 	}
 }
 
-// TestDCD_FromV1alpha1_AnnotationPreservedFields exercises the v1alpha1-only
-// fields that are preserved verbatim via origin annotations on the DCD carrier
-// (prefix "nvidia.com/dcd-"). Fields that flow through podTemplate
-// decomposition (EnvFromSecret, Resources, VolumeMounts, Probes) are not
-// bitwise round-trippable v1alpha1-first and are exercised via the
-// v1beta1-first round-trip instead.
-func TestDCD_FromV1alpha1_AnnotationPreservedFields(t *testing.T) {
+// TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields exercises the
+// v1alpha1-only fields preserved through the sparse DCD spoke annotation.
+// Fields that flow through podTemplate decomposition (EnvFromSecret,
+// Resources, VolumeMounts, Probes) are exercised via the v1beta1-first
+// round-trip instead.
+func TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields(t *testing.T) {
 	dynNs := "legacy-dyn-ns"
 	src := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "full", Namespace: "ns"},
@@ -697,36 +714,33 @@ func TestDCD_FromV1alpha1_AnnotationPreservedFields(t *testing.T) {
 		},
 	}
 
-	// Manually drive the round-trip so we can assert that the intermediate
-	// v1beta1 object actually carries the "nvidia.com/dcd-*" origin
-	// annotations for v1alpha1-only fields (this is the contract the
-	// v1alpha1-first round-trip relies on; if the carrier silently stops
-	// emitting them, the equality check below would still pass for the
-	// wrong reason).
 	b := &v1beta1.DynamoComponentDeployment{}
 	if err := src.ConvertTo(b); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	// Suffix list deliberately excludes "service-name" (only emitted for the
-	// standalone DCD case where v1alpha1 omitted ServiceName and v1beta1 used
-	// ObjectMeta.Name as the required ComponentName fallback)
-	// and "shared-memory-origin" (only emitted for the empty-struct edge
-	// case; SharedMemorySpec{Disabled:true} is canonically encoded as
-	// SharedMemorySize=0 without an annotation).
-	for _, suffix := range []string{
-		"sub-component-type",
-		"dynamo-namespace",
-		"autoscaling",
-		"ingress",
-		"scaling-adapter-disabled",
-		"gms-disabled-payload",
-		"annotations",
-		"labels",
-	} {
-		key := "nvidia.com/dcd-" + suffix
-		if _, ok := b.ObjectMeta.Annotations[key]; !ok {
-			t.Errorf("expected intermediate v1beta1 carrier annotation %q, got %v", key, b.ObjectMeta.Annotations)
-		}
+	assertOnlyKnownDCDAnnotations(t, b.Annotations)
+	raw := b.Annotations[annDCDSpokeSpec]
+	if raw == "" {
+		t.Fatalf("expected sparse spoke save in %q, got %v", annDCDSpokeSpec, b.Annotations)
+	}
+	saved, _, ok := restoreDCDSpokeSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpokeSpec, raw)
+	}
+	if saved.SubComponentType != "prefill" {
+		t.Fatalf("saved SubComponentType = %q, want prefill", saved.SubComponentType)
+	}
+	if saved.DynamoNamespace == nil || *saved.DynamoNamespace != dynNs {
+		t.Fatalf("saved DynamoNamespace = %v, want %q", saved.DynamoNamespace, dynNs)
+	}
+	if saved.Autoscaling == nil || saved.Ingress == nil || saved.ScalingAdapter == nil || saved.GPUMemoryService == nil {
+		t.Fatalf("expected alpha-only fields in sparse save, got %#v", saved)
+	}
+	if diff := cmp.Diff(src.Spec.Annotations, saved.Annotations); diff != "" {
+		t.Fatalf("saved annotations mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(src.Spec.Labels, saved.Labels); diff != "" {
+		t.Fatalf("saved labels mismatch (-want +got):\n%s", diff)
 	}
 
 	got := &DynamoComponentDeployment{}
@@ -735,77 +749,6 @@ func TestDCD_FromV1alpha1_AnnotationPreservedFields(t *testing.T) {
 	}
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// TestDCD_ConvertFrom_ScrubsLingeringAnnotations pins the consume-then-scrub
-// contract of ConvertFrom: known-suffix "nvidia.com/dcd-*" origin annotations
-// are consumed (applied to the resulting v1alpha1 fields and then removed),
-// unknown "nvidia.com/dcd-*" annotations are scrubbed, and unrelated user
-// annotations are preserved verbatim.
-func TestDCD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
-	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "scrub",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				// Known suffix carrying a v1alpha1-only field: must be
-				// applied to dst.Spec.DynamoNamespace AND removed from
-				// the resulting object's annotation map.
-				"nvidia.com/dcd-dynamo-namespace": "legacy-ns",
-				// Unknown suffix: nothing on the v1alpha1 side maps to
-				// it, so the scrub must drop it.
-				"nvidia.com/dcd-unknown-suffix": "stale",
-				"user/keep":                     "kept",
-			},
-		},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "scrub",
-			},
-		},
-	}
-	a := &DynamoComponentDeployment{}
-	if err := a.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	if a.Spec.DynamoNamespace == nil || *a.Spec.DynamoNamespace != "legacy-ns" {
-		t.Errorf("expected known-suffix annotation to be consumed into Spec.DynamoNamespace=legacy-ns, got %v", a.Spec.DynamoNamespace)
-	}
-	for _, k := range []string{
-		"nvidia.com/dcd-dynamo-namespace",
-		"nvidia.com/dcd-unknown-suffix",
-	} {
-		if _, present := a.ObjectMeta.Annotations[k]; present {
-			t.Errorf("nvidia.com/dcd-* annotation %q must not survive ConvertFrom: %v", k, a.ObjectMeta.Annotations)
-		}
-	}
-	if v, ok := a.ObjectMeta.Annotations["user/keep"]; !ok || v != "kept" {
-		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
-	}
-}
-
-func TestDCD_ConvertFrom_DoesNotTagHubOriginWhenInternalAnnotationsExist(t *testing.T) {
-	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "internal-annotation",
-			Namespace: "ns",
-			Annotations: map[string]string{
-				annDCDSpokeSpec: "corrupt",
-			},
-		},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "internal-annotation",
-			},
-		},
-	}
-	got := &DynamoComponentDeployment{}
-	if err := got.ConvertFrom(src); err != nil {
-		t.Fatalf("ConvertFrom: %v", err)
-	}
-	if _, ok := got.ObjectMeta.Annotations[annDCDHubOrigin]; ok {
-		t.Fatalf("unexpected %q annotation after internal annotation input: %v", annDCDHubOrigin, got.ObjectMeta.Annotations)
 	}
 }
 
