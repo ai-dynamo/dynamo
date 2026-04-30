@@ -71,6 +71,40 @@ func TestBugDCD_HubSidecarOnlyPodTemplateRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDCD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
+	in := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-pod-template", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "empty-pod-template",
+				PodTemplate:   &corev1.PodTemplateSpec{},
+			},
+		},
+	}
+
+	out := dcdRoundTripFromV1beta1(t, in)
+	if diff := cmp.Diff(in.Spec.PodTemplate, out.Spec.PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDGD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
+	in := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-pod-template", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "empty-pod-template",
+				PodTemplate:   &corev1.PodTemplateSpec{},
+			}},
+		},
+	}
+
+	out := roundTripFromV1beta1(t, in)
+	if diff := cmp.Diff(in.Spec.Components[0].PodTemplate, out.Spec.Components[0].PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestBugDCD_HubPodTemplateWithoutContainersRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-template-no-containers", Namespace: "ns"},

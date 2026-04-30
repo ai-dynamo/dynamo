@@ -737,9 +737,11 @@ func sparseSharedHubOnlyPodTemplate(src, projected *corev1.PodTemplateSpec, fron
 	// save signals so metadata-only preservation cannot freeze live sidecar order.
 	needsMetadataSave := !apiequality.Semantic.DeepEqual(meta, metav1.ObjectMeta{})
 	needsGeneratedMainMarker := sharedHubOnlyPodTemplateGeneratedMainNeedsSave(src, projected)
+	needsEmptyPodTemplateMarker := projected == nil && podTemplateIsZero(src)
 	needsContainerOrderSave := sharedHubOnlyPodTemplateContainerOrderNeedsSave(src, projected)
 	needsFrontendSidecarKey := frontendSidecar != "" && podTemplateHasContainer(src, frontendSidecar)
-	if !needsMetadataSave && !needsGeneratedMainMarker && !needsContainerOrderSave && !needsFrontendSidecarKey &&
+	if !needsMetadataSave && !needsGeneratedMainMarker && !needsEmptyPodTemplateMarker &&
+		!needsContainerOrderSave && !needsFrontendSidecarKey &&
 		!sharedHubOnlyPodTemplateContainerFieldsNeedSave(src, projected) {
 		return nil
 	}
@@ -748,7 +750,7 @@ func sparseSharedHubOnlyPodTemplate(src, projected *corev1.PodTemplateSpec, fron
 		out.ObjectMeta = meta
 	}
 	saveSharedHubOnlyPodTemplateContainers(src, projected, out, needsContainerOrderSave, frontendSidecar)
-	if !needsMetadataSave && len(out.Spec.Containers) == 0 && !needsGeneratedMainMarker {
+	if !needsMetadataSave && len(out.Spec.Containers) == 0 && !needsGeneratedMainMarker && !needsEmptyPodTemplateMarker {
 		return nil
 	}
 	// A non-nil empty PodTemplate preserves that the hub intentionally had no
@@ -1636,6 +1638,9 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	restoreSharedPodTemplateContainerOrder(out, preserved.PodTemplate)
 	restoreSharedHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
 	restoreSharedHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, src)
+	if podTemplateIsZero(preserved.PodTemplate) && podTemplateIsZero(out) {
+		return out
+	}
 	return nilIfEmptyPodTemplate(out)
 }
 
@@ -1905,10 +1910,14 @@ func experimentalIsHubOnlyShape(src *v1beta1.ExperimentalSpec) bool {
 }
 
 func nilIfEmptyPodTemplate(podTemplate *corev1.PodTemplateSpec) *corev1.PodTemplateSpec {
-	if podTemplate == nil || apiequality.Semantic.DeepEqual(*podTemplate, corev1.PodTemplateSpec{}) {
+	if podTemplate == nil || podTemplateIsZero(podTemplate) {
 		return nil
 	}
 	return podTemplate
+}
+
+func podTemplateIsZero(podTemplate *corev1.PodTemplateSpec) bool {
+	return podTemplate != nil && apiequality.Semantic.DeepEqual(*podTemplate, corev1.PodTemplateSpec{})
 }
 
 func resourceRequirementsEqual(a, b corev1.ResourceRequirements) bool {
