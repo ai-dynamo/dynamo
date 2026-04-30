@@ -1274,8 +1274,8 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 			t.Fatalf("expected restore gms-server to be a restartable init container, got RestartPolicy=%#v", gmsServer.RestartPolicy)
 		}
-		if gmsServer.StartupProbe == nil {
-			t.Fatalf("expected restore gms-server to have a StartupProbe")
+		if gmsServer.StartupProbe != nil {
+			t.Fatalf("expected restore gms-server to omit StartupProbe, got %#v", gmsServer.StartupProbe)
 		}
 		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.snapshot.loader" {
 			t.Fatalf("expected loader to run python module, got %#v", got)

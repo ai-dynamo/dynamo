@@ -179,9 +179,9 @@ func InjectCheckpointIntoPodSpec(
 		// (failover) support for GMS is tracked separately; stick to
 		// the legacy main-container path so single-engine GMS restore
 		// continues to work.
-		mainContainer := resolveMainContainer(podSpec)
-		if mainContainer == nil {
-			return fmt.Errorf("gpuMemoryService enabled but no container named %q found in pod spec", commonconsts.MainContainerName)
+		mainContainer, err := RequireMainContainer(podSpec)
+		if err != nil {
+			return fmt.Errorf("gpuMemoryService enabled: %w", err)
 		}
 		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
 	}

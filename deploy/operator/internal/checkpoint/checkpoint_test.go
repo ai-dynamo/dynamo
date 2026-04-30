@@ -328,7 +328,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Nil(t, findInitContainer(podSpec, GMSLoaderContainer))
 		require.NotNil(t, gmsServer.RestartPolicy)
 		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
-		assert.NotNil(t, gmsServer.StartupProbe)
+		assert.Nil(t, gmsServer.StartupProbe)
 		assert.Nil(t, loader.RestartPolicy, "restore gms-loader should be a regular container")
 
 		mounts := map[string]string{}

@@ -24,6 +24,7 @@ const (
 // Resolve methods return non-nil *specs.Spec with PID > 0 on success, or an error.
 type Runtime interface {
 	ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error)
+	ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error)
 	ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error)
 	Close() error
 }

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple
 
-from gpu_memory_service.client.rpc import _GMSRPCTransport
+from gpu_memory_service.client.rpc import DEFAULT_CONNECT_TIMEOUT_MS, _GMSRPCTransport
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
@@ -54,7 +54,10 @@ class _GMSClientSession:
     ):
         self._requested_lock_type = lock_type
         self._transport = _GMSRPCTransport(socket_path)
-        self._transport.connect()
+        connect_timeout_ms = timeout_ms
+        if connect_timeout_ms is None:
+            connect_timeout_ms = DEFAULT_CONNECT_TIMEOUT_MS
+        self._transport.connect(timeout_ms=connect_timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
         except Exception:
