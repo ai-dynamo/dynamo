@@ -357,7 +357,7 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.Checkpoint = src.Checkpoint.DeepCopy()
 		hasSave = true
 	}
-	if includeOriginSplits || hasSave || sharedMainContainerNameNeedsPreservation(src) {
+	if includeOriginSplits || hasSave || sharedMainContainerFieldOriginsNeedSave(src) {
 		saveSharedMainContainerOrigins(src, save)
 	}
 }
@@ -366,11 +366,20 @@ func sharedAlphaSpecSaveIsZero(save *DynamoComponentDeploymentSharedSpec) bool {
 	return save == nil || apiequality.Semantic.DeepEqual(*save, DynamoComponentDeploymentSharedSpec{})
 }
 
-func sharedMainContainerNameNeedsPreservation(src *DynamoComponentDeploymentSharedSpec) bool {
-	return src != nil &&
-		src.ExtraPodSpec != nil &&
-		src.ExtraPodSpec.MainContainer != nil &&
-		src.ExtraPodSpec.MainContainer.Name != ""
+func sharedMainContainerFieldOriginsNeedSave(src *DynamoComponentDeploymentSharedSpec) bool {
+	if src == nil || src.ExtraPodSpec == nil || src.ExtraPodSpec.MainContainer == nil {
+		return false
+	}
+	main := src.ExtraPodSpec.MainContainer
+
+	// These fields decompose back into dedicated v1alpha1 fields unless the
+	// sparse save records that they originated from ExtraPodSpec.MainContainer.
+	return main.Name != "" ||
+		len(main.Env) > 0 ||
+		!resourceRequirementsEqual(main.Resources, corev1.ResourceRequirements{}) ||
+		len(main.VolumeMounts) > 0 ||
+		main.LivenessProbe != nil ||
+		main.ReadinessProbe != nil
 }
 
 func saveSharedMainContainerOrigins(src, save *DynamoComponentDeploymentSharedSpec) {

@@ -105,6 +105,64 @@ func TestBugDGD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDGD_HubOriginSpokeMainContainerEnvSplitRoundTrips(t *testing.T) {
+	hub := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "main-container-env-split", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Name: "hub-origin-template"},
+				},
+			}},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom hub: %v", err)
+	}
+	component := spoke.Spec.Services["worker"]
+	if component == nil {
+		t.Fatalf("expected worker service after ConvertFrom: %#v", spoke.Spec.Services)
+	}
+
+	// Stage 2 edit: the v1alpha1 object intentionally splits env between the
+	// flat Envs field and the ExtraPodSpec main-container escape hatch.
+	component.Envs = []corev1.EnvVar{{Name: "FLAT", Value: "flat"}}
+	component.ExtraPodSpec = &ExtraPodSpec{
+		MainContainer: &corev1.Container{
+			Env: []corev1.EnvVar{{Name: "EXTRA", Value: "extra"}},
+		},
+	}
+
+	restoredHub := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo spoke: %v", err)
+	}
+	restoredSpoke := &DynamoGraphDeployment{}
+	if err := restoredSpoke.ConvertFrom(restoredHub); err != nil {
+		t.Fatalf("ConvertFrom restored hub: %v", err)
+	}
+	restoredComponent := restoredSpoke.Spec.Services["worker"]
+	if restoredComponent == nil {
+		t.Fatalf("expected restored worker service: %#v", restoredSpoke.Spec.Services)
+	}
+	if diff := cmp.Diff(component.Envs, restoredComponent.Envs); diff != "" {
+		t.Fatalf("flat env origin mismatch (-want +got):\n%s", diff)
+	}
+	if component.ExtraPodSpec == nil || component.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("test setup lost extra main-container env: %#v", component.ExtraPodSpec)
+	}
+	if restoredComponent.ExtraPodSpec == nil || restoredComponent.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("extra main-container env collapsed into flat envs: %#v", restoredComponent)
+	}
+	if diff := cmp.Diff(component.ExtraPodSpec.MainContainer.Env, restoredComponent.ExtraPodSpec.MainContainer.Env); diff != "" {
+		t.Fatalf("extra main-container env origin mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestBugDCD_HubPodTemplateWithoutContainersRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-template-no-containers", Namespace: "ns"},
