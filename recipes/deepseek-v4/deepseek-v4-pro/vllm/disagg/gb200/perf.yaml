@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Perf Job for the dsv4-pro-disagg DGD: 8K input / 1K output, concurrency
+# sweep 256x512x1024
+#
+# Topology assumed (set by the matching deploy.yaml):
+#   1 prefill (DP=8 across 2 GB200 nodes) + 1 decode (DP=8 across 2 GB200 nodes)
+#     => 16 decode GPUs, c=512
+#
+# Deploy first:  kubectl -n <ns> apply -f deploy.yaml
+# Then run perf: kubectl -n <ns> apply -f perf.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv4-pro-disagg-bench
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: bench
+        image: python:3.12-slim
+        securityContext:
+          allowPrivilegeEscalation: false
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: TARGET_MODEL
+          value: deepseek-ai/DeepSeek-V4-Pro
+        - name: ENDPOINT
+          value: dsv4-pro-disagg-frontend:8000
+        - name: ISL
+          value: "8192"
+        - name: OSL
+          value: "1024"
+        # Concurrency sweep — each value runs as its own aiperf profile under a
+        # per-concurrency artifact subdir. Override to a single value for a quick
+        # smoke run, e.g. CONCURRENCIES: "512".
+        - name: CONCURRENCIES
+          value: "256 512 1024"
+        - name: ARTIFACT_ROOT
+          value: /opt/models/perf/dsv4-pro-disagg-isl8k-osl1k
+        - name: TOKENIZER
+          value: deepseek-ai/DeepSeek-V4-Pro
+        - name: HF_HOME
+          value: /opt/models
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: COLUMNS
+          value: "200"
+        # HOME defaults to "/" for uid 1000 with no /etc/passwd entry; pip --user
+        # then tries to write /.local (read-only). Point HOME at /tmp (1777 sticky)
+        # so ~/.local resolves under a writable path.
+        - name: HOME
+          value: /tmp
+        - name: PATH
+          value: /tmp/.local/bin:/usr/local/bin:/usr/bin:/bin
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          # No apt-get: cluster runs us as non-root, and we don't actually need
+          # curl/jq — Python stdlib handles the readiness probe. Install aiperf
+          # into HOME=/tmp/.local via --user so it works under runAsNonRoot.
+          pip install --user -q aiperf==0.6.0 transformers==4.57.3 tokenizers==0.22.2
+
+          echo "Waiting for model at http://$ENDPOINT/v1/models..."
+          python3 - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          endpoint, target = os.environ["ENDPOINT"], os.environ["TARGET_MODEL"]
+          while True:
+              try:
+                  with urllib.request.urlopen(f"http://{endpoint}/v1/models", timeout=5) as r:
+                      data = json.load(r)
+                  if any(m.get("id") == target for m in data.get("data", [])):
+                      break
+              except (urllib.error.URLError, ValueError, KeyError):
+                  pass
+              print(f"[{time.strftime('%H:%M:%S')}] not ready, retrying in 10s...", flush=True)
+              time.sleep(10)
+          print("Model ready!", flush=True)
+          PY
+
+          for c in $CONCURRENCIES; do
+            ARTIFACT_DIR="$ARTIFACT_ROOT/c${c}"
+            mkdir -p "$ARTIFACT_DIR"
+            echo ""
+            echo "================================================================"
+            echo " concurrency=$c   isl=$ISL   osl=$OSL   artifact=$ARTIFACT_DIR"
+            echo "================================================================"
+
+            aiperf profile \
+              --artifact-dir "$ARTIFACT_DIR" \
+              --model "$TARGET_MODEL" \
+              --tokenizer "$TOKENIZER" \
+              --tokenizer-trust-remote-code \
+              --endpoint-type chat \
+              --endpoint /v1/chat/completions \
+              --streaming \
+              --url "http://$ENDPOINT" \
+              --synthetic-input-tokens-mean $ISL \
+              --synthetic-input-tokens-stddev 0 \
+              --output-tokens-mean $OSL \
+              --output-tokens-stddev 0 \
+              --extra-inputs "max_tokens:$OSL" \
+              --extra-inputs "min_tokens:$OSL" \
+              --extra-inputs "ignore_eos:true" \
+              --concurrency $c \
+              --request-count $((c * 3)) \
+              --warmup-request-count 16 \
+              --num-dataset-entries 12800 \
+              --random-seed 100 \
+              --ui simple
+          done
+
+          echo ""
+          echo "All sweeps complete. Results under $ARTIFACT_ROOT:"
+          ls -la "$ARTIFACT_ROOT"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /opt/models
+        workingDir: /workspace
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

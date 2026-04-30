@@ -1,0 +1,17 @@
+{
+  "request_id": "deepseek-v4-mixed-param-types-test",
+  "expected_output": {"normal_content": "", "reasoning_content": "The user asked me to send a high-priority overdue-billing notification. I'll call send_notification with the appropriate parameters.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "send_notification", "arguments": "{\"recipient\": \"user@example.com\", \"priority\": 3, \"urgent\": true, \"tags\": [\"billing\", \"overdue\"], \"metadata\": {\"ticket\": \"T-42\", \"retries\": 2}}"}}]},
+  "input_stream": [
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<think>The user asked me to send a high-priority overdue-billing notification. I'll call send_notification with the appropriate parameters.</think>","role":"assistant","reasoning_content":"The user asked me to send a high-priority overdue-billing notification. I'll call send_notification with the appropriate parameters."}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜tool_calls>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜invoke name=\"send_notification\">\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"recipient\" string=\"true\">user@example.com</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"priority\" string=\"false\">3</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"urgent\" string=\"false\">true</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"tags\" string=\"false\">[\"billing\", \"overdue\"]</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"metadata\" string=\"false\">{\"ticket\": \"T-42\", \"retries\": 2}</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"</｜DSML｜invoke>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":"</｜DSML｜tool_calls>","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-mixed","choices":[{"index":0,"delta":{"content":null,"role":"assistant"},"finish_reason":"tool_calls"}]}}
+  ]
+}

@@ -26,23 +26,24 @@ import (
 	"sort"
 	"strings"
 
-	istioNetworking "istio.io/api/networking/v1beta1"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
-
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -266,10 +267,8 @@ type RollingUpdateContext struct {
 	NewWorkerHash string
 	// OldWorkerReplicas maps service name to the desired replica count for old workers.
 	// Used by the controller to patch old worker DCDs directly.
-	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
 	OldWorkerReplicas map[string]int32
 	// NewWorkerReplicas maps service name to the desired replica count for new workers.
-	// Calculated as: min(desiredReplicas, newReadyReplicas + 1) to gradually scale up.
 	NewWorkerReplicas map[string]int32
 }
 
@@ -379,8 +378,8 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && rollingUpdateCtx.NewWorkerReplicas[componentName] != 0 {
-		deployment.Spec.Replicas = ptr.To(rollingUpdateCtx.NewWorkerReplicas[componentName])
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && ok {
+		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
 	}
@@ -520,30 +519,33 @@ func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string
 }
 
 // applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
-// based on the backend framework and multinode deployment patterns.
+// based on the backend framework, multinode deployment patterns, and the
+// inter-pod GMS layout.
 //
 // Rules:
-// - For VLLM and SGLang: worker cliques start after leader clique
-// - For TRTLLM: leader clique starts after worker cliques
-// - Only applies to multinode deployments (numberOfNodes > 1)
-// - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
+//   - For TRTLLM multinode: leader clique starts after worker cliques
+//   - For inter-pod GMS: engine PCLQs start after their corresponding GMS PCLQ
+//     (per rank). This applies both to the standalone inter-pod layout and to
+//     the inter-pod layout with failover; the ordering reflects that engines
+//     load weights from the weight-server pod regardless of whether shadows are
+//     present.
+//   - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
 func applyCliqueStartupDependencies(
 	gangSet *grovev1alpha1.PodCliqueSet,
 	roles []ServiceRole,
 	backendFramework BackendFramework,
 	numberOfNodes int32,
+	isInterPodGMS bool,
 ) {
-	// enabled for TRTLLM multinode deployments only
-	// TODO: reactivate for all backends when we have a better way to handle the readiness probe for the leader.
-	enabled := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
-
-	if !enabled {
-		return // No dependencies for single-node deployments
+	enabledMultinode := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
+	if !enabledMultinode && !isInterPodGMS {
+		return
 	}
 
-	// Build maps of leader and worker clique names
 	var leaderCliqueName string
 	var workerCliqueNames []string
+	// For GMS: map rank -> GMS clique name
+	gmsCliqueByRank := map[int32]string{}
 
 	for _, r := range roles {
 		cliqueName := strings.ToLower(r.Name)
@@ -552,30 +554,49 @@ func applyCliqueStartupDependencies(
 			leaderCliqueName = cliqueName
 		case RoleWorker:
 			workerCliqueNames = append(workerCliqueNames, cliqueName)
+		case RoleGMS:
+			gmsCliqueByRank[r.Rank] = cliqueName
 		}
 	}
 
-	// Apply dependencies to cliques
 	hasDependencies := false
 	for _, clique := range gangSet.Spec.Template.Cliques {
-		// Find the corresponding role for this clique
 		var cliqueRole Role
+		var cliqueRank int32
+		found := false
 		for _, r := range roles {
 			if strings.ToLower(r.Name) == clique.Name {
 				cliqueRole = r.Role
+				cliqueRank = r.Rank
+				found = true
 				break
 			}
 		}
+		if !found {
+			continue
+		}
 
-		// Determine dependencies for this clique
-		startsAfter := getCliqueStartupDependencies(cliqueRole, backendFramework, leaderCliqueName, workerCliqueNames)
+		var startsAfter []string
+
+		// GMS dependencies: engine PCLQs start after their rank's GMS PCLQ
+		if isInterPodGMS && cliqueRole != RoleGMS {
+			if gmsName, ok := gmsCliqueByRank[cliqueRank]; ok {
+				startsAfter = append(startsAfter, gmsName)
+			}
+		}
+
+		// Existing multinode dependencies
+		if enabledMultinode {
+			multiDeps := getCliqueStartupDependencies(cliqueRole, backendFramework, leaderCliqueName, workerCliqueNames)
+			startsAfter = append(startsAfter, multiDeps...)
+		}
+
 		if len(startsAfter) > 0 {
 			clique.Spec.StartsAfter = startsAfter
 			hasDependencies = true
 		}
 	}
 
-	// Set explicit startup type if we have any dependencies
 	if hasDependencies {
 		explicitStartupType := grovev1alpha1.CliqueStartupTypeExplicit
 		gangSet.Spec.Template.StartupType = &explicitStartupType
@@ -658,7 +679,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 		labels[k] = v
 	}
 	if params.IsK8sDiscovery {
-		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
@@ -787,6 +808,52 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 	return vs
 }
 
+// GenerateEPPDestinationRule builds an Istio DestinationRule for an EPP service.
+// This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
+// avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
+func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
+	// Normalize the service name the same way GenerateComponentService does
+	// so the DestinationRule host matches the actual Service DNS name.
+	normalizedName := strings.ReplaceAll(serviceName, ".", "-")
+
+	dr := &networkingv1beta1.DestinationRule{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      normalizedName,
+			Namespace: namespace,
+		},
+	}
+
+	if !meshConfig.IsEnabled() || meshConfig.Istio == nil {
+		return dr
+	}
+
+	tlsMode := istioNetworking.ClientTLSSettings_SIMPLE
+	switch meshConfig.Istio.TLSMode {
+	case "DISABLE":
+		tlsMode = istioNetworking.ClientTLSSettings_DISABLE
+	case "ISTIO_MUTUAL":
+		tlsMode = istioNetworking.ClientTLSSettings_ISTIO_MUTUAL
+	case "MUTUAL":
+		tlsMode = istioNetworking.ClientTLSSettings_MUTUAL
+	}
+
+	skipVerify := true
+	if meshConfig.Istio.InsecureSkipVerify != nil {
+		skipVerify = *meshConfig.Istio.InsecureSkipVerify
+	}
+
+	dr.Spec = istioNetworking.DestinationRule{
+		Host: fmt.Sprintf("%s.%s.svc.cluster.local", normalizedName, namespace),
+		TrafficPolicy: &istioNetworking.TrafficPolicy{
+			Tls: &istioNetworking.ClientTLSSettings{
+				Mode:               tlsMode,
+				InsecureSkipVerify: wrapperspb.Bool(skipVerify),
+			},
+		},
+	}
+	return dr
+}
+
 func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment, ingressConfig configv1alpha1.IngressConfiguration) v1alpha1.IngressSpec {
 	res := v1alpha1.IngressSpec{
 		Enabled:           ingressConfig.VirtualServiceGateway != "" || ingressConfig.ControllerClassName != "",
@@ -820,28 +887,116 @@ const (
 	RoleWorker     Role = "worker"
 	RoleMain       Role = "main"
 	RoleCheckpoint Role = "checkpoint"
+	RoleGMS        Role = "gms"
 )
 
-// Update ServiceRole struct for expandRolesForService
-
+// ServiceRole describes one PodClique (PCLQ) to be materialised for a
+// service. A single DynamoComponentDeploymentSharedSpec can expand into
+// multiple ServiceRoles depending on the deployment topology:
+//
+//   - single-node, no GMS: 1 role (RoleMain)
+//   - multinode, no GMS:    2 roles (RoleLeader + RoleWorker)
+//   - single-node, inter-pod GMS: 1 engine PCLQ (replicated) + 1 RoleGMS
+//     weight-server PCLQ
+//   - multinode, inter-pod GMS: N engine PCLQs (one per rank, replicated)
+//   - 1 RoleGMS weight-server PCLQ
+//
+// The fields carry the information buildCliqueForRole needs to produce a
+// concrete PodCliqueTemplateSpec:
+//
+//   - Name: PCLQ name suffix used for Grove resource naming and hostname
+//     derivation.
+//   - Role:     the pod's semantic role (main/leader/worker/gms). Drives
+//     backend-specific wiring (e.g. --load-format, --node-rank, discovery
+//     labels).
+//   - Replicas: the PCLQ replica count. For GMS this is the number of
+//     engine pods per rank (primary + NumShadows shadows); for non-GMS
+//     roles it is typically 1 (the PCSG-level serviceReplicas controls
+//     horizontal scaling).
+//   - Rank:     static node rank (0 = leader/main, 1..N-1 = workers).
+//     Non-trivial for inter-pod GMS because each rank becomes its own
+//     PCLQ and shares a pod index across shadows; for non-GMS multinode
+//     pods the rank is derived dynamically from GROVE_PCLQ_POD_INDEX.
 type ServiceRole struct {
 	Name     string
 	Role     Role
 	Replicas int32
+	Rank     int32 // node rank: 0 = leader/main, 1..N-1 = workers
 }
 
-// Update expandRolesForService to use Role
-func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32) []ServiceRole {
-	var roles []ServiceRole
-	if numberOfNodes > 1 {
-		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1})
-		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1})
-	} else {
-		replicas := int32(1)
-		if serviceReplicas != nil {
-			replicas = *serviceReplicas
+// expandRolesForService turns a service's (numberOfNodes,
+// gpuMemoryService.mode, failover.mode, replicas) tuple into the concrete
+// list of ServiceRole entries the rest of the Grove rendering pipeline
+// iterates over. It is the single place that decides how many PodCliques a
+// service produces and what each PCLQ looks like (name, role, replicas,
+// static rank).
+//
+// The inter-pod GMS branch is selected by IsInterPodGMSEnabled() (layout)
+// rather than IsInterPodFailoverEnabled() (hot-spares): both the standalone
+// inter-pod layout (1 engine pod + 1 weight-server pod per rank) and the
+// inter-pod layout with failover (primary + N shadows + 1 weight-server pod
+// per rank) use the same PCLQ topology, differing only in the per-rank engine
+// clique's Replicas (derived from GetTotalEnginePods).
+//
+// Callers that iterate "engine roles" must still gate on
+// IsInterPodGMSEnabled() — this function emits the GMS weight-server PCLQ
+// as a regular ServiceRole, not as a separate concept.
+func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentSharedSpec) []ServiceRole {
+	isInterPodGMS := component.IsInterPodGMSEnabled()
+	isMultinode := numberOfNodes > 1
+
+	switch {
+	case isMultinode && isInterPodGMS:
+		return expandMultinodeGMSRoles(serviceName, numberOfNodes, component.GetTotalEnginePods())
+	case isMultinode:
+		return expandMultinodeRoles(serviceName, numberOfNodes)
+	case isInterPodGMS:
+		return expandSingleNodeGMSRoles(serviceName, component.GetTotalEnginePods())
+	default:
+		return expandSingleNodeRoles(serviceName, serviceReplicas)
+	}
+}
+
+func expandSingleNodeRoles(serviceName string, serviceReplicas *int32) []ServiceRole {
+	replicas := int32(1)
+	if serviceReplicas != nil {
+		replicas = *serviceReplicas
+	}
+	return []ServiceRole{
+		{Name: serviceName, Role: RoleMain, Replicas: replicas},
+	}
+}
+
+func expandMultinodeRoles(serviceName string, numberOfNodes int32) []ServiceRole {
+	return []ServiceRole{
+		{Name: serviceName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1},
+		{Name: serviceName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1},
+	}
+}
+
+func expandSingleNodeGMSRoles(serviceName string, totalEnginePods int32) []ServiceRole {
+	return []ServiceRole{
+		{Name: fmt.Sprintf("%s-%s-0", serviceName, commonconsts.GroveRoleSuffixGMS), Role: RoleGMS, Replicas: 1, Rank: 0},
+		{Name: serviceName, Role: RoleMain, Replicas: totalEnginePods, Rank: 0},
+	}
+}
+
+func expandMultinodeGMSRoles(serviceName string, numberOfNodes int32, totalEnginePods int32) []ServiceRole {
+	roles := make([]ServiceRole, 0, numberOfNodes*2)
+	for rank := int32(0); rank < numberOfNodes; rank++ {
+		gmsName := fmt.Sprintf("%s-%s-%d", serviceName, commonconsts.GroveRoleSuffixGMS, rank)
+		roles = append(roles, ServiceRole{Name: gmsName, Role: RoleGMS, Replicas: 1, Rank: rank})
+
+		var engineName string
+		var engineRole Role
+		if rank == 0 {
+			engineName = serviceName + "-" + commonconsts.GroveRoleSuffixLeader
+			engineRole = RoleLeader
+		} else {
+			engineName = fmt.Sprintf("%s-%s-%d", serviceName, commonconsts.GroveRoleSuffixWorker, rank)
+			engineRole = RoleWorker
 		}
-		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: replicas})
+		roles = append(roles, ServiceRole{Name: engineName, Role: engineRole, Replicas: totalEnginePods, Rank: rank})
 	}
 	return roles
 }
@@ -1000,9 +1155,10 @@ func GenerateBasePodSpec(
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
+	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, component.Annotations))
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -1117,9 +1273,12 @@ func GenerateBasePodSpec(
 		})
 	}
 	// Apply backend-specific container modifications
-	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
+	multinodeDeployer := deployerOverride
 	if multinodeDeployer == nil {
-		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
+		multinodeDeployer = MultinodeDeployerFactory(multinodeDeploymentType)
+		if multinodeDeployer == nil {
+			return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
+		}
 	}
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName)
 	if backend == nil {
@@ -1182,6 +1341,32 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// Intra-pod GMS: replace nvidia.com/gpu with a shared DRA claim and add the server
+	// sidecar directly into this pod.
+	//
+	// Inter-pod GMS (gpuMemoryService.mode=interPod, with or without failover)
+	// must be skipped here — that layout wires DRA claims and the GMS server
+	// on a dedicated weight-server pod at the PCSG level (see
+	// generateGrovePodCliqueSet → gmsWeightServerPodSpec); re-applying the
+	// claim and injecting a sidecar here would produce a double-wired engine
+	// pod (stray GMS sidecar, conflicting claim).
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled &&
+		!component.IsInterPodGMSEnabled() {
+		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
+		}
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+	}
+
+	// Clone main container into two engine containers (active + standby) for failover.
+	// Runs after GMS so the main container already has DRA claims and shared volume.
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1196,7 +1381,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
@@ -1208,7 +1393,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
-		DiscoveryBackend:               discoveryBackend,
+		Discovery:                      discovery,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
@@ -1230,7 +1415,7 @@ func generateFrontendSidecar(
 		ComponentType:                  commonconsts.ComponentTypeFrontend,
 		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
-		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		Discovery:                      parentContext.Discovery,
 		DynamoNamespace:                parentContext.DynamoNamespace,
 	}
 
@@ -1264,7 +1449,8 @@ func generateFrontendSidecar(
 	return container, nil
 }
 
-// GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
+// GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper).
+// deployerOverride, when non-nil, overrides the default MultinodeDeployer from the factory.
 func GeneratePodSpecForComponent(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
@@ -1275,7 +1461,8 @@ func GeneratePodSpecForComponent(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info
+	checkpointInfo *checkpoint.CheckpointInfo,
+	deployerOverride MultinodeDeployer,
 ) (*corev1.PodSpec, error) {
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
@@ -1284,7 +1471,7 @@ func GeneratePodSpecForComponent(
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -1297,6 +1484,7 @@ func GeneratePodSpecForComponent(
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
 	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
@@ -1339,6 +1527,150 @@ func propagateDGDSpecMetadata(annotations, labels map[string]string, component *
 }
 
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+// cliqueParams groups the context needed to build a single PodClique template
+// from a ServiceRole. All fields come from the enclosing GenerateGrovePodCliqueSet
+// loop iteration and are read-only.
+type cliqueParams struct {
+	r                          ServiceRole
+	component                  *v1alpha1.DynamoComponentDeploymentSharedSpec
+	backendFramework           BackendFramework
+	secretsRetriever           SecretsRetriever
+	dynamoDeployment           *v1alpha1.DynamoGraphDeployment
+	numberOfNodes              int32
+	operatorConfig             *configv1alpha1.OperatorConfiguration
+	runtimeConfig              *controller_common.RuntimeConfig
+	serviceName                string
+	checkpointInfo             *checkpoint.CheckpointInfo
+	isMultinode                bool
+	usesPCSG                   bool
+	isInterPodGMS              bool
+	isInterPodFailover         bool
+	discoveryBackend           configv1alpha1.DiscoveryBackend
+	discoveryContext           DiscoveryContext
+	restartState               *RestartState
+	existingRestartAnnotations map[string]string
+	validatedQueueName         string
+	kubeClient                 ctrlclient.Reader
+	ctx                        context.Context
+}
+
+// buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
+// injecting labels, annotations, checkpoint config, and scheduler settings.
+func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	podSpec, err := generatePodSpecForRole(
+		p.r, p.component, p.backendFramework, p.secretsRetriever,
+		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.serviceName, p.checkpointInfo,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
+	}
+
+	if p.operatorConfig.Checkpoint.Enabled {
+		if err := checkpoint.InjectCheckpointIntoPodSpec(
+			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+		); err != nil {
+			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
+		}
+	}
+
+	// minAvailable controls Grove gang-scheduling: the clique is only
+	// considered available when at least this many replicas are Ready.
+	//
+	// The invariant we want is "minAvailable = Replicas unless the clique
+	// has redundant replicas". Concretely:
+	//
+	//   - Plain multinode (no inter-pod GMS failover): the worker clique
+	//     collapses non-leader ranks into a single clique with
+	//     Replicas = numberOfNodes - 1 and those pods are NCCL peers of each
+	//     other — losing any one breaks the collective, so all replicas
+	//     must be Ready. Standalone inter-pod GMS on multinode also lands
+	//     here but has Replicas = 1 per PCLQ (primary only, no shadows), so
+	//     the same rule evaluates to minAvailable = 1 without a special case.
+	//
+	//   - Inter-pod GMS failover (single- or multinode): within each rank
+	//     Replicas = primary + shadows and shadows ARE redundant hot spares
+	//     — requiring every shadow to be Ready would defeat failover, so
+	//     the clique stays at minAvailable = 1.
+	//
+	//   - Single-node clique (no multinode, with or without intra-pod
+	//     failover or standalone inter-pod GMS): Replicas is at most 1 or a
+	//     small DP fanout under the outer PCSG where the replicas are
+	//     independent of each other; minAvailable = 1 is correct.
+	//
+	// The two-line rule below captures all of the above: take the baseline
+	// of 1, then lift it to Replicas only on plain multinode without
+	// inter-pod failover (the only layout that combines >1 replicas per
+	// clique with no redundancy between them).
+	minAvailable := int32(1)
+	if p.isMultinode && !p.isInterPodFailover {
+		minAvailable = p.r.Replicas
+	}
+
+	clique := &grovev1alpha1.PodCliqueTemplateSpec{
+		Name: strings.ToLower(p.r.Name),
+		Spec: grovev1alpha1.PodCliqueSpec{
+			RoleName:     strings.ToLower(p.r.Name),
+			Replicas:     p.r.Replicas,
+			MinAvailable: ptr.To(minAvailable),
+			PodSpec:      *podSpec,
+		},
+	}
+
+	if !p.usesPCSG {
+		clique.TopologyConstraint = toGroveTopologyConstraint(p.component.TopologyConstraint)
+	}
+
+	labels, err := generateLabels(p.component, p.dynamoDeployment, p.serviceName, p.discoveryContext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate labels: %w", err)
+	}
+	clique.Labels = labels
+	if p.isInterPodFailover && p.r.Role != RoleGMS {
+		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
+	}
+	// Strip discovery labels from RoleGMS pods. generateLabels applies them
+	// unconditionally to every role for container-mode Pod reflector filtering
+	// (see #8067), but GMS weight-server pods run gpu_memory_service.cli.server
+	// — not the dynamo runtime — and never register a DynamoWorkerMetadata CR.
+	// Leaving the labels on them would make the Rust discovery daemon include
+	// them in its reflector store for no purpose and wake its debounce loop on
+	// every GMS restart/fast-kill event.
+	if p.r.Role == RoleGMS {
+		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryBackend)
+		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryEnabled)
+	}
+
+	annotations, err := generateAnnotations(p.component)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate annotations: %w", err)
+	}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
+	clique.Annotations = annotations
+
+	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	return clique, nil
+}
+
+// applyRestartAnnotation adds the restart annotation to the map if needed,
+// creating the map when it is nil.
+func applyRestartAnnotation(annotations map[string]string, serviceName string, restartState *RestartState, existingRestartAnnotations map[string]string) map[string]string {
+	if restartState.ShouldAnnotateService(serviceName) {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+	} else if existingRestartAnnotations != nil {
+		if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
+			if annotations == nil {
+				annotations = make(map[string]string)
+			}
+			annotations[commonconsts.RestartAnnotation] = existingTimestamp
+		}
+	}
+	return annotations
+}
+
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
@@ -1379,9 +1711,19 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
+	discoveryContext := NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
-	for serviceName, component := range dynamoDeployment.Spec.Services {
+	var resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
+
+	sortedServiceNames := make([]string, 0, len(dynamoDeployment.Spec.Services))
+	for name := range dynamoDeployment.Spec.Services {
+		sortedServiceNames = append(sortedServiceNames, name)
+	}
+	sort.Strings(sortedServiceNames)
+
+	for _, serviceName := range sortedServiceNames {
+		component := dynamoDeployment.Spec.Services[serviceName]
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
@@ -1405,118 +1747,128 @@ func GenerateGrovePodCliqueSet(
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
-		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
+		isInterPodGMS := component.IsInterPodGMSEnabled()
+		isInterPodFailover := component.IsInterPodFailoverEnabled()
+		usesPCSG := isMultinode || isInterPodGMS
+		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 
 		for _, r := range roles {
-			podSpec, err := GeneratePodSpecForComponent(
-				component,
-				backendFramework,
-				secretsRetriever,
-				dynamoDeployment,
-				r.Role,
-				numberOfNodes,
-				operatorConfig,
-				commonconsts.MultinodeDeploymentTypeGrove,
-				serviceName,
-				checkpointInfo,
-			)
+			clique, err := buildCliqueForRole(cliqueParams{
+				r:                          r,
+				component:                  component,
+				backendFramework:           backendFramework,
+				secretsRetriever:           secretsRetriever,
+				dynamoDeployment:           dynamoDeployment,
+				numberOfNodes:              numberOfNodes,
+				operatorConfig:             operatorConfig,
+				runtimeConfig:              runtimeConfig,
+				serviceName:                serviceName,
+				checkpointInfo:             checkpointInfo,
+				isMultinode:                isMultinode,
+				usesPCSG:                   usesPCSG,
+				isInterPodGMS:              isInterPodGMS,
+				isInterPodFailover:         isInterPodFailover,
+				discoveryBackend:           discoveryBackend,
+				discoveryContext:           discoveryContext,
+				restartState:               restartState,
+				existingRestartAnnotations: existingRestartAnnotations,
+				validatedQueueName:         validatedQueueName,
+				kubeClient:                 kubeClient,
+				ctx:                        ctx,
+			})
 			if err != nil {
-				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
+				return nil, err
 			}
-			if operatorConfig.Checkpoint.Enabled {
-				if err := checkpoint.InjectCheckpointIntoPodSpec(
-					ctx,
-					kubeClient,
-					dynamoDeployment.Namespace,
-					podSpec,
-					checkpointInfo,
-				); err != nil {
-					return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", r.Name, err)
-				}
-			}
-
-			minAvailable := int32(1)
-			if isMultinode {
-				minAvailable = r.Replicas
-			}
-
-			clique := &grovev1alpha1.PodCliqueTemplateSpec{
-				Name: strings.ToLower(r.Name),
-				Spec: grovev1alpha1.PodCliqueSpec{
-					RoleName:     strings.ToLower(r.Name),
-					Replicas:     r.Replicas,
-					MinAvailable: ptr.To(minAvailable),
-					PodSpec:      *podSpec,
-				},
-			}
-
-			// For single-node services, set topology constraint directly on the clique.
-			// For multinode services, the constraint goes on the PCSG instead;
-			// child cliques inherit from PCSG and should NOT have explicit constraints.
-			if !isMultinode {
-				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
-			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate labels: %w", err)
-			}
-			clique.Labels = labels
-			annotations, err := generateAnnotations(component)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate annotations: %w", err)
-			}
-			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
-
-			// Apply restart annotation if this service should be restarted.
-			// For services not in the current restart order, preserve their existing annotation
-			// to avoid triggering unwanted rollouts when a new restart begins.
-			if restartState.ShouldAnnotateService(serviceName) {
-				if annotations == nil {
-					annotations = make(map[string]string)
-				}
-				annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
-			} else if existingRestartAnnotations != nil {
-				if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
-					if annotations == nil {
-						annotations = make(map[string]string)
-					}
-					annotations[commonconsts.RestartAnnotation] = existingTimestamp
-				}
-			}
-			clique.Annotations = annotations
-
-			// Inject kai-scheduler settings if enabled
-			injectKaiSchedulerIfEnabled(clique, runtimeConfig, validatedQueueName)
-
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
 
-		// Apply startup dependencies for this service
-		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes)
+		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodGMS)
 
-		if isMultinode {
-			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
+		if isInterPodGMS {
+			resourceClaimTemplates = append(resourceClaimTemplates, gmsResourceClaimTemplateConfigs(serviceName, component.Resources, roles)...)
+		}
+
+		if usesPCSG {
+			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(serviceName),
 				CliqueNames:        cliqueNames,
 				Replicas:           component.Replicas,
 				MinAvailable:       ptr.To(int32(1)),
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
-			})
+			}
+			if isInterPodGMS {
+				pcsg.ResourceSharing = gmsResourceSharingEntries(serviceName, roles)
+			}
+			scalingGroups = append(scalingGroups, pcsg)
 		}
 	}
 	if len(scalingGroups) > 0 {
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
+	if len(resourceClaimTemplates) > 0 {
+		gangSet.Spec.Template.ResourceClaimTemplates = resourceClaimTemplates
+	}
 
 	return gangSet, nil
+}
+
+// generatePodSpecForRole builds the pod spec for a single role, handling GMS
+// weight server pods and GMS engine pods differently from regular pods.
+func generatePodSpecForRole(
+	r ServiceRole,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) (*corev1.PodSpec, error) {
+	isInterPodGMS := component.IsInterPodGMSEnabled()
+
+	if r.Role == RoleGMS {
+		// GMS weight server: generate a base engine spec then transform it
+		basePodSpec, err := GeneratePodSpecForComponent(
+			component, backendFramework, secretsRetriever, dynamoDeployment,
+			RoleMain, 1, operatorConfig,
+			commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate base podSpec for GMS: %w", err)
+		}
+		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(getGPUCount(component.Resources))), nil
+	}
+
+	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode inter-pod GMS
+	var deployer MultinodeDeployer
+	if isInterPodGMS && numberOfNodes > 1 {
+		deployer = &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: r.Rank}
+	}
+
+	podSpec, err := GeneratePodSpecForComponent(
+		component, backendFramework, secretsRetriever, dynamoDeployment,
+		r.Role, numberOfNodes, operatorConfig,
+		commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, deployer,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if isInterPodGMS {
+		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled())
+	}
+
+	return podSpec, nil
 }
 
 func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
+	discovery DiscoveryContext,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
@@ -1545,6 +1897,7 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
+	// Re-apply system labels after user merge to prevent override
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
@@ -1554,6 +1907,19 @@ func generateLabels(
 	}
 	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	// Discovery labels on pod template — needed for Pod reflector filtering in
+	// container mode (see lib/runtime/src/discovery/kube/daemon.rs). Applied to
+	// every role by default because any role may host the dynamo runtime — for
+	// example, multinode vLLM workers in data-parallel hybrid-lb mode run their
+	// own API server (see RoleWorker branch in injectDataParallelLaunchFlags).
+	// Callers that render non-dynamo pods (specifically the RoleGMS weight
+	// server, which runs gpu_memory_service.cli.server and never registers a
+	// DynamoWorkerMetadata CR) are responsible for stripping these labels after
+	// the fact — see buildCliqueForRole.
+	if discovery.Backend == configv1alpha1.DiscoveryBackendKubernetes {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 	return labels, nil
 }
@@ -1754,6 +2120,7 @@ func GenerateBasePodSpecForController(
 		multinodeDeploymentType,
 		serviceName,
 		checkpointInfo,
+		nil, // use default deployer
 	)
 	if err != nil {
 		return nil, err

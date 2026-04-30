@@ -18,7 +18,7 @@ spec:
                   matchLabels:
                     nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -54,7 +54,7 @@ spec:
             capabilities:
               add:
                 - IPC_LOCK
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2-efa-amd64
           workingDir: /workspace/examples/backends/vllm
           command:
           - /bin/bash
@@ -99,7 +99,7 @@ spec:
             capabilities:
               add:
                 - IPC_LOCK
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2-efa-amd64
           workingDir: /workspace/examples/backends/vllm
           command:
           - /bin/bash

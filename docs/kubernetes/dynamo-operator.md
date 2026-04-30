@@ -190,7 +190,10 @@ export IMAGE_TAG=latest
 
 # Build operator image
 cd deploy/operator
-docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG .
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG \
+  --build-context snapshot=../snapshot \
+  --build-arg DOCKER_PROXY="" \
+  .
 docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 cd -
 

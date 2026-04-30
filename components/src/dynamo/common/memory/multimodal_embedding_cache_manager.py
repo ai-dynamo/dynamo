@@ -59,6 +59,7 @@ class MultimodalEmbeddingCacheManager:
         # Stats
         self._hits = 0
         self._misses = 0
+        self._evictions = 0
 
         logger.info(
             f"MultimodalEmbeddingCacheManager initialized: capacity={capacity_bytes / 1024**3:.2f}GB"
@@ -138,6 +139,7 @@ class MultimodalEmbeddingCacheManager:
             evicted_key, evicted_entry = self._cache.popitem(last=False)
             evicted_size = self._tensor_size(evicted_entry.tensor)
             self._current_bytes -= evicted_size
+            self._evictions += 1
             logger.debug(
                 f"Evicted key={evicted_key[:16]}..., size={evicted_size / 1024**2:.2f}MB"
             )
@@ -174,5 +176,6 @@ class MultimodalEmbeddingCacheManager:
             else 0,
             "hits": self._hits,
             "misses": self._misses,
+            "evictions": self._evictions,
             "hit_rate": hit_rate,
         }

@@ -11,17 +11,18 @@ homepage.workspace = true
 repository.workspace = true
 description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 
-[[bin]]
+[[bench]]
 name = "multiturn_bench"
-path = "src/bin/multiturn_bench.rs"
+path = "multiturn_bench.rs"
+harness = false
 
 [[bin]]
 name = "claude_trace_export"
-path = "src/bin/claude_trace_export.rs"
+path = "claude_trace_export.rs"
 
 [[bench]]
-name = "kv_indexer_bench"
-path = "kv_router/kv_indexer_bench.rs"
+name = "offline_replay_bench"
+path = "offline_replay_bench.rs"
 harness = false
 
 [[bench]]
@@ -59,12 +60,13 @@ dynamo-mocker = { workspace = true }
 bytemuck = "1.22"
 
 [dev-dependencies]
-async-trait = { workspace = true }
-dynamo-kv-router = { workspace = true, features = ["bench"] }
+dynamo-kv-router = { workspace = true, features = ["bench", "metrics", "shard-metrics"] }
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

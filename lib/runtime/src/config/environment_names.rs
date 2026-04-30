@@ -312,6 +312,34 @@ pub mod llm {
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
+
+    /// Agent trace configuration
+    pub mod agent_trace {
+        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
+
+        /// Local output path for normalized agent trace records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
+        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
+
+        /// In-process trace bus capacity.
+        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
+
+        /// JSONL sink buffer size in bytes.
+        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
+
+        /// JSONL sink periodic flush interval in milliseconds.
+        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL sink roll threshold in record lines.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
+    }
 }
 
 /// Model loading and caching environment variables
@@ -365,7 +393,13 @@ pub mod tcp_response_stream {
 
 /// Event Plane transport environment variables
 pub mod event_plane {
-    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    /// Event transport selection: "zmq" or "nats".
+    ///
+    /// When unset the default depends on the discovery backend:
+    /// - `file` / `mem` backends: defaults to `zmq` (no external services required).
+    /// - `etcd` / `kubernetes` backends: defaults to `nats`.
+    ///
+    /// Set this explicitly to override the context-aware default.
     pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
 
     /// Event plane codec selection: "json" or "msgpack".
@@ -390,6 +424,15 @@ pub mod zmq_broker {
 
     /// Namespace for broker discovery registration
     pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
+}
+
+/// Discovery environment variables
+pub mod discovery {
+    /// Discovery backend: "kubernetes" or "etcd" (default)
+    pub const DYN_DISCOVERY_BACKEND: &str = "DYN_DISCOVERY_BACKEND";
+
+    /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
+    pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 }
 
 /// CUDA and GPU environment variables
@@ -507,6 +550,13 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
+            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
+            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -529,6 +579,9 @@ mod tests {
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
+            // Discovery
+            discovery::DYN_DISCOVERY_BACKEND,
+            discovery::DYN_KUBE_DISCOVERY_MODE,
             // CUDA
             cuda::DYN_FATBIN_PATH,
             // Build

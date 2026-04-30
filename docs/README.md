@@ -54,7 +54,7 @@ the navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
+| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.agents/skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
 
 ---
 
@@ -182,7 +182,7 @@ navigation:
   - section: Getting Started
     contents:
       - page: Quickstart
-        path: getting-started/quickstart.md
+        path: getting-started/quickstart.mdxx
       - page: Support Matrix
         path: reference/support-matrix.md
 ```

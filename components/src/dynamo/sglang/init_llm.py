@@ -80,6 +80,15 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    load_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
+    )
+    unload_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.unload_lora"
+    )
+    list_loras_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
+    )
 
     shutdown_endpoints[:] = [generate_endpoint]
 
@@ -131,6 +140,18 @@ async def init_decode(
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=metrics_labels,
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=metrics_labels,
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
+                metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(
                 engine,
@@ -187,6 +208,15 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    load_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
+    )
+    unload_lora_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.unload_lora"
+    )
+    list_loras_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
+    )
 
     shutdown_endpoints[:] = [generate_endpoint]
 
@@ -227,6 +257,18 @@ async def init_prefill(
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=metrics_labels,
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=metrics_labels,
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
+                metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(
                 engine,
