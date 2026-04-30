@@ -150,7 +150,7 @@ func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus
 	if preservedStatus != nil && len(dstStatus.PodSelector) == 0 && len(preservedStatus.PodSelector) > 0 {
 		dstStatus.PodSelector = maps.Clone(preservedStatus.PodSelector)
 	}
-	if preservedStatus != nil && shouldRestorePreservedComponentName(dstStatus.Service, preservedStatus.Service) {
+	if preservedStatus != nil && shouldRestoreSavedComponentName(dstStatus.Service, preservedStatus.Service) {
 		dstStatus.Service.ComponentName = preservedStatus.Service.ComponentName
 	}
 }
