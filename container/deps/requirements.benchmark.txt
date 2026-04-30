@@ -3,4 +3,4 @@
 
 # Benchmark and profiling tool dependencies.
 
-aiperf==0.6.0
+aiperf==0.7.0
