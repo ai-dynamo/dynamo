@@ -507,9 +507,10 @@ func restoreDGDRHubSpecAnnotation(src *DynamoGraphDeploymentRequest) *dgdrHubSpe
 		return nil
 	}
 	envelope.Spec = legacy
-	if legacy.AutoApply != nil && !*legacy.AutoApply {
+	if dgdrLegacyHubSpecMarksNilAutoApply(&legacy) {
 		envelope.AutoApplyNil = true
 		envelope.Spec.AutoApply = nil
+		envelope.Spec.Features = nil
 	}
 	if dgdrHubSpecSaveIsZero(&envelope) {
 		return nil
@@ -531,10 +532,31 @@ func restoreDGDRHubStatusAnnotation(src *DynamoGraphDeploymentRequest) *dgdrHubS
 		return nil
 	}
 	envelope.Status = legacy
+	envelope.PhaseSet = dgdrLegacyHubStatusHasPhase(raw)
 	if dgdrHubStatusSaveIsZero(&envelope) {
 		return nil
 	}
 	return &envelope
+}
+
+func dgdrLegacyHubSpecMarksNilAutoApply(legacy *v1beta1.DynamoGraphDeploymentRequestSpec) bool {
+	if legacy == nil {
+		return false
+	}
+	if legacy.AutoApply != nil && !*legacy.AutoApply {
+		return true
+	}
+	return legacy.Features != nil &&
+		apiequality.Semantic.DeepEqual(legacy.Features, &v1beta1.FeaturesSpec{})
+}
+
+func dgdrLegacyHubStatusHasPhase(raw string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return false
+	}
+	_, ok := obj["phase"]
+	return ok
 }
 
 func restoreDGDRSpokeAnnotations(src *v1beta1.DynamoGraphDeploymentRequest) (*DynamoGraphDeploymentRequestSpec, *DynamoGraphDeploymentRequestStatus) {

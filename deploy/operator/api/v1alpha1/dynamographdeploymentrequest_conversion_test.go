@@ -1170,6 +1170,30 @@ func TestDGDR_SparseHubSpecNilAutoApplyOmitsRepresentableFields(t *testing.T) {
 	}
 }
 
+func TestDGDR_LegacyHubSpecEmptyFeaturesMarkerRestoresNilAutoApply(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "legacy-nil-autoapply",
+			Annotations: map[string]string{
+				annDGDRHubSpec: `{"features":{}}`,
+			},
+		},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:     "llama",
+			Backend:   "vllm",
+			AutoApply: true,
+		},
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.AutoApply != nil {
+		t.Fatalf("AutoApply = %v, want nil from legacy marker", *restored.Spec.AutoApply)
+	}
+}
+
 func TestDGDR_HubNilAutoApplyWithOtherHubSavesRoundTrips(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "nil-autoapply-with-mocker"},
@@ -1319,6 +1343,28 @@ func TestDGDR_HubDeployedPhaseRespectsIntermediateSpokeCreatedEdit(t *testing.T)
 	}
 	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
 		t.Fatalf("Phase = %q, want %q", restored.Status.Phase, v1beta1.DGDRPhaseReady)
+	}
+}
+
+func TestDGDR_LegacyHubStatusPhaseRestoresPhase(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "legacy-hub-phase",
+			Annotations: map[string]string{
+				annDGDRHubStatus: `{"phase":"Deployed"}`,
+			},
+		},
+		Status: DynamoGraphDeploymentRequestStatus{
+			State: DGDRStateReady,
+		},
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Status.Phase != v1beta1.DGDRPhaseDeployed {
+		t.Fatalf("Phase = %q, want %q from legacy annotation", restored.Status.Phase, v1beta1.DGDRPhaseDeployed)
 	}
 }
 
