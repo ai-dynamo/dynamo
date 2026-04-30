@@ -3,14 +3,10 @@
 
 agent:
   enabled: true
-  image:
-    tag: "v0.47.1"
   serviceMonitor:
     enabled: true
 
 server:
   enabled: true
-  image:
-    tag: "v0.27.1"
   serviceMonitor:
     enabled: true

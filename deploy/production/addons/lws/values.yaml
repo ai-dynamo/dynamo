@@ -3,5 +3,10 @@
 
 enablePrometheus: true
 
+image:
+  manager:
+    tag: "v0.8.0"
+    pullPolicy: IfNotPresent
+
 gangSchedulingManagement:
   schedulerProvider: volcano
