@@ -3,13 +3,12 @@
 
 # DeepSeek V3.2 REAP W4A4KV4 NVFP4 on the Dynamo production profile.
 #
-# This manifest is the first aggregated A4 deployment target for the
-# ai-blaise/optimization-playground engine. It intentionally keeps the full
-# IndexCache + target dense TurboQuant + SMC-SD stack enabled. The checkpoint is
-# W4A4KV4 NVFP4; target KV is the explicit exception and is compressed through
-# dense TurboQuant 2.5-bit. It does not use prefill/decode disaggregation yet
-# because the current dense TurboQuant path rejects PD disaggregation; add that
-# only after the custom kernels/runtime support are in place.
+# This A4 deployment uses disaggregated SGLang serving with one 4-GPU prefill
+# role and one 4-GPU decode role on a single 8-GPU B200 node. Both roles keep
+# DP attention, IndexCache, HiCache, event-backed KV-aware routing, and dense
+# TurboQuant enabled. The checkpoint is W4A4KV4 NVFP4; target KV is the
+# explicit exception and is compressed through dense TurboQuant 2.5-bit.
+# Speculation is decode-only through SMC-SD.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -76,7 +75,8 @@ spec:
           args:
             - --router-mode
             - kv
-            - --no-kv-events
+            - --router-kv-events
+            - --router-reset-states
             - --http-port
             - "8000"
           env:
@@ -91,17 +91,143 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 360
-    decode:
+    prefill:
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       envFromSecret: hf-token-secret
       resources:
         limits:
-          gpu: "8"
+          gpu: "4"
         requests:
-          gpu: "8"
+          gpu: "4"
       sharedMemory:
-        size: 200Gi
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations:
+          - operator: Exists
+        volumes:
+          - name: deepseek-v32-reap-model
+            hostPath:
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              type: Directory
+        mainContainer:
+          image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+            - --host
+            - 0.0.0.0
+            - --trust-remote-code
+            - --quantization
+            - modelopt_fp4
+            - --fp4-gemm-backend
+            - auto
+            - --fp8-gemm-backend
+            - auto
+            - --kv-cache-dtype
+            - bfloat16
+            - --tp
+            - "4"
+            - --dp
+            - "4"
+            - --enable-dp-attention
+            - --mem-fraction-static
+            - "0.80"
+            - --max-running-requests
+            - "8"
+            - --context-length
+            - "73728"
+            - --max-total-tokens
+            - "524288"
+            - --cuda-graph-max-bs
+            - "8"
+            - --disable-custom-all-reduce
+            - --disable-flashinfer-autotune
+            - --watchdog-timeout
+            - "1800"
+            - --page-size
+            - "64"
+            - --enable-hierarchical-cache
+            - --hicache-ratio
+            - "2"
+            - --hicache-write-policy
+            - write_through
+            - --hicache-io-backend
+            - kernel
+            - --hicache-mem-layout
+            - layer_first
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+            - --nsa-indexer-mode
+            - indexcache
+            - --nsa-indexcache-pattern
+            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+            - --nsa-prefill-backend
+            - flashmla_kv
+            - --nsa-decode-backend
+            - flashmla_kv
+            - --enable-turboquant-dense-kv-cache
+            - --turboquant-dense-kv-preset
+            - latent_2p5bit_nc
+            - --turboquant-residual-window-size
+            - "128"
+            - --turboquant-execution-mode
+            - fused_decode
+            - --turboquant-mla-decode-num-splits
+            - "16"
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --tool-call-parser
+            - deepseekv32
+            - --reasoning-parser
+            - deepseek-v3
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          volumeMounts:
+            - name: deepseek-v32-reap-model
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              readOnly: true
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+      sharedMemory:
+        size: 120Gi
       extraPodSpec:
         nodeSelector:
           kubernetes.io/hostname: a4-us-001-rl9
@@ -141,9 +267,9 @@ spec:
             - --kv-cache-dtype
             - bfloat16
             - --tp
-            - "8"
+            - "4"
             - --dp
-            - "8"
+            - "4"
             - --enable-dp-attention
             - --mem-fraction-static
             - "0.80"
@@ -152,7 +278,7 @@ spec:
             - --context-length
             - "73728"
             - --max-total-tokens
-            - "1048576"
+            - "524288"
             - --cuda-graph-max-bs
             - "8"
             - --disable-custom-all-reduce
@@ -161,6 +287,17 @@ spec:
             - "1800"
             - --page-size
             - "64"
+            - --enable-hierarchical-cache
+            - --hicache-ratio
+            - "2"
+            - --hicache-write-policy
+            - write_through
+            - --hicache-io-backend
+            - kernel
+            - --hicache-mem-layout
+            - layer_first
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
             - --nsa-indexer-mode
             - indexcache
             - --nsa-indexcache-pattern
@@ -178,6 +315,12 @@ spec:
             - fused_decode
             - --turboquant-mla-decode-num-splits
             - "16"
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
             - --speculative-algorithm
             - SMC
             - --speculative-draft-model-path
@@ -209,8 +352,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            - name: CUDA_VISIBLE_DEVICES
-              value: "0,1,2,3,4,5,6,7"
           securityContext:
             capabilities:
               add:

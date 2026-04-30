@@ -7,14 +7,16 @@ SPDX-License-Identifier: Apache-2.0
 
 This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
-The first supported topology is a single aggregated `a4-us-001-rl9` worker. The deployment keeps the full IndexCache + target dense TurboQuant + SMC-SD stack enabled:
+The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The deployment keeps the full IndexCache + target dense TurboQuant stack enabled on both roles, with SMC-SD enabled only on decode:
 
 - target checkpoint: W4A4KV4 NVFP4 via `--quantization modelopt_fp4`
 - target KV exception: dense TurboQuant 2.5-bit via `--enable-turboquant-dense-kv-cache`
 - target IndexCache via `--nsa-indexer-mode indexcache`
-- SMC-SD draft: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
-
-Do not enable prefill/decode disaggregation for this manifest yet. The current dense TurboQuant implementation rejects PD disaggregation, so P/D requires a later kernel/runtime change.
+- SGLang HiCache on both workers via `--enable-hierarchical-cache`
+- Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
+- prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
+- decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled
+- SMC-SD draft on decode only: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
 
 ## Production Profile
 
@@ -108,16 +110,33 @@ python3 -m dynamo.sglang \
   --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
   --quantization modelopt_fp4 \
   --kv-cache-dtype bfloat16 \
-  --tp 8 \
-  --dp 8 \
+  --tp 4 \
+  --dp 4 \
   --enable-dp-attention \
+  --enable-hierarchical-cache \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --nsa-indexer-mode indexcache \
   --enable-turboquant-dense-kv-cache \
   --turboquant-dense-kv-preset latent_2p5bit_nc \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-mode prefill|decode \
   --speculative-algorithm SMC
 ```
 
+Omit the SMC-SD flags on the prefill role. The manifest sets them only on
+decode.
+
+SMC-SD draft KV is decode-local in this topology. The prefill/decode transfer
+registers target-model KV plus NSA IndexCache state; it does not register the
+decode-side draft KV pool because the prefill worker does not instantiate the
+draft model.
+
 The `bfloat16` KV dtype is intentional: the checkpoint is W4A4KV4 NVFP4, but target KV is the configured exception. Dense TurboQuant currently uses BF16 as the target KV pool dtype and stores compressed 2.5-bit dense MLA KV internally.
+
+Keep this deployment on plain `--nsa-indexer-mode indexcache`. Do not substitute
+any alternate sparse NSA indexer or KV-pool mode; this production profile
+intentionally keeps plain IndexCache and dense TurboQuant together.
 
 ## Smoke Test
 
