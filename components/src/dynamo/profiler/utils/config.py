@@ -261,45 +261,45 @@ def _get_per_instance_gpus(worker_service: Service) -> int | None:
     if not args:
         return None
 
+    def _match_flag(arg: str, next_arg: str | None, names: tuple[str, ...]) -> str | None:
+        """Return the value for `arg` if it matches any of `names` in either
+        `--name value` or `--name=value` form, else None."""
+        for name in names:
+            if arg == name:
+                return next_arg
+            if arg.startswith(name + "="):
+                return arg.split("=", 1)[1]
+        return None
+
+    TP_FLAGS = ("--tensor-parallel-size", "--tp")
+    PP_FLAGS = ("--pipeline-parallel-size", "--pp")
+    DP_FLAGS = ("--data-parallel-size", "--data-parallel-size-local", "--dp")
+
     tp = 1
     pp = 1
     saw_parallelism_flag = False
     for index, arg in enumerate(args):
-        if arg in ("--tensor-parallel-size", "--tp") and index + 1 < len(args):
+        next_arg = args[index + 1] if index + 1 < len(args) else None
+
+        tp_value = _match_flag(arg, next_arg, TP_FLAGS)
+        if tp_value is not None:
             try:
-                tp = int(args[index + 1])
+                tp = int(tp_value)
                 saw_parallelism_flag = True
             except ValueError:
                 pass
-        elif arg.startswith("--tensor-parallel-size=") or arg.startswith("--tp="):
+            continue
+
+        pp_value = _match_flag(arg, next_arg, PP_FLAGS)
+        if pp_value is not None:
             try:
-                tp = int(arg.split("=", 1)[1])
+                pp = int(pp_value)
                 saw_parallelism_flag = True
             except ValueError:
                 pass
-        elif arg in ("--pipeline-parallel-size", "--pp") and index + 1 < len(args):
-            try:
-                pp = int(args[index + 1])
-                saw_parallelism_flag = True
-            except ValueError:
-                pass
-        elif arg.startswith("--pipeline-parallel-size=") or arg.startswith("--pp="):
-            try:
-                pp = int(arg.split("=", 1)[1])
-                saw_parallelism_flag = True
-            except ValueError:
-                pass
-        elif arg in (
-            "--data-parallel-size",
-            "--data-parallel-size-local",
-            "--dp",
-        ) and index + 1 < len(args):
-            saw_parallelism_flag = True
-        elif (
-            arg.startswith("--data-parallel-size=")
-            or arg.startswith("--data-parallel-size-local=")
-            or arg.startswith("--dp=")
-        ):
+            continue
+
+        if _match_flag(arg, next_arg, DP_FLAGS) is not None:
             saw_parallelism_flag = True
 
     if not saw_parallelism_flag:
