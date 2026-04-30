@@ -177,6 +177,9 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!("Failed to send events: {:?}", e);
                     }
                 }
+                WorkerTask::Flush(sender) => {
+                    let _ = sender.send(());
+                }
                 WorkerTask::Terminate => {
                     break;
                 }

@@ -1,3 +1,8 @@
+---
+name: dep-update
+description: Update Dynamo Enhancement Proposal lifecycle state in GitHub, including triage, PIC assignment, review, approval, and status label changes.
+---
+
 # Skill: Update DEP Lifecycle
 
 ## Purpose

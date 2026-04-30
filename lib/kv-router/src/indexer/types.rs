@@ -325,6 +325,12 @@ pub struct DumpRequest {
     pub resp: oneshot::Sender<Vec<RouterEvent>>,
 }
 
+/// A request to wait until all previously submitted work is applied.
+pub struct FlushRequest {
+    /// Channel to acknowledge completion.
+    pub resp: oneshot::Sender<()>,
+}
+
 /// A request to get all workers currently tracked
 pub struct GetWorkersRequest {
     /// Channel to send the worker IDs
@@ -340,6 +346,7 @@ pub enum WorkerTask {
     /// Best-effort maintenance task for shared-state backends.
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
+    Flush(oneshot::Sender<()>),
     Terminate,
 }
 
