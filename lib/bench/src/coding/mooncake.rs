@@ -1,497 +1,61 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::coding::claude::parser::{SessionTurnBuilder, TurnDraft};
-use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
-use anyhow::{Context, Result, anyhow, bail};
+//! Generic Mooncake JSONL primitives.
+//!
+//! This module is intentionally producer-agnostic: it defines the row schema,
+//! the block-hash-to-id mapping, the token-block hashing helper, and the JSONL
+//! writer. Workload-specific orchestration (session scheduling, tokenization,
+//! parsing) lives elsewhere -- the Claude exporter in
+//! [`crate::coding::claude::export`] is one such producer; future producers
+//! (e.g. a Dynamo agent trace exporter) consume the same primitives.
+
+use anyhow::{Context, Result, bail};
 use bytemuck::cast_slice;
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use dynamo_tokens::compute_hash_v2;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::thread::{self, JoinHandle};
 
-#[derive(Debug, Clone, Copy)]
-pub struct ExportConfig {
-    pub block_size: usize,
-    pub delta_overlap_words: usize,
-    pub tokenizer_workers: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ExportStats {
-    pub row_count: usize,
-    pub sidecar_count: usize,
-    pub max_heap_len: usize,
-}
-
-#[derive(Serialize)]
-struct MooncakeRow {
-    session_id: String,
-    input_length: usize,
-    output_length: usize,
-    hash_ids: Vec<u64>,
+/// One row of a Mooncake replay trace.
+///
+/// `timestamp` and `delay` are mutually exclusive in the typical convention
+/// (the first row in a session carries `timestamp`, subsequent rows carry
+/// `delay`), but neither is required by the schema -- both fields are skipped
+/// during serialization when `None`.
+#[derive(Debug, Clone, Serialize)]
+pub struct MooncakeRow {
+    pub session_id: String,
+    pub input_length: usize,
+    pub output_length: usize,
+    pub hash_ids: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    timestamp: Option<i64>,
+    pub timestamp: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    delay: Option<i64>,
+    pub delay: Option<i64>,
 }
 
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-struct HeapEntry {
-    assistant_start_ms: i64,
-    turn_index: usize,
-    export_session_id: String,
-    session_id: String,
-}
-
-#[derive(Debug)]
-struct OverlapBase {
-    previous_text: String,
-    previous_tokens: Vec<u32>,
-}
-
-#[derive(Debug)]
-struct ReadyTurn {
-    current_text: String,
-    tokens: Vec<u32>,
-}
-
-#[derive(Debug)]
-struct HeadTurn {
-    turn: TurnDraft,
-    turn_key: u64,
-    scheduled: bool,
-    ready: Option<ReadyTurn>,
-}
-
-#[derive(Debug)]
-struct SessionState {
-    builder: SessionTurnBuilder,
-    head: Option<HeadTurn>,
-    overlap_base: Option<OverlapBase>,
-    next_turn_key: u64,
-}
-
-#[derive(Debug)]
-struct TokenizeJob {
-    session_id: String,
-    turn_key: u64,
-    current_text: String,
-    overlap_start: Option<usize>,
-    previous_overlap_text: Option<String>,
-    previous_tokens: Option<Vec<u32>>,
-    overlap_words: usize,
-}
-
-#[derive(Debug)]
-struct TokenizeResponse {
-    session_id: String,
-    turn_key: u64,
-    outcome: Result<ReadyTurn, String>,
-}
-
-pub fn write_streamed_mooncake_rows<F>(
-    output_path: &Path,
-    sidecar_path: &Path,
-    sessions: FxHashMap<String, Vec<crate::coding::claude::parser::TraceRecord>>,
-    preserve_session_ids: bool,
-    tokenizer_factory: F,
-    config: ExportConfig,
-) -> Result<ExportStats>
-where
-    F: TokenizerFactory,
-{
-    if config.block_size == 0 {
-        bail!("block_size must be greater than 0");
-    }
-    if config.tokenizer_workers == 0 {
-        bail!("tokenizer_workers must be greater than 0");
-    }
-
-    let mut parser_tokenizer = tokenizer_factory.create_worker()?;
-    let mut states = FxHashMap::default();
-    let mut heap = BinaryHeap::new();
-    let mut unscheduled_sessions = VecDeque::new();
-    let mut global_trace_start_ms: Option<i64> = None;
-    let mut stats = ExportStats::default();
-
-    for (session_id, records) in sessions {
-        let mut builder =
-            SessionTurnBuilder::new(session_id.clone(), records, preserve_session_ids);
-        let Some(first_turn) = builder.next_turn(&mut parser_tokenizer)? else {
-            continue;
-        };
-
-        global_trace_start_ms = Some(
-            global_trace_start_ms
-                .map(|current| current.min(first_turn.assistant_start_ms))
-                .unwrap_or(first_turn.assistant_start_ms),
-        );
-
-        let head = HeadTurn {
-            turn: first_turn,
-            turn_key: 0,
-            scheduled: false,
-            ready: None,
-        };
-        states.insert(
-            session_id.clone(),
-            SessionState {
-                builder,
-                head: Some(head),
-                overlap_base: None,
-                next_turn_key: 1,
-            },
-        );
-        push_heap_entry(&mut heap, &session_id, states.get(&session_id).unwrap());
-        unscheduled_sessions.push_back(session_id);
-    }
-
-    if states.is_empty() {
-        write_empty_files(output_path, sidecar_path)?;
-        return Ok(stats);
-    }
-
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = sidecar_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    stats.max_heap_len = heap.len();
-    let global_trace_start_ms =
-        global_trace_start_ms.ok_or_else(|| anyhow!("no assistant turns were reconstructed"))?;
-
-    let output_file = File::create(output_path)
-        .with_context(|| format!("failed to create {}", output_path.display()))?;
-    let sidecar_file = File::create(sidecar_path)
-        .with_context(|| format!("failed to create {}", sidecar_path.display()))?;
-    let mut output_writer = BufWriter::new(output_file);
-    let mut sidecar_writer = BufWriter::new(sidecar_file);
-    let mut hasher = RollingHasher::new(config.block_size);
-
-    let (job_tx, job_rx) = bounded::<TokenizeJob>(config.tokenizer_workers);
-    let (result_tx, result_rx) = unbounded::<TokenizeResponse>();
-    let workers = spawn_tokenizer_workers(
-        tokenizer_factory,
-        config.tokenizer_workers,
-        job_rx,
-        result_tx,
-    );
-
-    let mut inflight_jobs = 0_usize;
-    while !heap.is_empty() {
-        schedule_pending_jobs(
-            &mut states,
-            &mut unscheduled_sessions,
-            &job_tx,
-            &mut inflight_jobs,
-            config.delta_overlap_words,
-            config.tokenizer_workers,
-        )?;
-
-        let Some(Reverse(entry)) = heap.peek() else {
-            break;
-        };
-        let head_ready = states
-            .get(&entry.session_id)
-            .and_then(|state| state.head.as_ref())
-            .and_then(|head| head.ready.as_ref())
-            .is_some();
-        if !head_ready {
-            let response = result_rx
-                .recv()
-                .context("tokenizer worker channel closed unexpectedly")?;
-            inflight_jobs = inflight_jobs.saturating_sub(1);
-            apply_tokenize_response(&mut states, response)?;
-            continue;
-        }
-
-        let Reverse(entry) = heap.pop().unwrap();
-        let session_id = entry.session_id.clone();
-        let (turn, ready_turn) = {
-            let state = states
-                .get_mut(&session_id)
-                .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-            let mut head = state
-                .head
-                .take()
-                .ok_or_else(|| anyhow!("missing head for session {}", session_id))?;
-            let ready_turn = head
-                .ready
-                .take()
-                .ok_or_else(|| anyhow!("missing tokenized result for session {}", session_id))?;
-            (head.turn, ready_turn)
-        };
-
-        let hash_ids = hasher.hash_token_blocks(&ready_turn.tokens);
-        let row = MooncakeRow {
-            session_id: turn.export_session_id.clone(),
-            input_length: ready_turn.tokens.len(),
-            output_length: turn.output_length,
-            hash_ids,
-            timestamp: turn
-                .delay_ms
-                .is_none()
-                .then_some(turn.assistant_start_ms - global_trace_start_ms),
-            delay: turn.delay_ms,
-        };
-
-        serde_json::to_writer(&mut output_writer, &row)?;
-        output_writer.write_all(b"\n")?;
-        serde_json::to_writer(&mut sidecar_writer, &turn.sidecar)?;
-        sidecar_writer.write_all(b"\n")?;
-        stats.row_count += 1;
-        stats.sidecar_count += 1;
-
-        let next_turn = {
-            let state = states
-                .get_mut(&session_id)
-                .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-            state.overlap_base = Some(OverlapBase {
-                previous_text: ready_turn.current_text,
-                previous_tokens: ready_turn.tokens,
-            });
-            state.builder.next_turn(&mut parser_tokenizer)?
-        };
-
-        if let Some(next_turn) = next_turn {
-            let state = states
-                .get_mut(&session_id)
-                .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-            let turn_key = state.next_turn_key;
-            state.next_turn_key += 1;
-            state.head = Some(HeadTurn {
-                turn: next_turn,
-                turn_key,
-                scheduled: false,
-                ready: None,
-            });
-            push_heap_entry(&mut heap, &session_id, state);
-            unscheduled_sessions.push_back(session_id);
-            stats.max_heap_len = stats.max_heap_len.max(heap.len());
-            continue;
-        }
-
-        states.remove(&session_id);
-    }
-
-    drop(job_tx);
-    for worker in workers {
-        worker
-            .join()
-            .map_err(|_| anyhow!("tokenizer worker panicked"))?;
-    }
-    output_writer.flush()?;
-    sidecar_writer.flush()?;
-    Ok(stats)
-}
-
-fn push_heap_entry(
-    heap: &mut BinaryHeap<Reverse<HeapEntry>>,
-    session_id: &str,
-    state: &SessionState,
-) {
-    if let Some(head) = state.head.as_ref() {
-        heap.push(Reverse(HeapEntry {
-            assistant_start_ms: head.turn.assistant_start_ms,
-            turn_index: head.turn.turn_index,
-            export_session_id: head.turn.export_session_id.clone(),
-            session_id: session_id.to_string(),
-        }));
-    }
-}
-
-fn schedule_pending_jobs(
-    states: &mut FxHashMap<String, SessionState>,
-    unscheduled_sessions: &mut VecDeque<String>,
-    job_tx: &Sender<TokenizeJob>,
-    inflight_jobs: &mut usize,
-    overlap_words: usize,
-    worker_limit: usize,
-) -> Result<()> {
-    while *inflight_jobs < worker_limit {
-        let Some(session_id) = unscheduled_sessions.pop_front() else {
-            return Ok(());
-        };
-        let Some(state) = states.get_mut(&session_id) else {
-            continue;
-        };
-        let Some(head) = state.head.as_mut() else {
-            continue;
-        };
-        if head.scheduled || head.ready.is_some() {
-            continue;
-        }
-
-        let overlap_base = state.overlap_base.take();
-        let current_text = std::mem::take(&mut head.turn.input_text);
-        let (overlap_start, previous_overlap_text, previous_tokens) =
-            prepare_overlap_inputs(overlap_base, &current_text, overlap_words);
-        let job = TokenizeJob {
-            session_id: session_id.clone(),
-            turn_key: head.turn_key,
-            current_text,
-            overlap_start,
-            previous_overlap_text,
-            previous_tokens,
-            overlap_words,
-        };
-        job_tx
-            .send(job)
-            .map_err(|_| anyhow!("failed to schedule tokenization job"))?;
-        head.scheduled = true;
-        *inflight_jobs += 1;
-    }
-    Ok(())
-}
-
-fn apply_tokenize_response(
-    states: &mut FxHashMap<String, SessionState>,
-    response: TokenizeResponse,
-) -> Result<()> {
-    let Some(state) = states.get_mut(&response.session_id) else {
-        return Ok(());
-    };
-    let Some(head) = state.head.as_mut() else {
-        return Ok(());
-    };
-    if head.turn_key != response.turn_key {
-        return Ok(());
-    }
-    head.scheduled = false;
-    match response.outcome {
-        Ok(ready) => {
-            head.ready = Some(ready);
-            Ok(())
-        }
-        Err(message) => bail!("{message}"),
-    }
-}
-
-fn prepare_overlap_inputs(
-    overlap_base: Option<OverlapBase>,
-    current_text: &str,
-    overlap_words: usize,
-) -> (Option<usize>, Option<String>, Option<Vec<u32>>) {
-    if overlap_words == 0 {
-        return (None, None, None);
-    }
-    let Some(overlap_base) = overlap_base else {
-        return (None, None, None);
-    };
-    if !current_text.starts_with(&overlap_base.previous_text) {
-        return (None, None, None);
-    }
-
-    let overlap_start = last_word_overlap_start(&overlap_base.previous_text, overlap_words);
-    (
-        Some(overlap_start),
-        Some(overlap_base.previous_text[overlap_start..].to_string()),
-        Some(overlap_base.previous_tokens),
-    )
-}
-
-fn spawn_tokenizer_workers<F>(
-    factory: F,
-    worker_count: usize,
-    job_rx: Receiver<TokenizeJob>,
-    result_tx: Sender<TokenizeResponse>,
-) -> Vec<JoinHandle<()>>
-where
-    F: TokenizerFactory,
-{
-    (0..worker_count)
-        .map(|_| {
-            let job_rx = job_rx.clone();
-            let result_tx = result_tx.clone();
-            let factory = factory.clone();
-            thread::spawn(move || {
-                let mut tokenizer = match factory.create_worker() {
-                    Ok(tokenizer) => tokenizer,
-                    Err(error) => {
-                        let _ = result_tx.send(TokenizeResponse {
-                            session_id: "__worker_init__".to_string(),
-                            turn_key: 0,
-                            outcome: Err(format!(
-                                "failed to initialize tokenizer worker: {error:#}"
-                            )),
-                        });
-                        return;
-                    }
-                };
-                while let Ok(job) = job_rx.recv() {
-                    let outcome = tokenize_job(&mut tokenizer, &job)
-                        .map(|tokens| ReadyTurn {
-                            current_text: job.current_text,
-                            tokens,
-                        })
-                        .map_err(|error| {
-                            format!("failed to tokenize session {}: {error:#}", job.session_id)
-                        });
-                    let _ = result_tx.send(TokenizeResponse {
-                        session_id: job.session_id,
-                        turn_key: job.turn_key,
-                        outcome,
-                    });
-                }
-            })
-        })
-        .collect()
-}
-
-fn tokenize_job(tokenizer: &mut impl TokenizerWorker, job: &TokenizeJob) -> Result<Vec<u32>> {
-    let Some(overlap_start) = job.overlap_start else {
-        return tokenizer.encode(&job.current_text);
-    };
-    let Some(previous_overlap_text) = job.previous_overlap_text.as_deref() else {
-        return tokenizer.encode(&job.current_text);
-    };
-    let Some(previous_tokens) = job.previous_tokens.as_deref() else {
-        return tokenizer.encode(&job.current_text);
-    };
-    if job.overlap_words == 0 || !job.current_text.is_char_boundary(overlap_start) {
-        return tokenizer.encode(&job.current_text);
-    }
-
-    let previous_overlap_tokens = tokenizer.encode(previous_overlap_text)?;
-    let prefix_token_count = previous_tokens
-        .len()
-        .saturating_sub(previous_overlap_tokens.len());
-    let suffix_tokens = tokenizer.encode(&job.current_text[overlap_start..])?;
-    let mut merged = Vec::with_capacity(prefix_token_count + suffix_tokens.len());
-    merged.extend_from_slice(&previous_tokens[..prefix_token_count]);
-    merged.extend(suffix_tokens);
-    Ok(merged)
-}
-
-fn write_empty_files(output_path: &Path, sidecar_path: &Path) -> Result<()> {
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = sidecar_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    File::create(output_path)?;
-    File::create(sidecar_path)?;
-    Ok(())
-}
-
-struct RollingHasher {
+/// Maps sequence-aware block hashes to compact, stable `u64` ids.
+///
+/// The mapper is intentionally stateful and reusable across requests/turns: a
+/// block of tokens that appears at the same prefix position in two different
+/// requests will be assigned the same id. Equality of leading `hash_ids`
+/// between rows therefore signals shared prompt prefixes for replay purposes.
+///
+/// `hash_ids` here are workload identity labels, not literal Dynamo runtime
+/// KV-cache hashes. Producers should not try to reconcile them with a
+/// production cache.
+pub struct RollingHashIdMapper {
     block_size: usize,
     hash_to_id: FxHashMap<u64, u64>,
     next_id: u64,
 }
 
-impl RollingHasher {
-    fn new(block_size: usize) -> Self {
+impl RollingHashIdMapper {
+    /// Create a new mapper for the given block size.
+    pub fn new(block_size: usize) -> Self {
         Self {
             block_size,
             hash_to_id: FxHashMap::default(),
@@ -499,233 +63,319 @@ impl RollingHasher {
         }
     }
 
-    fn hash_token_blocks(&mut self, tokens: &[u32]) -> Vec<u64> {
-        let mut hash_ids = Vec::with_capacity(tokens.len().div_ceil(self.block_size));
-        let mut parent_hash = 0_u64;
-        for block in tokens.chunks(self.block_size) {
-            let block_hash = compute_hash_v2(cast_slice(block), 0);
-            let combined_hash = compute_hash_v2(&block_hash.to_be_bytes(), parent_hash);
-            let id = *self.hash_to_id.entry(combined_hash).or_insert_with(|| {
-                let next_id = self.next_id;
-                self.next_id += 1;
-                next_id
-            });
-            hash_ids.push(id);
-            parent_hash = combined_hash;
-        }
-        hash_ids
+    /// Block size that this mapper was constructed with.
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
+
+    /// Hash a sequence of tokens into Mooncake `hash_ids`.
+    ///
+    /// Tokens are chunked by `block_size`; each block contributes one id. The
+    /// chained hash mixes the prior block's combined hash, so identical
+    /// prefixes across requests resolve to identical leading `hash_ids` once
+    /// the mapper has seen them.
+    pub fn hash_token_blocks(&mut self, tokens: &[u32]) -> Vec<u64> {
+        hash_token_blocks(self, tokens)
+    }
+}
+
+/// Token-block hashing helper for the Mooncake replay schema.
+///
+/// Splits `tokens` into chunks of `mapper.block_size()`, computes a chained
+/// hash per block, and returns the compact ids assigned by `mapper`. Mirrors
+/// [`RollingHashIdMapper::hash_token_blocks`] as a free function so callers
+/// that already hold a mutable mapper reference can invoke it without
+/// re-borrowing.
+pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Vec<u64> {
+    let block_size = mapper.block_size;
+    let mut hash_ids = Vec::with_capacity(tokens.len().div_ceil(block_size));
+    let mut parent_hash = 0_u64;
+    for block in tokens.chunks(block_size) {
+        let block_hash = compute_hash_v2(cast_slice(block), 0);
+        let combined_hash = compute_hash_v2(&block_hash.to_be_bytes(), parent_hash);
+        let id = *mapper.hash_to_id.entry(combined_hash).or_insert_with(|| {
+            let next_id = mapper.next_id;
+            mapper.next_id += 1;
+            next_id
+        });
+        hash_ids.push(id);
+        parent_hash = combined_hash;
+    }
+    hash_ids
+}
+
+/// Counters for what a [`MooncakeJsonlWriter`] has emitted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WriterStats {
+    pub row_count: usize,
+    pub sidecar_count: usize,
+}
+
+/// JSONL writer for Mooncake rows plus an optional sidecar stream.
+///
+/// The sidecar stream is configured at construction time. Producers that do
+/// not emit sidecar metadata pass `None` for `sidecar_path` and never call
+/// [`Self::write_sidecar`]. When a sidecar path is configured, the path
+/// convention from [`crate::coding::common::sidecar_path_for`] is the typical
+/// choice but not enforced here -- callers pass the sidecar path explicitly.
+pub struct MooncakeJsonlWriter {
+    output: BufWriter<File>,
+    sidecar: Option<BufWriter<File>>,
+    stats: WriterStats,
+}
+
+impl MooncakeJsonlWriter {
+    /// Create a writer at `output_path`, optionally with a paired sidecar
+    /// JSONL file at `sidecar_path`. Parent directories are created as needed.
+    pub fn create(output_path: &Path, sidecar_path: Option<&Path>) -> Result<Self> {
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let output = BufWriter::new(
+            File::create(output_path)
+                .with_context(|| format!("failed to create {}", output_path.display()))?,
+        );
+        let sidecar = if let Some(path) = sidecar_path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Some(BufWriter::new(File::create(path).with_context(|| {
+                format!("failed to create {}", path.display())
+            })?))
+        } else {
+            None
+        };
+        Ok(Self {
+            output,
+            sidecar,
+            stats: WriterStats::default(),
+        })
+    }
+
+    /// Append one Mooncake row.
+    pub fn write_row(&mut self, row: &MooncakeRow) -> Result<()> {
+        serde_json::to_writer(&mut self.output, row)?;
+        self.output.write_all(b"\n")?;
+        self.stats.row_count += 1;
+        Ok(())
+    }
+
+    /// Append one sidecar entry. Errors if no sidecar was configured.
+    pub fn write_sidecar<S: Serialize>(&mut self, sidecar: &S) -> Result<()> {
+        let writer = self
+            .sidecar
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("sidecar was not configured for this writer"))?;
+        serde_json::to_writer(writer, sidecar)?;
+        let writer = self.sidecar.as_mut().unwrap();
+        writer.write_all(b"\n")?;
+        self.stats.sidecar_count += 1;
+        Ok(())
+    }
+
+    /// True if a sidecar stream is configured.
+    pub fn has_sidecar(&self) -> bool {
+        self.sidecar.is_some()
+    }
+
+    /// Snapshot of how many rows and sidecar entries have been written so far.
+    pub fn stats(&self) -> WriterStats {
+        self.stats
+    }
+
+    /// Flush both streams and return the final stats.
+    pub fn finish(mut self) -> Result<WriterStats> {
+        self.output.flush()?;
+        if let Some(sidecar) = self.sidecar.as_mut() {
+            sidecar.flush()?;
+        }
+        Ok(self.stats)
+    }
+}
+
+/// Create both files empty (touch-equivalent), preserving directory creation
+/// semantics for callers that want a "no rows produced" outcome to still emit
+/// well-formed (empty) JSONL files.
+pub fn write_empty_files(output_path: &Path, sidecar_path: Option<&Path>) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    File::create(output_path)
+        .with_context(|| format!("failed to create {}", output_path.display()))?;
+    if let Some(path) = sidecar_path {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Sentinel used by callers that want to bail when neither block_size nor
+/// worker count is allowed to be zero. Producers may also enforce this on
+/// their own configuration types.
+pub fn require_positive(name: &str, value: usize) -> Result<()> {
+    if value == 0 {
+        bail!("{name} must be greater than 0");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ExportConfig, HeadTurn, ReadyTurn, SessionState, TurnDraft, apply_tokenize_response,
-        write_streamed_mooncake_rows,
-    };
-    use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord};
-    use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker};
-    use anyhow::Result;
-    use rustc_hash::FxHashMap;
+    use super::*;
+    use crate::coding::common::sidecar_path_for;
     use serde_json::{Value, json};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::Duration;
     use tempfile::TempDir;
 
-    #[derive(Clone, Default)]
-    struct StubFactory {
-        calls: Arc<Mutex<Vec<String>>>,
-    }
+    #[test]
+    fn shared_prefix_yields_shared_leading_hash_ids() {
+        let mut mapper = RollingHashIdMapper::new(2);
+        let prefix = vec![1u32, 2, 3, 4];
+        let extended = vec![1u32, 2, 3, 4, 5, 6];
 
-    struct StubWorker {
-        calls: Arc<Mutex<Vec<String>>>,
-    }
+        let prefix_ids = mapper.hash_token_blocks(&prefix);
+        let extended_ids = mapper.hash_token_blocks(&extended);
 
-    impl TokenizerFactory for StubFactory {
-        type Worker = StubWorker;
-
-        fn create_worker(&self) -> Result<Self::Worker> {
-            Ok(StubWorker {
-                calls: self.calls.clone(),
-            })
-        }
-    }
-
-    impl TokenizerWorker for StubWorker {
-        fn encode(&mut self, text: &str) -> Result<Vec<u32>> {
-            if text.contains("slow") {
-                thread::sleep(Duration::from_millis(20));
-            }
-            self.calls.lock().unwrap().push(text.to_string());
-            Ok(text
-                .split_whitespace()
-                .map(|word| word.len() as u32)
-                .collect())
-        }
-    }
-
-    fn make_record(
-        session_id: &str,
-        row_type: &str,
-        timestamp_ms: i64,
-        source_order: u64,
-        raw: Value,
-    ) -> TraceRecord {
-        TraceRecord {
-            session_id: session_id.to_string(),
-            row_type: row_type.to_string(),
-            timestamp_ms,
-            source_order,
-            raw,
-        }
+        assert_eq!(prefix_ids.len(), 2);
+        assert_eq!(extended_ids.len(), 3);
+        assert_eq!(extended_ids[..2], prefix_ids[..]);
     }
 
     #[test]
-    fn stale_result_is_dropped_by_turn_key() {
-        let mut states = FxHashMap::default();
-        states.insert(
-            "session-a".to_string(),
-            SessionState {
-                builder: SessionTurnBuilder::new("session-a".to_string(), Vec::new(), true),
-                head: Some(HeadTurn {
-                    turn: TurnDraft {
-                        session_id: "session-a".to_string(),
-                        export_session_id: "session-a".to_string(),
-                        turn_index: 1,
-                        input_text: String::new(),
-                        output_length: 1,
-                        assistant_start_ms: 1,
-                        assistant_end_ms: 2,
-                        delay_ms: None,
-                        sidecar: json!({}),
-                    },
-                    turn_key: 9,
-                    scheduled: true,
-                    ready: None,
-                }),
-                overlap_base: None,
-                next_turn_key: 10,
-            },
-        );
+    fn mapper_state_is_reused_across_requests() {
+        let mut mapper = RollingHashIdMapper::new(4);
+        let request_a = vec![10u32, 20, 30, 40, 50, 60, 70, 80];
+        let request_b = vec![10u32, 20, 30, 40, 50, 60, 70, 80];
+        let request_c = vec![10u32, 20, 30, 40, 99, 99, 99, 99];
 
-        apply_tokenize_response(
-            &mut states,
-            super::TokenizeResponse {
-                session_id: "session-a".to_string(),
-                turn_key: 7,
-                outcome: Ok(ReadyTurn {
-                    current_text: "stale".to_string(),
-                    tokens: vec![1],
-                }),
-            },
-        )
-        .unwrap();
+        let ids_a = mapper.hash_token_blocks(&request_a);
+        let ids_b = mapper.hash_token_blocks(&request_b);
+        let ids_c = mapper.hash_token_blocks(&request_c);
 
-        assert!(
-            states
-                .get("session-a")
-                .unwrap()
-                .head
-                .as_ref()
-                .unwrap()
-                .ready
-                .is_none()
+        assert_eq!(ids_a, ids_b);
+        assert_eq!(ids_c[0], ids_a[0], "shared first block should keep its id");
+        assert_ne!(
+            ids_c[1], ids_a[1],
+            "diverging tail block must get a fresh id"
         );
     }
 
     #[test]
-    fn streamed_writer_preserves_global_order_with_parallel_tokenization() {
+    fn free_function_and_method_agree() {
+        let mut mapper_a = RollingHashIdMapper::new(2);
+        let mut mapper_b = RollingHashIdMapper::new(2);
+        let tokens = vec![7u32, 8, 9, 10, 11];
+
+        let via_method = mapper_a.hash_token_blocks(&tokens);
+        let via_function = hash_token_blocks(&mut mapper_b, &tokens);
+
+        assert_eq!(via_method, via_function);
+    }
+
+    #[test]
+    fn empty_token_input_yields_empty_hash_ids() {
+        let mut mapper = RollingHashIdMapper::new(4);
+        assert!(mapper.hash_token_blocks(&[]).is_empty());
+    }
+
+    #[test]
+    fn row_omits_timestamp_and_delay_when_absent() {
+        let row = MooncakeRow {
+            session_id: "s".to_string(),
+            input_length: 4,
+            output_length: 1,
+            hash_ids: vec![0, 1],
+            timestamp: None,
+            delay: None,
+        };
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert!(rendered.get("timestamp").is_none());
+        assert!(rendered.get("delay").is_none());
+        assert_eq!(rendered["hash_ids"], json!([0, 1]));
+    }
+
+    #[test]
+    fn row_serializes_optional_fields_when_set() {
+        let with_timestamp = MooncakeRow {
+            session_id: "s".to_string(),
+            input_length: 4,
+            output_length: 1,
+            hash_ids: vec![],
+            timestamp: Some(0),
+            delay: None,
+        };
+        let with_delay = MooncakeRow {
+            session_id: "s".to_string(),
+            input_length: 4,
+            output_length: 1,
+            hash_ids: vec![],
+            timestamp: None,
+            delay: Some(123),
+        };
+        let v_ts: Value = serde_json::to_value(&with_timestamp).unwrap();
+        let v_dl: Value = serde_json::to_value(&with_delay).unwrap();
+        assert_eq!(v_ts["timestamp"], json!(0));
+        assert!(v_ts.get("delay").is_none());
+        assert_eq!(v_dl["delay"], json!(123));
+        assert!(v_dl.get("timestamp").is_none());
+    }
+
+    #[test]
+    fn writer_writes_rows_and_sidecar_jsonl() {
         let temp = TempDir::new().unwrap();
-        let output_path = temp.path().join("trace.jsonl");
-        let sidecar_path = temp.path().join("trace.sidecar.jsonl");
-        let mut sessions = FxHashMap::default();
-        sessions.insert(
-            "session-a".to_string(),
-            vec![
-                make_record(
-                    "session-a",
-                    "user",
-                    1_000,
-                    0,
-                    json!({"type":"user","message":{"role":"user","content":"slow first a"}}),
-                ),
-                make_record(
-                    "session-a",
-                    "assistant",
-                    2_000,
-                    1,
-                    json!({"type":"assistant","message":{"id":"a-1","content":[{"type":"text","text":"done a"}],"usage":{"output_tokens":3}}}),
-                ),
-                make_record(
-                    "session-a",
-                    "user",
-                    2_100,
-                    2,
-                    json!({"type":"user","message":{"role":"user","content":"follow a"}}),
-                ),
-                make_record(
-                    "session-a",
-                    "assistant",
-                    2_200,
-                    3,
-                    json!({"type":"assistant","message":{"id":"a-2","content":[{"type":"text","text":"done a 2"}],"usage":{"output_tokens":4}}}),
-                ),
-            ],
-        );
-        sessions.insert(
-            "session-b".to_string(),
-            vec![
-                make_record(
-                    "session-b",
-                    "user",
-                    900,
-                    4,
-                    json!({"type":"user","message":{"role":"user","content":"first b"}}),
-                ),
-                make_record(
-                    "session-b",
-                    "assistant",
-                    1_100,
-                    5,
-                    json!({"type":"assistant","message":{"id":"b-1","content":[{"type":"text","text":"done b"}],"usage":{"output_tokens":2}}}),
-                ),
-            ],
-        );
+        let output = temp.path().join("trace.jsonl");
+        let sidecar = sidecar_path_for(&output);
 
-        let stats = write_streamed_mooncake_rows(
-            &output_path,
-            &sidecar_path,
-            sessions,
-            true,
-            StubFactory::default(),
-            ExportConfig {
-                block_size: 2,
-                delta_overlap_words: 50,
-                tokenizer_workers: 2,
-            },
-        )
-        .unwrap();
+        let mut writer = MooncakeJsonlWriter::create(&output, Some(&sidecar)).unwrap();
+        writer
+            .write_row(&MooncakeRow {
+                session_id: "s".to_string(),
+                input_length: 2,
+                output_length: 1,
+                hash_ids: vec![0],
+                timestamp: Some(0),
+                delay: None,
+            })
+            .unwrap();
+        writer.write_sidecar(&json!({"k": "v"})).unwrap();
+        let stats = writer.finish().unwrap();
 
-        let rows = std::fs::read_to_string(&output_path)
+        assert_eq!(stats.row_count, 1);
+        assert_eq!(stats.sidecar_count, 1);
+
+        let row_lines: Vec<Value> = std::fs::read_to_string(&output)
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        let sidecar_rows = std::fs::read_to_string(&sidecar_path)
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let sidecar_lines: Vec<Value> = std::fs::read_to_string(&sidecar)
             .unwrap()
             .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(row_lines.len(), 1);
+        assert_eq!(sidecar_lines, vec![json!({"k": "v"})]);
+        assert_eq!(row_lines[0]["session_id"], json!("s"));
+        assert!(row_lines[0].get("delay").is_none());
+    }
 
-        assert_eq!(stats.row_count, 3);
-        assert_eq!(stats.sidecar_count, 3);
-        assert!(stats.max_heap_len <= 2);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(sidecar_rows.len(), 3);
-        assert_eq!(rows[0]["session_id"], json!("session-b"));
-        assert_eq!(rows[0]["timestamp"], json!(0));
-        assert_eq!(rows[1]["session_id"], json!("session-a"));
-        assert_eq!(rows[2]["delay"], json!(200));
+    #[test]
+    fn writer_without_sidecar_rejects_sidecar_writes() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("trace.jsonl");
+        let mut writer = MooncakeJsonlWriter::create(&output, None).unwrap();
+        assert!(!writer.has_sidecar());
+        let err = writer.write_sidecar(&json!({})).unwrap_err();
+        assert!(err.to_string().contains("sidecar was not configured"));
+    }
+
+    #[test]
+    fn sidecar_path_convention_is_preserved() {
+        let path = std::path::Path::new("/tmp/example/trace.jsonl");
+        assert_eq!(
+            sidecar_path_for(path),
+            std::path::PathBuf::from("/tmp/example/trace.sidecar.jsonl")
+        );
     }
 }
