@@ -32,3 +32,12 @@ debugging Perfetto nesting or label rendering.
 
 Stage slice boundaries are normalized to avoid same-thread overlap caused by
 independent metric rounding. Raw timing fields remain available in event args.
+
+## Validate Converter
+
+The converter has a local self-check that is intentionally not wired into the
+main pytest suite:
+
+```bash
+python3 benchmarks/agent_trace/validate_convert_to_perfetto.py
+```

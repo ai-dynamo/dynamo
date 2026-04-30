@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.agent_trace.convert_to_perfetto import convert_records
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
-
-def test_convert_records_emits_request_stages_and_metadata():
+def check_convert_records_emits_request_stages_and_metadata():
     trace, converted = convert_records(
         [
             {
@@ -77,7 +80,7 @@ def test_convert_records_emits_request_stages_and_metadata():
     assert markers[0]["ts"] == 1_012_000
 
 
-def test_convert_records_can_emit_stages_on_separate_tracks():
+def check_convert_records_can_emit_stages_on_separate_tracks():
     trace, _ = convert_records(
         [
             {
@@ -127,7 +130,7 @@ def test_convert_records_can_emit_stages_on_separate_tracks():
     ]
 
 
-def test_convert_records_clamps_stage_rounding_overlap():
+def check_convert_records_clamps_stage_rounding_overlap():
     trace, _ = convert_records(
         [
             {
@@ -174,7 +177,7 @@ def test_convert_records_clamps_stage_rounding_overlap():
     assert stages[1]["ts"] + stages[1]["dur"] == stages[2]["ts"]
 
 
-def test_convert_records_splits_overlapping_program_requests_into_lanes():
+def check_convert_records_splits_overlapping_program_requests_into_lanes():
     def record(request_id: str, start_ms: int, total_ms: int):
         return {
             "event": {
@@ -227,7 +230,7 @@ def test_convert_records_splits_overlapping_program_requests_into_lanes():
     assert request_tids["req-1"] != request_tids["req-2"]
 
 
-def test_convert_records_emits_tool_duration_slices():
+def check_convert_records_emits_tool_duration_slices():
     trace, converted = convert_records(
         [
             {
@@ -277,7 +280,7 @@ def test_convert_records_emits_tool_duration_slices():
     assert thread_names == ["workflow-1:searcher tools"]
 
 
-def test_convert_records_pairs_tool_start_and_end_without_duration():
+def check_convert_records_pairs_tool_start_and_end_without_duration():
     trace, converted = convert_records(
         [
             {
@@ -334,7 +337,7 @@ def test_convert_records_pairs_tool_start_and_end_without_duration():
     assert tool_event["dur"] == 250_000
 
 
-def test_convert_records_renders_zero_duration_tool_as_synthetic_span():
+def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
     trace, converted = convert_records(
         [
             {
@@ -394,3 +397,25 @@ def test_convert_records_renders_zero_duration_tool_as_synthetic_span():
     assert tool_event["args"]["duration_ms"] == 0.0
     assert tool_event["args"]["synthetic_duration"] is True
     assert tool_event["args"]["visual_duration_ms"] == 1.0
+
+
+CHECKS = [
+    check_convert_records_emits_request_stages_and_metadata,
+    check_convert_records_can_emit_stages_on_separate_tracks,
+    check_convert_records_clamps_stage_rounding_overlap,
+    check_convert_records_splits_overlapping_program_requests_into_lanes,
+    check_convert_records_emits_tool_duration_slices,
+    check_convert_records_pairs_tool_start_and_end_without_duration,
+    check_convert_records_renders_zero_duration_tool_as_synthetic_span,
+]
+
+
+def main() -> int:
+    for check in CHECKS:
+        check()
+        print(f"PASS {check.__name__}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
