@@ -188,9 +188,6 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 	if pod.Spec.NodeName != w.config.NodeName {
 		return
 	}
-	if !isPodReady(pod) {
-		return
-	}
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 
@@ -218,6 +215,9 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 		return
 	}
 	containerName := targets[0]
+	if !isContainerReady(pod, containerName) {
+		return
+	}
 
 	if !w.tryAcquire(podKey) {
 		return
