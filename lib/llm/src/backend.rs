@@ -66,6 +66,10 @@ struct DecoderUnfoldState {
     validate_engine_decode: bool,
     /// Set to true when a local stop condition is detected, causing the stream to end
     finished: bool,
+    /// Tokenizer used to decode top-logprob token_ids when the backend omits text
+    /// (e.g. SGLang with --skip-tokenizer-init forcibly drops it).
+    tokenizer: Tokenizer,
+    skip_special_tokens: bool,
 }
 
 impl Backend {
@@ -113,6 +117,8 @@ impl Backend {
             decoder,
             validate_engine_decode: self.validate_engine_decode,
             finished: false,
+            tokenizer: tokenizer.clone(),
+            skip_special_tokens,
         })
     }
 }
@@ -272,6 +278,24 @@ impl
                     }
                     data.text = text;
                     data.tokens = Some(tokens);
+
+                    if let Some(top_logprobs) = data.top_logprobs.as_mut() {
+                        for position in top_logprobs.iter_mut() {
+                            for entry in position.iter_mut() {
+                                if entry.token.is_none()
+                                    && let Ok(decoded) = state
+                                        .tokenizer
+                                        .decode(&[entry.token_id], state.skip_special_tokens)
+                                {
+                                    let s: String = decoded.into();
+                                    if entry.bytes.is_none() && !s.is_empty() {
+                                        entry.bytes = Some(s.as_bytes().to_vec());
+                                    }
+                                    entry.token = Some(s);
+                                }
+                            }
+                        }
+                    }
 
                     output.data = Some(data);
 
