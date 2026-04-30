@@ -195,6 +195,22 @@ This is the "virtual shards" option:
 - rebalancing cost paid mostly during migration events rather than steady-state
   request routing
 
+### Potential improvements
+
+The current benchmark prototype is useful as a first ownership-migration model,
+but there are a few obvious next steps if this direction continues to look
+promising:
+
+- **better logical routing keys**: virtual shards cannot fix a routing key that
+  is fundamentally too coarse, so this design likely pairs best with either a
+  deeper prefix rule or node-depth routing
+- **virtual-shard splitting**: if one virtual shard becomes persistently hot,
+  split it into child virtual shards instead of only moving it as a whole
+- **cleanup after migration**: remove or compact stale copied state on the old
+  owner after cutover so balance metrics reflect true serving ownership
+- **smarter cutover**: replace the current time-based dual-write window with a
+  replay-until-caught-up protocol and cut over once lag reaches zero
+
 ## Comparison Table
 
 | Design view | Rust type | Request-time routing | Mutable ownership | Main benefit | Main risk |
