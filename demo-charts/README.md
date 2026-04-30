@@ -46,12 +46,6 @@ Successful (SLA-meeting) request count per 30 s. Pre-kill both setups deliver ~1
 
 ![goodput_per_window](demo-failover/goodput_per_window.png)
 
-### Error rate per 30-second window
-
-% of requests in each 30 s window that errored or missed the SLA. Baseline pegs at 100 % during the cold-restart window. Failover spikes briefly for in-flight requests at kill, then settles back near 0 %.
-
-![error_rate_per_window](demo-failover/error_rate_per_window.png)
-
 > **Bin choice (30 s)**: Kimi 50 K-token completions arrive ~once every 5-10 s, so 1-second bins were mostly 0/1 spikes. 30 s captures 3-6 completions per bin in steady state — smooth enough to read while keeping pre-kill and post-kill regions clearly separated.
 
 Raw aggregates in [demo-failover/summary.csv](demo-failover/summary.csv).
