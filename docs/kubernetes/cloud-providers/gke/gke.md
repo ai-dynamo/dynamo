@@ -51,7 +51,7 @@ gcloud container node-pools create gpu-pool \
     --max-nodes=3
 ```
 
-###  Clone Dynamo GitHub repository
+### Clone Dynamo GitHub repository
 
 **Note:** Please make sure GitHub branch/commit version matches with Dynamo platform and VLLM container.
 
@@ -62,7 +62,7 @@ git clone https://github.com/ai-dynamo/dynamo.git
 git checkout release/0.6.0
 ```
 
-###  Set environment variables for GKE
+### Set environment variables for GKE
 
 ```bash
 export NAMESPACE=dynamo-system
@@ -116,7 +116,7 @@ export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
 /sbin/ldconfig
 ```
 
-For example, refer to the following from [`examples/deployments/GKE/vllm/disagg_gke.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/disagg_gke.yaml)
+For example, refer to the following from [`examples/deployments/GKE/vllm/disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/disagg.yaml)
 
 ```yaml
 metadata:

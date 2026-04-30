@@ -62,7 +62,7 @@ navigation:
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
-      - section: Deplyoment Guide
+      - section: Deployment Guide
         contents:
           - page: Quickstart
             path: kubernetes/README.md

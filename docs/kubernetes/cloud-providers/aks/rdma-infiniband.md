@@ -240,7 +240,7 @@ spec:
       - operator: Exists
       containers:
       - name: k8s-rdma-shared-dp-ds
-        image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin
+        image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:v1.5.3
         securityContext:
           privileged: true
         volumeMounts:

@@ -223,7 +223,7 @@ kubectl get pvc -n ${DYNAMO_NAMESPACE}
 
 You should see output similar to:
 
-```
+```text
 NAME                STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS     VOLUMEATTRIBUTESCLASS   AGE
 compilation-cache   Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 41s
 model-cache         Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 42s

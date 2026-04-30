@@ -79,7 +79,7 @@ kubectl get pods -n gpu-operator
 
 Expected output (abbreviated):
 
-```
+```text
 NAMESPACE      NAME                                       READY   STATUS      RESTARTS   AGE
 gpu-operator   gpu-feature-discovery-xxxxx                1/1     Running     0          2m
 gpu-operator   gpu-operator-xxxxx                         1/1     Running     0          2m
@@ -121,8 +121,8 @@ Significantly reduces GPU compute costs by running on preemptible Spot VM node p
 kubectl delete dynamographdeployments.nvidia.com --all --all-namespaces
 
 # Uninstall Dynamo Platform and CRDs
-helm uninstall dynamo-platform -n dynamo-kubernetes
-helm uninstall dynamo-crds -n default
+helm uninstall dynamo-platform -n dynamo-system
+helm uninstall dynamo-crds -n dynamo-system
 ```
 
 If you want to delete the GPU Operator, follow the [Uninstalling the NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/uninstall.html) guide.

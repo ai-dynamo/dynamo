@@ -52,6 +52,7 @@ Based on the task definition, you may need to add Amazon CloudWatch permissions 
 |-|-|-|-|
 |2379|TCP|2379|HTTP|
 |2380|TCP|2380|HTTP|
+
 - Environment variable key is `ALLOW_NONE_AUTHENTICATION` and value is `YES`
 2. NATS container
 - Container name use `nats`
@@ -63,6 +64,7 @@ Based on the task definition, you may need to add Amazon CloudWatch permissions 
 |4222|TCP|4222|HTTP|
 |6222|TCP|6222|HTTP|
 |8222|TCP|8222|HTTP|
+
 - Docker configuration, add `-js, --trace` in **Command**
 
 ## 4. vLLM Task Definitions Setup

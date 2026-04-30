@@ -39,7 +39,7 @@ automates the rest:
 7. **Planner** (optional) — If enabled, the Planner monitors live traffic and
    adjusts replica counts at runtime to meet your SLA targets.
 
-```
+```text
 ┌──────┐    ┌───────────┐    ┌──────────┐    ┌─────────────┐    ┌────────┐    ┌─────────┐
 │ Spec │───▶│ Hardware  │───▶│ Profiler │───▶│ Generated   │───▶│ Deploy │───▶│ Planner │
 │      │    │ Discovery │    │          │    │ DGD         │    │        │    │ (opt.)  │
