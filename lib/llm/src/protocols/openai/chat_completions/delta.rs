@@ -393,7 +393,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         };
 
         // Create the streaming response.
-        let index = 0;
+        let index = delta.index.unwrap_or(0);
         let mut stream_response = self.create_choice(
             index,
             delta.text,
@@ -626,6 +626,20 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_backend_choice_index_is_preserved() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-choice-index".to_string());
+        let mut output = final_backend_output();
+        output.index = Some(2);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        assert_eq!(response.inner.choices[0].index, 2);
     }
 
     #[test]

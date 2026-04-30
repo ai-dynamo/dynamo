@@ -61,6 +61,11 @@
     {% include "templates/aws.Dockerfile" %}
 {% endif %}
 
+# --- Test Stage
+{% if target == "runtime" %}
+    {% include "templates/test_stage.Dockerfile" %}
+{% endif %}
+
 # --- Development Stages
 {% if target == "dev" or target == "local-dev" %}
     {% include "templates/dev.Dockerfile" %}

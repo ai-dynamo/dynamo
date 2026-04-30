@@ -1,6 +1,6 @@
 {
   "request_id": "deepseek-v4-special-chars-test",
-  "expected_output": {"normal_content": "", "reasoning_content": "The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "save_note", "arguments": "{\"note\": \"He said \\\"hello\\\".\\n\\t'world' `backtick` — 中文测试 — 🚀✨ <not_a_sentinel> & </not_a_sentinel>.\"}"}}]},
+  "expected_output": {"normal_content": "", "reasoning_content": "The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "save_note", "arguments": "{\"note\": \"He said \\\"hello\\\".\\n\\t'world' `backtick` — 中文测试 — 🚀✨ <not_a_sentinel> & </not_a_sentinel>.\"}"}}], "finish_reason": "tool_calls"},
   "input_stream": [
     {"data":{"id":"chatcmpl-deepseek-v4-special","choices":[{"index":0,"delta":{"content":"<think>The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note.</think>","role":"assistant","reasoning_content":"The user wants me to save a multiline note with special characters, quotes, unicode, and emoji. I'll call save_note."}}]}},
     {"data":{"id":"chatcmpl-deepseek-v4-special","choices":[{"index":0,"delta":{"content":"<｜DSML｜tool_calls>\n","role":"assistant"}}]}},

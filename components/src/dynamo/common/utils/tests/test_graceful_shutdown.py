@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 # ---------------------------------------------------------------------------
 # Module loading: import graceful_shutdown without triggering the full dynamo

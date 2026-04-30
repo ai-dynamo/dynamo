@@ -14,7 +14,7 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
-        LowerTierMatchDetails, MatchDetails,
+        LowerTierMatchDetails, MatchDetails, WireTieredMatchDetails,
     },
     protocols::{
         DpRank, LocalBlockHash, OverlapScores, RouterEvent, StorageTier, TokensWithHashes,
@@ -147,6 +147,42 @@ pub(crate) struct TieredMatchDetails {
     pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
 }
 
+impl From<&TieredMatchDetails> for WireTieredMatchDetails {
+    fn from(d: &TieredMatchDetails) -> Self {
+        Self {
+            device: d.device.overlap_scores.clone().into(),
+            lower_tier: d
+                .lower_tier
+                .iter()
+                .map(|(tier, details)| (*tier, details.into()))
+                .collect(),
+        }
+    }
+}
+
+impl From<WireTieredMatchDetails> for TieredMatchDetails {
+    fn from(w: WireTieredMatchDetails) -> Self {
+        // `last_matched_hashes` is only needed server-side to seed the tier walk,
+        // so we leave it empty on the inbound side.
+        let mut lower_tier = HashMap::with_capacity(w.lower_tier.len());
+        for (tier, details) in w.lower_tier {
+            if lower_tier.insert(tier, details.into()).is_some() {
+                tracing::warn!(
+                    ?tier,
+                    "Duplicate StorageTier in WireTieredMatchDetails; keeping last entry"
+                );
+            }
+        }
+        Self {
+            device: MatchDetails {
+                overlap_scores: w.device.into(),
+                ..Default::default()
+            },
+            lower_tier,
+        }
+    }
+}
+
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub(crate) use subscriber::start_subscriber;
@@ -264,13 +300,14 @@ impl Indexer {
             Self::Concurrent { primary, .. } => {
                 Ok(primary.backend().find_match_details_impl(&sequence, false))
             }
+            // Device-only queries on the remote path go through the same tiered
+            // RPC and project out the device result. The `device_only` request
+            // flag tells the server to skip the lower-tier walk so we don't
+            // pay tier-walk CPU/bandwidth for results we'd discard.
             Self::Remote(remote) => remote
-                .find_matches(sequence)
+                .find_matches_by_tier(sequence, true)
                 .await
-                .map(|overlap_scores| MatchDetails {
-                    overlap_scores,
-                    ..Default::default()
-                })
+                .map(|tiered| tiered.device)
                 .map_err(|e| {
                     tracing::warn!(error = %e, "Remote indexer query failed");
                     KvRouterError::IndexerOffline
@@ -283,15 +320,26 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        let device = self.find_match_details(sequence.clone()).await?;
-        let lower_tier = match self {
+        match self {
             Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
-                query_lower_tiers(lower_tier, &sequence, &device)
+                let device = self.find_match_details(sequence.clone()).await?;
+                let lt = query_lower_tiers(lower_tier, &sequence, &device);
+                Ok(TieredMatchDetails {
+                    device,
+                    lower_tier: lt,
+                })
             }
-            Self::Remote(_) | Self::None => HashMap::new(),
-        };
-
-        Ok(TieredMatchDetails { device, lower_tier })
+            Self::Remote(remote) => {
+                remote
+                    .find_matches_by_tier(sequence, false)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "Remote indexer tiered query failed");
+                        KvRouterError::IndexerOffline
+                    })
+            }
+            Self::None => Ok(TieredMatchDetails::default()),
+        }
     }
 
     pub(crate) async fn record_hashed_routing_decision(
@@ -478,20 +526,74 @@ impl Indexer {
 }
 
 #[cfg(test)]
+pub(super) mod test_util {
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
+        compute_seq_hash_for_block,
+    };
+
+    pub(crate) fn store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        prefix_hashes: &[u64],
+        local_hashes: &[u64],
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        let prefix_block_hashes: Vec<LocalBlockHash> =
+            prefix_hashes.iter().copied().map(LocalBlockHash).collect();
+        let parent_hash = compute_seq_hash_for_block(&prefix_block_hashes)
+            .last()
+            .copied()
+            .map(ExternalSequenceBlockHash);
+
+        let full_hashes: Vec<LocalBlockHash> = prefix_hashes
+            .iter()
+            .chain(local_hashes.iter())
+            .copied()
+            .map(LocalBlockHash)
+            .collect();
+        let full_sequence_hashes = compute_seq_hash_for_block(&full_hashes);
+        let new_sequence_hashes = &full_sequence_hashes[prefix_hashes.len()..];
+        let blocks = local_hashes
+            .iter()
+            .zip(new_sequence_hashes.iter())
+            .map(|(&local_hash, &sequence_hash)| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(sequence_hash),
+                tokens_hash: LocalBlockHash(local_hash),
+                mm_extra_info: None,
+            })
+            .collect();
+
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash,
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank,
+            },
+            storage_tier,
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use tokio_util::sync::CancellationToken;
 
+    use super::test_util::store_event;
     use super::{Indexer, LowerTierIndexers};
     use dynamo_kv_router::{
         ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics},
-        protocols::{
-            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-            KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerWithDpRank,
-            compute_seq_hash_for_block,
-        },
+        protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank},
     };
 
     fn make_test_indexer() -> Indexer {
@@ -538,54 +640,6 @@ mod tests {
             }
             Indexer::Remote(_) | Indexer::None => {}
         }
-    }
-
-    fn store_event(
-        worker_id: u64,
-        dp_rank: u32,
-        event_id: u64,
-        prefix_hashes: &[u64],
-        local_hashes: &[u64],
-        storage_tier: StorageTier,
-    ) -> RouterEvent {
-        let prefix_block_hashes: Vec<LocalBlockHash> =
-            prefix_hashes.iter().copied().map(LocalBlockHash).collect();
-        let parent_hash = compute_seq_hash_for_block(&prefix_block_hashes)
-            .last()
-            .copied()
-            .map(ExternalSequenceBlockHash);
-
-        let full_hashes: Vec<LocalBlockHash> = prefix_hashes
-            .iter()
-            .chain(local_hashes.iter())
-            .copied()
-            .map(LocalBlockHash)
-            .collect();
-        let full_sequence_hashes = compute_seq_hash_for_block(&full_hashes);
-        let new_sequence_hashes = &full_sequence_hashes[prefix_hashes.len()..];
-        let blocks = local_hashes
-            .iter()
-            .zip(new_sequence_hashes.iter())
-            .map(|(&local_hash, &sequence_hash)| KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(sequence_hash),
-                tokens_hash: LocalBlockHash(local_hash),
-                mm_extra_info: None,
-            })
-            .collect();
-
-        RouterEvent::with_storage_tier(
-            worker_id,
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash,
-                    start_position: None,
-                    blocks,
-                }),
-                dp_rank,
-            },
-            storage_tier,
-        )
     }
 
     #[tokio::test]

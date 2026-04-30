@@ -835,6 +835,69 @@ class FpmEventRelay:
         ...
 
 
+class FpmDirectPublisher:
+    """
+    Direct Forward Pass Metrics publisher used by in-process producers such
+    as the TRT-LLM adapter. The underlying Rust publisher owns per-DP-rank
+    serialization tasks (each with its own 1s idle heartbeat timer) and a
+    single event-plane publisher task. Python callers do not manage
+    heartbeat: when ``publish`` is not called for ``IDLE_HEARTBEAT_INTERVAL``
+    (1.0s, matching vLLM's ``HEARTBEAT_INTERVAL``), the Rust side emits a
+    zeroed snapshot on that rank's channel.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        worker_id: str,
+        dp_size: int = 1,
+    ) -> None:
+        """
+        Create a publisher with ``dp_size`` per-DP-rank channels.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+            worker_id: Unique worker identifier stamped on every emitted FPM.
+            dp_size: Number of DP ranks to allocate channels for. Use ``1``
+                when attention DP is disabled.
+        """
+        ...
+
+    def publish(
+        self,
+        *,
+        dp_rank: int,
+        scheduled_num_prefill_requests: int,
+        scheduled_sum_prefill_tokens: int,
+        scheduled_sum_prefill_kv_tokens: int,
+        scheduled_num_decode_requests: int,
+        scheduled_sum_decode_kv_tokens: int,
+        queued_num_prefill_requests: int,
+        queued_sum_prefill_tokens: int,
+        queued_num_decode_requests: int,
+        queued_sum_decode_kv_tokens: int,
+        wall_time_secs: float,
+    ) -> None:
+        """
+        Publish one iteration's FPM snapshot for the given DP rank.
+
+        All parameters are keyword-only on the Python side: adjacent ints
+        with similar units (``scheduled_*`` vs ``queued_*``, ``*_prefill_*``
+        vs ``*_decode_*``) cannot be distinguished by the type system, so
+        a transposition would silently corrupt every published snapshot.
+
+        Variance fields (var_prefill_length, var_decode_kv_tokens,
+        var_queued_prefill_length, var_queued_decode_kv_tokens) are defaulted
+        to 0.0 per the MVP scope; a follow-up PR can add Welford-based
+        variance computation.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the publisher and its per-rank serialization tasks."""
+        ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.

@@ -26,6 +26,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -87,9 +88,18 @@ sglang_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             responses_payload_default(),
             responses_stream_payload_default(),
+            guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
@@ -111,6 +121,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -365,7 +376,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(13.3),  # same as multimodal_e_pd_qwen
             pytest.mark.timeout(360),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-7B-Instruct",
         script_args=[
@@ -471,7 +482,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(19.3),
             pytest.mark.timeout(240),
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,
         ],
         model="Tongyi-MAI/Z-Image-Turbo",
         env={},
@@ -510,7 +521,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
             pytest.mark.timeout(180),
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         env={},
