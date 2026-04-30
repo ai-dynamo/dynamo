@@ -261,7 +261,9 @@ def _get_per_instance_gpus(worker_service: Service) -> int | None:
     if not args:
         return None
 
-    def _match_flag(arg: str, next_arg: str | None, names: tuple[str, ...]) -> str | None:
+    def _match_flag(
+        arg: str, next_arg: str | None, names: tuple[str, ...]
+    ) -> str | None:
         """Return the value for `arg` if it matches any of `names` in either
         `--name value` or `--name=value` form, else None."""
         for name in names:
