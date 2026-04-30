@@ -110,7 +110,7 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 /// * `Err(e)` - If parsing fails due to encoding or tokenization errors
 pub async fn parse_tool_calls_harmony_complete(
     text: &str,
-    _config: &JsonParserConfig,
+    config: &JsonParserConfig,
     _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let enc = match get_harmony_encoding().await.as_ref() {
@@ -130,12 +130,14 @@ pub async fn parse_tool_calls_harmony_complete(
                 "Failed to parse messages from completion tokens: {e}. Falling back to regex extraction."
             );
             // Recovery: harmony rejects parallel commentary blocks and
-            // truncated JSON. The regex fallback extracts each commentary
-            // block independently and runs the same JSON repair as
-            // base_json_parser.
-            let (calls, residual) = extract_calls_via_regex(text);
-            if !calls.is_empty() {
-                return Ok((calls, Some(residual)));
+            // truncated JSON. Gated on `allow_eof_recovery` so streaming
+            // jails (where the tokenizer often rejects mid-chunk before all
+            // tokens have arrived) don't extract a partial call.
+            if config.allow_eof_recovery {
+                let (calls, residual) = extract_calls_via_regex(text);
+                if !calls.is_empty() {
+                    return Ok((calls, Some(residual)));
+                }
             }
             return Ok((vec![], Some(text.to_string())));
         }
@@ -171,13 +173,16 @@ pub async fn parse_tool_calls_harmony_complete(
                     let trimmed = text.text.trim();
                     match serde_json::from_str::<Value>(trimmed) {
                         Ok(value) => value,
-                        Err(_) => {
+                        Err(_) if config.allow_eof_recovery => {
                             // Truncation recovery: balance unclosed strings /
                             // braces (max_tokens / EOS pattern) and retry.
+                            // Gated so streaming early-exit doesn't extract
+                            // a partial call with synthesized closers.
                             try_repair_truncated_json(trimmed)
                                 .and_then(|r| serde_json::from_str::<Value>(&r).ok())
                                 .unwrap_or(Value::Null)
                         }
+                        Err(_) => Value::Null,
                     }
                 }
                 _ => {
@@ -364,10 +369,16 @@ mod tests {
     #[tokio::test] // CASE.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
-        let (tool_calls, _normal) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
+        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(tool_calls.len(), 2);
         let (n0, a0) = extract_name_and_args(tool_calls[0].clone());
         let (n1, a1) = extract_name_and_args(tool_calls[1].clone());
@@ -383,10 +394,16 @@ mod tests {
     #[tokio::test] // CASE.4 — gpt-oss
     async fn test_parse_harmony_truncated_json_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
-        let (tool_calls, _normal) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
+        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_weather");
@@ -399,10 +416,16 @@ mod tests {
     #[tokio::test] // CASE.5 — gpt-oss
     async fn test_parse_harmony_bare_envelope_no_call_token_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
-        let (tool_calls, _normal) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
+        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_weather");
@@ -414,10 +437,16 @@ mod tests {
     #[tokio::test]
     async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
         let text = r#"PREFIX <|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
-        let (tool_calls, normal) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
+        let (tool_calls, normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(tool_calls.len(), 1);
         let normal = normal.unwrap_or_default();
         assert!(
