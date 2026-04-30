@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -442,9 +443,11 @@ def test_frontend_api_surface_compliance(
     # the marker won't appear in stdout and the assertion fails. Proves the
     # tool-call paths through the frontend end-to-end (both /v1/responses
     # for codex and /v1/messages for claude), not just text generation.
+    # The UUID suffix prevents the model from guessing the filename via
+    # hallucination — it must actually invoke `ls` to discover it.
     agent_cwd = tmp_path / "agent_cwd"
     agent_cwd.mkdir()
-    marker_filename = "dynamo_compliance_marker.txt"
+    marker_filename = f"marker_{uuid.uuid4().hex[:12]}.txt"
     (agent_cwd / marker_filename).write_text("compliance-smoke")
 
     # Isolated HOME so claude doesn't write session state into the runner's
