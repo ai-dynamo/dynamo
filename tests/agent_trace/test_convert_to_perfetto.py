@@ -332,3 +332,65 @@ def test_convert_records_pairs_tool_start_and_end_without_duration():
     )
     assert tool_event["ts"] == 1_000_000
     assert tool_event["dur"] == 250_000
+
+
+def test_convert_records_renders_zero_duration_tool_as_synthetic_span():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_start",
+                    "event_time_unix_ms": 1000,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "file_system",
+                        "status": "running",
+                    },
+                },
+            },
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1000,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "file_system",
+                        "status": "succeeded",
+                        "duration_ms": 0.0,
+                    },
+                },
+            },
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    assert not [
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool.marker"
+    ]
+    tool_event = next(
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    )
+    assert tool_event["name"] == "Tool: file_system"
+    assert tool_event["ts"] == 1_000_000
+    assert tool_event["dur"] == 1_000
+    assert tool_event["args"]["duration_ms"] == 0.0
+    assert tool_event["args"]["synthetic_duration"] is True
+    assert tool_event["args"]["visual_duration_ms"] == 1.0

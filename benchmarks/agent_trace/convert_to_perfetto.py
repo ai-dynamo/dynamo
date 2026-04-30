@@ -56,6 +56,7 @@ def _iter_records(paths: list[Path]) -> Iterable[dict[str, Any]]:
 
 
 _TOOL_EVENT_TYPES = {"tool_start", "tool_end", "tool_error"}
+_SYNTHETIC_TOOL_DURATION_US = 1_000
 
 
 def _event_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -356,7 +357,25 @@ def _prepare_tool_items(tool_records: list[dict[str, Any]]) -> list[dict[str, An
             ts_us = matched_start["event_time_us"]
             dur_us = event_time_us - ts_us
         else:
-            items.append({**record, "kind": "tool_instant", "ts_us": event_time_us})
+            synthetic_ts_us = (
+                matched_start["event_time_us"]
+                if matched_start is not None
+                else event_time_us
+            )
+            synthetic_args = {
+                **record["args"],
+                "synthetic_duration": True,
+                "visual_duration_ms": _SYNTHETIC_TOOL_DURATION_US / 1000.0,
+            }
+            items.append(
+                {
+                    **record,
+                    "kind": "tool",
+                    "ts_us": synthetic_ts_us,
+                    "dur_us": _SYNTHETIC_TOOL_DURATION_US,
+                    "args": synthetic_args,
+                }
+            )
             continue
 
         items.append(
