@@ -568,6 +568,33 @@ func TestDGDR_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
 	}
 }
 
+func TestDGDR_ExplicitFalseEnableGPUDiscoveryRoundTrips(t *testing.T) {
+	enableGPUDiscovery := false
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "explicit-false-gpu-discovery"},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:              "llama",
+			Backend:            "vllm",
+			EnableGPUDiscovery: &enableGPUDiscovery,
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Spec.EnableGPUDiscovery == nil {
+		t.Fatalf("EnableGPUDiscovery = nil, want explicit false")
+	}
+	if *spoke.Spec.EnableGPUDiscovery {
+		t.Fatalf("EnableGPUDiscovery = true, want false")
+	}
+}
+
 func TestDGDR_IntermediateSpokeProfilingConfigModelCacheEditWins(t *testing.T) {
 	original := newV1beta1DGDR()
 	spoke := &DynamoGraphDeploymentRequest{}
@@ -1137,6 +1164,31 @@ func TestDGDR_SparseHubSpecNilAutoApplyOmitsRepresentableFields(t *testing.T) {
 	}
 }
 
+func TestDGDR_HubNilAutoApplyWithOtherHubSavesRoundTrips(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "nil-autoapply-with-mocker"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+			Features: &v1beta1.FeaturesSpec{
+				Mocker: &v1beta1.MockerSpec{},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.AutoApply != nil {
+		t.Fatalf("AutoApply = %v, want nil", *restored.Spec.AutoApply)
+	}
+}
+
 func TestDGDR_SparseHubSpecWorkloadWithoutSLAOmitsRepresentableFields(t *testing.T) {
 	isl := int32(2048)
 	src := &v1beta1.DynamoGraphDeploymentRequest{
@@ -1179,6 +1231,85 @@ func TestDGDR_SparseHubSpecWorkloadWithoutSLAOmitsRepresentableFields(t *testing
 	}
 	if restored.Spec.Workload == nil || restored.Spec.Workload.ISL == nil || *restored.Spec.Workload.ISL != isl {
 		t.Fatalf("Workload = %#v, want ISL %d", restored.Spec.Workload, isl)
+	}
+}
+
+func TestDGDR_HubKnownProfilingBlobDoesNotLeakAnnotation(t *testing.T) {
+	ttft := 0.1
+	itl := 0.2
+	e2e := 0.3
+	optimizationType := v1beta1.OptimizationTypeLatency
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "known-profiling"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:          "llama",
+			Backend:        v1beta1.BackendTypeVllm,
+			SearchStrategy: v1beta1.SearchStrategyThorough,
+			SLA: &v1beta1.SLASpec{
+				TTFT:             &ttft,
+				ITL:              &itl,
+				E2ELatency:       &e2e,
+				OptimizationType: &optimizationType,
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if _, ok := restored.Annotations[annDGDRProfilingConfig]; ok {
+		t.Fatalf("known profiling fields leaked into %s: %v", annDGDRProfilingConfig, restored.Annotations)
+	}
+}
+
+func TestDGDR_HubDGDNameDoesNotCreateDeploymentAnnotation(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "synthetic-deployment"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "llama",
+			Backend: v1beta1.BackendTypeVllm,
+		},
+		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
+			DGDName: "generated-dgd",
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if _, ok := restored.Annotations[annDGDRDeploymentStatus]; ok {
+		t.Fatalf("synthetic deployment leaked into %s: %v", annDGDRDeploymentStatus, restored.Annotations)
+	}
+}
+
+func TestDGDR_EmptyStateRoundTrips(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-state"},
+		Status: DynamoGraphDeploymentRequestStatus{
+			State: "",
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Status.State != "" {
+		t.Fatalf("State = %q, want empty", spoke.Status.State)
 	}
 }
 
