@@ -235,8 +235,6 @@ impl Indexer {
             let cancellation_token = component.drt().primary_token();
             let prune_config = Some(PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-                max_tree_size: kv_router_config.router_max_tree_size,
-                prune_target_ratio: kv_router_config.router_prune_target_ratio,
             });
             return Ok(Self::KvIndexer {
                 primary: KvIndexer::new_with_frequency(
