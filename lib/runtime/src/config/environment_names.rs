@@ -340,6 +340,15 @@ pub mod llm {
         /// Rotating gzip JSONL sink roll threshold in record lines.
         pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
 
+        /// Enable replay-oriented prompt block hashes in agent request trace records.
+        ///
+        /// Enabled by default when agent tracing is enabled. Set to a falsey value
+        /// (`0`, `false`, `off`, or `no`) to omit replay hashes.
+        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
+
+        /// Token block size used for replay-oriented prompt block hashes.
+        pub const DYN_AGENT_TRACE_REPLAY_BLOCK_SIZE: &str = "DYN_AGENT_TRACE_REPLAY_BLOCK_SIZE";
+
         /// Local ZMQ endpoint for harness tool events.
         pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
             "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
@@ -565,6 +574,8 @@ mod tests {
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
+            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_BLOCK_SIZE,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model

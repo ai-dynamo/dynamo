@@ -129,6 +129,8 @@ impl TurnTrace {
         Ok(ReplayRequestHashes {
             local_block_hashes,
             sequence_hashes,
+            generated_local_block_hashes: Vec::new(),
+            generated_sequence_hashes: Vec::new(),
         })
     }
 }

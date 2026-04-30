@@ -77,6 +77,14 @@ impl RollingHashIdMapper {
     pub fn hash_token_blocks(&mut self, tokens: &[u32]) -> Vec<u64> {
         hash_token_blocks(self, tokens)
     }
+
+    /// Map precomputed sequence-aware block hashes into compact Mooncake IDs.
+    ///
+    /// This is useful for producers that record stable block hashes in the
+    /// serving path and only compact them during offline trace conversion.
+    pub fn ids_for_sequence_hashes(&mut self, sequence_hashes: &[u64]) -> Vec<u64> {
+        ids_for_sequence_hashes(self, sequence_hashes)
+    }
 }
 
 /// Token-block hashing helper for the Mooncake replay schema.
@@ -102,6 +110,23 @@ pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Ve
         parent_hash = combined_hash;
     }
     hash_ids
+}
+
+/// Map stable sequence hashes to compact Mooncake IDs with a shared mapper.
+pub fn ids_for_sequence_hashes(
+    mapper: &mut RollingHashIdMapper,
+    sequence_hashes: &[u64],
+) -> Vec<u64> {
+    sequence_hashes
+        .iter()
+        .map(|sequence_hash| {
+            *mapper.hash_to_id.entry(*sequence_hash).or_insert_with(|| {
+                let next_id = mapper.next_id;
+                mapper.next_id += 1;
+                next_id
+            })
+        })
+        .collect()
 }
 
 /// Counters for what a [`MooncakeJsonlWriter`] has emitted.
@@ -277,6 +302,17 @@ mod tests {
     fn empty_token_input_yields_empty_hash_ids() {
         let mut mapper = RollingHashIdMapper::new(4);
         assert!(mapper.hash_token_blocks(&[]).is_empty());
+    }
+
+    #[test]
+    fn precomputed_sequence_hashes_map_to_stable_ids() {
+        let mut mapper = RollingHashIdMapper::new(64);
+
+        let first = mapper.ids_for_sequence_hashes(&[101, 202, 303]);
+        let second = mapper.ids_for_sequence_hashes(&[101, 202, 404]);
+
+        assert_eq!(first[..2], second[..2]);
+        assert_ne!(first[2], second[2]);
     }
 
     #[test]

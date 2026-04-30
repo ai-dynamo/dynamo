@@ -250,6 +250,12 @@ impl TraceCollector {
         }
     }
 
+    pub(crate) fn on_reuse_observed(&mut self, uuid: Uuid, reused_input_tokens: usize) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
+        }
+    }
+
     pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
             stats.token_times_ms.push(token_time_ms);
