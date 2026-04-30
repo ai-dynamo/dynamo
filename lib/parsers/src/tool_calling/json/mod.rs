@@ -149,4 +149,76 @@ mod tests {
             "should stop at end of first complete call when second is incomplete"
         );
     }
+
+    // Pin current Nemotron behavior when </TOOLCALL> is absent due to
+    // max_tokens / EOS truncation. The JSON-family parser today silently
+    // drops the in-flight call — the failure mode TEST_CASES.md flags.
+    // Promoting to recovery (matching Kimi K2's behavior)
+    // would be a parser change.
+    #[test] // CASE.5 — nemotron_deci
+    fn test_parse_nemotron_deci_no_outer_close_silent_drop() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            ..Default::default()
+        };
+        // JSON array fully complete; only outer </TOOLCALL> missing.
+        let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}}]"#;
+
+        let (calls, normal_text) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "nemotron_deci today drops the in-flight call when </TOOLCALL> is missing"
+        );
+        assert_eq!(normal_text, Some(input.to_string()));
+    }
+
+    // Verifies multi-call works correctly for nemotron_deci. The shared
+    // dispatcher tests this at the integration layer (see
+    // `parsers.rs::test_detect_and_parse_tool_call_default_parser_nemotron_deci_multiple`),
+    // but no parser-level test pinned it. This test makes the contract
+    // visible at the per-parser surface so a JSON-family refactor can't
+    // silently break parallel-call extraction without a per-parser failure.
+    #[test] // CASE.2 — nemotron_deci
+    fn test_parse_nemotron_deci_multiple_calls() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            ..Default::default()
+        };
+        // Two calls in a single <TOOLCALL>...</TOOLCALL> block, JSON array form.
+        let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}},{"name":"get_time","arguments":{"tz":"EST"}}]</TOOLCALL>"#;
+
+        let (calls, normal_text) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+        assert_eq!(normal_text, Some("".to_string()));
+    }
+
+    // Pin current behavior when JSON args are truncated mid-value (e.g.
+    // max_tokens fires inside `"city":"NYC` with no closing quote). The
+    // outer </TOOLCALL> is also absent here — same shape as a real
+    // truncation. nemotron_deci silently drops the call today; the same
+    // class of bug as CASE.5. Distinct from existing fallback-to-string
+    // tests on other parsers, which exercise syntactically-bad-but-complete
+    // JSON, not truncation.
+    #[test] // CASE.4 — nemotron_deci
+    fn test_parse_nemotron_deci_truncated_json_silent_drop() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            ..Default::default()
+        };
+        let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC</TOOLCALL>"#;
+
+        let (calls, normal_text) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "nemotron_deci today drops calls with truncated JSON args"
+        );
+        assert_eq!(normal_text, Some(input.to_string()));
+    }
 }

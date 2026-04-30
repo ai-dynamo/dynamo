@@ -95,7 +95,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
@@ -142,7 +142,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
@@ -173,7 +173,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
@@ -259,7 +259,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
-      gpu_test_timeout_minutes: 35
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -308,6 +308,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -340,6 +341,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -473,7 +475,7 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -488,7 +490,7 @@ jobs:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   trtllm-copy-to-acr:
@@ -503,7 +505,7 @@ jobs:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   frontend-copy-to-acr:
@@ -518,7 +520,7 @@ jobs:
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # ============================================================================

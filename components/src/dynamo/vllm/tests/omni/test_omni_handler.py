@@ -14,6 +14,7 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
@@ -65,6 +66,7 @@ class TestEngineInputs:
         assert ei.fps == 0
         assert ei.sampling_params_list is None
         assert ei.response_format is None
+        assert ei.output_format is None
 
 
 class TestBuildEngineInputs:
@@ -303,3 +305,87 @@ class TestParseOmniRequest:
         op = result["original_prompt"]
         assert "num_inference_steps" not in op
         assert "guidance_scale" not in op
+
+
+# ---------------------------------------------------------------------------
+# AudioGenerationHandler — data_source / response_format field mapping
+# ---------------------------------------------------------------------------
+
+
+def _make_audio_handler():
+    config = MagicMock()
+    config.tts_max_instructions_length = 200
+    config.tts_max_new_tokens_min = 1
+    config.tts_max_new_tokens_max = 4096
+    config.tts_ref_audio_timeout = 10
+    config.tts_ref_audio_max_bytes = 1024 * 1024
+    engine_client = MagicMock()
+    engine_client.model_config.hf_config.talker_config = None
+    return AudioGenerationHandler(config, engine_client, None, None)
+
+
+class TestAudioHandlerFieldMapping:
+    """AudioGenerationHandler maps data_source→response_format and response_format→output_format."""
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_to_response_format(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="url", response_format="mp3"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"  # data_source → response_format
+        assert result.output_format == "mp3"  # response_format → output_format
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_b64_json(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="b64_json", response_format="opus"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "b64_json"
+        assert result.output_format == "opus"
+
+    @pytest.mark.asyncio
+    async def test_generic_path_no_data_source_passes_none(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        # No data_source → response_format in EngineInputs will be None
+        req = NvCreateAudioSpeechRequest(input="hello", response_format="wav")
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format is None
+        assert result.output_format == "wav"
+
+    @pytest.mark.asyncio
+    async def test_tts_path_applies_same_field_mapping(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=True)
+        handler._validate_tts_request = MagicMock()
+        handler._estimate_tts_prompt_len = MagicMock(return_value=10)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hi", data_source="url", response_format="flac"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"
+        assert result.output_format == "flac"
+
+    @pytest.mark.asyncio
+    async def test_request_type_is_audio_generation(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        result = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hi")
+        )
+        assert result.request_type == RequestType.AUDIO_GENERATION

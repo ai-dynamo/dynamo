@@ -279,6 +279,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
+          build_target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -293,7 +294,7 @@ jobs:
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ${{ inputs.extra_build_args }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -301,42 +302,25 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ inputs.target != 'dev' }}
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
-          CACHE_TAG="test-${PLAIN_TAG}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
-          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
-          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
-          fi
-
-          PUSH_ARGS=""
-          if [ "${{ inputs.push_image }}" == "true" ]; then
-            PUSH_ARGS="--push"
-          elif [ "${{ inputs.no_load }}" == "false" ]; then
-            PUSH_ARGS="--load"
-          fi
-
-          NO_CACHE_ARG=""
-          if [ "${{ inputs.no_cache }}" == "true" ]; then
-            NO_CACHE_ARG="--no-cache"
-          fi
-
-          docker buildx build \
-            --progress=plain \
-            ${PUSH_ARGS} \
-            ${NO_CACHE_ARG} \
-            --platform ${{ inputs.platform }} \
-            -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
-            ${CACHE_ARGS} \
-            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
+        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
+        uses: ./.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
+          framework: ${{ inputs.framework }}
+          target: ${{ inputs.target }}
+          build_target: ${{ inputs.target }}_test
+          tag_suffix: test
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          no_cache: ${{ inputs.no_cache }}
+          push_image: ${{ inputs.push_image }}
+          no_load: ${{ inputs.no_load }}
+          extra_build_args: |
+            DYNAMO_COMMIT_SHA=${{ github.sha }}
+            ${{ inputs.extra_build_args }}
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
