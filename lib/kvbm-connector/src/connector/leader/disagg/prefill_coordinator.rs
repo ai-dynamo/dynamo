@@ -672,16 +672,56 @@ impl PrefillCoordinatorImpl {
         Ok(())
     }
 
+    /// Onboard the blocks decode forwarded into the prefill side's
+    /// G1 destinations.
+    ///
+    /// `g1_dst_local_match_prefix` is the **local-match prefix** of
+    /// the G1 destinations vLLM allocated — its length must equal
+    /// `state.registered_g2.len()` (= the count decode published via
+    /// its session = `params.sequence_hashes.len()`). Callers
+    /// (`on_usaa`, `run_setup`'s post-USAA kick) are responsible
+    /// for slicing the full G1 list down to that prefix. The
+    /// trailing G1 slots — `prefill_window - local_match` — are
+    /// filled by the prefill model's forward pass; the worker
+    /// observer publishes those blocks back to decode via
+    /// `commit_output_blocks` and the session.
+    ///
+    /// When `state.num_external_tokens == 0` (decode had no cache
+    /// to forward — the cold-cache common case), there is nothing
+    /// to onboard from G2; this returns after marking the request
+    /// complete so the worker side knows the CD-decode flow is
+    /// closed and forward-pass-only continues normally.
     async fn kick_onboard(
         self: &Arc<Self>,
         request_id: &str,
         state: &Arc<RequestState>,
-        g1_dst_block_ids: Vec<BlockId>,
+        g1_dst_local_match_prefix: Vec<BlockId>,
     ) -> Result<()> {
         if state.onboarding_scheduled.swap(true, Ordering::AcqRel) {
             return Ok(()); // already scheduled
         }
         *state.status.lock() = PrefillStatus::OnboardingScheduled;
+
+        // Cold-cache CD: decode forwarded zero blocks. Nothing to
+        // onboard from G2; the prefill model's forward pass is the
+        // entire data flow. We do NOT call
+        // `worker_hook.mark_onboarding_complete` here: the prefill
+        // leader's gnmt short-circuited to inner passthrough
+        // (`(Some(0), false)`), so vLLM never registered this
+        // request as having an "external receive" pending. The
+        // worker holds no kv-recv state for it; signaling
+        // `finished_recving` would panic vLLM at
+        // `scheduler.py::_update_from_kv_xfer_finished` with
+        // `assert req_id in self.requests`.
+        if state.num_external_tokens == 0 {
+            tracing::info!(
+                "kick_onboard: num_external_tokens=0 — \
+                 no G2→G1 onboard needed (cold-cache CD); \
+                 marking complete (no worker_hook signal)"
+            );
+            *state.status.lock() = PrefillStatus::OnboardingComplete;
+            return Ok(());
+        }
 
         let g2_src_block_ids: Vec<BlockId> = state
             .registered_g2
@@ -690,16 +730,19 @@ impl PrefillCoordinatorImpl {
             .map(|b| b.block_id())
             .collect();
 
-        if g2_src_block_ids.len() != g1_dst_block_ids.len() {
+        if g2_src_block_ids.len() != g1_dst_local_match_prefix.len() {
             anyhow::bail!(
-                "kick_onboard: G2 src count {} != G1 dst count {}",
+                "kick_onboard: G2 src count {} != local-match G1 dst prefix count {} \
+                 (state.num_external_tokens={}, state.expected_hashes.len()={})",
                 g2_src_block_ids.len(),
-                g1_dst_block_ids.len()
+                g1_dst_local_match_prefix.len(),
+                state.num_external_tokens,
+                g2_src_block_ids.len(),
             );
         }
 
         self.transport
-            .local_g2_to_g1(g2_src_block_ids, g1_dst_block_ids)
+            .local_g2_to_g1(g2_src_block_ids, g1_dst_local_match_prefix)
             .await?;
 
         *state.status.lock() = PrefillStatus::OnboardingComplete;
@@ -778,6 +821,22 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
             // Non-CD or already cleaned up: nothing to do.
             return Ok(());
         };
+        // num_external_tokens here is what vLLM passes through from
+        // the prefill leader's gnmt return. With the leader's n=0
+        // short-circuit (`prefill_leader::ensure_started_zero_passthrough`),
+        // cold-cache CD reaches USAA with `num_external_tokens=0`
+        // even though `state.num_external_tokens=0` from
+        // `params.sequence_hashes.len() * block_size`. Both are 0
+        // and agree.
+        //
+        // For non-zero local-match (decode forwarded N blocks),
+        // vLLM allocates ALL G1 slots for the full prefill window
+        // (local-match + remote). The leader returns
+        // `(Some(local_match_tokens), true)` to vLLM; vLLM passes
+        // that back here as `num_external_tokens`, which equals
+        // `state.num_external_tokens`. block_ids covers the full
+        // window though, so we slice the local-match prefix below
+        // before kick_onboard.
         if num_external_tokens != state.num_external_tokens {
             anyhow::bail!(
                 "on_usaa: num_external_tokens mismatch (got {}, expected {})",
@@ -786,7 +845,21 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
             );
         }
 
-        let g1_ids = block_ids.to_vec();
+        // Slice the G1 destinations to the local-match prefix —
+        // that's the subset kick_onboard fills via G2→G1 from
+        // decode's forwarded blocks. The trailing slots are
+        // forward-pass-filled by the prefill model.
+        let block_size = self.inner.block_size();
+        let local_match_blocks = state.num_external_tokens / block_size;
+        if block_ids.len() < local_match_blocks {
+            anyhow::bail!(
+                "on_usaa: block_ids len {} < local_match_blocks {} (num_external_tokens={})",
+                block_ids.len(),
+                local_match_blocks,
+                state.num_external_tokens
+            );
+        }
+        let g1_ids: Vec<BlockId> = block_ids[..local_match_blocks].to_vec();
         let pulls_complete = state.pulls_complete.load(Ordering::Acquire);
 
         if pulls_complete {
