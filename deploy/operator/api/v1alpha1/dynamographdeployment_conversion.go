@@ -52,6 +52,10 @@ const (
 	annDGDSpokeSpec   = "nvidia.com/dgd-spoke-spec"
 	annDGDSpokeStatus = "nvidia.com/dgd-spoke-status"
 	annDGDHubOrigin   = "nvidia.com/dgd-hub-origin"
+
+	// Older conversion code wrote a full spoke-hub snapshot under this key.
+	// Current conversion never restores it, but must scrub stale copies.
+	annDGDSpokeHubLegacy = "nvidia.com/dgd-spoke-hub"
 )
 
 type dgdConversionContext struct {
@@ -413,6 +417,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	convertDGDStatusFromHub(&src.Status, &dst.Status, nil, nil, ctx)
 	fillDGDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus)
 	scrubStaleDGDAnnotations(&dst.ObjectMeta, dst.Spec.Services)
+	delAnnFromObj(&dst.ObjectMeta, annDGDSpokeHubLegacy)
 	if preservedSpokeSpec != nil || preservedSpokeStatus != nil {
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeSpec)
 		delAnnFromObj(&dst.ObjectMeta, annDGDSpokeStatus)
@@ -579,6 +584,7 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 		annDGDSpokeSpec,
 		annDGDSpokeStatus,
 		annDGDHubOrigin,
+		annDGDSpokeHubLegacy,
 	} {
 		delAnnFromObj(obj, key)
 	}

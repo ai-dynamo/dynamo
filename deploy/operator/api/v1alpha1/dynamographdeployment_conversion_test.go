@@ -1116,6 +1116,41 @@ func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	}
 }
 
+func TestDGD_ConvertFrom_ScrubsLegacySpokeHubAnnotation(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-spoke-hub",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				annDGDSpokeHubLegacy: `{"spec":{},"status":{}}`,
+				"user/keep-me":       "kept",
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if _, ok := spoke.Annotations[annDGDSpokeHubLegacy]; ok {
+		t.Fatalf("legacy annotation was not scrubbed from spoke: %v", spoke.Annotations)
+	}
+	if v, ok := spoke.Annotations["user/keep-me"]; !ok || v != "kept" {
+		t.Fatalf("user annotations must be preserved, got %v", spoke.Annotations)
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if _, ok := hub.Annotations[annDGDSpokeHubLegacy]; ok {
+		t.Fatalf("legacy annotation leaked back to hub: %v", hub.Annotations)
+	}
+	if v, ok := hub.Annotations["user/keep-me"]; !ok || v != "kept" {
+		t.Fatalf("user annotations must be preserved, got %v", hub.Annotations)
+	}
+}
+
 // TestDGD_ConvertFrom_DuplicateComponentNames asserts that ConvertFrom
 // returns an error when the v1beta1 spec.components list has two entries
 // with the same componentName, instead of silently overwriting the earlier
