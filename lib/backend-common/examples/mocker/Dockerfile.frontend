@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1.6
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal Dynamo frontend image built from source.
+#
+# Build context MUST be the dynamo workspace root (see docker-compose.yml).
+# Produces an image that runs `python -m dynamo.frontend`.
+
+FROM python:3.12-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        clang \
+        cmake \
+        curl \
+        git \
+        libclang-dev \
+        libssl-dev \
+        pkg-config \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain for building ai-dynamo-runtime (maturin-backed Python wheel).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /root/.cargo/bin/cargo --version
+ENV PATH=/root/.cargo/bin:$PATH
+
+RUN pip install --no-cache-dir maturin
+
+WORKDIR /build
+COPY . .
+
+# Build the ai-dynamo-runtime wheel. Cache both the cargo registry and the
+# target/ dir so incremental rebuilds don't recompile every crate. The wheel
+# output goes to /tmp/wheels which is NOT a cache mount, so it persists into
+# the next stage.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/build/lib/bindings/python/target \
+    cd lib/bindings/python \
+    && maturin build --release --out /tmp/wheels
+
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /tmp/wheels /tmp/wheels
+COPY --from=builder /build/pyproject.toml /build/hatch_build.py /build/README.md /build/LICENSE /app/
+COPY --from=builder /build/components /app/components
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir /tmp/wheels/*.whl \
+    && pip install --no-cache-dir . \
+    && rm -rf /tmp/wheels
+
+ENTRYPOINT ["python", "-m", "dynamo.frontend"]
