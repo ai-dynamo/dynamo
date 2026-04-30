@@ -60,4 +60,3 @@ Before finalizing a review:
 - Is the review scoped to the recent changes, not the whole repo?
 
 If you're uncertain about a point of style, say so rather than fabricating Graham's opinion.
-
