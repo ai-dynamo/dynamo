@@ -108,7 +108,7 @@ pub(super) fn pop_ready_worker_completion(
             output_signals,
             kv_events,
         ),
-        SimulationEventKind::DecodeHandoff { .. } => {
+        SimulationEventKind::DecodeHandoff { .. } | SimulationEventKind::WorkerReady { .. } => {
             unreachable!("peeked worker completion event must match popped event")
         }
     };
@@ -151,6 +151,39 @@ pub(super) fn pop_ready_decode_handoff(
         unreachable!("peeked decode handoff event must match popped event");
     };
     Some(uuid)
+}
+
+pub(super) fn push_worker_ready(
+    events: &mut BinaryHeap<SimulationEvent>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+    stage: SimulationWorkerStage,
+    worker_id: usize,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::WorkerReady { stage, worker_id },
+    });
+    *next_event_seq += 1;
+}
+
+pub(super) fn pop_ready_worker_ready(
+    events: &mut BinaryHeap<SimulationEvent>,
+    now_ms: f64,
+) -> Option<(SimulationWorkerStage, usize)> {
+    let event = events.peek()?;
+    if event.at_ms != now_ms {
+        return None;
+    }
+    let SimulationEventKind::WorkerReady { .. } = &event.kind else {
+        return None;
+    };
+    let event = events.pop().expect("event must exist after peek");
+    let SimulationEventKind::WorkerReady { stage, worker_id } = event.kind else {
+        unreachable!("peeked worker ready event must match popped event");
+    };
+    Some((stage, worker_id))
 }
 
 #[cfg(test)]
@@ -258,6 +291,86 @@ mod tests {
         assert_eq!(second.stage, SimulationWorkerStage::Aggregated);
         assert_eq!(second.worker_idx, 8);
         assert_eq!(second.completed_requests, 2);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_worker_ready_push_pop_round_trip() {
+        let mut events = BinaryHeap::new();
+        let mut next_event_seq = 0;
+
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            100.0,
+            SimulationWorkerStage::Aggregated,
+            3,
+        );
+
+        // Not ready before the scheduled time.
+        assert!(pop_ready_worker_ready(&mut events, 99.0).is_none());
+
+        let (stage, worker_id) = pop_ready_worker_ready(&mut events, 100.0).unwrap();
+        assert_eq!(stage, SimulationWorkerStage::Aggregated);
+        assert_eq!(worker_id, 3);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_worker_ready_does_not_interfere_with_completion_pop() {
+        let mut events = BinaryHeap::new();
+        let mut next_event_seq = 0;
+
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            10.0,
+            SimulationWorkerStage::Aggregated,
+            1,
+        );
+
+        // pop_ready_worker_completion must return None (wrong event kind).
+        assert!(pop_ready_worker_completion(&mut events, 10.0).is_none());
+        // The event should still be in the heap.
+        assert_eq!(events.len(), 1);
+        // pop_ready_worker_ready should succeed.
+        assert!(pop_ready_worker_ready(&mut events, 10.0).is_some());
+    }
+
+    #[test]
+    fn test_worker_ready_interleaved_with_completion() {
+        let mut events = BinaryHeap::new();
+        let mut next_event_seq = 0;
+
+        push_worker_completion(
+            &mut events,
+            &mut next_event_seq,
+            10.0,
+            WorkerCompletionPayload {
+                stage: SimulationWorkerStage::Aggregated,
+                worker_idx: 0,
+                completed_requests: 1,
+                output_signals: Vec::new(),
+                kv_events: Vec::new(),
+            },
+        );
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            10.0,
+            SimulationWorkerStage::Aggregated,
+            5,
+        );
+
+        // The completion was pushed first (lower seq_no) so it pops first.
+        let completion = pop_ready_worker_completion(&mut events, 10.0).unwrap();
+        assert_eq!(completion.worker_idx, 0);
+
+        // Now the ready event is at the front.
+        assert!(pop_ready_worker_completion(&mut events, 10.0).is_none());
+        let (stage, worker_id) = pop_ready_worker_ready(&mut events, 10.0).unwrap();
+        assert_eq!(stage, SimulationWorkerStage::Aggregated);
+        assert_eq!(worker_id, 5);
         assert!(events.is_empty());
     }
 }

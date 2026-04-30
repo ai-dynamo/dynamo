@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+try:
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+except ImportError:
+    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -28,6 +31,12 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
+
+
+@pytest.fixture(autouse=True)
+def dgdr_name_env(monkeypatch):
+    """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
+    monkeypatch.setenv("DGDR_NAME", "test-dgdr")
 
 
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:

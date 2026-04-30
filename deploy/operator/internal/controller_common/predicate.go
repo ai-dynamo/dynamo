@@ -62,6 +62,19 @@ func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool
 	return detectAPIGroupAvailability(ctx, mgr, "inference.networking.k8s.io")
 }
 
+// DetectDRAAvailability checks if Dynamic Resource Allocation is available
+// by checking if the resource.k8s.io API group is registered (Kubernetes 1.32+)
+func DetectDRAAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "resource.k8s.io")
+}
+
+// DetectIstioAvailability checks if Istio is available by checking if the
+// networking.istio.io API group is registered. Used to guard DestinationRule
+// reconciliation so the operator doesn't error on clusters without Istio CRDs.
+func DetectIstioAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "networking.istio.io")
+}
+
 // detectAPIGroupAvailability checks if a specific API group is registered in the cluster
 func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName string) bool {
 	logger := log.FromContext(ctx)
@@ -108,6 +121,14 @@ func GetDiscoveryBackend(discoveryBackend configv1alpha1.DiscoveryBackend, annot
 // IsK8sDiscoveryEnabled returns whether Kubernetes discovery is enabled for the given annotations.
 func IsK8sDiscoveryEnabled(discoveryBackend configv1alpha1.DiscoveryBackend, annotations map[string]string) bool {
 	return GetDiscoveryBackend(discoveryBackend, annotations) == configv1alpha1.DiscoveryBackendKubernetes
+}
+
+// GetKubeDiscoveryMode returns the kube discovery mode from annotations, defaulting to pod mode.
+func GetKubeDiscoveryMode(annotations map[string]string) configv1alpha1.KubeDiscoveryMode {
+	if mode, exists := annotations[commonconsts.KubeAnnotationDynamoKubeDiscoveryMode]; exists {
+		return configv1alpha1.KubeDiscoveryMode(mode)
+	}
+	return configv1alpha1.KubeDiscoveryModePod
 }
 
 // EphemeralDeploymentEventFilter returns a predicate that filters events based on namespace configuration.

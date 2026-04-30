@@ -39,8 +39,15 @@ pub enum EventTransportKind {
 
 impl EventTransportKind {
     /// Parse from environment variable `DYN_EVENT_PLANE`.
-    /// Returns `Nats` if not set or empty.
-    /// Returns error for invalid values.
+    ///
+    /// Returns `Nats` if the variable is not set or is empty, which is the correct
+    /// default for distributed deployments (etcd/kubernetes backends). For local-only
+    /// workflows (`--discovery-backend file` or `mem`) this context-unaware default
+    /// may be incorrect — prefer [`DistributedRuntime::default_event_transport_kind`]
+    /// when you have access to a runtime, as it derives the correct default from the
+    /// configured discovery backend.
+    ///
+    /// Returns an error for unrecognised values.
     pub fn from_env() -> Result<Self> {
         match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
             .as_deref()
@@ -54,7 +61,12 @@ impl EventTransportKind {
         }
     }
 
-    /// Parse from environment variable, defaulting to Nats on error.
+    /// Parse from environment variable, defaulting to NATS when the variable is unset.
+    ///
+    /// This default is suitable for distributed deployments. For local-only workflows
+    /// prefer [`DistributedRuntime::default_event_transport_kind`], which automatically
+    /// selects ZMQ when running with a `file` or `mem` discovery backend.
+    ///
     /// Logs a warning if an invalid value is encountered.
     pub fn from_env_or_default() -> Self {
         Self::from_env().unwrap_or_else(|e| {

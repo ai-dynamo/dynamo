@@ -43,6 +43,9 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("deepseek_v3", ToolCallConfig::deepseek_v3());
         map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
         map.insert("deepseek_v3_2", ToolCallConfig::deepseek_v3_2());
+        map.insert("deepseek_v4", ToolCallConfig::deepseek_v4());
+        map.insert("deepseek-v4", ToolCallConfig::deepseek_v4());
+        map.insert("deepseekv4", ToolCallConfig::deepseek_v4());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
@@ -50,6 +53,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
+        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
         map
     })
 }
@@ -164,7 +168,12 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     }
 }
 
-pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usize {
+/// Returns the byte offset immediately after the last complete tool-call
+/// section in `chunk`. Returns `None` when the parser detects that the section
+/// is not properly closed (e.g. kimi_k2 without `section_end`), signalling
+/// that the caller should NOT treat the current buffer as a complete result —
+/// more content may follow.
+pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Option<usize> {
     let parser_map = get_tool_parser_map();
     let parser_key = match parser_str {
         Some(s) if !s.is_empty() => s,
@@ -174,35 +183,36 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
     match parser_map.get(parser_key) {
         Some(config) => match &config.parser_config {
             ParserConfig::Json(json_config) => {
-                // For "default", use "nemotron_deci" as the effective parser; otherwise, use the provided parser_key
                 let effective_parser = if parser_key == "default" {
                     "nemotron_deci"
                 } else {
                     parser_key
                 };
-                find_tool_call_end_position_json(chunk, effective_parser, json_config)
+                Some(find_tool_call_end_position_json(
+                    chunk,
+                    effective_parser,
+                    json_config,
+                ))
             }
             ParserConfig::Harmony(json_config) => {
-                find_tool_call_end_position_harmony(chunk, json_config)
+                Some(find_tool_call_end_position_harmony(chunk, json_config))
             }
-            ParserConfig::Pythonic => find_tool_call_end_position_pythonic(chunk),
-            ParserConfig::Typescript => {
-                // Typescript parser not implemented
-                chunk.len()
+            ParserConfig::Pythonic => Some(find_tool_call_end_position_pythonic(chunk)),
+            ParserConfig::Typescript => Some(chunk.len()),
+            ParserConfig::Xml(xml_config) => {
+                Some(find_tool_call_end_position_xml(chunk, xml_config))
             }
-            ParserConfig::Xml(xml_config) => find_tool_call_end_position_xml(chunk, xml_config),
-            ParserConfig::Dsml(dsml_config) => find_tool_call_end_position_dsml(chunk, dsml_config),
+            ParserConfig::Dsml(dsml_config) => {
+                Some(find_tool_call_end_position_dsml(chunk, dsml_config))
+            }
             ParserConfig::Glm47(glm47_config) => {
-                find_tool_call_end_position_glm47(chunk, glm47_config)
+                Some(find_tool_call_end_position_glm47(chunk, glm47_config))
             }
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
         },
-        None => {
-            // Unknown parser, return full content length
-            chunk.len()
-        }
+        None => Some(chunk.len()),
     }
 }
 // Tests
@@ -234,12 +244,16 @@ mod tests {
             "deepseek_v3",
             "deepseek_v3_1",
             "deepseek_v3_2",
+            "deepseek_v4",
+            "deepseek-v4",
+            "deepseekv4",
             "qwen3_coder",
             "jamba",
             "nemotron_nano",
             "minimax_m2",
             "glm47",
             "kimi_k2",
+            "qwen25",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
@@ -1695,6 +1709,54 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[tokio::test]
+    async fn test_deepseek_v4_single_tool_call() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_datetime">
+<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        let (tool_calls, normal_text) =
+            detect_and_parse_tool_call(input, Some("deepseek_v4"), None)
+                .await
+                .expect("Failed to parse");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_datetime");
+        assert_eq!(normal_text, Some("".to_string()));
+
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a CASE.*; covers registry plumbing.
+    #[tokio::test]
+    async fn test_deepseek_v4_compatibility_aliases() {
+        let input = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="search">
+<｜DSML｜parameter name="query" string="true">search agent benchmark 2024</｜DSML｜parameter>
+<｜DSML｜parameter name="topn" string="false">10</｜DSML｜parameter>
+<｜DSML｜parameter name="source" string="true">web</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+
+        for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            let (tool_calls, _) = detect_and_parse_tool_call(input, Some(parser_name), None)
+                .await
+                .expect("Failed to parse");
+
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(tool_calls[0].function.name, "search");
+
+            let args: serde_json::Value =
+                serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+            assert_eq!(args["query"], "search agent benchmark 2024");
+            assert_eq!(args["topn"], 10);
+            assert_eq!(args["source"], "web");
+        }
+    }
+
+    #[tokio::test]
     async fn test_hermes_parser_without_new_line() {
         let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "celsius"}}</tool_call>"
         "#;
@@ -1707,6 +1769,72 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_simple() {
+        // Qwen2.5 tool call format (matches sglang qwen25_detector):
+        // <tool_call>\n{"name": ..., "arguments": {...}}\n</tool_call>
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_with_normal_text() {
+        let input = r#"I'll check the weather for you. <tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("I'll check the weather for you.".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, _args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_multiple_tool_calls() {
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>
+<tool_call>
+{"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+    }
+
+    #[tokio::test]
+    async fn test_qwen25_plain_text_only() {
+        let input = "Hello, how can I help you today?";
+        let (result, content) = detect_and_parse_tool_call(input, Some("qwen25"), None)
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+        assert_eq!(
+            content,
+            Some("Hello, how can I help you today?".to_string())
+        );
     }
 }
 
@@ -2536,6 +2664,15 @@ mod detect_parser_tests {
     fn test_e2e_detect_tool_call_start_hermes() {
         let text = r#"{"name": "get_current_weather", "parameters": {"location": "Tokyo"}}"#;
         let result = detect_tool_call_start(text, Some("hermes")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_qwen25() {
+        let text = r#"<tool_call>
+{"name": "get_current_weather", "arguments": {"location": "Tokyo"}}
+</tool_call>"#;
+        let result = detect_tool_call_start(text, Some("qwen25")).unwrap();
         assert!(result);
     }
 

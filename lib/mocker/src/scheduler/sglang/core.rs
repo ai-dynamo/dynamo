@@ -272,12 +272,15 @@ fn simulate_prefill_duration(
 }
 
 fn debug_assert_sglang_scheduler_state(
-    waiting: &VecDeque<SglangRequest>,
-    running: &[SglangRequest],
-    block_size: usize,
+    _waiting: &VecDeque<SglangRequest>,
+    _running: &[SglangRequest],
+    _block_size: usize,
 ) {
     #[cfg(debug_assertions)]
     {
+        let waiting = _waiting;
+        let running = _running;
+        let block_size = _block_size;
         let mut seen = std::collections::HashSet::new();
         for req in waiting {
             debug_assert!(

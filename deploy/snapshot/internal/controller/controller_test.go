@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/testr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,12 +18,27 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 const testNodeName = "test-node"
 const testContainerID = "test-container"
+
+// fakeRuntime is a minimal Runtime implementation for controller reconciliation
+// tests. Resolve paths aren't exercised by the reconciler filter tests.
+type fakeRuntime struct{}
+
+var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
+
+func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
+	return 0, nil, errors.New("not implemented")
+}
+func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error) {
+	return 0, nil, errors.New("not implemented")
+}
+func (r *fakeRuntime) Close() error { return nil }
 
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by runCheckpoint/runRestore
@@ -38,6 +54,7 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 			},
 		},
 		clientset: fake.NewClientset(objs...),
+		runtime:   &fakeRuntime{},
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
@@ -490,6 +507,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 			},
 		},
 		clientset: clientset,
+		runtime:   &fakeRuntime{},
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight: map[string]struct{}{

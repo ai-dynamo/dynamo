@@ -26,6 +26,8 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
+use crate::block_manager::kv_consolidator::StorageTier;
+
 pub(crate) struct Resources {
     pub worker_id: WorkerID,
     pub cancellation_token: CancellationToken,
@@ -253,7 +255,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
         let (device_pool, device_blocks, device_offload_filter) = match device_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
-                    create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "device")?;
                 (Some(pool), Some(blocks), offload_filter)
             }
             None => {
@@ -523,17 +525,25 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> std::fmt::Debug
 pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadata>(
     factory: impl IntoBlocks<S, L>,
     resources: &Resources,
-    _pool_name: &str,
+    pool_name: &str,
 ) -> Result<(
     Arc<dyn BlockPool<S, L, M>>,
     Vec<Block<S, L, M>>,
     Option<Arc<dyn OffloadFilter>>,
 )> {
+    let storage_tier = match pool_name {
+        "device" => StorageTier::Device,
+        "host" => StorageTier::HostPinned,
+        "disk" => StorageTier::Disk,
+        _ => anyhow::bail!("unsupported block pool tier: {}", pool_name),
+    };
+
     let pool = ManagedBlockPool::<S, L, M>::builder()
         .cancel_token(resources.cancellation_token.clone())
         .global_registry(resources.global_registry.clone())
         .async_runtime(resources.async_rt_handle.clone())
         .event_manager(resources.event_manager.clone())
+        .storage_tier(storage_tier)
         .build()?;
 
     let offload_filter = factory.offload_filter();
