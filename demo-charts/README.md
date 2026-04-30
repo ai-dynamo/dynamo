@@ -48,17 +48,19 @@ Each dot is one request's TTFT. Both lines look similar pre-kill. Post-kill: fai
 
 ![ttft_scatter](demo-failover/ttft_scatter.png)
 
-### Error rate per second
+### Goodput per 30-second window
 
-Baseline pegs to 100% errors during the cold-restart window. Failover briefly spikes for the requests that were in-flight at kill, then drops back to ~0%.
+Successful (SLA-meeting) request count per 30 s. Pre-kill both setups deliver ~10–14 successes per 30 s. Post-kill: baseline holds at zero for the entire ~5-min cold restart window, then surfaces a few late completions; failover dips briefly and re-establishes a steady ~5–7 successes/30 s.
 
-![error_rate_per_sec](demo-failover/error_rate_per_sec.png)
+![goodput_per_window](demo-failover/goodput_per_window.png)
 
-### Goodput per second
+### Error rate per 30-second window
 
-Noisy at 1-second bins because Kimi 50K-token completions are sparse (~one every 5-10 s). Cumulative chart above is the better visualization at this completion cadence.
+% of requests in each 30 s window that errored or missed the SLA. Baseline pegs at 100 % during the cold-restart window. Failover spikes briefly for in-flight requests at kill, then settles back near 0 %.
 
-![goodput_per_sec](demo-failover/goodput_per_sec.png)
+![error_rate_per_window](demo-failover/error_rate_per_window.png)
+
+> **Bin choice (30 s)**: Kimi 50 K-token completions arrive ~once every 5-10 s, so 1-second bins were mostly 0/1 spikes. 30 s captures 3-6 completions per bin in steady state — smooth enough to read while keeping pre-kill and post-kill regions clearly separated.
 
 Raw aggregates in [demo-failover/summary.csv](demo-failover/summary.csv).
 
