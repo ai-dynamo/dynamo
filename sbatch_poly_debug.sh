@@ -6,10 +6,12 @@
 # Uses etcd + nats + dynamo frontend instead of trtllm-serve disaggregated
 #
 #SBATCH --job-name=glm5_nvfp4_dynamo_debug_ctx2tp4_gen1tp4
-#SBATCH --nodes=4
-#SBATCH --ntasks=16
+# Allocate 9 nodes (cluster scheduler prefers larger jobs) but only the
+# first 4 are actually used by the workload below.
+#SBATCH --nodes=9
+#SBATCH --ntasks=36
 #SBATCH --ntasks-per-node=4
-#SBATCH --segment=4
+#SBATCH --segment=9
 #SBATCH --account=core_dlfw_ci
 #SBATCH --time=4:00:00
 #SBATCH --output=/home/rihuo/srt-slurm/outputs/%j/logs/sweep_%j.log
@@ -25,7 +27,7 @@ CONTAINER_IMAGE="/lustre/fsw/core_dlfw_ci/rihuo/tensorrtllm-runtime-1-1-0-dev-3.
 MODEL_PATH="/lustre/fsw/core_dlfw_ci/rihuo/nvidia_GLM-5-NVFP4"
 MODEL_NAME="nvidia_GLM-5-NVFP4"
 SCRIPT_MOUNTS="${LOG_DIR}:/logs,${MODEL_PATH}:/model,${SRTCTL_SOURCE}/configs:/configs,${SRTCTL_SOURCE}/src/srtctl/benchmarks/scripts:/srtctl-benchmarks"
-TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 && export NCCL_GRAPH_MIXING_SUPPORT=0 && export TLLM_LOG_LEVEL=INFO && export TRTLLM_ENABLE_PDL=1 && export TRTLLM_SERVER_DISABLE_GC=1 && export TRTLLM_WORKER_DISABLE_GC=1"
+TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 && export NCCL_GRAPH_MIXING_SUPPORT=0 && export TLLM_LOG_LEVEL=DEBUG && export TRTLLM_ENABLE_PDL=1 && export TRTLLM_SERVER_DISABLE_GC=1 && export TRTLLM_WORKER_DISABLE_GC=1"
 
 # Dynamo ports
 ETCD_PORT=2379
@@ -47,10 +49,17 @@ if [ "${#ALL_NODES[@]}" -lt 4 ]; then
     exit 1
 fi
 
-HEAD_NODE="${ALL_NODES[0]}"
-PREFILL_NODE_A="${ALL_NODES[1]}"
-PREFILL_NODE_B="${ALL_NODES[2]}"
-DECODE_NODE="${ALL_NODES[3]}"
+# We allocate 9 nodes for scheduling priority but only use the first 4.
+USED_NODES=("${ALL_NODES[@]:0:4}")
+if [ "${#ALL_NODES[@]}" -gt 4 ]; then
+    echo "Note: allocated ${#ALL_NODES[@]} nodes but only using the first 4: ${USED_NODES[*]}"
+    echo "Idle nodes: ${ALL_NODES[*]:4}"
+fi
+
+HEAD_NODE="${USED_NODES[0]}"
+PREFILL_NODE_A="${USED_NODES[1]}"
+PREFILL_NODE_B="${USED_NODES[2]}"
+DECODE_NODE="${USED_NODES[3]}"
 DECODE_NODELIST="${DECODE_NODE}"
 
 SRUN_PIDS=()
@@ -398,7 +407,7 @@ echo "Infrastructure services are ready"
 # ==============================================================================
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
-DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_WORKER_POOL_SIZE=256 && export DYN_TCP_WORK_QUEUE_SIZE=512 && export DYN_LOG=debug"
+DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug"
 
 echo "Starting prefill workers (2x TP4/EP4)"
 
@@ -469,7 +478,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug && python3 -m dynamo.frontend --http-port ${FRONTEND_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug && python3 -m dynamo.frontend --http-port ${FRONTEND_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
 FRONTEND_PID="${SRUN_PIDS[-1]}"
 require_alive "${FRONTEND_PID}" "FRONTEND_PID"
 
@@ -506,4 +515,4 @@ srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "export SRTCTL_FRONTEND_TYPE=dynamo && bash /srtctl-benchmarks/sa-bench/bench.sh http://localhost:${FRONTEND_PORT} 1024 1024 3072 inf /model ${MODEL_NAME} true 12 8 4 0.8 16 2 glm_moe_dsa true random"
+    bash -c "export SRTCTL_FRONTEND_TYPE=dynamo && bash /srtctl-benchmarks/sa-bench/bench.sh http://localhost:${FRONTEND_PORT} 1024 1024 1024 inf /model ${MODEL_NAME} true 12 8 4 0.8 16 2 glm_moe_dsa true random"

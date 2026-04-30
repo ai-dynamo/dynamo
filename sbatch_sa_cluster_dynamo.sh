@@ -26,13 +26,13 @@ CONTAINER_IMAGE="/data/home/rihuo/tensorrtllm-runtime-1-1-0-dev-3.sqsh"
 MODEL_PATH="/data/home/rihuo/nvidia_GLM-5-NVFP4"
 MODEL_NAME="nvidia_GLM-5-NVFP4"
 SCRIPT_MOUNTS="${LOG_DIR}:/logs,${MODEL_PATH}:/model,${SRTCTL_SOURCE}/configs:/configs,${SRTCTL_SOURCE}/src/srtctl/benchmarks/scripts:/srtctl-benchmarks"
-TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 && export NCCL_GRAPH_MIXING_SUPPORT=0 && export TLLM_LOG_LEVEL=INFO && export TRTLLM_ENABLE_PDL=1 && export TRTLLM_SERVER_DISABLE_GC=1 && export TRTLLM_WORKER_DISABLE_GC=1"
+TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 && export NCCL_GRAPH_MIXING_SUPPORT=0 && export TLLM_LOG_LEVEL=DEBUG && export TRTLLM_ENABLE_PDL=1 && export TRTLLM_SERVER_DISABLE_GC=1 && export TRTLLM_WORKER_DISABLE_GC=1"
 
 # Dynamo ports
 ETCD_PORT=2379
 NATS_PORT=4222
 FRONTEND_PORT=8000
-DYNAMO_REQUEST_PLANE=nats
+DYNAMO_REQUEST_PLANE=tcp
 
 # DYN_SYSTEM_PORT assignments (one per worker, starting at 8081)
 DYN_SYS_PORT_CTX0=8081
@@ -404,7 +404,7 @@ echo "Infrastructure services are ready"
 # ==============================================================================
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
-DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_WORKER_POOL_SIZE=256 && export DYN_TCP_WORK_QUEUE_SIZE=512 && export DYN_LOG=debug"
+DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_WORKER_POOL_SIZE=768 && export DYN_LOG=debug"
 
 echo "Starting prefill workers (6x TP2/EP2)"
 
