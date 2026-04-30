@@ -146,7 +146,7 @@ func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
 	}
 }
 
-func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) {
 	src := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
 		Spec: DynamoComponentDeploymentSpec{
@@ -171,8 +171,24 @@ func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T)
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if _, ok := spoke.Annotations[annDCDHubSpec]; !ok {
-		t.Fatalf("expected current hub-only edit to be preserved in %q", annDCDHubSpec)
+	if raw, ok := spoke.Annotations[annDCDHubSpec]; ok {
+		preserved, ok := restoreDCDHubSpec(raw)
+		if !ok {
+			t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		}
+		main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+		if !ok {
+			t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.PodTemplate)
+		}
+		if main.Image != "" {
+			t.Fatalf("representable main-container image was preserved: %#v", main)
+		}
+	}
+	if spoke.Spec.ExtraPodSpec == nil || spoke.Spec.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("expected podTemplate main container to be represented in ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec)
+	}
+	if got := spoke.Spec.ExtraPodSpec.MainContainer.Image; got != "worker:edited" {
+		t.Fatalf("ExtraPodSpec.MainContainer.Image = %q, want worker:edited", got)
 	}
 
 	restored := &v1beta1.DynamoComponentDeployment{}
@@ -181,6 +197,71 @@ func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T)
 	}
 	if diff := cmp.Diff(hub.Spec.PodTemplate, restored.Spec.PodTemplate); diff != "" {
 		t.Fatalf("podTemplate mismatch after preserving hub-only edit (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t *testing.T) {
+	sidecarName := "sidecar"
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-sidecar", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:   "stale-sidecar",
+				ComponentType:   v1beta1.ComponentTypeFrontend,
+				FrontendSidecar: ptr.To(sidecarName),
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "main:v1"},
+							{Name: sidecarName, Image: "frontend:v1"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if spoke.Spec.ExtraPodSpec == nil || spoke.Spec.ExtraPodSpec.PodSpec == nil {
+		t.Fatalf("expected sidecar container to be represented in ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec)
+	}
+	if _, ok := findContainerByName(spoke.Spec.ExtraPodSpec.PodSpec.Containers, sidecarName); !ok {
+		t.Fatalf("expected sidecar container in spoke ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec.PodSpec.Containers)
+	}
+	raw, ok := spoke.Annotations[annDCDHubSpec]
+	if !ok {
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDHubSpec, spoke.Annotations)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+	}
+	preservedSidecar, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, sidecarName)
+	if !ok {
+		t.Fatalf("expected preserved podTemplate to carry sidecar key, got %#v", preserved.PodTemplate)
+	}
+	if preservedSidecar.Image != "" {
+		t.Fatalf("expected sparse preserved sidecar key only, got %#v", preservedSidecar)
+	}
+
+	// Stage 2 edit: the v1alpha1 carrier removes the representable sidecar
+	// container but leaves preservation annotations untouched.
+	spoke.Spec.ExtraPodSpec.PodSpec.Containers = nil
+
+	restoredHub := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if restoredHub.Spec.FrontendSidecar != nil {
+		t.Fatalf("stale frontendSidecar reference was restored: %q", *restoredHub.Spec.FrontendSidecar)
+	}
+	if restoredHub.Spec.PodTemplate != nil {
+		if _, ok := findContainerByName(restoredHub.Spec.PodTemplate.Spec.Containers, sidecarName); ok {
+			t.Fatalf("stale sidecar container was restored: %#v", restoredHub.Spec.PodTemplate.Spec.Containers)
+		}
 	}
 }
 

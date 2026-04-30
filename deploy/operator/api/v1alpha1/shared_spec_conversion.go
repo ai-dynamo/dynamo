@@ -399,7 +399,7 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 	convertExperimentalTo(src, dst, ctx.carrier)
 
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
-	if err := buildPodTemplateTo(src, dst, ctx.carrier); err != nil {
+	if err := buildPodTemplateTo(src, dst, ctx.carrier, ctx.includeOriginSplits); err != nil {
 		return err
 	}
 
@@ -719,12 +719,19 @@ func saveSharedHubOnlySpec(src, save *v1beta1.DynamoComponentDeploymentSharedSpe
 	if sharedFrontendSidecarNeedsPreservationInContext(ctx, src) {
 		save.FrontendSidecar = ptr.To(*src.FrontendSidecar)
 	}
-	if src.PodTemplate != nil && !sharedGeneratedPodTemplateUnmodifiedInContext(ctx) {
-		save.PodTemplate = src.PodTemplate.DeepCopy()
+	if sharedPodTemplateSaveNeeded(src, ctx) {
+		saveSharedPodTemplateHubOnlyFields(src, save)
 	}
 	if experimentalIsHubOnlyShape(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
 	}
+}
+
+func sharedPodTemplateSaveNeeded(src *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) bool {
+	if src == nil || sharedGeneratedPodTemplateUnmodifiedInContext(ctx) {
+		return false
+	}
+	return src.PodTemplate != nil
 }
 
 func sharedFrontendSidecarNeedsPreservationInContext(ctx sharedSpecConversionContext, src *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -756,6 +763,123 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 		save.FrontendSidecar == nil &&
 			save.PodTemplate == nil &&
 			save.Experimental == nil
+}
+
+func saveSharedPodTemplateHubOnlyFields(src, save *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if src.PodTemplate == nil {
+		return
+	}
+
+	saveSharedPodTemplateHubOnlyMetadata(src.PodTemplate, save)
+	saveSharedPodTemplateMainContainerKey(src.PodTemplate, save)
+	saveSharedPodTemplateVolumeMountKeysAndHubOnlyFields(src.PodTemplate, save)
+	saveSharedPodTemplateCompilationCacheMountAbsence(src, save)
+	saveSharedPodTemplateFrontendSidecarContainerKey(src, save)
+
+	save.PodTemplate = nilIfEmptyPodTemplate(save.PodTemplate)
+}
+
+func saveSharedPodTemplateHubOnlyMetadata(src *corev1.PodTemplateSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if src == nil {
+		return
+	}
+	meta := *src.ObjectMeta.DeepCopy()
+	meta.Labels = nil
+	meta.Annotations = nil
+	if apiequality.Semantic.DeepEqual(meta, metav1.ObjectMeta{}) {
+		return
+	}
+	ensureSharedSavePodTemplate(save).ObjectMeta = meta
+}
+
+func saveSharedPodTemplateMainContainerKey(src *corev1.PodTemplateSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if !podTemplateHasContainer(src, mainContainerName) {
+		return
+	}
+	ensureSharedSavePodTemplateContainer(save, mainContainerName)
+}
+
+func saveSharedPodTemplateVolumeMountKeysAndHubOnlyFields(src *corev1.PodTemplateSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if src == nil {
+		return
+	}
+	main, ok := findContainerByName(src.Spec.Containers, mainContainerName)
+	if !ok {
+		return
+	}
+	for _, mount := range main.VolumeMounts {
+		savedMount := corev1.VolumeMount{
+			Name:      mount.Name,
+			MountPath: mount.MountPath,
+		}
+		if sharedVolumeMountHasHubOnlyFields(mount) {
+			savedMount = *mount.DeepCopy()
+		}
+		savedMain := ensureSharedSavePodTemplateContainer(save, mainContainerName)
+		savedMain.VolumeMounts = append(savedMain.VolumeMounts, savedMount)
+	}
+}
+
+func saveSharedPodTemplateCompilationCacheMountAbsence(src, save *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if src == nil || src.PodTemplate == nil || src.CompilationCache == nil {
+		return
+	}
+	if sharedPodTemplateMainContainerHasVolumeMount(src.PodTemplate, src.CompilationCache.PVCName, src.CompilationCache.MountPath) {
+		return
+	}
+	if !podTemplateHasContainer(src.PodTemplate, mainContainerName) {
+		return
+	}
+	ensureSharedSavePodTemplateContainer(save, mainContainerName)
+}
+
+func saveSharedPodTemplateFrontendSidecarContainerKey(src, save *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if src == nil || src.FrontendSidecar == nil || src.PodTemplate == nil {
+		return
+	}
+	if _, ok := findContainerByName(src.PodTemplate.Spec.Containers, *src.FrontendSidecar); !ok {
+		return
+	}
+	ensureSharedSavePodTemplateContainer(save, *src.FrontendSidecar)
+}
+
+func sharedVolumeMountHasHubOnlyFields(mount corev1.VolumeMount) bool {
+	keyOnly := corev1.VolumeMount{
+		Name:      mount.Name,
+		MountPath: mount.MountPath,
+	}
+	return !apiequality.Semantic.DeepEqual(mount, keyOnly)
+}
+
+func sharedPodTemplateMainContainerHasVolumeMount(podTemplate *corev1.PodTemplateSpec, name, mountPath string) bool {
+	main, ok := findContainerByName(podTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		return false
+	}
+	for _, mount := range main.VolumeMounts {
+		if mount.Name == name && mount.MountPath == mountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureSharedSavePodTemplate(save *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
+	if save.PodTemplate == nil {
+		save.PodTemplate = &corev1.PodTemplateSpec{}
+	}
+	return save.PodTemplate
+}
+
+func ensureSharedSavePodTemplateContainer(save *v1beta1.DynamoComponentDeploymentSharedSpec, name string) *corev1.Container {
+	podTemplate := ensureSharedSavePodTemplate(save)
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == name {
+			return &podTemplate.Spec.Containers[i]
+		}
+	}
+	podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, corev1.Container{Name: name})
+	return &podTemplate.Spec.Containers[len(podTemplate.Spec.Containers)-1]
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,7 +1246,7 @@ func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool)
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
 // over dedicated fields, except for env which is additive.
-func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
+func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier, includeOriginSplits bool) error {
 	_, podTemplateOrigin := c.get(suffixPodTemplateOrig)
 	frontendSidecarRef, hasFrontendSidecarRef := c.get(suffixFrontendSidecarRef)
 	if hasFrontendSidecarRef && !hasPodTemplateContent(src, podTemplateOrigin) {
@@ -1161,7 +1285,7 @@ func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.D
 	// present, and set FrontendSidecar to its name.
 	applyFrontendSidecarToPodTemplate(src, dst, podTpl, c)
 
-	if !podTemplateOrigin {
+	if !podTemplateOrigin && includeOriginSplits {
 		c.set(suffixPodTemplateOrig, annotationPodTemplateGenerated)
 	}
 	dst.PodTemplate = podTpl
@@ -1432,12 +1556,36 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 		return
 	}
 	dst.PodTemplate = restoreSharedPodTemplateHubOnlyFields(preserved, dst.PodTemplate, dst.CompilationCache, src)
-	if dst.FrontendSidecar == nil && preserved.FrontendSidecar != nil {
-		dst.FrontendSidecar = ptr.To(*preserved.FrontendSidecar)
-	}
+	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
 	}
+}
+
+func restoreSharedHubOnlyFrontendSidecar(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if dst.FrontendSidecar != nil || preserved.FrontendSidecar == nil {
+		return
+	}
+	if sharedFrontendSidecarHasPreservedPodTemplateContainer(preserved) &&
+		!podTemplateHasContainer(dst.PodTemplate, *preserved.FrontendSidecar) {
+		return
+	}
+	dst.FrontendSidecar = ptr.To(*preserved.FrontendSidecar)
+}
+
+func sharedFrontendSidecarHasPreservedPodTemplateContainer(preserved *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if preserved.PodTemplate == nil || preserved.FrontendSidecar == nil {
+		return false
+	}
+	return podTemplateHasContainer(preserved.PodTemplate, *preserved.FrontendSidecar)
+}
+
+func podTemplateHasContainer(podTemplate *corev1.PodTemplateSpec, name string) bool {
+	if podTemplate == nil {
+		return false
+	}
+	_, ok := findContainerByName(podTemplate.Spec.Containers, name)
+	return ok
 }
 
 func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDeploymentSharedSpec, semantic *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {

@@ -104,6 +104,27 @@ type; prefer small family-specific contexts such as `dgdConversionContext`,
 information that leaves cannot derive from their local `src/restored/save`
 arguments.
 
+## Helper Naming
+
+Conversion helper names should be consistent and reveal the helper's role:
+
+- `convert<Scope><Subject>ToHub` / `convert<Scope><Subject>FromHub`: convert
+  live representable fields and call local restore/save sections.
+- `restore<Scope><TargetOnly|HubOnly|AlphaOnly><Subject>`: copy only fields
+  the source version cannot represent from `restored` into `dst`.
+- `save<Scope><SourceOnly|HubOnly|AlphaOnly><Subject>`: copy only fields the
+  target version cannot represent from `src` into `save`.
+- `ensure<Scope>Save<Subject>...`: allocate nested objects inside the sparse
+  `save` payload and return the location the caller should fill.
+- `<scope><Subject><Predicate>`: answer a side-effect-free question used by
+  restore/save code, such as whether a live object still matches a preserved
+  key.
+
+Use the same `Scope` words that appear in the converted type or shared helper
+family, such as `DGD`, `DCD`, `DGDR`, and `Shared`. Avoid ambiguous verbs such
+as `preserve` for conversion policy: use `restore` when reading `restored`, and
+`save` when writing `save`.
+
 ## Preservation Annotations
 
 Preservation annotations exist only to make unrepresentable data survive a
@@ -123,7 +144,7 @@ source-version fields that the target version cannot represent:
 ```go
 // Save source-only fields that dst cannot represent.
 save.FrontendSidecar = src.FrontendSidecar
-save.PodTemplate = src.PodTemplate
+ensureSharedSavePodTemplateContainer(save, *src.FrontendSidecar)
 if experimentalIsHubOnlyShape(src.Experimental) {
 	save.Experimental = src.Experimental
 }
