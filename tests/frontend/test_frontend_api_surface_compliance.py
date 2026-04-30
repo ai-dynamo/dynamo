@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -376,8 +377,7 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 # masking real hangs.
 @pytest.mark.timeout(750)
 @pytest.mark.frontend_api_surface_compliance
-@pytest.mark.post_merge
-@pytest.mark.xfail(reason="DYN-2924 assigned to Ishan")
+@pytest.mark.pre_merge
 def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
@@ -443,9 +443,11 @@ def test_frontend_api_surface_compliance(
     # the marker won't appear in stdout and the assertion fails. Proves the
     # tool-call paths through the frontend end-to-end (both /v1/responses
     # for codex and /v1/messages for claude), not just text generation.
+    # The UUID suffix prevents the model from guessing the filename via
+    # hallucination — it must actually invoke `ls` to discover it.
     agent_cwd = tmp_path / "agent_cwd"
     agent_cwd.mkdir()
-    marker_filename = "dynamo_compliance_marker.txt"
+    marker_filename = f"marker_{uuid.uuid4().hex[:12]}.txt"
     (agent_cwd / marker_filename).write_text("compliance-smoke")
 
     # Isolated HOME so claude doesn't write session state into the runner's
@@ -456,11 +458,21 @@ def test_frontend_api_surface_compliance(
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
-        _run_codex_exec_smoke(
-            _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
+        _run_agent_smoke_with_retries(
+            "codex",
+            _run_codex_exec_smoke,
+            frontend_port,
+            _codex_cli,
+            _node_bin,
+            codex_home,
+            agent_cwd,
+            marker_filename,
         )
         _wait_for_frontend_healthy(frontend_port)
-        _run_claude_exec_smoke(
+        _run_agent_smoke_with_retries(
+            "claude",
+            _run_claude_exec_smoke,
+            frontend_port,
             _claude_cli,
             _node_bin,
             claude_home,
@@ -611,6 +623,41 @@ wire_api = "responses"
 env_key = "LOCAL_API_KEY"
 """.lstrip()
     )
+
+
+_SMOKE_MAX_ATTEMPTS = 3
+
+
+def _run_agent_smoke_with_retries(
+    label: str,
+    fn,
+    frontend_port: int,
+    *args,
+) -> None:
+    """Retry an agent smoke test up to ``_SMOKE_MAX_ATTEMPTS`` times.
+
+    Small models (~2B) non-deterministically skip tool calls ~5% of the
+    time, emitting text instead of a function_call.  Retrying reduces
+    the effective failure rate to p^N (e.g. 0.05^3 ≈ 0.01%).
+    """
+    last_err: pytest.Failed | None = None
+    for attempt in range(1, _SMOKE_MAX_ATTEMPTS + 1):
+        try:
+            fn(*args)
+            return
+        except pytest.Failed as exc:
+            last_err = exc
+            logger.warning(
+                "%s smoke attempt %d/%d failed: %s",
+                label,
+                attempt,
+                _SMOKE_MAX_ATTEMPTS,
+                exc,
+            )
+            if attempt < _SMOKE_MAX_ATTEMPTS:
+                _wait_for_frontend_healthy(frontend_port)
+    assert last_err is not None
+    raise last_err
 
 
 def _run_codex_exec_smoke(
