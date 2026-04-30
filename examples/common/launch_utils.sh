@@ -75,9 +75,19 @@ wait_any_exit() {
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    wait -n
-    local _rc=$?
+    # `wait -n` returning non-zero is the signal we want — a child failed.
+    # But `set -e` would treat that as a script error and exit before we
+    # ever read the code. The `||` tells bash "I'm handling this myself,
+    # don't kill the script."
+    local _rc=0
+    wait -n || _rc=$?
     echo "A background process exited with code $_rc"
+    # Replace the original `trap 'exit 0' TERM INT` so that when the EXIT
+    # trap's `kill 0` loops SIGTERM back to us, we re-exit with $_rc instead
+    # of clobbering it with 0. (bash defers signals received during a trap
+    # and processes them when the trap finishes, so this trap fires after
+    # the script's EXIT trap completes.)
+    trap "exit $_rc" TERM INT
     exit "$_rc"
 }
 
