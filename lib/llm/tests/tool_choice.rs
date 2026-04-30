@@ -611,7 +611,7 @@ async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
 }
 
 // ---------------------------------------------------------------------------
-// CASE.11 — tool_choice × parser-name parametrisation (DIS-1842 work-item #1)
+// CASE.11 — tool_choice × parser-name parametrisation (cross-parser tool_choice parametrisation work-item (tracked separately))
 //
 // The hermes tests above exercise CASE.11 only for the hermes parser. These
 // tests exercise the same auto / required / named-correct / named-wrong axis
@@ -736,7 +736,7 @@ async fn test_kimi_k2_tool_choice_auto() {
 /// integration layer actually produces today so a future fix is intentional.
 ///
 /// TODO(CASE.11) — required + parser path is ill-defined: the immediate jail
-/// expects raw JSON while the parser expects its own envelope. DIS-1842
+/// expects raw JSON while the parser expects its own envelope. cross-parser parametrisation work-item
 /// work-item #1 should reconcile these paths so `tool_choice=required` works
 /// uniformly across all top-7 parsers. Flip this assertion once reconciled.
 #[tokio::test]
@@ -818,7 +818,7 @@ async fn test_deepseek_v4_tool_choice_auto() {
 /// `CASE.11` — DSv4 + tool_choice=required. Same parser-vs-immediate
 /// conflict as Kimi above. Pin current behavior.
 ///
-/// TODO(CASE.11) — see kimi_k2 counterpart. Flip when DIS-1842 work-item #1
+/// TODO(CASE.11) — see kimi_k2 counterpart. Flip when cross-parser tool_choice parametrisation work-item (tracked separately)
 /// reconciles parser path with immediate-jail mode.
 #[tokio::test]
 async fn test_deepseek_v4_tool_choice_required_pins_current_behavior() {

@@ -856,7 +856,7 @@ mod tests {
     /// see `finish_reason` and produces the same output for any upstream
     /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
     /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
-    /// belongs in DIS-1842 work-item #5.
+    /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
     #[test]
     fn test_parser_output_independent_of_upstream_finish() {
         let config = default_config();
@@ -890,7 +890,7 @@ mod tests {
     }
 
     /// `CASE.15` — duplicate calls (same function name twice in one section).
-    /// Universal gap noted in DIS-1842; first parser to land coverage.
+    /// Universal gap noted in the test taxonomy; first parser to land coverage.
     #[test] // CASE.15
     fn test_parse_duplicate_calls_same_name() {
         let config = default_config();

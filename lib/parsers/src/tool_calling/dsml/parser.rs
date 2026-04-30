@@ -301,11 +301,11 @@ mod tests {
     //                                      named_correct_tool_passes,named_wrong_tool_filtered};
     //                                      parser-level invariant in
     //                                      test_parser_does_not_filter_by_tool_choice_v4;
-    //                                      DIS-1842 work-item #1 covers full cross-parser parametrisation)
+    //                                      cross-parser tool_choice parametrisation work-item (tracked separately) covers full cross-parser parametrisation)
     //   - CASE.12  finish-reason          (parser-level invariant in
     //                                      test_parser_output_independent_of_upstream_finish_v4;
     //                                      cross-parser stop/tool_calls/length mapping is
-    //                                      DIS-1842 work-item #5; lib/llm/tests/test_streaming_tool_parsers
+    //                                      cross-parser finish_reason mapping work-item (tracked separately); lib/llm/tests/test_streaming_tool_parsers
     //                                      covers ToolCalls / Stop on E2E fixtures)
     //   - CASE.13  interleaved-text       (test_parse_deepseek_v4_multiple_tool_calls prefix text;
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._content_before_tool_vllm)
@@ -1121,7 +1121,7 @@ mod tests {
     /// see `finish_reason` and produces the same output for any upstream
     /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
     /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
-    /// belongs in DIS-1842 work-item #5.
+    /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
     #[test]
     fn test_parser_output_independent_of_upstream_finish_v4() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     /// `CASE.15` — duplicate calls (same invoke name twice in one block).
-    /// Universal gap noted in DIS-1842; first DSML coverage.
+    /// Universal gap noted in the test taxonomy; first DSML coverage.
     #[test] // CASE.15
     fn test_parse_duplicate_invokes_same_name_v4() {
         let input = "<｜DSML｜tool_calls>\n\
