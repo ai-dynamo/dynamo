@@ -1,0 +1,65 @@
+# Download DeepSeek-V4-Pro to GCP shared-model-cache
+# Prereq: kubectl create secret generic hf-token-secret -n kprashanth \
+#   --from-literal=HF_TOKEN=<token> \
+#   --context=nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-01
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-dsv4-pro
+  namespace: kprashanth
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: user-workload
+        effect: NoExecute
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      - key: kubernetes.io/arch
+        operator: Equal
+        value: arm64
+        effect: NoSchedule
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+      - name: download
+        image: python:3.12-slim
+        command: ["sh", "-c"]
+        args:
+        - |
+          set -eux
+          pip install --no-cache-dir 'huggingface_hub[hf_xet]>=1.11.0'
+          echo "Downloading DeepSeek-V4-Pro (~865GB)..."
+          python3 -c "
+          import os
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              'deepseek-ai/DeepSeek-V4-Pro',
+              token=os.environ.get('HF_TOKEN'),
+          )
+          print('Done.')
+          "
+        env:
+        - name: HF_HOME
+          value: /models
+        - name: HF_XET_HIGH_PERFORMANCE
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        resources:
+          requests:
+            memory: 8Gi
+            cpu: "4"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache

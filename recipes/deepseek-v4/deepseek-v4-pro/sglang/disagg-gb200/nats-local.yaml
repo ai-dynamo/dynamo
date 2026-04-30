@@ -1,0 +1,57 @@
+# Namespace-local NATS for GCP dynamo-gcp-dev-01
+# Workaround: system NATS is on system-cpu nodes, unreachable from GPU pods.
+# This deploys NATS on customer-cpu nodes (same network segment as GPU pods).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nats-local
+  namespace: kprashanth
+  labels:
+    app: nats-local
+spec:
+  restartPolicy: Always
+  tolerations:
+  - key: dedicated
+    operator: Equal
+    value: user-workload
+    effect: NoExecute
+  nodeSelector:
+    cloud.google.com/gke-nodepool: customer-cpu
+  containers:
+  - name: nats
+    image: nats:2.10-alpine
+    args: ["-js", "-m", "8222"]
+    ports:
+    - containerPort: 4222
+      name: client
+    - containerPort: 8222
+      name: monitor
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8222
+      initialDelaySeconds: 5
+      periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-local
+  namespace: kprashanth
+spec:
+  selector:
+    app: nats-local
+  ports:
+  - port: 4222
+    targetPort: 4222
+    name: client
+  - port: 8222
+    targetPort: 8222
+    name: monitor
