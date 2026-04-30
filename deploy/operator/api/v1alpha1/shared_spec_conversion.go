@@ -742,7 +742,9 @@ func sparseSharedHubOnlyPodTemplate(src, projected *corev1.PodTemplateSpec, fron
 		out.ObjectMeta = meta
 	}
 	saveSharedHubOnlyPodTemplateContainers(src, projected, out)
-	return nilIfEmptyPodTemplate(out)
+	// A non-nil empty PodTemplate preserves that the hub intentionally had no
+	// regular containers, even when the v1alpha1 projection generates "main".
+	return out
 }
 
 func sharedHubOnlyPodTemplateMetadata(src *corev1.PodTemplateSpec) metav1.ObjectMeta {
@@ -1668,6 +1670,9 @@ func dropGeneratedMainContainer(dst, preserved *corev1.PodTemplateSpec, compilat
 		}
 		if mainContainerHasOnlyGeneratedFields(dst.Spec.Containers[i], compilationCache) {
 			dst.Spec.Containers = slices.Delete(dst.Spec.Containers, i, i+1)
+			if len(dst.Spec.Containers) == 0 {
+				dst.Spec.Containers = nil
+			}
 			return
 		}
 	}

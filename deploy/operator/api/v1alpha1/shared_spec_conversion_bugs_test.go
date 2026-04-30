@@ -54,6 +54,27 @@ func TestBugDCD_HubSidecarOnlyPodTemplateRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDCD_HubPodTemplateWithoutContainersRoundTrips(t *testing.T) {
+	in := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-template-no-containers", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "pod-template-no-containers",
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						NodeSelector: map[string]string{"accelerator": "h100"},
+					},
+				},
+			},
+		},
+	}
+
+	out := dcdRoundTripFromV1beta1(t, in)
+	if diff := cmp.Diff(in.Spec.PodTemplate, out.Spec.PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestBugDCD_HubPodTemplateContainerOrderRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "container-order", Namespace: "ns"},
