@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerId, WorkerWithDpRank};
 
 const HEAP_REBUILD_THRESHOLD: usize = 50;
+const WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD: usize = 10;
 
 /// Block entry to be inserted in the [`PruneManager::expirations`] heap.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -317,11 +318,10 @@ impl WorkerPruneManager {
         }
 
         for (worker, worker_entries) in by_worker {
-            let state =
-                self.inner.workers.entry(worker).or_insert_with(|| {
+            let next_expiry = {
+                let state = self.inner.workers.entry(worker).or_insert_with(|| {
                     Mutex::new(WorkerPruneState::new(self.inner.config.clone()))
                 });
-            let next_expiry = {
                 let mut state = state.lock().expect("worker prune state mutex poisoned");
                 state.insert_block_entries(worker_entries, now);
                 state.peek_next_valid_expiry()
@@ -346,10 +346,10 @@ impl WorkerPruneManager {
         }
 
         for (worker, worker_entries) in by_worker {
-            let Some(state) = self.inner.workers.get(&worker) else {
-                continue;
-            };
             let next_expiry = {
+                let Some(state) = self.inner.workers.get(&worker) else {
+                    continue;
+                };
                 let mut state = state.lock().expect("worker prune state mutex poisoned");
                 for entry in &worker_entries {
                     state.remove_block_entry(entry);
@@ -442,6 +442,43 @@ impl WorkerPruneManagerInner {
             .lock()
             .expect("worker expiry index mutex poisoned")
             .push((Reverse(expiry), worker));
+        self.rebuild_worker_expiry_heap_if_needed();
+    }
+
+    fn rebuild_worker_expiry_heap_if_needed(&self) {
+        let workers_len = self.workers.len();
+        if workers_len == 0 {
+            return;
+        }
+
+        let should_rebuild = {
+            let expiries = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned");
+            expiries.len() > workers_len * WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD
+        };
+        if !should_rebuild {
+            return;
+        }
+
+        let mut rebuilt = BinaryHeap::new();
+        for entry in self.workers.iter() {
+            let worker = *entry.key();
+            let next_expiry = entry
+                .value()
+                .lock()
+                .expect("worker prune state mutex poisoned")
+                .peek_next_valid_expiry();
+            if let Some(next_expiry) = next_expiry {
+                rebuilt.push((Reverse(next_expiry), worker));
+            }
+        }
+
+        *self
+            .next_expiries
+            .lock()
+            .expect("worker expiry index mutex poisoned") = rebuilt;
     }
 
     fn next_global_expiry(&self) -> Option<Instant> {
@@ -483,10 +520,10 @@ impl WorkerPruneManagerInner {
         let mut expired = Vec::new();
 
         for worker in workers {
-            let Some(state) = self.workers.get(&worker) else {
-                continue;
-            };
             let (mut worker_expired, next_expiry) = {
+                let Some(state) = self.workers.get(&worker) else {
+                    continue;
+                };
                 let mut state = state.lock().expect("worker prune state mutex poisoned");
                 let expired = state.pop_expired(now);
                 let next_expiry = state.peek_next_valid_expiry();
@@ -519,6 +556,16 @@ mod tests {
     impl<T: Clone + Hash + Eq + Ord> PruneManager<T> {
         pub fn get_expiry(&self, key: &T) -> Option<&Instant> {
             self.timers.get(key)
+        }
+    }
+
+    impl WorkerPruneManager {
+        fn worker_expiry_heap_len(&self) -> usize {
+            self.inner
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned")
+                .len()
         }
     }
 
@@ -599,5 +646,24 @@ mod tests {
 
         // entry1 < entry2 because seq_position 0 < 1
         assert!(entry1 < entry2);
+    }
+
+    #[test]
+    fn test_worker_expiry_heap_rebuilds_under_churn() {
+        let manager = WorkerPruneManager::new(PruneConfig {
+            ttl: Duration::from_secs(60),
+        });
+        let worker = WorkerWithDpRank::from_worker_id(7);
+
+        for idx in 0..=WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD {
+            manager.insert_block_entries(vec![BlockEntry {
+                key: ExternalSequenceBlockHash(100 + idx as u64),
+                worker,
+                seq_position: idx,
+            }]);
+        }
+
+        assert_eq!(manager.worker_expiry_heap_len(), 1);
+        manager.shutdown();
     }
 }
