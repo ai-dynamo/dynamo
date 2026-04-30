@@ -7,16 +7,24 @@ SPDX-License-Identifier: Apache-2.0
 
 This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
-The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The deployment keeps the full IndexCache + target dense TurboQuant stack enabled on both roles, with SMC-SD enabled only on decode:
+The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The production profile is HiSparse-first because current SGLang treats HiSparse, HiCache, IndexCache, and dense TurboQuant as separate KV-cache paths:
 
 - target checkpoint: W4A4KV4 NVFP4 via `--quantization modelopt_fp4`
-- target KV exception: dense TurboQuant 2.5-bit via `--enable-turboquant-dense-kv-cache`
-- target IndexCache via `--nsa-indexer-mode indexcache`
-- SGLang HiCache on both workers via `--enable-hierarchical-cache`
+- target KV exception: BF16 target KV storage for HiSparse
+- decode-side HiSparse via `--enable-hisparse`
+- DSA sparse attention backends via `--nsa-prefill-backend flashmla_sparse` and `--nsa-decode-backend flashmla_sparse`
+- no SGLang HiCache, IndexCache, or dense TurboQuant in this profile unless a combined implementation is deliberately added and revalidated
 - Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
 - prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
-- decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled
+- decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled, radix cache disabled as required by HiSparse
 - SMC-SD draft on decode only: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
+
+Compatibility note: SGLang documents HiSparse as a decode-side DSA/PD feature
+that keeps a hot GPU KV buffer and complete CPU pinned-memory KV, while HiCache
+is documented as a RadixAttention/HiRadixTree prefix-KV reuse system. Current
+SGLang validation mirrors that split, so this production profile chooses
+HiSparse when these paths conflict. See the SGLang HiSparse guide and HiCache
+design docs before reintroducing HiCache or dense KV compression here.
 
 ## Production Profile
 
@@ -113,30 +121,36 @@ python3 -m dynamo.sglang \
   --tp 4 \
   --dp 4 \
   --enable-dp-attention \
-  --enable-hierarchical-cache \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
-  --nsa-indexer-mode indexcache \
-  --enable-turboquant-dense-kv-cache \
-  --turboquant-dense-kv-preset latent_2p5bit_nc \
+  --nsa-prefill-backend flashmla_sparse \
+  --nsa-decode-backend flashmla_sparse \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 12345 \
-  --disaggregation-mode prefill|decode \
-  --speculative-algorithm SMC
+  --disaggregation-mode prefill|decode
 ```
 
-Omit the SMC-SD flags on the prefill role. The manifest sets them only on
-decode.
+Omit the HiSparse and SMC-SD flags on the prefill role. The manifest sets them
+only on decode:
+
+```bash
+--disable-radix-cache \
+--enable-hisparse \
+--hisparse-config '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}' \
+--speculative-algorithm SMC
+```
 
 SMC-SD draft KV is decode-local in this topology. The prefill/decode transfer
-registers target-model KV plus NSA IndexCache state; it does not register the
-decode-side draft KV pool because the prefill worker does not instantiate the
-draft model.
+registers target-model KV; it does not register the decode-side draft KV pool
+because the prefill worker does not instantiate the draft model.
 
-The `bfloat16` KV dtype is intentional: the checkpoint is W4A4KV4 NVFP4, but target KV is the configured exception. Dense TurboQuant currently uses BF16 as the target KV pool dtype and stores compressed 2.5-bit dense MLA KV internally.
+The `bfloat16` KV dtype is intentional: the checkpoint is W4A4KV4 NVFP4, but
+HiSparse currently requires BF16 target KV storage and `flashmla_sparse` NSA
+backends.
 
-Keep this deployment on plain `--nsa-indexer-mode indexcache`. Do not substitute
-any alternate sparse NSA indexer or KV-pool mode; this production profile
-intentionally keeps plain IndexCache and dense TurboQuant together.
+Do not add `--enable-hierarchical-cache`, `--enable-turboquant-dense-kv-cache`,
+or `--nsa-indexer-mode indexcache` to this production profile without first
+implementing and validating a combined HiSparse KV path in
+`ai-blaise/optimization-playground`.
 
 ## Smoke Test
 

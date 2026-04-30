@@ -4,10 +4,12 @@
 # DeepSeek V3.2 REAP W4A4KV4 NVFP4 on the Dynamo production profile.
 #
 # This A4 deployment uses disaggregated SGLang serving with one 4-GPU prefill
-# role and one 4-GPU decode role on a single 8-GPU B200 node. Both roles keep
-# DP attention, IndexCache, HiCache, event-backed KV-aware routing, and dense
-# TurboQuant enabled. The checkpoint is W4A4KV4 NVFP4; target KV is the
-# explicit exception and is compressed through dense TurboQuant 2.5-bit.
+# role and one 4-GPU decode role on a single 8-GPU B200 node. The deployment
+# keeps DP attention, event-backed KV-aware routing, and decode-side HiSparse.
+# HiSparse is intentionally preferred over HiCache, IndexCache, and dense
+# TurboQuant in this production profile because current SGLang treats those
+# features as separate KV-cache paths. The checkpoint remains W4A4KV4 NVFP4;
+# target KV uses BF16 storage because HiSparse currently requires it.
 # Speculation is decode-only through SMC-SD.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -156,36 +158,12 @@ spec:
             - --disable-flashinfer-autotune
             - --watchdog-timeout
             - "1800"
-            - --page-size
-            - "64"
-            - --enable-hierarchical-cache
-            - --hicache-ratio
-            - "2"
-            - --hicache-write-policy
-            - write_through
-            - --hicache-io-backend
-            - kernel
-            - --hicache-mem-layout
-            - layer_first
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-            - --nsa-indexer-mode
-            - indexcache
-            - --nsa-indexcache-pattern
-            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
             - --nsa-prefill-backend
-            - flashmla_kv
+            - flashmla_sparse
             - --nsa-decode-backend
-            - flashmla_kv
-            - --enable-turboquant-dense-kv-cache
-            - --turboquant-dense-kv-preset
-            - latent_2p5bit_nc
-            - --turboquant-residual-window-size
-            - "128"
-            - --turboquant-execution-mode
-            - fused_decode
-            - --turboquant-mla-decode-num-splits
-            - "16"
+            - flashmla_sparse
             - --disaggregation-mode
             - prefill
             - --disaggregation-transfer-backend
@@ -285,36 +263,16 @@ spec:
             - --disable-flashinfer-autotune
             - --watchdog-timeout
             - "1800"
-            - --page-size
-            - "64"
-            - --enable-hierarchical-cache
-            - --hicache-ratio
-            - "2"
-            - --hicache-write-policy
-            - write_through
-            - --hicache-io-backend
-            - kernel
-            - --hicache-mem-layout
-            - layer_first
+            - --disable-radix-cache
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-            - --nsa-indexer-mode
-            - indexcache
-            - --nsa-indexcache-pattern
-            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
             - --nsa-prefill-backend
-            - flashmla_kv
+            - flashmla_sparse
             - --nsa-decode-backend
-            - flashmla_kv
-            - --enable-turboquant-dense-kv-cache
-            - --turboquant-dense-kv-preset
-            - latent_2p5bit_nc
-            - --turboquant-residual-window-size
-            - "128"
-            - --turboquant-execution-mode
-            - fused_decode
-            - --turboquant-mla-decode-num-splits
-            - "16"
+            - flashmla_sparse
+            - --enable-hisparse
+            - --hisparse-config
+            - '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}'
             - --disaggregation-mode
             - decode
             - --disaggregation-transfer-backend

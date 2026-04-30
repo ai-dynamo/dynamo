@@ -33,7 +33,7 @@ def test_deepseek_reap_frontend_uses_event_backed_kv_routing():
     assert "--no-router-kv-events" not in args
 
 
-def test_deepseek_reap_workers_keep_indexcache_turboquant_hicache_pd_contract():
+def test_deepseek_reap_workers_keep_hisparse_first_pd_contract():
     for service_name, mode in (("prefill", "prefill"), ("decode", "decode")):
         args = _args_for(service_name)
 
@@ -42,15 +42,24 @@ def test_deepseek_reap_workers_keep_indexcache_turboquant_hicache_pd_contract():
         assert _arg_value(args, "--tp") == "4"
         assert _arg_value(args, "--dp") == "4"
         assert "--enable-dp-attention" in args
-        assert "--enable-hierarchical-cache" in args
         assert "--kv-events-config" in args
-        assert _arg_value(args, "--nsa-indexer-mode") == "indexcache"
-        assert "--enable-turboquant-dense-kv-cache" in args
-        assert _arg_value(args, "--turboquant-dense-kv-preset") == "latent_2p5bit_nc"
+        assert _arg_value(args, "--kv-cache-dtype") == "bfloat16"
+        assert _arg_value(args, "--nsa-prefill-backend") == "flashmla_sparse"
+        assert _arg_value(args, "--nsa-decode-backend") == "flashmla_sparse"
 
-        joined = " ".join(args).lower()
-        assert "hisa" not in joined
-        assert "hisparse" not in joined
+        assert "--enable-hierarchical-cache" not in args
+        assert "--enable-turboquant-dense-kv-cache" not in args
+        assert "--nsa-indexer-mode" not in args
+
+    prefill_args = _args_for("prefill")
+    decode_args = _args_for("decode")
+
+    assert "--enable-hisparse" not in prefill_args
+    assert "--disable-radix-cache" not in prefill_args
+
+    assert "--enable-hisparse" in decode_args
+    assert "--disable-radix-cache" in decode_args
+    assert "--hisparse-config" in decode_args
 
 
 def test_deepseek_reap_smc_is_decode_only():
@@ -59,4 +68,12 @@ def test_deepseek_reap_smc_is_decode_only():
 
     assert "--speculative-algorithm" not in prefill_args
     assert _arg_value(decode_args, "--speculative-algorithm") == "SMC"
-    assert "--speculative-draft-model-path" in decode_args
+    assert (
+        _arg_value(decode_args, "--speculative-draft-model-path")
+        == "/models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP"
+    )
+    assert _arg_value(decode_args, "--speculative-draft-model-quantization") == "fp8"
+    assert _arg_value(decode_args, "--speculative-draft-attention-backend") == "triton"
+    assert _arg_value(decode_args, "--smc-draft-kv-cache-dtype") == "fp8_e4m3"
+    assert _arg_value(decode_args, "--smc-n-particles") == "4"
+    assert _arg_value(decode_args, "--smc-gamma") == "6"
