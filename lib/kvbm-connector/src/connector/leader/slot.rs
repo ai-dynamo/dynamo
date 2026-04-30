@@ -37,16 +37,42 @@ pub enum StateTransitionError {
 
 /// Data associated with onboarding operations (both PreparingToOnboard and Onboarding states).
 ///
+/// RAII cleanup hook for resources kicked off during a CD-remote
+/// onboarding. Lives inside [`OnboardingState::cd_payload`].
+///
+/// The wrapper installs an implementation when the request enters
+/// the CD-decode flow. Cleanup runs when this is dropped — which
+/// happens when the slot's `OnboardingState` is taken (`txn_take_onboarding`)
+/// during `update_connector_output(finished_recving)`, when the slot
+/// is reset on preemption, or when the slot is dropped on
+/// `request_finished` for untracked slots.
+///
+/// Implementations must be safe to drop from any thread (the slot is
+/// behind a `parking_lot::Mutex` today; future preemption paths may
+/// drop without holding it).
+pub trait CdOnboardingPayload: Send + Sync + std::fmt::Debug {}
+
 /// This struct holds all the state needed for finding and loading external KV cache blocks.
-/// The `session_id` is `None` while preparing (searching/staging) and becomes `Some` when
-/// actively onboarding.
+///
+/// `find_session` is `None` for **CD-decode** requests — those have no
+/// local find/onboard work; the slot enters `Onboarding` purely so the
+/// canonical `update_connector_output` cleanup path applies. The
+/// `cd_payload` field carries the RAII cleanup hook for the CD pipeline.
+/// At least one of `find_session` / `cd_payload` is `Some` whenever the
+/// slot is in `PreparingToOnboard` / `Onboarding`.
 #[derive(Debug)]
 pub struct OnboardingState {
     /// The number of tokens that match tokens already in the G1 storage
     pub num_computed_tokens: usize,
 
     /// The active find session for discovering external blocks.
-    pub find_session: FindMatchesResult,
+    /// `None` when this onboarding is purely CD-driven (no local match).
+    pub find_session: Option<FindMatchesResult>,
+
+    /// RAII cleanup hook for the CD-remote prefill pipeline. Dropped
+    /// when this `OnboardingState` is taken/dropped — that's the
+    /// canonical CD cleanup point.
+    pub cd_payload: Option<Box<dyn CdOnboardingPayload>>,
 }
 
 /// Data associated with offloading operations.
@@ -280,6 +306,75 @@ impl SlotStateMachine {
                 Err(StateTransitionError::InvalidTransition {
                     from: self.txn_state.name(),
                     to: "Inactive (via take_onboarding)",
+                })
+            }
+        }
+    }
+
+    /// Install or attach a CD-onboarding RAII payload on the slot.
+    ///
+    /// Three legal transitions, mirroring the inner gnmt's outcome:
+    ///
+    /// 1. `Inactive` → `Onboarding(OnboardingState { find_session: None, cd_payload: Some(...) })`
+    ///    — cold-cache CD: no local match was found, the wrapper
+    ///    promotes the slot directly into Onboarding so
+    ///    `process_finished_onboarding` cleanup applies.
+    /// 2. `Onboarding(state)` with `state.cd_payload.is_none()` →
+    ///    same state, with `cd_payload` attached. The local-match
+    ///    onboarding is already running; CD just adds its cleanup.
+    /// 3. `PreparingToOnboard(state)` with `state.cd_payload.is_none()` →
+    ///    same state, with `cd_payload` attached.
+    ///
+    /// Any state with `cd_payload` already set returns
+    /// `MarkedForDeletion`-shaped `InvalidTransition` (we don't
+    /// install twice — the wrapper's `cd_request_state` already
+    /// guards via DashMap entry).
+    fn txn_install_or_attach_cd_payload(
+        &mut self,
+        cd_payload: Box<dyn CdOnboardingPayload>,
+    ) -> Result<(), StateTransitionError> {
+        if self.is_marked_for_deletion() {
+            return Err(StateTransitionError::MarkedForDeletion);
+        }
+        let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
+        match current {
+            TransactionState::Inactive => {
+                self.txn_state = TransactionState::Onboarding(OnboardingState {
+                    num_computed_tokens: 0,
+                    find_session: None,
+                    cd_payload: Some(cd_payload),
+                });
+                Ok(())
+            }
+            TransactionState::Onboarding(mut state) => {
+                if state.cd_payload.is_some() {
+                    self.txn_state = TransactionState::Onboarding(state);
+                    return Err(StateTransitionError::InvalidTransition {
+                        from: "Onboarding(cd_payload=Some)",
+                        to: "Onboarding(cd_payload attach)",
+                    });
+                }
+                state.cd_payload = Some(cd_payload);
+                self.txn_state = TransactionState::Onboarding(state);
+                Ok(())
+            }
+            TransactionState::PreparingToOnboard(mut state) => {
+                if state.cd_payload.is_some() {
+                    self.txn_state = TransactionState::PreparingToOnboard(state);
+                    return Err(StateTransitionError::InvalidTransition {
+                        from: "PreparingToOnboard(cd_payload=Some)",
+                        to: "PreparingToOnboard(cd_payload attach)",
+                    });
+                }
+                state.cd_payload = Some(cd_payload);
+                self.txn_state = TransactionState::PreparingToOnboard(state);
+                Ok(())
+            }
+            other => {
+                self.txn_state = other;
+                Err(StateTransitionError::InvalidTransition {
+                    from: self.txn_state.name(),
+                    to: "Onboarding(cd_payload install)",
                 })
             }
         }
@@ -833,7 +928,8 @@ impl RequestSlot {
     ) -> Result<(), StateTransitionError> {
         let state = OnboardingState {
             num_computed_tokens,
-            find_session,
+            find_session: Some(find_session),
+            cd_payload: None,
         };
         self.evaluated_tokens = 0;
         self.state.txn_prepare_to_onboard(state)
@@ -852,6 +948,20 @@ impl RequestSlot {
     /// Returns the `OnboardingState` containing the session ID and find session.
     pub fn txn_take_onboarding(&mut self) -> Result<OnboardingState, StateTransitionError> {
         self.state.txn_take_onboarding()
+    }
+
+    /// Install or attach a [`CdOnboardingPayload`] on the slot.
+    ///
+    /// See [`StateMachine::txn_install_or_attach_cd_payload`] for the
+    /// full transition table. This is the canonical entry point for
+    /// the decode-side CD wrapper to bring the slot's transaction
+    /// state machine in sync with the `(Some(N), true)` async-load
+    /// promise it makes to vLLM.
+    pub fn txn_install_or_attach_cd_payload(
+        &mut self,
+        cd_payload: Box<dyn CdOnboardingPayload>,
+    ) -> Result<(), StateTransitionError> {
+        self.state.txn_install_or_attach_cd_payload(cd_payload)
     }
 
     /// Begin offloading blocks to remote storage.

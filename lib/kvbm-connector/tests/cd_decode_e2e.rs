@@ -115,6 +115,7 @@ fn build_harness() -> TestHarness {
         gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
         transfer_params: None,
+        ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
 
@@ -202,6 +203,16 @@ async fn cd_decode_happy_path() -> Result<()> {
     // sequence_hashes carries the local-match (what prefill will pull
     // from us), not the remote slice — symmetric-API wire semantics.
     assert_eq!(queued[0].sequence_hashes, local_match_hashes(&h));
+    // num_computed_tokens carries the decode-side gnmt argument
+    // (decode-already-computed prefix), so prefill knows where the
+    // sequence_hashes blocks live in absolute position.
+    assert_eq!(queued[0].num_computed_tokens, COMPUTED_BLOCKS * BLOCK_SIZE);
+    // token_ids carries only the prefill-window slice — decode keeps
+    // its already-computed prefix and the partial tail block.
+    assert_eq!(
+        queued[0].token_ids.len(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE
+    );
 
     let session = h.factory.last_opened().expect("decode opened a session");
     assert_eq!(session.commit_calls(), vec![local_match_hashes(&h)]);

@@ -106,6 +106,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
             transfer_params: None,
+            ..MockSlot::default()
         },
     );
     let d_queue = InMemoryRemotePrefillQueue::new();
@@ -198,6 +199,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
             gnmt_result: (Some(0), false),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
             transfer_params: Some(p_transfer),
+            ..MockSlot::default()
         },
     );
 

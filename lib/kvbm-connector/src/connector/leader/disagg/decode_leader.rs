@@ -123,6 +123,56 @@ struct RemoteSlotMeta {
     g1_dst_block_id: BlockId,
 }
 
+/// RAII payload installed on the slot's `OnboardingState` when a
+/// CD-decode request enters the wrapper.
+///
+/// Its `Drop` impl runs the canonical CD cleanup — releasing the
+/// inflight-budget reservation and dropping the wrapper's
+/// `cd_request_state` entry + the coordinator's session state. The
+/// payload is dropped exactly once: when
+/// [`crate::connector::leader::ConnectorLeader::process_finished_onboarding`]
+/// takes the slot's `OnboardingState`. Since cleanup is idempotent
+/// (DashMap entries simply remove no-ops when missing), explicit
+/// fallback paths (`request_finished` on untracked slots, error
+/// recovery) can also drop it without coordination.
+struct CdRequestStatePayload {
+    request_id: String,
+    reserved_tokens: usize,
+    wrapper: Weak<DecodeDisaggLeader>,
+    coordinator: Weak<RemotePrefillCoordinator>,
+}
+
+impl std::fmt::Debug for CdRequestStatePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CdRequestStatePayload")
+            .field("request_id", &self.request_id)
+            .field("reserved_tokens", &self.reserved_tokens)
+            .finish()
+    }
+}
+
+impl crate::connector::leader::slot::CdOnboardingPayload for CdRequestStatePayload {}
+
+impl Drop for CdRequestStatePayload {
+    fn drop(&mut self) {
+        crate::audit!(
+            "cd_payload_drop",
+            role = "decode",
+            request_id = %self.request_id,
+            reserved_tokens = self.reserved_tokens
+        );
+        if let Some(w) = self.wrapper.upgrade() {
+            // Removes from cd_request_state + releases inflight budget.
+            // Idempotent against earlier release calls.
+            w.release_request(&self.request_id);
+        }
+        if let Some(c) = self.coordinator.upgrade() {
+            // Drops the holder-side session and per-request state.
+            c.release(&self.request_id);
+        }
+    }
+}
+
 struct CdRequestState {
     reserved_tokens: usize,
 
@@ -286,6 +336,12 @@ impl DecodeDisaggLeader {
                 reserved_tokens = state.reserved_tokens,
                 "decode_gnmt: idempotent — already CD-tracked"
             );
+            crate::audit!(
+                "gnmt_idempotent",
+                role = "decode",
+                request_id,
+                reserved_tokens = state.reserved_tokens
+            );
             return Ok((Some(state.reserved_tokens), true));
         }
 
@@ -312,6 +368,15 @@ impl DecodeDisaggLeader {
             matched_tokens,
             "decode_gnmt: policy decision"
         );
+        crate::audit!(
+            "policy_decision",
+            role = "decode",
+            request_id,
+            selection = ?selection,
+            total_tokens,
+            block_size,
+            matched_tokens
+        );
         match selection {
             PrefillSelection::Local => {
                 tracing::info!(?inner_result, "decode_gnmt: Local — passthrough");
@@ -328,6 +393,12 @@ impl DecodeDisaggLeader {
                 if full_block_external_tokens == 0 {
                     tracing::info!(
                         "decode_gnmt: Remote but no full block to send — passthrough"
+                    );
+                    crate::audit!(
+                        "policy_remote_passthrough_zero_block",
+                        role = "decode",
+                        request_id,
+                        prefill_window
                     );
                     return Ok(inner_result);
                 }
@@ -352,6 +423,12 @@ impl DecodeDisaggLeader {
                 tracing::info!(
                     full_block_external_tokens,
                     "decode_gnmt: queued remote prefill — returning (Some(N), true)"
+                );
+                crate::audit!(
+                    "remote_prefill_queued",
+                    role = "decode",
+                    request_id,
+                    full_block_external_tokens
                 );
                 Ok((Some(full_block_external_tokens), true))
             }
@@ -389,6 +466,7 @@ impl DecodeDisaggLeader {
                 local_g2.len()
             );
         }
+        let num_local_match_hashes = local_g2.len();
         let local_match_g2_block_ids: Vec<BlockId> =
             local_g2.iter().map(|b| b.block_id()).collect();
         // Independent pin set: the wrapper holds its own clones to
@@ -397,7 +475,23 @@ impl DecodeDisaggLeader {
         // `coordinator.begin_remote_prefill`.
         let session_local_g2: Vec<ImmutableBlock<G2>> = local_g2.to_vec();
 
-        let token_ids = self.inner.slot_token_ids(request_id)?;
+        let all_token_ids = self.inner.slot_token_ids(request_id)?;
+        // Slice tokens to the prefill window: only the full-block
+        // prefix `[num_computed_tokens, num_computed_tokens +
+        // full_block_external_tokens)`. The partial tail block (if
+        // any) and decode-already-computed prefix stay on decode.
+        let base_offset = inputs.num_computed_tokens;
+        let prefill_window_end = base_offset + full_block_external_tokens;
+        if prefill_window_end > all_token_ids.len() {
+            anyhow::bail!(
+                "prefill window [{}..{}] out of bounds for {} tokens",
+                base_offset,
+                prefill_window_end,
+                all_token_ids.len(),
+            );
+        }
+        let prefill_token_ids: Vec<u32> =
+            all_token_ids[base_offset..prefill_window_end].to_vec();
 
         let new_state = Arc::new(CdRequestState {
             reserved_tokens: full_block_external_tokens,
@@ -416,21 +510,71 @@ impl DecodeDisaggLeader {
         let initiator = self.inner.local_instance_id();
         tracing::info!(
             %initiator,
-            num_token_ids = token_ids.len(),
+            num_prefill_token_ids = prefill_token_ids.len(),
             num_session_local_g2 = session_local_g2.len(),
             "commit_gnmt_remote: begin_remote_prefill"
+        );
+        crate::audit!(
+            "begin_remote_prefill_call",
+            role = "decode",
+            request_id,
+            num_prefill_tokens = prefill_token_ids.len(),
+            num_session_local_g2 = session_local_g2.len(),
+            num_local_match_hashes,
+            full_block_external_tokens,
+            base_offset
         );
         match self.coordinator.begin_remote_prefill(
             request_id,
             inputs,
             initiator,
             session_local_g2,
-            token_ids,
+            prefill_token_ids,
         ) {
             Ok(outcome) => {
                 tracing::info!(
                     session_id = %outcome.session_id,
                     "commit_gnmt_remote: begin_remote_prefill ok"
+                );
+                // Install the RAII payload on the slot's
+                // OnboardingState. This is what brings the slot's
+                // canonical transaction state machine in sync with
+                // the (Some(N), true) async-load promise we're
+                // about to return to vLLM. When
+                // process_finished_onboarding takes the
+                // OnboardingState, the payload's Drop runs the
+                // canonical cleanup chain.
+                let payload = Box::new(CdRequestStatePayload {
+                    request_id: request_id.to_string(),
+                    reserved_tokens: full_block_external_tokens,
+                    wrapper: self.weak_self.clone(),
+                    coordinator: Arc::downgrade(&self.coordinator),
+                });
+                if let Err(err) =
+                    self.inner.install_cd_onboarding_payload(request_id, payload)
+                {
+                    tracing::error!(
+                        error = %err,
+                        "commit_gnmt_remote: install_cd_onboarding_payload failed; \
+                         rolling back cd_request_state"
+                    );
+                    crate::audit!(
+                        "cd_payload_install_failed",
+                        role = "decode",
+                        request_id,
+                        error = %err
+                    );
+                    // Roll back cd_request_state and coordinator; the
+                    // RAII Drop never gets to run for this request.
+                    self.cd_request_state.remove(request_id);
+                    self.coordinator.release(request_id);
+                    return Err(err);
+                }
+                crate::audit!(
+                    "cd_payload_installed",
+                    role = "decode",
+                    request_id,
+                    reserved_tokens = full_block_external_tokens
                 );
                 Ok(())
             }
@@ -572,6 +716,16 @@ impl DecodeDisaggLeader {
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
 
+        crate::audit!(
+            "commit_usaa1_state_built",
+            role = "decode",
+            request_id,
+            local_match_blocks = split.local_match_blocks,
+            remote_slots_len = updated.remote_slots.len(),
+            local_match_g1_len = updated.local_match_g1_block_ids.len(),
+            expected_remote_hashes_len = expected_remote_hashes.len()
+        );
+
         // Spawn the local kick.
         let local_count = split.local_match_blocks;
         if local_count > 0 {
@@ -593,6 +747,12 @@ impl DecodeDisaggLeader {
                         state_clone
                             .local_onboard_complete
                             .store(true, Ordering::Release);
+                        crate::audit!(
+                            "local_onboard_complete_set",
+                            role = "decode",
+                            request_id = %request_id_owned,
+                            reason = "local_g2_to_g1_done"
+                        );
                         wrapper.maybe_complete(&request_id_owned).await;
                     }
                     Err(err) => {
@@ -609,6 +769,12 @@ impl DecodeDisaggLeader {
             updated
                 .local_onboard_complete
                 .store(true, Ordering::Release);
+            crate::audit!(
+                "local_onboard_complete_set",
+                role = "decode",
+                request_id,
+                reason = "no_local_match_blocks"
+            );
         }
 
         // Spawn the remote pull pipeline. If there's no remote
@@ -618,6 +784,12 @@ impl DecodeDisaggLeader {
             updated
                 .remote_pipeline_complete
                 .store(true, Ordering::Release);
+            crate::audit!(
+                "remote_pipeline_complete_set",
+                role = "decode",
+                request_id,
+                reason = "remote_slots_empty"
+            );
         } else {
             let session = match self.coordinator.state_for(request_id) {
                 Some(s) => Arc::clone(&s.lock().session),
@@ -740,6 +912,13 @@ impl DecodeDisaggLeader {
         state
             .remote_pipeline_complete
             .store(true, Ordering::Release);
+        crate::audit!(
+            "remote_pipeline_complete_set",
+            role = "decode",
+            request_id,
+            reason = "all_remote_pulls_filled",
+            filled = filled.len()
+        );
         self.maybe_complete(request_id).await;
         Ok(())
     }
@@ -755,6 +934,12 @@ impl DecodeDisaggLeader {
         hashes: Vec<SequenceHash>,
         session: Arc<dyn Session>,
     ) -> Result<()> {
+        crate::audit!(
+            "worker_pull_chunk_start",
+            role = "decode",
+            request_id,
+            num_hashes = hashes.len()
+        );
         // Reorder hashes by their slot position so chunks pair
         // with the correct G1 destination + token block.  Chunks
         // may arrive in any order on the wire, but positional
@@ -797,7 +982,20 @@ impl DecodeDisaggLeader {
 
         // 1. Alloc G2 mutables + RDMA pull.
         let dst = self.inner.allocate_g2_blocks(chunk_size)?;
+        crate::audit!(
+            "worker_session_pull_call",
+            role = "decode",
+            request_id,
+            num_hashes = ordered_hashes.len(),
+            num_dst = dst.len()
+        );
         let filled = session.pull(ordered_hashes, dst).await?;
+        crate::audit!(
+            "worker_session_pull_returned",
+            role = "decode",
+            request_id,
+            num_filled = filled.len()
+        );
 
         // 2. Pull token blocks for the chunk's positions to
         //    drive `MutableBlock::complete`.
@@ -822,8 +1020,14 @@ impl DecodeDisaggLeader {
 
         // 4. Local G2→G1 onboard for this chunk's slice.
         self.transport
-            .local_g2_to_g1(chunk_g2_block_ids, chunk_g1_block_ids)
+            .local_g2_to_g1(chunk_g2_block_ids.clone(), chunk_g1_block_ids.clone())
             .await?;
+        crate::audit!(
+            "worker_g2_to_g1_done",
+            role = "decode",
+            request_id,
+            num_blocks = chunk_g1_block_ids.len()
+        );
 
         // Hold registered pins for the lifetime of the request —
         // drop happens via release_request → state drop.
@@ -847,13 +1051,24 @@ impl DecodeDisaggLeader {
             return;
         };
 
+        let local_done = state.local_onboard_complete.load(Ordering::Acquire);
+        let remote_done = state.remote_pipeline_complete.load(Ordering::Acquire);
+        crate::audit!(
+            "maybe_complete_check",
+            role = "decode",
+            request_id,
+            local_onboard_complete = local_done,
+            remote_pipeline_complete = remote_done,
+            already_completed = state.completed.load(Ordering::Acquire)
+        );
+
         if state.completed.load(Ordering::Acquire) {
             return;
         }
-        if !state.local_onboard_complete.load(Ordering::Acquire) {
+        if !local_done {
             return;
         }
-        if !state.remote_pipeline_complete.load(Ordering::Acquire) {
+        if !remote_done {
             return;
         }
 
@@ -865,14 +1080,34 @@ impl DecodeDisaggLeader {
             return;
         }
 
+        crate::audit!(
+            "mark_onboarding_complete",
+            role = "decode",
+            request_id
+        );
         if let Err(err) = self
             .worker_hook
             .mark_onboarding_complete(request_id.to_string())
             .await
         {
             tracing::error!(request_id, error = %err, "mark_onboarding_complete failed");
+            crate::audit!(
+                "mark_onboarding_complete_error",
+                role = "decode",
+                request_id,
+                error = %err
+            );
         }
 
+        // Eager release so the inflight budget reopens immediately
+        // and the next `cd_request_state` lookup sees an empty slot.
+        // This is a hot-path optimization, not the canonical cleanup
+        // — that runs via the `CdRequestStatePayload`'s `Drop` when
+        // `process_finished_onboarding` takes the slot's
+        // `OnboardingState` on `finished_recving`. Both
+        // `release_request` and `coordinator.release` are idempotent
+        // (DashMap `remove` returns `None` if absent), so the
+        // duplicate Drop is a no-op.
         self.release_request(request_id);
         self.coordinator.release(request_id);
     }
@@ -915,6 +1150,20 @@ impl DecodeDisaggLeader {
 
 impl ConnectorLeaderApi for DecodeDisaggLeader {
     fn create_slot(&self, request: Request) -> Result<()> {
+        let request_id = request.request_id.clone();
+        let num_tokens = request.tokens.len();
+        let has_kv_transfer = request
+            .metadata
+            .as_ref()
+            .and_then(|m| m.kv_transfer_params.as_ref())
+            .is_some();
+        crate::audit!(
+            "create_slot",
+            role = "decode",
+            request_id = %request_id,
+            num_tokens,
+            has_kv_transfer
+        );
         self.inner.create_slot(request)
     }
 
@@ -931,12 +1180,34 @@ impl ConnectorLeaderApi for DecodeDisaggLeader {
         request_id: &str,
         num_computed_tokens: usize,
     ) -> Result<(Option<usize>, bool)> {
-        match self.current_role() {
+        crate::audit!(
+            "gnmt_entry",
+            role = "decode",
+            request_id,
+            num_computed_tokens
+        );
+        let result = match self.current_role() {
             DisaggregationRole::Decode => self.decode_gnmt(request_id, num_computed_tokens),
             DisaggregationRole::Prefill => {
                 self.prefill_unimplemented("get_num_new_matched_tokens", Some(request_id))
             }
+        };
+        match &result {
+            Ok((count, async_load)) => crate::audit!(
+                "gnmt_exit",
+                role = "decode",
+                request_id,
+                count = ?count,
+                async_load
+            ),
+            Err(err) => crate::audit!(
+                "gnmt_error",
+                role = "decode",
+                request_id,
+                error = %err
+            ),
         }
+        result
     }
 
     fn update_state_after_alloc(
@@ -945,17 +1216,37 @@ impl ConnectorLeaderApi for DecodeDisaggLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
-        match self.current_role() {
+        let cd_tracked = self.cd_request_state.contains_key(request_id);
+        crate::audit!(
+            "usaa_entry",
+            role = "decode",
+            request_id,
+            num_block_ids = block_ids.len(),
+            num_external_tokens,
+            cd_tracked
+        );
+        let result = match self.current_role() {
             DisaggregationRole::Decode => {
                 self.decode_usaa(request_id, block_ids, num_external_tokens)
             }
             DisaggregationRole::Prefill => {
                 self.prefill_unimplemented("update_state_after_alloc", Some(request_id))
             }
+        };
+        match &result {
+            Ok(()) => crate::audit!("usaa_exit", role = "decode", request_id, ok = true),
+            Err(err) => crate::audit!(
+                "usaa_error",
+                role = "decode",
+                request_id,
+                error = %err
+            ),
         }
+        result
     }
 
     fn build_connector_meta(&self, output: SchedulerOutput) -> Result<KvConnectorMetadata> {
+        crate::connector::leader::audit::audit_build_meta("decode", &output);
         self.inner.build_connector_meta(output)
     }
 
@@ -964,16 +1255,46 @@ impl ConnectorLeaderApi for DecodeDisaggLeader {
         finished_sending: HashSet<String>,
         finished_recving: HashSet<String>,
     ) -> Result<()> {
+        for rid in &finished_sending {
+            crate::audit!(
+                "uco_finished_sending",
+                role = "decode",
+                request_id = %rid,
+                cd_tracked = self.cd_request_state.contains_key(rid)
+            );
+        }
+        for rid in &finished_recving {
+            crate::audit!(
+                "uco_finished_recving",
+                role = "decode",
+                request_id = %rid,
+                cd_tracked = self.cd_request_state.contains_key(rid)
+            );
+        }
         self.inner
             .update_connector_output(finished_sending, finished_recving)
     }
 
     fn request_finished(&self, request_id: &str) -> FinishedStatus {
-        if self.cd_request_state.contains_key(request_id) {
+        let cd_tracked = self.cd_request_state.contains_key(request_id);
+        crate::audit!(
+            "request_finished_entry",
+            role = "decode",
+            request_id,
+            cd_tracked
+        );
+        if cd_tracked {
             self.release_request(request_id);
             self.coordinator.release(request_id);
         }
-        self.inner.request_finished(request_id)
+        let status = self.inner.request_finished(request_id);
+        crate::audit!(
+            "request_finished_exit",
+            role = "decode",
+            request_id,
+            status = ?status
+        );
+        status
     }
 }
 

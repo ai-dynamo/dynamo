@@ -260,11 +260,17 @@ async fn install_outbound(inner: &Arc<VeloSessionInner>, endpoint: &SessionEndpo
 }
 
 fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle) {
+    let session_id = inner.session_id;
     match frame {
         Frame::Attach {
             instance_id,
             endpoint,
         } => {
+            crate::engine_audit!(
+                "session_recv_attach",
+                session_id = %session_id,
+                peer_instance_id = %instance_id
+            );
             *inner.peer_instance_id.lock() = Some(instance_id);
             // Holder side: install the outbound sender + ensure
             // peer's worker metadata is imported, then push
@@ -313,6 +319,11 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             });
         }
         Frame::Commit { hashes } => {
+            crate::engine_audit!(
+                "session_recv_commit",
+                session_id = %session_id,
+                num_hashes = hashes.len()
+            );
             {
                 let mut peer_committed = inner.peer_committed.lock();
                 peer_committed.extend(hashes.iter().copied());
@@ -320,9 +331,18 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             inner.commit_stream.push(CommitDelta::Added(hashes));
         }
         Frame::CommitsClosed => {
+            crate::engine_audit!(
+                "session_recv_commits_closed",
+                session_id = %session_id
+            );
             inner.commit_stream.push(CommitDelta::Closed);
         }
         Frame::Available { blocks } => {
+            crate::engine_audit!(
+                "session_recv_available",
+                session_id = %session_id,
+                num_blocks = blocks.len()
+            );
             {
                 let mut peer_available = inner.peer_available.lock();
                 for b in &blocks {
@@ -334,9 +354,19 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 .push(AvailabilityDelta::Available(blocks));
         }
         Frame::Drained => {
+            crate::engine_audit!(
+                "session_recv_drained",
+                session_id = %session_id
+            );
             inner.avail_stream.push(AvailabilityDelta::Drained);
         }
         Frame::Pull { pull_id, hashes } => {
+            crate::engine_audit!(
+                "session_recv_pull",
+                session_id = %session_id,
+                pull_id,
+                num_hashes = hashes.len()
+            );
             // We are holder. Authorize the puller's RDMA read,
             // remember the hashes so we can drop pins on PullAck.
             inner.inbound_pulls.insert(pull_id, hashes);
@@ -349,6 +379,11 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             });
         }
         Frame::PullComplete { pull_id } => {
+            crate::engine_audit!(
+                "session_recv_pull_complete",
+                session_id = %session_id,
+                pull_id
+            );
             // We are puller. Resolve the matching oneshot so the
             // pull future proceeds to do the RDMA read.
             if let Some((_, tx)) = inner.pending_pulls.remove(&pull_id) {
@@ -358,6 +393,11 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             }
         }
         Frame::PullAck { pull_id } => {
+            crate::engine_audit!(
+                "session_recv_pull_ack",
+                session_id = %session_id,
+                pull_id
+            );
             // We are holder. Puller confirmed RDMA read settled;
             // drop pins for the hashes correlated with this pull.
             if let Some((_, hashes)) = inner.inbound_pulls.remove(&pull_id) {
@@ -368,6 +408,10 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             }
         }
         Frame::Detach => {
+            crate::engine_audit!(
+                "session_recv_detach",
+                session_id = %session_id
+            );
             inner.lifecycle_stream.push(LifecycleEvent::Detached {
                 reason: Some("peer detached".to_string()),
             });
@@ -534,6 +578,11 @@ impl Session for VeloSession {
     }
 
     fn commit(&self, hashes: Vec<SequenceHash>) -> Result<()> {
+        crate::engine_audit!(
+            "session_commit",
+            session_id = %self.inner.session_id,
+            num_hashes = hashes.len()
+        );
         if hashes.is_empty() {
             return Ok(());
         }
@@ -555,6 +604,10 @@ impl Session for VeloSession {
     }
 
     fn finish_commits(&self) -> Result<()> {
+        crate::engine_audit!(
+            "session_finish_commits",
+            session_id = %self.inner.session_id
+        );
         {
             let mut closed = self.inner.commits_closed.lock();
             if *closed {
@@ -573,6 +626,11 @@ impl Session for VeloSession {
     }
 
     fn make_available(&self, blocks: Vec<ImmutableBlock<G2>>) -> Result<()> {
+        crate::engine_audit!(
+            "session_make_available",
+            session_id = %self.inner.session_id,
+            num_blocks = blocks.len()
+        );
         if blocks.is_empty() {
             return Ok(());
         }
@@ -617,6 +675,10 @@ impl Session for VeloSession {
     }
 
     fn finish_availability(&self) -> Result<()> {
+        crate::engine_audit!(
+            "session_finish_availability",
+            session_id = %self.inner.session_id
+        );
         {
             let mut drained = self.inner.avail_drained.lock();
             if *drained {
@@ -666,6 +728,12 @@ impl Session for VeloSession {
         dst: Vec<MutableBlock<G2>>,
     ) -> BoxFuture<'static, Result<Vec<MutableBlock<G2>>>> {
         let session = self.clone();
+        crate::engine_audit!(
+            "session_pull_request",
+            session_id = %self.inner.session_id,
+            num_hashes = hashes.len(),
+            num_dst = dst.len()
+        );
         Box::pin(async move {
             // Validate inputs.
             if hashes.len() != dst.len() {
@@ -724,6 +792,13 @@ impl Session for VeloSession {
             session.inner.pending_pulls.insert(pull_id, tx);
 
             // Send the Pull frame and await PullComplete.
+            crate::engine_audit!(
+                "session_pull_send",
+                session_id = %session.inner.session_id,
+                pull_id,
+                num_hashes = hashes.len(),
+                peer_instance_id = %peer_instance_id
+            );
             session
                 .send_frame(Frame::Pull {
                     pull_id,
@@ -736,6 +811,11 @@ impl Session for VeloSession {
                     pull_id
                 )
             })?;
+            crate::engine_audit!(
+                "session_pull_complete_received",
+                session_id = %session.inner.session_id,
+                pull_id
+            );
 
             // Now drive the RDMA read. Build RemoteBlockSet.
             let block_set = RemoteBlockSet {
@@ -750,6 +830,12 @@ impl Session for VeloSession {
                     .collect(),
             };
             let dst_block_ids: Vec<BlockId> = dst.iter().map(|b| b.block_id()).collect();
+            crate::engine_audit!(
+                "session_pull_rdma_start",
+                session_id = %session.inner.session_id,
+                pull_id,
+                num_blocks = dst_block_ids.len()
+            );
             let notification = session
                 .inner
                 .leader
@@ -759,12 +845,22 @@ impl Session for VeloSession {
             notification
                 .await
                 .context("pull_remote_block_sets notification")?;
+            crate::engine_audit!(
+                "session_pull_rdma_done",
+                session_id = %session.inner.session_id,
+                pull_id
+            );
 
             // Send PullAck.
             session
                 .send_frame(Frame::PullAck { pull_id })
                 .await
                 .context("send PullAck")?;
+            crate::engine_audit!(
+                "session_pull_ack_sent",
+                session_id = %session.inner.session_id,
+                pull_id
+            );
 
             Ok(dst)
         })
@@ -776,6 +872,11 @@ impl Session for VeloSession {
     }
 
     fn close(&self, reason: Option<String>) {
+        crate::engine_audit!(
+            "session_close",
+            session_id = %self.inner.session_id,
+            reason = ?reason
+        );
         let session = self.clone();
         let runtime = self.inner.runtime.clone();
         runtime.spawn(async move {
@@ -886,6 +987,10 @@ impl VeloSessionFactory {
 
 impl SessionFactory for VeloSessionFactory {
     fn open(&self, session_id: SessionId) -> Result<Arc<dyn Session>> {
+        crate::engine_audit!(
+            "session_factory_open",
+            session_id = %session_id
+        );
         let anchor = self.velo.create_anchor::<Frame>();
         let endpoint = endpoint_from_handle(anchor.handle());
         let inner = VeloSession::new_inner(
@@ -905,6 +1010,11 @@ impl SessionFactory for VeloSessionFactory {
         peer_instance_id: InstanceId,
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>> {
+        crate::engine_audit!(
+            "session_factory_attach",
+            session_id = %session_id,
+            peer_instance_id = %peer_instance_id
+        );
         let velo = Arc::clone(&self.velo);
         let leader = Arc::clone(&self.leader);
         let runtime = self.runtime.clone();

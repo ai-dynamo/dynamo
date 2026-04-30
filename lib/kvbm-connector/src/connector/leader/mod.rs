@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod audit;
 mod control;
 pub mod control_api;
 pub mod disagg;
@@ -311,7 +312,12 @@ impl ConnectorLeader {
         let all_sequence_hashes = slot.all_sequence_hashes();
 
         let onboarding = slot.onboarding_state().map(|o| {
-            let breakdown = o.find_session.match_breakdown();
+            // CD-only onboarding has no find_session; treat as no local match.
+            let breakdown = o
+                .find_session
+                .as_ref()
+                .map(|fs| fs.match_breakdown())
+                .unwrap_or_default();
             let local = breakdown.host_blocks + breakdown.disk_blocks + breakdown.object_blocks;
             (local, o.num_computed_tokens)
         });
@@ -345,9 +351,11 @@ impl ConnectorLeader {
         let Some(onboarding) = slot.onboarding_state_mut() else {
             return Ok(Vec::new());
         };
-        onboarding
-            .find_session
-            .take_g2_blocks()
+        // CD-only OnboardingState has no find_session — there's nothing to take.
+        let Some(fs) = onboarding.find_session.as_mut() else {
+            return Ok(Vec::new());
+        };
+        fs.take_g2_blocks()
             .ok_or_else(|| anyhow!("slot {} G2 blocks not yet ready to take", request_id))
     }
 
@@ -574,7 +582,8 @@ impl ConnectorLeader {
         let outcome = self.process_match(&mut slot, num_computed_tokens);
         let match_breakdown = slot
             .onboarding_state()
-            .map(|state| state.find_session.match_breakdown())
+            .and_then(|state| state.find_session.as_ref())
+            .map(|fs| fs.match_breakdown())
             .unwrap_or_default();
         let blocks_queried = slot.match_query_blocks();
 

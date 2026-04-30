@@ -182,6 +182,21 @@ pub trait InnerLeaderShim: Send + Sync {
     /// returning the corresponding `ImmutableBlock`s.
     fn register_g2_blocks(&self, blocks: Vec<CompleteBlock<G2>>)
     -> Result<Vec<ImmutableBlock<G2>>>;
+
+    /// Install or attach a [`crate::connector::leader::slot::CdOnboardingPayload`]
+    /// on the slot's transaction state, transitioning `Inactive →
+    /// Onboarding(cd_payload=Some)` (cold-cache CD) or attaching to
+    /// an existing `Onboarding/PreparingToOnboard` state (CD with
+    /// local match).
+    ///
+    /// Idempotent: returns `Ok(())` even if the slot already carries
+    /// a payload (the wrapper's `cd_request_state` DashMap entry
+    /// already guards against duplicate installs).
+    fn install_cd_onboarding_payload(
+        &self,
+        request_id: &str,
+        cd_payload: Box<dyn crate::connector::leader::slot::CdOnboardingPayload>,
+    ) -> Result<()>;
 }
 
 /// Production [`InnerLeaderShim`] that wraps a concrete `ConnectorLeader`.
@@ -312,5 +327,25 @@ impl InnerLeaderShim for ConnectorLeaderShim {
             .instance_leader()
             .ok_or_else(|| anyhow!("InstanceLeader not initialized for register_g2_blocks"))?;
         Ok(leader.g2_manager().register_blocks(blocks))
+    }
+
+    fn install_cd_onboarding_payload(
+        &self,
+        request_id: &str,
+        cd_payload: Box<dyn crate::connector::leader::slot::CdOnboardingPayload>,
+    ) -> Result<()> {
+        let shared_slot = self
+            .inner
+            .get_slot(request_id)
+            .map_err(|e| anyhow!("install_cd_onboarding_payload: {}", e))?;
+        let mut slot = shared_slot.lock();
+        slot.txn_install_or_attach_cd_payload(cd_payload)
+            .map_err(|e| {
+                anyhow!(
+                    "install_cd_onboarding_payload({}): {}",
+                    request_id,
+                    e
+                )
+            })
     }
 }

@@ -140,6 +140,7 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
         gnmt_result: (Some(7 * BLOCK_SIZE), false),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
         transfer_params,
+        ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
 
@@ -425,6 +426,7 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
         gnmt_result: inner_gnmt,
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
         transfer_params,
+        ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
 

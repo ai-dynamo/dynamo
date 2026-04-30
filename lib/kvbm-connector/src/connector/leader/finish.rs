@@ -154,6 +154,11 @@ impl ConnectorLeader {
     }
 
     fn process_finished_onboarding(&self, request_id: &str) -> Result<()> {
+        crate::audit!(
+            "process_finished_onboarding_entry",
+            role = "both",
+            request_id
+        );
         let shared_slot = self
             .slots
             .get(request_id)
@@ -161,13 +166,65 @@ impl ConnectorLeader {
             .ok_or_else(|| anyhow!("Slot not found for request ID: {}", request_id))?;
 
         let mut slot = shared_slot.lock();
+        crate::audit!(
+            "process_finished_onboarding_observed_state",
+            role = "both",
+            request_id,
+            txn_state = slot.txn_state().name(),
+            has_onboarding_state = slot.has_onboarding_state()
+        );
+
+        // TODO(AI): I think you messed up here.  The state machine is clear
+        // on this point. If we marked the request as pending, it should have
+        // this onboarding state.  Any removal of it is correct and this is
+        // the only place it should be cleaned up.
+        //
+        // // The slot may be Inactive when the request finished via a
+        // // parallel path that doesn't use `Slot::OnboardingState` —
+        // // primarily CD-decode, where the Velo session lifecycle is
+        // // owned by the wrapper's `cd_request_state` and released in
+        // // `request_finished` via `coordinator.release()`. There's
+        // // nothing to clean up at the leader level for that case;
+        // // skip the `txn_take_onboarding` call so it doesn't surface
+        // // as an `Invalid transition from Inactive to Inactive` error.
+        // //
+        // // The `txn_take_onboarding` path below remains the canonical
+        // // cleanup for local G2/G3→G1 onboarding (the non-CD case).
+        // if !slot.has_onboarding_state() {
+        //     tracing::debug!(
+        //         request_id,
+        //         "finished_recving with no OnboardingState — \
+        //          leader-level cleanup not required (CD-decode or \
+        //          already-released slot)"
+        //     );
+        //     return Ok(());
+        // }
+
         let onboarding_state = slot.txn_take_onboarding()?;
-        if let Some(session_id) = onboarding_state.find_session.session_id() {
+        let find_session_id = onboarding_state
+            .find_session
+            .as_ref()
+            .and_then(|fs| fs.session_id());
+        let had_cd_payload = onboarding_state.cd_payload.is_some();
+        crate::audit!(
+            "process_finished_onboarding_take",
+            role = "both",
+            request_id,
+            find_session_id = ?find_session_id,
+            had_cd_payload
+        );
+        if let Some(session_id) = find_session_id {
             self.instance_leader
                 .get()
                 .unwrap()
                 .release_session(session_id);
         }
+        // Dropping `onboarding_state` runs the `cd_payload`'s `Drop`
+        // impl — the canonical CD cleanup (coordinator.release,
+        // session close, inflight_budget release,
+        // cd_request_state removal). Local-only onboarding has
+        // `cd_payload: None` and the drop is a no-op.
+        drop(onboarding_state);
         Ok(())
     }
 

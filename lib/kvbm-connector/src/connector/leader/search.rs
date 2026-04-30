@@ -101,7 +101,14 @@ impl ConnectorLeader {
             return Ok(MatchCheckOutcome::NoMatch);
         }
 
-        let outcome = match &session.find_session {
+        // CD-only OnboardingState has no find_session — search has
+        // nothing to do; the wrapper drives the CD pipeline itself.
+        // Returning NoMatch tells the inner state machine to leave
+        // Onboarding intact (cd_payload still attached).
+        let Some(find_session) = session.find_session.as_ref() else {
+            return Ok(MatchCheckOutcome::NoMatch);
+        };
+        let outcome = match find_session {
             FindMatchesResult::Ready(ready) => {
                 // Ready result means immediate completion (local only, no async work)
                 let matched_blocks = ready.g2_count();
@@ -158,14 +165,19 @@ impl ConnectorLeader {
             match active_data {
                 slot::ActiveStateData::Onboarding(onboarding_state) => {
                     match onboarding_state.find_session {
-                        FindMatchesResult::Ready(_) => {
+                        Some(FindMatchesResult::Ready(_)) => {
                             // no-op - Ready sessions have no async cleanup
                         }
-                        FindMatchesResult::AsyncSession(_async_session) => {
+                        Some(FindMatchesResult::AsyncSession(_async_session)) => {
                             // todo: cancel and clean up the async session
                             tracing::warn!(
                                 "Async session cleanup not yet implemented - session may leak"
                             );
+                        }
+                        None => {
+                            // CD-only onboarding: cd_payload's Drop
+                            // runs the cleanup chain when
+                            // onboarding_state goes out of scope here.
                         }
                     }
                 }

@@ -234,6 +234,34 @@ pub struct MockSlot {
     pub gnmt_result: (Option<usize>, bool),
     pub usaa_passthrough_calls: Mutex<Vec<(Vec<crate::BlockId>, usize)>>,
     pub transfer_params: Option<TransferParams>,
+    /// Recorded request_ids for which a CD onboarding payload was
+    /// installed via `install_cd_onboarding_payload`. Order
+    /// preserved.
+    pub installed_cd_payloads: Mutex<Vec<String>>,
+    /// The most recently installed CD onboarding payload — held
+    /// alive so its `Drop` doesn't fire until the test takes it.
+    pub installed_cd_payload:
+        Mutex<Option<Box<dyn crate::connector::leader::slot::CdOnboardingPayload>>>,
+}
+
+impl Default for MockSlot {
+    fn default() -> Self {
+        Self {
+            block_size: 0,
+            total_blocks: 0,
+            computed_blocks: 0,
+            local_match_blocks: 0,
+            all_hashes: Vec::new(),
+            token_blocks: Vec::new(),
+            local_match_g2: Mutex::new(None),
+            assigned_block_ids: Mutex::new(None),
+            gnmt_result: (None, false),
+            usaa_passthrough_calls: Mutex::new(Vec::new()),
+            transfer_params: None,
+            installed_cd_payloads: Mutex::new(Vec::new()),
+            installed_cd_payload: Mutex::new(None),
+        }
+    }
 }
 
 pub struct MockInnerLeaderShim {
@@ -407,5 +435,23 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         blocks: Vec<CompleteBlock<G2>>,
     ) -> Result<Vec<ImmutableBlock<G2>>> {
         Ok(self.g2_manager.register_blocks(blocks))
+    }
+
+    fn install_cd_onboarding_payload(
+        &self,
+        request_id: &str,
+        cd_payload: Box<dyn crate::connector::leader::slot::CdOnboardingPayload>,
+    ) -> Result<()> {
+        let slot = self.require_slot(request_id)?;
+        // Mock just records that a payload was installed and drops
+        // it via the slot field; production transitions the slot's
+        // txn_state. Tests that need to assert the install can
+        // inspect `installed_cd_payloads`.
+        slot.installed_cd_payloads.lock().push(request_id.to_string());
+        // Hold the payload alive on the mock slot so its `Drop`
+        // doesn't fire prematurely. Tests assert against
+        // `cd_payloads_dropped` to check Drop behavior.
+        slot.installed_cd_payload.lock().replace(cd_payload);
+        Ok(())
     }
 }

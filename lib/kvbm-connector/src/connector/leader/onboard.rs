@@ -73,6 +73,11 @@ impl ConnectorLeader {
             .onboarding_state_mut()
             .ok_or_else(|| anyhow!("Expected active onboarding state for {}", request_id))?
             .find_session
+            .as_mut()
+            .ok_or_else(|| anyhow!(
+                "intra-pass onboarding requires a find_session; got CD-only OnboardingState for {}",
+                request_id
+            ))?
             .take_g2_blocks()
             .ok_or_else(|| anyhow!("No G2 blocks found for intra-pass onboarding"))?;
 
@@ -135,7 +140,13 @@ impl ConnectorLeader {
             slot.apply_new_blocks(block_ids);
 
             let staging_fut = match slot.onboarding_state() {
-                Some(onboarding_state) => onboarding_state.find_session.wait_for_completion(),
+                Some(onboarding_state) => match onboarding_state.find_session.as_ref() {
+                    Some(fs) => fs.wait_for_completion(),
+                    None => bail!(
+                        "Expected find_session in onboarding state for {} (CD-only?)",
+                        request_id
+                    ),
+                },
                 None => bail!("Expected active onboarding state for {}", request_id),
             };
 
@@ -182,7 +193,8 @@ impl ConnectorLeader {
             if let Some(session_id) = shared_slot
                 .lock()
                 .onboarding_state()
-                .and_then(|state| state.find_session.session_id())
+                .and_then(|state| state.find_session.as_ref())
+                .and_then(|fs| fs.session_id())
             {
                 let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
                 instance_leader.release_session(session_id);
@@ -225,6 +237,8 @@ async fn execute_onboarding(
         .onboarding_state_mut()
         .expect("Onboarding state not found")
         .find_session
+        .as_mut()
+        .expect("find_session required for inter-pass G2 onboarding")
         .take_g2_blocks()
         .ok_or_else(|| anyhow::anyhow!("No G2 blocks found"))?;
 

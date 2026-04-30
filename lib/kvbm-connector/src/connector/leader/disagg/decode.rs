@@ -91,21 +91,26 @@ impl RemotePrefillCoordinator {
     ///
     /// `RemotePrefillRequest.sequence_hashes` carries decode's
     /// **local-match hashes** (what the prefill peer will pull
-    /// from us).  This is the symmetric meaning the new
-    /// `Session` API enforces — the prefill side reads it as
-    /// `params.sequence_hashes.len() * block_size == external`.
-    #[tracing::instrument(level = "info", skip(self, inputs, local_match_g2, token_ids))]
+    /// from us) — empty when decode has no cached prefix to
+    /// offer. `token_ids` is the prefill-window slice only: the
+    /// full-block prefix `(num_computed_tokens, full_block_external_tokens)`
+    /// that prefill must compute KV for. The partial tail block
+    /// stays on decode.
+    #[tracing::instrument(
+        level = "info",
+        skip(self, inputs, local_match_g2, prefill_token_ids)
+    )]
     pub fn begin_remote_prefill(
         self: &Arc<Self>,
         request_id: &str,
         inputs: &PolicyInputs,
         initiator_instance_id: InstanceId,
         local_match_g2: Vec<ImmutableBlock<G2>>,
-        token_ids: Vec<u32>,
+        prefill_token_ids: Vec<u32>,
     ) -> Result<BeginOutcome> {
         tracing::info!(
             num_local_match = local_match_g2.len(),
-            num_token_ids = token_ids.len(),
+            num_prefill_token_ids = prefill_token_ids.len(),
             num_computed_tokens = inputs.num_computed_tokens,
             %initiator_instance_id,
             "begin_remote_prefill"
@@ -152,7 +157,7 @@ impl RemotePrefillCoordinator {
             initiator_instance_id,
             decode_endpoint: endpoint,
             sequence_hashes: local_match_hashes,
-            token_ids,
+            token_ids: prefill_token_ids,
             num_computed_tokens: inputs.num_computed_tokens,
         };
 

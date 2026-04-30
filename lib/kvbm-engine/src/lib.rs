@@ -23,6 +23,7 @@ pub struct G3;
 #[derive(Clone, Copy, Debug)]
 pub struct G4;
 
+pub mod audit;
 #[cfg(feature = "collectives")]
 pub mod collectives;
 pub mod disagg;

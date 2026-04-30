@@ -53,6 +53,20 @@ impl PrefillDisaggLeader {
 
 impl ConnectorLeaderApi for PrefillDisaggLeader {
     fn create_slot(&self, request: Request) -> Result<()> {
+        let request_id = request.request_id.clone();
+        let num_tokens = request.tokens.len();
+        let has_kv_transfer = request
+            .metadata
+            .as_ref()
+            .and_then(|m| m.kv_transfer_params.as_ref())
+            .is_some();
+        crate::audit!(
+            "create_slot",
+            role = "prefill",
+            request_id = %request_id,
+            num_tokens,
+            has_kv_transfer
+        );
         self.inner.create_slot(request)
     }
 
@@ -70,6 +84,12 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         request_id: &str,
         num_computed_tokens: usize,
     ) -> Result<(Option<usize>, bool)> {
+        crate::audit!(
+            "gnmt_entry",
+            role = "prefill",
+            request_id,
+            num_computed_tokens
+        );
         // Detect CD-bound requests via transfer_params on the slot.
         let params = self
             .inner
@@ -79,12 +99,25 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
             has_transfer_params = params.is_some(),
             "prefill_gnmt: transfer_params lookup"
         );
+        crate::audit!(
+            "transfer_params_lookup",
+            role = "prefill",
+            request_id,
+            has_transfer_params = params.is_some()
+        );
         let Some(remote) = params.as_ref().and_then(remote_prefill_marker) else {
             // Non-CD request: passthrough to inner.
             tracing::info!("prefill_gnmt: non-CD request — passthrough to inner");
-            return self
+            crate::audit!(
+                "gnmt_passthrough_non_cd",
+                role = "prefill",
+                request_id
+            );
+            let r = self
                 .inner
                 .get_num_new_matched_tokens(request_id, num_computed_tokens);
+            audit_gnmt_exit("prefill", request_id, &r);
+            return r;
         };
 
         tracing::info!(
@@ -93,6 +126,15 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
             initiator = %remote.initiator_instance_id,
             session_id = %remote.session_id,
             "prefill_gnmt: CD-bound — ensure_started"
+        );
+        crate::audit!(
+            "cd_bound_ensure_started",
+            role = "prefill",
+            request_id,
+            num_sequence_hashes = remote.sequence_hashes.len(),
+            decode_num_computed_tokens = remote.num_computed_tokens,
+            initiator = %remote.initiator_instance_id,
+            session_id = %remote.session_id
         );
         // Idempotent: first call installs state and spawns
         // attach/diff/pull; subsequent calls just return the
@@ -119,16 +161,31 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
                 "prefill_gnmt: ensure_started returned 0 external tokens — \
                  passthrough to inner so vLLM forward-passes the prompt"
             );
-            return self
+            crate::audit!(
+                "ensure_started_zero_passthrough",
+                role = "prefill",
+                request_id
+            );
+            let r = self
                 .inner
                 .get_num_new_matched_tokens(request_id, num_computed_tokens);
+            audit_gnmt_exit("prefill", request_id, &r);
+            return r;
         }
 
         tracing::info!(
             external_tokens = n,
             "prefill_gnmt: ensure_started returned (Some(N>0), true) — async onboard"
         );
-        Ok((Some(n), true))
+        crate::audit!(
+            "ensure_started_async_onboard",
+            role = "prefill",
+            request_id,
+            external_tokens = n
+        );
+        let r: Result<(Option<usize>, bool)> = Ok((Some(n), true));
+        audit_gnmt_exit("prefill", request_id, &r);
+        r
     }
 
     fn update_state_after_alloc(
@@ -137,6 +194,13 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
+        crate::audit!(
+            "usaa_entry",
+            role = "prefill",
+            request_id,
+            num_block_ids = block_ids.len(),
+            num_external_tokens
+        );
         // Always call inner first.
         self.inner
             .update_state_after_alloc(request_id, block_ids.clone(), num_external_tokens)?;
@@ -144,11 +208,23 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         // For CD-bound requests, hand the deltas to the
         // coordinator. Non-CD requests have no coordinator
         // state and `on_usaa` is a no-op.
-        self.coordinator
-            .on_usaa(request_id, &block_ids, num_external_tokens)
+        let r = self
+            .coordinator
+            .on_usaa(request_id, &block_ids, num_external_tokens);
+        match &r {
+            Ok(()) => crate::audit!("usaa_exit", role = "prefill", request_id, ok = true),
+            Err(err) => crate::audit!(
+                "usaa_error",
+                role = "prefill",
+                request_id,
+                error = %err
+            ),
+        }
+        r
     }
 
     fn build_connector_meta(&self, output: SchedulerOutput) -> Result<KvConnectorMetadata> {
+        crate::connector::leader::audit::audit_build_meta("prefill", &output);
         let meta = self.inner.build_connector_meta(output)?;
         // Per-request observer install. The coordinator only
         // acts on request_ids it tracks; passing the whole meta
@@ -159,6 +235,11 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         // and the coordinator currently no-ops.
         if let Err(err) = self.coordinator.observe_forward("", &meta) {
             tracing::warn!(error = %err, "observe_forward failed");
+            crate::audit!(
+                "observe_forward_error",
+                role = "prefill",
+                error = %err
+            );
         }
         Ok(meta)
     }
@@ -168,14 +249,57 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         finished_sending: HashSet<String>,
         finished_recving: HashSet<String>,
     ) -> Result<()> {
+        for rid in &finished_sending {
+            crate::audit!(
+                "uco_finished_sending",
+                role = "prefill",
+                request_id = %rid
+            );
+        }
+        for rid in &finished_recving {
+            crate::audit!(
+                "uco_finished_recving",
+                role = "prefill",
+                request_id = %rid
+            );
+        }
         self.inner
             .update_connector_output(finished_sending, finished_recving)
     }
 
     fn request_finished(&self, request_id: &str) -> FinishedStatus {
+        crate::audit!("request_finished_entry", role = "prefill", request_id);
         let status = self.inner.request_finished(request_id);
         self.coordinator.on_request_finished(request_id);
+        crate::audit!(
+            "request_finished_exit",
+            role = "prefill",
+            request_id,
+            status = ?status
+        );
         status
+    }
+}
+
+fn audit_gnmt_exit(
+    role: &'static str,
+    request_id: &str,
+    result: &Result<(Option<usize>, bool)>,
+) {
+    match result {
+        Ok((count, async_load)) => crate::audit!(
+            "gnmt_exit",
+            role,
+            request_id,
+            count = ?count,
+            async_load
+        ),
+        Err(err) => crate::audit!(
+            "gnmt_error",
+            role,
+            request_id,
+            error = %err
+        ),
     }
 }
 
