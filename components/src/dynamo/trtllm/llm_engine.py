@@ -10,13 +10,16 @@ and feature gap details.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
+import sys
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from torch.cuda import device_count
 
@@ -31,6 +34,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.llm import ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
+from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,32 @@ class TrtllmLLMEngine(LLMEngine):
             "max_beam_width": config.max_beam_width,
             "max_batch_size": config.max_batch_size,
         }
+
+        # Apply --extra-engine-args (YAML) and --override-engine-args (JSON)
+        # the same way the legacy `dynamo.trtllm` worker does
+        # (workers/llm_worker.py:285-298). Without this, profiler / parallel
+        # scheduler caps like `--override-engine-args '{"kv_cache_config":
+        # {"max_tokens": N}}'` are silently ignored on the unified path,
+        # causing tests to allocate at the engine config's default fraction
+        # and OOM the GPU under parallel load.
+        if config.extra_engine_args:
+            engine_args = update_llm_args_with_extra_options(
+                engine_args, config.extra_engine_args
+            )
+        if config.override_engine_args:
+            try:
+                overrides = json.loads(config.override_engine_args)
+            except json.JSONDecodeError as e:
+                logging.error("Failed to parse override_engine_args as JSON: %s", e)
+                sys.exit(1)
+            if not isinstance(overrides, dict):
+                logging.error(
+                    "override_engine_args must be a JSON object, got %s",
+                    type(overrides).__name__,
+                )
+                sys.exit(1)
+            logging.info("Applying engine arg overrides: %s", overrides)
+            deep_update(engine_args, overrides)
 
         engine = cls(
             engine_args=engine_args,
