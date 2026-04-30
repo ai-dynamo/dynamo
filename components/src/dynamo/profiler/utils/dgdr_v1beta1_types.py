@@ -82,6 +82,11 @@ class BackendType(str, Enum):
     Vllm = "vllm"
 
 
+class OptimizationType(str, Enum):
+    Latency = "latency"
+    Throughput = "throughput"
+
+
 class WorkloadSpec(BaseModel):
     """WorkloadSpec defines the workload characteristics for SLA-based profiling."""
 
@@ -120,6 +125,10 @@ class SLASpec(BaseModel):
     e2eLatency: Optional[float] = Field(
         default=None,
         description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.",
+    )
+    optimizationType: Optional[OptimizationType] = Field(
+        default=None,
+        description="OptimizationType is the optimization target for SLA profiling. Valid values: latency, throughput.",
     )
 
     @model_validator(mode="after")
