@@ -1631,7 +1631,7 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	}
 	dropGeneratedCompilationCacheMount(out, preserved.PodTemplate, compilationCache, src)
 	dropGeneratedMainContainer(out, preserved.PodTemplate, compilationCache, src)
-	restoreSharedPodTemplateMissingHubOnlyContainers(out, preserved.PodTemplate)
+	restoreSharedPodTemplateMissingHubOnlyContainers(out, preserved.PodTemplate, src)
 	restoreSharedPodTemplateExistingHubOnlyContainers(out, preserved.PodTemplate, src)
 	restoreSharedPodTemplateContainerOrder(out, preserved.PodTemplate)
 	restoreSharedHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
@@ -1639,16 +1639,25 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	return nilIfEmptyPodTemplate(out)
 }
 
-func restoreSharedPodTemplateMissingHubOnlyContainers(dst, preserved *corev1.PodTemplateSpec) {
+func restoreSharedPodTemplateMissingHubOnlyContainers(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) {
 	if dst == nil || preserved == nil {
 		return
 	}
 	for _, savedContainer := range preserved.Spec.Containers {
-		if containerHasOnlyName(savedContainer) || podTemplateHasContainer(dst, savedContainer.Name) {
+		if containerHasOnlyName(savedContainer) ||
+			podTemplateHasContainer(dst, savedContainer.Name) ||
+			preservedGeneratedFrontendSidecarWasDeleted(savedContainer, src) {
 			continue
 		}
 		dst.Spec.Containers = append(dst.Spec.Containers, *savedContainer.DeepCopy())
 	}
+}
+
+func preservedGeneratedFrontendSidecarWasDeleted(savedContainer corev1.Container, src *DynamoComponentDeploymentSharedSpec) bool {
+	// The default sidecar container is generated from v1alpha1 FrontendSidecar.
+	// If that live field is gone, the preserved hub-only remainder is stale.
+	return savedContainer.Name == defaultFrontendSidecarContainerName &&
+		(src == nil || src.FrontendSidecar == nil)
 }
 
 func restoreSharedPodTemplateExistingHubOnlyContainers(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) {

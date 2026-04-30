@@ -28,6 +28,23 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
+func addGeneratedFrontendSidecarHubOnlySecurityContext(t *testing.T, podTemplate *corev1.PodTemplateSpec) {
+	t.Helper()
+	if podTemplate == nil {
+		t.Fatalf("expected generated frontend sidecar podTemplate, got nil")
+	}
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name != defaultFrontendSidecarContainerName {
+			continue
+		}
+		podTemplate.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{
+			RunAsNonRoot: ptr.To(true),
+		}
+		return
+	}
+	t.Fatalf("expected generated frontend sidecar in podTemplate, got %#v", podTemplate)
+}
+
 func TestBugDCD_HubSidecarOnlyPodTemplateRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sidecar-only", Namespace: "ns"},
@@ -254,6 +271,59 @@ func TestBugDCD_HubEditToFrontendSidecarHubOnlyFieldRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDCD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyContainer(t *testing.T) {
+	alpha := &DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-generated-sidecar", Namespace: "ns"},
+		Spec: DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
+				ServiceName: "stale-generated-sidecar",
+				FrontendSidecar: &FrontendSidecarSpec{
+					Image: "frontend:v1",
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := alpha.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo alpha: %v", err)
+	}
+	addGeneratedFrontendSidecarHubOnlySecurityContext(t, hub.Spec.PodTemplate)
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom hub: %v", err)
+	}
+	raw, ok := spoke.Annotations[annDCDHubSpec]
+	if !ok {
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDHubSpec, spoke.Annotations)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+	}
+	if _, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName); !ok {
+		t.Fatalf("expected preserved generated frontend sidecar remainder, got %#v", preserved.PodTemplate)
+	}
+
+	// Stage 2 edit: the v1alpha1 carrier removes the generated frontend sidecar
+	// field but leaves preservation annotations untouched.
+	spoke.Spec.FrontendSidecar = nil
+
+	restoredHub := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo spoke: %v", err)
+	}
+	if restoredHub.Spec.FrontendSidecar != nil {
+		t.Fatalf("stale frontendSidecar reference was restored: %q", *restoredHub.Spec.FrontendSidecar)
+	}
+	if restoredHub.Spec.PodTemplate != nil {
+		if _, ok := findContainerByName(restoredHub.Spec.PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName); ok {
+			t.Fatalf("stale generated sidecar container was restored: %#v", restoredHub.Spec.PodTemplate.Spec.Containers)
+		}
+	}
+}
+
 func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t *testing.T) {
 	sidecarName := "sidecar"
 	src := &v1beta1.DynamoComponentDeployment{
@@ -315,6 +385,63 @@ func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 	if restoredHub.Spec.PodTemplate != nil {
 		if _, ok := findContainerByName(restoredHub.Spec.PodTemplate.Spec.Containers, sidecarName); ok {
 			t.Fatalf("stale sidecar container was restored: %#v", restoredHub.Spec.PodTemplate.Spec.Containers)
+		}
+	}
+}
+
+func TestBugDGD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyContainer(t *testing.T) {
+	alpha := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-generated-sidecar", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ServiceName: "frontend",
+					FrontendSidecar: &FrontendSidecarSpec{
+						Image: "frontend:v1",
+					},
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := alpha.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo alpha: %v", err)
+	}
+	addGeneratedFrontendSidecarHubOnlySecurityContext(t, hub.Spec.Components[0].PodTemplate)
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom hub: %v", err)
+	}
+	raw, ok := spoke.Annotations[annDGDHubSpec]
+	if !ok {
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDGDHubSpec, spoke.Annotations)
+	}
+	preserved, ok := restoreDGDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDGDHubSpec, raw)
+	}
+	if _, ok := findContainerByName(preserved.Components[0].PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName); !ok {
+		t.Fatalf("expected preserved generated frontend sidecar remainder, got %#v", preserved.Components[0].PodTemplate)
+	}
+
+	// Stage 2 edit: the v1alpha1 carrier removes the generated frontend sidecar
+	// field but leaves preservation annotations untouched.
+	component := spoke.Spec.Services["frontend"]
+	component.FrontendSidecar = nil
+
+	restoredHub := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(restoredHub); err != nil {
+		t.Fatalf("ConvertTo spoke: %v", err)
+	}
+	restoredComponent := restoredHub.Spec.Components[0]
+	if restoredComponent.FrontendSidecar != nil {
+		t.Fatalf("stale frontendSidecar reference was restored: %q", *restoredComponent.FrontendSidecar)
+	}
+	if restoredComponent.PodTemplate != nil {
+		if _, ok := findContainerByName(restoredComponent.PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName); ok {
+			t.Fatalf("stale generated sidecar container was restored: %#v", restoredComponent.PodTemplate.Spec.Containers)
 		}
 	}
 }
