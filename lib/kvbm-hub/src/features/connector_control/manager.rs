@@ -261,8 +261,8 @@ async fn proxy_unary(
             raw_json_response(StatusCode::OK, Bytes::from(body_bytes))
         }
         ControlReply::Err(err) => {
-            let status =
-                StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status = StatusCode::from_u16(err.http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             tracing::info!(
                 instance = %instance_id, %handler, kind = err.kind(), %status,
                 "proxy: connector returned control error"

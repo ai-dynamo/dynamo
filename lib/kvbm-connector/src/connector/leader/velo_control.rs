@@ -21,7 +21,9 @@ use super::ConnectorLeader;
 use super::control_api::ConnectorControlApi;
 
 // Re-export the handler-name constants so existing call sites keep working.
-pub use kvbm_control_protocol::{REGISTER_LEADER_HANDLER as REGISTER_LEADER_HANDLER_NAME, RESET_HANDLER as RESET_HANDLER_NAME};
+pub use kvbm_control_protocol::{
+    REGISTER_LEADER_HANDLER as REGISTER_LEADER_HANDLER_NAME, RESET_HANDLER as RESET_HANDLER_NAME,
+};
 
 /// Register both connector-leader control handlers on the given messenger.
 ///
@@ -58,7 +60,10 @@ fn register_reset(messenger: &Arc<Messenger>, leader: Arc<ConnectorLeader>) -> R
     Ok(())
 }
 
-fn register_register_leader(messenger: &Arc<Messenger>, leader: Arc<ConnectorLeader>) -> Result<()> {
+fn register_register_leader(
+    messenger: &Arc<Messenger>,
+    leader: Arc<ConnectorLeader>,
+) -> Result<()> {
     let leader = Arc::clone(&leader);
     let handler = Handler::typed_unary_async(REGISTER_LEADER_HANDLER, move |ctx| {
         let leader = Arc::clone(&leader);
@@ -70,9 +75,9 @@ fn register_register_leader(messenger: &Arc<Messenger>, leader: Arc<ConnectorLea
         }
     })
     .build();
-    messenger.register_handler(handler).map_err(|e| {
-        anyhow::anyhow!("velo register_handler({REGISTER_LEADER_HANDLER}): {e}")
-    })?;
+    messenger
+        .register_handler(handler)
+        .map_err(|e| anyhow::anyhow!("velo register_handler({REGISTER_LEADER_HANDLER}): {e}"))?;
     tracing::debug!(handler = REGISTER_LEADER_HANDLER, "registered velo handler");
     Ok(())
 }

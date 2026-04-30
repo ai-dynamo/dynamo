@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 // Re-exports for backward compatibility.
 pub use kvbm_control_protocol::{
-    ControlError, ControlReply, RegisterLeaderRequest, RegisterLeaderResponse,
-    RegisterLeaderStatus, REGISTER_LEADER_HANDLER, RESET_HANDLER, ResetRequest, ResetResponse,
-    Tier, TierError, plan_reset,
+    ControlError, ControlReply, REGISTER_LEADER_HANDLER, RESET_HANDLER, RegisterLeaderRequest,
+    RegisterLeaderResponse, RegisterLeaderStatus, ResetRequest, ResetResponse, Tier, TierError,
+    plan_reset,
 };
 
 use super::ConnectorLeader;
@@ -59,7 +59,10 @@ impl ConnectorControlApi for Arc<ConnectorLeader> {
         let mut failed = Vec::new();
         for tier in to_reset {
             let result = match tier {
-                Tier::G2 => il.g2_manager().reset_inactive_pool().map_err(|e| e.to_string()),
+                Tier::G2 => il
+                    .g2_manager()
+                    .reset_inactive_pool()
+                    .map_err(|e| e.to_string()),
                 Tier::G3 => il
                     .g3_manager()
                     .expect("plan_reset already verified G3 is configured")

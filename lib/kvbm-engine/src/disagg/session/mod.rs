@@ -81,8 +81,7 @@ pub enum LifecycleEvent {
 }
 
 pub type CommitStream = Pin<Box<dyn Stream<Item = CommitDelta> + Send + 'static>>;
-pub type AvailabilityStream =
-    Pin<Box<dyn Stream<Item = AvailabilityDelta> + Send + 'static>>;
+pub type AvailabilityStream = Pin<Box<dyn Stream<Item = AvailabilityDelta> + Send + 'static>>;
 pub type LifecycleStream = Pin<Box<dyn Stream<Item = LifecycleEvent> + Send + 'static>>;
 
 // ============================================================================
@@ -269,8 +268,7 @@ pub use testing::{MockSession, MockSessionFactory};
 mod tests {
     use super::*;
 
-    fn assert_object_safe(_: &dyn Session) {}
-    fn assert_factory_object_safe(_: &dyn SessionFactory) {}
+
 
     #[test]
     fn frame_round_trip_msgpack() {
@@ -285,25 +283,8 @@ mod tests {
 
     #[test]
     fn commit_delta_variants_are_distinct() {
-        assert_ne!(
-            CommitDelta::Added(vec![]),
-            CommitDelta::Closed,
-        );
+        assert_ne!(CommitDelta::Added(vec![]), CommitDelta::Closed,);
     }
 
-    // Stage 0: skeleton compiles. Real impls land in stage 1.
-    #[test]
-    fn skeleton_compiles() {
-        // Ensures the trait object surface exists and the
-        // trait is object-safe. Object-safety is not
-        // statically guaranteed by the trait definition alone
-        // because of the generic-free signatures; this asserts
-        // it.
-        let _: Option<&dyn Session> = None;
-        let _: Option<&dyn SessionFactory> = None;
-        if false {
-            assert_object_safe(unreachable!());
-            assert_factory_object_safe(unreachable!());
-        }
-    }
+
 }

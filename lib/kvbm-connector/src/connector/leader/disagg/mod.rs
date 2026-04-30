@@ -80,9 +80,7 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
 pub use conditional_leader::{ConditionalDisaggLeader, register_with_hub};
-pub use decode::{
-    BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus,
-};
+pub use decode::{BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus};
 pub use decode_leader::DecodeDisaggLeader;
 pub use prefill_coordinator::PrefillCoordinator;
 pub use prefill_leader::PrefillDisaggLeader;

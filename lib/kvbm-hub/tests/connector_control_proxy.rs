@@ -108,11 +108,7 @@ fn http() -> reqwest::Client {
 }
 
 fn proxy_reset_url(server: &HubServer, id: velo_common::InstanceId) -> String {
-    format!(
-        "http://{}/v1/instances/{}/reset",
-        server.control_addr(),
-        id
-    )
+    format!("http://{}/v1/instances/{}/reset", server.control_addr(), id)
 }
 
 // ---- tests ------------------------------------------------------------------

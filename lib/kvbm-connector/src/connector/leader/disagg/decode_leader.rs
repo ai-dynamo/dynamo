@@ -36,9 +36,7 @@ use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_config::{DisaggConfig, DisaggregationRole};
-use kvbm_engine::disagg::session::{
-    AvailabilityDelta, CommitDelta, Session,
-};
+use kvbm_engine::disagg::session::{AvailabilityDelta, CommitDelta, Session};
 use kvbm_hub::{ConditionalDisaggClient, HubClient};
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 use parking_lot::Mutex;
@@ -475,16 +473,12 @@ impl DecodeDisaggLeader {
             .get(request_id)
             .map(|e| Arc::clone(e.value()))
             .ok_or_else(|| anyhow!("CD request state missing for {} at USAA-1", request_id))?;
-        let local_match_g2_pins = existing
-            .local_match_g2_pins
-            .lock()
-            .take()
-            .ok_or_else(|| {
-                anyhow!(
-                    "CD USAA-1: local_match_g2_pins already drained for {} (USAA called twice?)",
-                    request_id
-                )
-            })?;
+        let local_match_g2_pins = existing.local_match_g2_pins.lock().take().ok_or_else(|| {
+            anyhow!(
+                "CD USAA-1: local_match_g2_pins already drained for {} (USAA called twice?)",
+                request_id
+            )
+        })?;
         if local_match_g2_pins.len() != split.local_match_blocks {
             anyhow::bail!(
                 "CD USAA-1: local_match_g2_pins has {} blocks but split says {}",
@@ -574,10 +568,7 @@ impl DecodeDisaggLeader {
             let session = match self.coordinator.state_for(request_id) {
                 Some(s) => Arc::clone(&s.lock().session),
                 None => {
-                    anyhow::bail!(
-                        "CD USAA-1: coordinator has no session for {}",
-                        request_id
-                    );
+                    anyhow::bail!("CD USAA-1: coordinator has no session for {}", request_id);
                 }
             };
             let wrapper = self
@@ -586,8 +577,9 @@ impl DecodeDisaggLeader {
             let request_id_owned = request_id.to_string();
             let state_clone = Arc::clone(&updated);
             self.tokio_handle.spawn(async move {
-                if let Err(err) =
-                    wrapper.run_remote_pipeline(&request_id_owned, state_clone, session).await
+                if let Err(err) = wrapper
+                    .run_remote_pipeline(&request_id_owned, state_clone, session)
+                    .await
                 {
                     wrapper
                         .cleanup_failed_request(&request_id_owned, err.to_string())
@@ -664,8 +656,7 @@ impl DecodeDisaggLeader {
                     if chunk.is_empty() {
                         continue;
                     }
-                    let chunk_hashes: Vec<SequenceHash> =
-                        chunk.iter().map(|b| b.hash).collect();
+                    let chunk_hashes: Vec<SequenceHash> = chunk.iter().map(|b| b.hash).collect();
                     self.pull_register_onboard_chunk(
                         request_id,
                         &state,
@@ -773,8 +764,7 @@ impl DecodeDisaggLeader {
 
         // 3. Register with the leader's G2 manager.
         let registered = self.inner.register_g2_blocks(completes)?;
-        let chunk_g2_block_ids: Vec<BlockId> =
-            registered.iter().map(|b| b.block_id()).collect();
+        let chunk_g2_block_ids: Vec<BlockId> = registered.iter().map(|b| b.block_id()).collect();
 
         // 4. Local G2→G1 onboard for this chunk's slice.
         self.transport

@@ -58,6 +58,7 @@ rstest = "0.23"
 proptest = "1.5.0"
 
 [features]
+default = ["testing"]
 static-kernels = ["kvbm-physical/static-kernels"]
 testing = [
     "kvbm-engine/testing",

@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
 use kvbm_connector::connector::leader::disagg::testing::{
@@ -38,7 +39,6 @@ use kvbm_connector::connector::leader::disagg::testing::{
 use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConnectorLeaderApi, DecodeDisaggLeader, RemotePrefillCoordinator,
 };
-use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_engine::disagg::session::{CommittedBlock, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
@@ -163,10 +163,7 @@ fn build_harness() -> TestHarness {
 /// Build a `Vec<CommittedBlock>` for prefill's remote-output
 /// peer-block_ids, mapping each remote hash to a synthetic peer
 /// block_id starting at `base`.
-fn committed_blocks(
-    hashes: &[kvbm_logical::SequenceHash],
-    base: usize,
-) -> Vec<CommittedBlock> {
+fn committed_blocks(hashes: &[kvbm_logical::SequenceHash], base: usize) -> Vec<CommittedBlock> {
     hashes
         .iter()
         .enumerate()
@@ -316,8 +313,7 @@ async fn cd_decode_remote_pull_failure() -> Result<()> {
     session.inject_peer_drained();
 
     session.wait_pull_count(1).await;
-    session
-        .resolve_pull(0, Err(anyhow::anyhow!("simulated pull failure")));
+    session.resolve_pull(0, Err(anyhow::anyhow!("simulated pull failure")));
 
     wait_until(|| h.workers.failed_for("req-1").is_some()).await;
     let failed = h.workers.failed_for("req-1").unwrap();

@@ -226,7 +226,6 @@ impl VeloSession {
             self.inner.outbound_ready.notified().await;
         }
     }
-
 }
 
 // ============================================================================
@@ -318,7 +317,9 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                     peer_available.insert(b.hash, b.peer_block_id);
                 }
             }
-            inner.avail_stream.push(AvailabilityDelta::Available(blocks));
+            inner
+                .avail_stream
+                .push(AvailabilityDelta::Available(blocks));
         }
         Frame::Drained => {
             inner.avail_stream.push(AvailabilityDelta::Drained);
@@ -329,9 +330,7 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
             inner.inbound_pulls.insert(pull_id, hashes);
             let inner_clone = Arc::clone(inner);
             runtime.spawn(async move {
-                let session = VeloSession {
-                    inner: inner_clone,
-                };
+                let session = VeloSession { inner: inner_clone };
                 if let Err(err) = session.send_frame(Frame::PullComplete { pull_id }).await {
                     tracing::error!(error = %err, pull_id, "send PullComplete failed");
                 }
@@ -450,7 +449,10 @@ impl<T: Unpin> Stream for CombiningStream<T> {
     }
 }
 
-fn build_commit_stream(rx: mpsc::UnboundedReceiver<CommitDelta>, replay: Vec<CommitDelta>) -> CommitStream {
+fn build_commit_stream(
+    rx: mpsc::UnboundedReceiver<CommitDelta>,
+    replay: Vec<CommitDelta>,
+) -> CommitStream {
     let mut pending: VecDeque<CommitDelta> = VecDeque::new();
     // Coalesce all `Added` deltas in the replay into one, then
     // optionally append a `Closed`.
@@ -568,10 +570,7 @@ impl Session for VeloSession {
             for b in &blocks {
                 let h = b.sequence_hash();
                 if !committed.contains(&h) {
-                    anyhow::bail!(
-                        "make_available: block hash {:?} is not in committed set",
-                        h
-                    );
+                    anyhow::bail!("make_available: block hash {:?} is not in committed set", h);
                 }
             }
         }
@@ -673,9 +672,10 @@ impl Session for VeloSession {
                 let peer_avail = session.inner.peer_available.lock();
                 let mut out = Vec::with_capacity(hashes.len());
                 for h in &hashes {
-                    let id = peer_avail.get(h).copied().ok_or_else(|| {
-                        anyhow!("pull: hash {:?} not in peer_available", h)
-                    })?;
+                    let id = peer_avail
+                        .get(h)
+                        .copied()
+                        .ok_or_else(|| anyhow!("pull: hash {:?} not in peer_available", h))?;
                     out.push(id);
                 }
                 out
@@ -698,13 +698,12 @@ impl Session for VeloSession {
             // peer_endpoint we held.
             let peer_instance_id = {
                 let stored = session.inner.peer_instance_id.lock();
-                stored
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "pull: peer_instance_id unknown — \
+                stored.ok_or_else(|| {
+                    anyhow!(
+                        "pull: peer_instance_id unknown — \
                              holder side requires `Attach` frame to have arrived"
-                        )
-                    })?
+                    )
+                })?
             };
 
             // Allocate pull_id and install oneshot.
@@ -720,7 +719,10 @@ impl Session for VeloSession {
                 })
                 .await?;
             rx.await.map_err(|_| {
-                anyhow!("pull {}: PullComplete oneshot dropped (session closed)", pull_id)
+                anyhow!(
+                    "pull {}: PullComplete oneshot dropped (session closed)",
+                    pull_id
+                )
             })?;
 
             // Now drive the RDMA read. Build RemoteBlockSet.
@@ -742,7 +744,9 @@ impl Session for VeloSession {
                 .pull_remote_block_sets(peer_instance_id, &[block_set], &dst_block_ids)
                 .await
                 .context("pull_remote_block_sets enqueue")?;
-            notification.await.context("pull_remote_block_sets notification")?;
+            notification
+                .await
+                .context("pull_remote_block_sets notification")?;
 
             // Send PullAck.
             session
@@ -1015,10 +1019,7 @@ mod tests {
             .unwrap();
         use futures::StreamExt;
         rt.block_on(async {
-            assert!(matches!(
-                stream.next().await,
-                Some(CommitDelta::Added(_))
-            ));
+            assert!(matches!(stream.next().await, Some(CommitDelta::Added(_))));
             assert!(matches!(stream.next().await, Some(CommitDelta::Closed)));
         });
     }

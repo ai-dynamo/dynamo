@@ -59,7 +59,7 @@ tracing-subscriber = { workspace = true, optional = true }
 nvtx = { version = "1.3", optional = true }
 
 [features]
-default = ["s3"]
+default = ["s3", "testing"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 collectives = ["nccl"]
 nccl = []

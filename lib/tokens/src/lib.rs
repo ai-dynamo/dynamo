@@ -420,7 +420,10 @@ impl std::cmp::Ord for PositionalLineageHash {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.position()
             .cmp(&other.position())
-            .then_with(|| self.current_hash_fragment().cmp(&other.current_hash_fragment()))
+            .then_with(|| {
+                self.current_hash_fragment()
+                    .cmp(&other.current_hash_fragment())
+            })
             .then_with(|| self.0.cmp(&other.0))
     }
 }
@@ -2722,20 +2725,24 @@ mod tests {
     fn test_positional_hashes_msgpack_roundtrip() {
         let psh = PositionalSequenceHash::new(0xDEAD_BEEF_CAFE_BABE, 12345, 0x0123_4567_89AB_CDEF);
         let bytes = rmp_serde::to_vec(&psh).expect("psh serialize");
-        let decoded: PositionalSequenceHash = rmp_serde::from_slice(&bytes).expect("psh deserialize");
+        let decoded: PositionalSequenceHash =
+            rmp_serde::from_slice(&bytes).expect("psh deserialize");
         assert_eq!(psh, decoded);
         assert_eq!(psh.as_u128(), decoded.as_u128());
 
-        let plh = PositionalLineageHash::new(0x1111_2222_3333_4444, Some(0x5555_6666_7777_8888), 256);
+        let plh =
+            PositionalLineageHash::new(0x1111_2222_3333_4444, Some(0x5555_6666_7777_8888), 256);
         let bytes = rmp_serde::to_vec(&plh).expect("plh serialize");
-        let decoded: PositionalLineageHash = rmp_serde::from_slice(&bytes).expect("plh deserialize");
+        let decoded: PositionalLineageHash =
+            rmp_serde::from_slice(&bytes).expect("plh deserialize");
         assert_eq!(plh, decoded);
         assert_eq!(plh.as_u128(), decoded.as_u128());
 
         // Vec roundtrip — exercises the codec inside a container.
         let vec = vec![psh, PositionalSequenceHash::default(), psh];
         let bytes = rmp_serde::to_vec(&vec).expect("vec serialize");
-        let decoded: Vec<PositionalSequenceHash> = rmp_serde::from_slice(&bytes).expect("vec deserialize");
+        let decoded: Vec<PositionalSequenceHash> =
+            rmp_serde::from_slice(&bytes).expect("vec deserialize");
         assert_eq!(vec, decoded);
     }
 
@@ -2744,12 +2751,14 @@ mod tests {
         // Confirm the byte-array codec also roundtrips through JSON (array of u8).
         let psh = PositionalSequenceHash::new(0xAAAA_BBBB_CCCC_DDDD, 7, 0xEEEE_FFFF_0000_1111);
         let json = serde_json::to_string(&psh).expect("psh json serialize");
-        let decoded: PositionalSequenceHash = serde_json::from_str(&json).expect("psh json deserialize");
+        let decoded: PositionalSequenceHash =
+            serde_json::from_str(&json).expect("psh json deserialize");
         assert_eq!(psh, decoded);
 
         let plh = PositionalLineageHash::new(0x1234_5678, Some(0xABCD_EF01), 42);
         let json = serde_json::to_string(&plh).expect("plh json serialize");
-        let decoded: PositionalLineageHash = serde_json::from_str(&json).expect("plh json deserialize");
+        let decoded: PositionalLineageHash =
+            serde_json::from_str(&json).expect("plh json deserialize");
         assert_eq!(plh, decoded);
     }
 }

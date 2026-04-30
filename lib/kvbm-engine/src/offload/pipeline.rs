@@ -254,8 +254,7 @@ pub type ChainOutputRx<T> = mpsc::Receiver<ChainOutput<T>>;
 /// underlying source blocks. Observers may inspect or `clone`
 /// individual `ImmutableBlock`s to retain pins; do not block in
 /// the callback as it runs on the executor's transfer task.
-pub type RegisterObserver<Dst> =
-    Arc<dyn Fn(&[ImmutableBlock<Dst>]) + Send + Sync + 'static>;
+pub type RegisterObserver<Dst> = Arc<dyn Fn(&[ImmutableBlock<Dst>]) + Send + Sync + 'static>;
 
 /// Shared registration-observer list. Held both by `Pipeline`
 /// (so callers can `add_register_observer` after the executor

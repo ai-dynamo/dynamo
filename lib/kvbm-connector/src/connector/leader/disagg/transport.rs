@@ -23,9 +23,7 @@ use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use kvbm_physical::TransferOptions;
 
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
-use crate::connector::leader::{
-    ConnectorLeader, FinishedStatus, Request, SlotMatchSplit,
-};
+use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request, SlotMatchSplit};
 use crate::{BlockId, G2, InstanceId};
 
 /// Transport seam used by the conditional-disagg wrapper to drive
@@ -162,15 +160,8 @@ pub trait InnerLeaderShim: Send + Sync {
     fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit>;
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>>;
     fn local_instance_id(&self) -> InstanceId;
-    fn apply_block_assignments(
-        &self,
-        request_id: &str,
-        block_ids: Vec<BlockId>,
-    ) -> Result<()>;
-    fn take_local_match_g2_blocks(
-        &self,
-        request_id: &str,
-    ) -> Result<Vec<ImmutableBlock<G2>>>;
+    fn apply_block_assignments(&self, request_id: &str, block_ids: Vec<BlockId>) -> Result<()>;
+    fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>>;
     fn token_blocks_for_range(
         &self,
         request_id: &str,
@@ -181,10 +172,7 @@ pub trait InnerLeaderShim: Send + Sync {
     /// Used by the prefill-side wrapper at GNMT time to detect CD-bound
     /// requests and read the decode-endpoint + sequence_hashes carried
     /// by the originating request.
-    fn slot_transfer_params(
-        &self,
-        request_id: &str,
-    ) -> Result<Option<TransferParams>>;
+    fn slot_transfer_params(&self, request_id: &str) -> Result<Option<TransferParams>>;
 
     // ---- G2 allocator + registration (kept narrow) ----
 
@@ -192,10 +180,8 @@ pub trait InnerLeaderShim: Send + Sync {
     fn allocate_g2_blocks(&self, count: usize) -> Result<Vec<MutableBlock<G2>>>;
     /// Register a batch of G2 `CompleteBlock`s with the leader's manager,
     /// returning the corresponding `ImmutableBlock`s.
-    fn register_g2_blocks(
-        &self,
-        blocks: Vec<CompleteBlock<G2>>,
-    ) -> Result<Vec<ImmutableBlock<G2>>>;
+    fn register_g2_blocks(&self, blocks: Vec<CompleteBlock<G2>>)
+    -> Result<Vec<ImmutableBlock<G2>>>;
 }
 
 /// Production [`InnerLeaderShim`] that wraps a concrete `ConnectorLeader`.
@@ -286,18 +272,11 @@ impl InnerLeaderShim for ConnectorLeaderShim {
         self.inner.local_instance_id()
     }
 
-    fn apply_block_assignments(
-        &self,
-        request_id: &str,
-        block_ids: Vec<BlockId>,
-    ) -> Result<()> {
+    fn apply_block_assignments(&self, request_id: &str, block_ids: Vec<BlockId>) -> Result<()> {
         self.inner.apply_block_assignments(request_id, block_ids)
     }
 
-    fn take_local_match_g2_blocks(
-        &self,
-        request_id: &str,
-    ) -> Result<Vec<ImmutableBlock<G2>>> {
+    fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>> {
         self.inner.take_local_match_g2_blocks(request_id)
     }
 
@@ -309,10 +288,7 @@ impl InnerLeaderShim for ConnectorLeaderShim {
         self.inner.token_blocks_for_range(request_id, range)
     }
 
-    fn slot_transfer_params(
-        &self,
-        request_id: &str,
-    ) -> Result<Option<TransferParams>> {
+    fn slot_transfer_params(&self, request_id: &str) -> Result<Option<TransferParams>> {
         self.inner.slot_transfer_params(request_id)
     }
 

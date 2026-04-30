@@ -690,12 +690,10 @@ impl ConnectorLeader {
                 hub_url = %disagg_cfg.hub_url,
                 "Registering leader with kvbm-hub for conditional disaggregation"
             );
-            let (_hub, client, _hub_velo_id) = super::disagg::register_with_hub(
-                &disagg_cfg,
-                self.runtime.messenger().clone(),
-            )
-            .await
-            .context("conditional-disagg hub registration failed")?;
+            let (_hub, client, _hub_velo_id) =
+                super::disagg::register_with_hub(&disagg_cfg, self.runtime.messenger().clone())
+                    .await
+                    .context("conditional-disagg hub registration failed")?;
             let _ = self.disagg_client.set(client);
         }
 

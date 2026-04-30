@@ -58,10 +58,7 @@ async fn new_velo() -> Arc<velo::Velo> {
 /// - velo transport attached so heartbeat task is spawned.
 /// - 30s registration TTL (default) — large enough that the reaper
 ///   never preempts the heartbeat path during test duration.
-async fn start_hub_with_heartbeat(
-    interval: Duration,
-    max_failures: u32,
-) -> HubServer {
+async fn start_hub_with_heartbeat(interval: Duration, max_failures: u32) -> HubServer {
     let transport = new_velo_transport();
     kvbm_hub::create_server_builder()
         .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
@@ -245,8 +242,14 @@ async fn wedged_peer_does_not_block_healthy_peer() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let ids = registered_ids(&server);
-    assert!(ids.contains(&healthy_id), "healthy peer must stay registered");
-    assert!(ids.contains(&wedged_id), "wedged peer should still be there (max_failures=100)");
+    assert!(
+        ids.contains(&healthy_id),
+        "healthy peer must stay registered"
+    );
+    assert!(
+        ids.contains(&wedged_id),
+        "wedged peer should still be there (max_failures=100)"
+    );
 
     server.shutdown().await.unwrap();
 }

@@ -31,8 +31,8 @@
 //! wire won't generate this; tests that do it have a bug.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use dashmap::DashMap;
 
@@ -368,7 +368,9 @@ impl MockSession {
         for b in &blocks {
             inner.peer_available.insert(b.hash, b.peer_block_id);
         }
-        inner.availability_state.push(AvailabilityDelta::Available(blocks));
+        inner
+            .availability_state
+            .push(AvailabilityDelta::Available(blocks));
     }
 
     pub fn inject_peer_drained(&self) {
@@ -597,7 +599,10 @@ impl Session for MockSession {
             .lock()
             .peer_available
             .iter()
-            .map(|(&hash, &peer_block_id)| CommittedBlock { hash, peer_block_id })
+            .map(|(&hash, &peer_block_id)| CommittedBlock {
+                hash,
+                peer_block_id,
+            })
             .collect()
     }
 
@@ -610,10 +615,8 @@ impl Session for MockSession {
         if hashes.len() != dst.len() {
             let hl = hashes.len();
             let dl = dst.len();
-            return async move {
-                Err(anyhow!("pull: hashes.len() ({hl}) != dst.len() ({dl})"))
-            }
-            .boxed();
+            return async move { Err(anyhow!("pull: hashes.len() ({hl}) != dst.len() ({dl})")) }
+                .boxed();
         }
 
         // Assign a monotonic index before taking the lock (atomic, no contention).
@@ -896,9 +899,11 @@ mod tests {
         )
     }
 
-    fn alloc_immutable(manager: &Arc<BlockManager<G2>>, count: usize, start_token: u32)
-    -> Vec<ImmutableBlock<G2>>
-    {
+    fn alloc_immutable(
+        manager: &Arc<BlockManager<G2>>,
+        count: usize,
+        start_token: u32,
+    ) -> Vec<ImmutableBlock<G2>> {
         let token_sequence = create_token_sequence(count, TEST_BLOCK_SIZE, start_token);
         let mutable = manager.allocate_blocks(count).expect("alloc failed");
         let complete: Vec<_> = mutable
@@ -909,10 +914,10 @@ mod tests {
         manager.register_blocks(complete)
     }
 
-    fn alloc_mutable(manager: &Arc<BlockManager<G2>>, count: usize)
-    -> Vec<MutableBlock<G2>>
-    {
-        manager.allocate_blocks(count).expect("alloc mutable failed")
+    fn alloc_mutable(manager: &Arc<BlockManager<G2>>, count: usize) -> Vec<MutableBlock<G2>> {
+        manager
+            .allocate_blocks(count)
+            .expect("alloc mutable failed")
     }
 
     /// Build a `Vec<CommittedBlock>` from immutable blocks with fake peer IDs.
@@ -968,10 +973,7 @@ mod tests {
         let manager = make_g2_manager(1);
         let dst = alloc_mutable(&manager, 1);
         let session = MockSession::new(uuid::Uuid::new_v4(), None);
-        let err = session
-            .pull(vec![hash(1), hash(2)], dst)
-            .await
-            .unwrap_err();
+        let err = session.pull(vec![hash(1), hash(2)], dst).await.unwrap_err();
         assert!(
             err.to_string().contains("hashes.len()"),
             "unexpected error: {err}"
@@ -1081,10 +1083,7 @@ mod tests {
         let session = factory.open(id).unwrap();
         let last = factory.last_opened().expect("last_opened should be Some");
         assert_eq!(session.session_id(), last.session_id());
-        assert_eq!(
-            last.endpoint().map(|e| e.kind),
-            Some("mock".to_string())
-        );
+        assert_eq!(last.endpoint().map(|e| e.kind), Some("mock".to_string()));
     }
 
     // ========================================================================
@@ -1097,7 +1096,10 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let peer_id: InstanceId = uuid::Uuid::new_v4().into();
         let session = factory.attach(id, peer_id, mock_endpoint()).await.unwrap();
-        assert!(session.endpoint().is_none(), "attach session should have None endpoint");
+        assert!(
+            session.endpoint().is_none(),
+            "attach session should have None endpoint"
+        );
     }
 
     #[tokio::test]
@@ -1105,10 +1107,7 @@ mod tests {
         let factory = MockSessionFactory::new();
         let id = uuid::Uuid::new_v4();
         let peer_id: InstanceId = uuid::Uuid::new_v4().into();
-        let _ = factory
-            .attach(id, peer_id, mock_endpoint())
-            .await
-            .unwrap();
+        let _ = factory.attach(id, peer_id, mock_endpoint()).await.unwrap();
         let calls = factory.attach_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, peer_id);

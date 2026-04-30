@@ -13,21 +13,15 @@
 
 use std::sync::Arc;
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::put,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::put};
 use kvbm_config::ControlConfig;
 use serde::Serialize;
 use tokio::net::TcpListener;
 
 use super::ConnectorLeader;
 use super::control_api::{
-    ConnectorControlApi, ControlError, RegisterLeaderRequest, RegisterLeaderResponse,
-    ResetRequest, ResetResponse,
+    ConnectorControlApi, ControlError, RegisterLeaderRequest, RegisterLeaderResponse, ResetRequest,
+    ResetResponse,
 };
 
 /// JSON error envelope returned to HTTP clients.
@@ -42,8 +36,8 @@ fn map_error(err: ControlError) -> (StatusCode, Json<ErrorBody>) {
     // Single source of truth for ControlError → HTTP status lives in
     // `kvbm_control_protocol::ControlError::http_status()` so the local
     // axum shim and the hub's HTTP→velo proxy always agree.
-    let status = StatusCode::from_u16(err.http_status())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status =
+        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let kind = err.kind();
     (
         status,

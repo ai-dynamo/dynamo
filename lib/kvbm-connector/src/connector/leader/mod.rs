@@ -4,14 +4,13 @@
 mod control;
 pub mod control_api;
 pub mod disagg;
-pub mod velo_control;
 mod request;
 mod slot;
+pub mod velo_control;
 
 use super::worker::ConnectorWorkerClient;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
 use kvbm_config::OnboardMode;
-use kvbm_hub::ConditionalDisaggClient;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::leader::{
     FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
@@ -19,6 +18,7 @@ use kvbm_engine::leader::{
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
+use kvbm_hub::ConditionalDisaggClient;
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_observability::CacheStatsTracker;
 
@@ -360,8 +360,9 @@ impl ConnectorLeader {
         use futures::FutureExt;
         let workers = self.workers.get().cloned();
         async move {
-            let workers = workers
-                .ok_or_else(|| anyhow!("WorkerClients not initialized for mark_workers_onboarding_complete"))?;
+            let workers = workers.ok_or_else(|| {
+                anyhow!("WorkerClients not initialized for mark_workers_onboarding_complete")
+            })?;
             workers.mark_onboarding_complete(request_id).await
         }
         .boxed()
@@ -415,8 +416,9 @@ impl ConnectorLeader {
         use futures::FutureExt;
         let workers = self.workers.get().cloned();
         async move {
-            let workers = workers
-                .ok_or_else(|| anyhow!("WorkerClients not initialized for mark_workers_failed_onboarding"))?;
+            let workers = workers.ok_or_else(|| {
+                anyhow!("WorkerClients not initialized for mark_workers_failed_onboarding")
+            })?;
             workers.mark_failed_onboarding(request_id, block_ids).await
         }
         .boxed()
@@ -462,7 +464,6 @@ impl SlotMatchSplit {
 }
 
 impl ConnectorLeader {
-
     /// Extend a slot's token sequence with new tokens.
     ///
     /// This is called during decoding when new tokens have been generated

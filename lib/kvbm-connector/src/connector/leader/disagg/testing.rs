@@ -15,8 +15,8 @@ use kvbm_disagg_protocol::{RemotePrefillRequest, TransferParams};
 use tokio::sync::oneshot;
 
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
-use kvbm_logical::blocks::{CompleteBlock, MutableBlock};
 use kvbm_logical::blocks::ImmutableBlock;
+use kvbm_logical::blocks::{CompleteBlock, MutableBlock};
 use kvbm_logical::manager::BlockManager;
 use parking_lot::Mutex;
 
@@ -94,7 +94,11 @@ impl MockCdBlockTransport {
     }
 
     pub fn onboard_calls(&self) -> Vec<LocalG2ToG1Call> {
-        self.onboards.lock().iter().map(|o| o.call.clone()).collect()
+        self.onboards
+            .lock()
+            .iter()
+            .map(|o| o.call.clone())
+            .collect()
     }
 
     pub fn resolve_onboard(&self, index: usize, result: Result<()>) {
@@ -363,10 +367,7 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         Ok(())
     }
 
-    fn take_local_match_g2_blocks(
-        &self,
-        request_id: &str,
-    ) -> Result<Vec<ImmutableBlock<G2>>> {
+    fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>> {
         let slot = self.require_slot(request_id)?;
         slot.local_match_g2
             .lock()
