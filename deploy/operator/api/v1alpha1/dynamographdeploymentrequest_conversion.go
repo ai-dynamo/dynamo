@@ -345,16 +345,16 @@ func saveDGDRAlphaOnlyStatus(src, save *DynamoGraphDeploymentRequestStatus) {
 	if src == nil || save == nil {
 		return
 	}
-	if !dgdrAlphaStateRoundTripsThroughHub(src) {
+	if !dgdrAlphaStateIsRepresentableInHub(src) {
 		save.State = src.State
 	}
 }
 
 func dgdrAlphaStatusNeedsSave(src *DynamoGraphDeploymentRequestStatus) bool {
-	return !dgdrAlphaStateRoundTripsThroughHub(src)
+	return !dgdrAlphaStateIsRepresentableInHub(src)
 }
 
-func dgdrAlphaStateRoundTripsThroughHub(src *DynamoGraphDeploymentRequestStatus) bool {
+func dgdrAlphaStateIsRepresentableInHub(src *DynamoGraphDeploymentRequestStatus) bool {
 	if src == nil {
 		return true
 	}
@@ -1466,7 +1466,7 @@ func convertDGDRStatusToHub(src *DynamoGraphDeploymentRequestStatus, dst *v1beta
 	if ctx.profilingJobName != "" {
 		dst.ProfilingJobName = ctx.profilingJobName
 	}
-	restoreDGDRHubStatus(dst, restored, dgdrAlphaStatusNeedsSave(src))
+	restoreDGDRHubStatus(dst, restored, src)
 	if save != nil {
 		saveDGDRAlphaOnlyStatus(src, save)
 	}
@@ -1530,13 +1530,11 @@ func dgdrDeploymentStatusNeedsAnnotation(src *DeploymentStatus, phase v1beta1.DG
 			src.Created && phase != v1beta1.DGDRPhaseDeployed)
 }
 
-func restoreDGDRHubStatus(dst *v1beta1.DynamoGraphDeploymentRequestStatus, restored *dgdrHubStatusPreservation, sourceStateNeedsSave bool) {
+func restoreDGDRHubStatus(dst *v1beta1.DynamoGraphDeploymentRequestStatus, restored *dgdrHubStatusPreservation, src *DynamoGraphDeploymentRequestStatus) {
 	if restored == nil {
 		return
 	}
-	if restored.PhaseSet && !sourceStateNeedsSave && dgdrHubPhaseCompatibleWithSaved(dst.Phase, &restored.Status) {
-		dst.Phase = restored.Status.Phase
-	}
+	restoreDGDRHubPhase(dst, restored, src)
 	if dst.ProfilingPhase == "" {
 		dst.ProfilingPhase = restored.Status.ProfilingPhase
 	}
@@ -1552,6 +1550,21 @@ func restoreDGDRHubStatus(dst *v1beta1.DynamoGraphDeploymentRequestStatus, resto
 		}
 		dst.ProfilingResults.Pareto = restored.Status.ProfilingResults.DeepCopy().Pareto
 	}
+}
+
+func restoreDGDRHubPhase(dst *v1beta1.DynamoGraphDeploymentRequestStatus, restored *dgdrHubStatusPreservation, src *DynamoGraphDeploymentRequestStatus) {
+	if !restored.PhaseSet {
+		return
+	}
+	// Phase and State are two spellings of the same lifecycle field, but both
+	// versions have values the other cannot express. A restored hub phase may
+	// refine the live alpha state projection, but must not overwrite a live
+	// alpha state that itself needs sparse preservation.
+	if !dgdrAlphaStateIsRepresentableInHub(src) ||
+		!dgdrHubPhaseCompatibleWithSaved(dst.Phase, &restored.Status) {
+		return
+	}
+	dst.Phase = restored.Status.Phase
 }
 
 func dgdrHubPhaseCompatibleWithSaved(current v1beta1.DGDRPhase, saved *v1beta1.DynamoGraphDeploymentRequestStatus) bool {
