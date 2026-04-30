@@ -159,3 +159,74 @@ func TestBugDGDR_SparseHubSpecSaveOmitsRepresentableContextFields(t *testing.T) 
 		t.Fatalf("hub save included representable ModelCache: %#v", saved.ModelCache)
 	}
 }
+
+func TestBugDGDR_HubEmptyModelCacheShapeRoundTrips(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-model-cache"},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:      "llama",
+			Backend:    v1beta1.BackendTypeVllm,
+			ModelCache: &v1beta1.ModelCacheSpec{},
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.ModelCache == nil {
+		t.Fatalf("ModelCache = nil, want empty object shape preserved")
+	}
+}
+
+func TestBugDGDR_SpokeLossyStateSurvivesUnrelatedHubStatusChange(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "deployment-deleted-state"},
+		Status: DynamoGraphDeploymentRequestStatus{
+			State:              DGDRStateDeploymentDeleted,
+			ObservedGeneration: 1,
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	hub.Status.ObservedGeneration = 2
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Status.State != DGDRStateDeploymentDeleted {
+		t.Fatalf("State = %q, want %q", spoke.Status.State, DGDRStateDeploymentDeleted)
+	}
+	if spoke.Status.ObservedGeneration != 2 {
+		t.Fatalf("ObservedGeneration = %d, want 2", spoke.Status.ObservedGeneration)
+	}
+}
+
+func TestBugDGDR_HubEmptyPhaseRoundTrips(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-phase"},
+		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
+			Phase: "",
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Status.Phase != "" {
+		t.Fatalf("Phase = %q, want empty", restored.Status.Phase)
+	}
+}
