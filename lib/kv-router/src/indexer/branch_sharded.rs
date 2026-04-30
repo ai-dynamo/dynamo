@@ -188,11 +188,12 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     /// but the underlying CRTC may have no data there until replay is implemented.
     ///
     /// Separately, `find_matches` hashes only the available prefix
-    /// (`min(prefix_depth, len)`). A query shorter than `prefix_depth` therefore
-    /// probes with a shorter key than a root `Stored` event that first established
-    /// the branch with `>= prefix_depth` blocks. With `prefix_depth > 1`, that can
-    /// cause false early-miss returns for short queries unless shorter-prefix keys
-    /// are also recorded or reads fall back to a broader lookup.
+    /// (`min(prefix_depth, len)`). A query shorter than `prefix_depth` would
+    /// therefore probe with a shorter key than the key registered by a root
+    /// `Stored` event. This is addressed by `register_prefix_keys`, which
+    /// records intermediate FNV values (depths 1 … prefix_depth) at store time
+    /// so short queries route to the correct shard instead of receiving a false
+    /// miss.
     ///
     /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
     /// `Cleared` events; only `Removed` events prune them.
