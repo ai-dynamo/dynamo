@@ -378,6 +378,7 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.timeout(750)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
+@pytest.mark.flaky(reruns=2, only_rerun=["did not report the marker file"])
 def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
@@ -458,21 +459,11 @@ def test_frontend_api_surface_compliance(
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
-        _run_agent_smoke_with_retries(
-            "codex",
-            _run_codex_exec_smoke,
-            frontend_port,
-            _codex_cli,
-            _node_bin,
-            codex_home,
-            agent_cwd,
-            marker_filename,
+        _run_codex_exec_smoke(
+            _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
         _wait_for_frontend_healthy(frontend_port)
-        _run_agent_smoke_with_retries(
-            "claude",
-            _run_claude_exec_smoke,
-            frontend_port,
+        _run_claude_exec_smoke(
             _claude_cli,
             _node_bin,
             claude_home,
@@ -623,41 +614,6 @@ wire_api = "responses"
 env_key = "LOCAL_API_KEY"
 """.lstrip()
     )
-
-
-_SMOKE_MAX_ATTEMPTS = 3
-
-
-def _run_agent_smoke_with_retries(
-    label: str,
-    fn,
-    frontend_port: int,
-    *args,
-) -> None:
-    """Retry an agent smoke test up to ``_SMOKE_MAX_ATTEMPTS`` times.
-
-    Small models (~2B) non-deterministically skip tool calls ~5% of the
-    time, emitting text instead of a function_call.  Retrying reduces
-    the effective failure rate to p^N (e.g. 0.05^3 ≈ 0.01%).
-    """
-    last_err: pytest.Failed | None = None
-    for attempt in range(1, _SMOKE_MAX_ATTEMPTS + 1):
-        try:
-            fn(*args)
-            return
-        except pytest.Failed as exc:
-            last_err = exc
-            logger.warning(
-                "%s smoke attempt %d/%d failed: %s",
-                label,
-                attempt,
-                _SMOKE_MAX_ATTEMPTS,
-                exc,
-            )
-            if attempt < _SMOKE_MAX_ATTEMPTS:
-                _wait_for_frontend_healthy(frontend_port)
-    assert last_err is not None
-    raise last_err
 
 
 def _run_codex_exec_smoke(
