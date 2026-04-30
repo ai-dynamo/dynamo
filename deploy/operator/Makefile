@@ -153,6 +153,10 @@ test: manifests generate fmt vet envtest ## Run tests.
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
 
+.PHONY: test-e2e-dgdr  # Run DGDR e2e tests against a live cluster with the operator installed.
+test-e2e-dgdr:
+	go test ./test/e2e/dgdr/ -v -ginkgo.v $(DGDR_TEST_FLAGS)
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
 	$(GOLANGCI_LINT) run

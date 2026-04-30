@@ -1,0 +1,221 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package dgdr
+
+import (
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// Default hardware for mocker mode (AIC simulation needs hardware metadata).
+var defaultMockerHardware = v1beta1.HardwareSpec{
+	GPUSKU:         v1beta1.GPUSKUTypeA100SXM,
+	VRAMMB:         ptr.To(float64(81920)),
+	NumGPUsPerNode: ptr.To(int32(8)),
+	TotalGPUs:      ptr.To(int32(8)),
+}
+
+// newDGDR builds a v1beta1 DynamoGraphDeploymentRequest with sensible defaults.
+// Options can override any field.
+func newDGDR(name string, opts ...func(*v1beta1.DynamoGraphDeploymentRequest)) *v1beta1.DynamoGraphDeploymentRequest {
+	dgdr := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: flagNamespace,
+			Labels: map[string]string{
+				"test.dynamo/managed": "true",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:          flagModel,
+			Backend:        v1beta1.BackendType(flagBackend),
+			Image:          flagImage,
+			SearchStrategy: v1beta1.SearchStrategyRapid,
+		},
+	}
+	for _, o := range opts {
+		o(dgdr)
+	}
+	// Inject mocker config when enabled
+	if useMocker() {
+		injectMockerConfig(dgdr)
+	}
+	return dgdr
+}
+
+// Option functions for newDGDR
+
+func withAutoApply(v bool) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.AutoApply = ptr.To(v)
+	}
+}
+
+func withBackend(b v1beta1.BackendType) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.Backend = b
+	}
+}
+
+func withSearchStrategy(s v1beta1.SearchStrategy) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.SearchStrategy = s
+	}
+}
+
+func withModel(m string) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.Model = m
+	}
+}
+
+func withSLA(ttft, itl float64) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.SLA = &v1beta1.SLASpec{
+			TTFT: ptr.To(ttft),
+			ITL:  ptr.To(itl),
+		}
+	}
+}
+
+func withWorkload(isl, osl int32) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.Workload = &v1beta1.WorkloadSpec{
+			ISL: ptr.To(isl),
+			OSL: ptr.To(osl),
+		}
+	}
+}
+
+func withHardware(hw v1beta1.HardwareSpec) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.Hardware = &hw
+	}
+}
+
+func withFeatures(f v1beta1.FeaturesSpec) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		d.Spec.Features = &f
+	}
+}
+
+// injectMockerConfig mutates a DGDR for GPU-free testing.
+func injectMockerConfig(d *v1beta1.DynamoGraphDeploymentRequest) {
+	if d.Spec.Features == nil {
+		d.Spec.Features = &v1beta1.FeaturesSpec{}
+	}
+	d.Spec.Features.Mocker = &v1beta1.MockerSpec{Enabled: true}
+
+	if d.Spec.Hardware == nil {
+		hw := defaultMockerHardware
+		d.Spec.Hardware = &hw
+	} else {
+		// Fill missing fields from defaults
+		if d.Spec.Hardware.GPUSKU == "" {
+			d.Spec.Hardware.GPUSKU = defaultMockerHardware.GPUSKU
+		}
+		if d.Spec.Hardware.VRAMMB == nil {
+			d.Spec.Hardware.VRAMMB = defaultMockerHardware.VRAMMB
+		}
+		if d.Spec.Hardware.NumGPUsPerNode == nil {
+			d.Spec.Hardware.NumGPUsPerNode = defaultMockerHardware.NumGPUsPerNode
+		}
+		if d.Spec.Hardware.TotalGPUs == nil {
+			d.Spec.Hardware.TotalGPUs = defaultMockerHardware.TotalGPUs
+		}
+	}
+}
+
+// uniqueName generates a K8s-safe test name with a timestamp suffix.
+func uniqueName(prefix string) string {
+	return fmt.Sprintf("dgdr-test-%s-%d", prefix, time.Now().UnixMilli()%100000)
+}
+
+// createAndCleanup creates a DGDR and registers it for cleanup via DeferCleanup.
+func createAndCleanup(dgdr *v1beta1.DynamoGraphDeploymentRequest) {
+	Expect(k8sClient.Create(ctx, dgdr)).To(Succeed(), "failed to create DGDR %s", dgdr.Name)
+	DeferCleanup(func() {
+		_ = k8sClient.Delete(ctx, dgdr)
+	})
+}
+
+// serverDryRun attempts to create a DGDR with server-side dry-run and returns the error (if any).
+func serverDryRun(dgdr *v1beta1.DynamoGraphDeploymentRequest) error {
+	return k8sClient.Create(ctx, dgdr, client.DryRunAll)
+}
+
+// waitForPhase polls until the DGDR reaches the target phase or times out.
+func waitForPhase(name string, target v1beta1.DGDRPhase, timeout time.Duration) *v1beta1.DynamoGraphDeploymentRequest {
+	var dgdr v1beta1.DynamoGraphDeploymentRequest
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{
+			Namespace: flagNamespace,
+			Name:      name,
+		}, &dgdr)).To(Succeed())
+		g.Expect(dgdr.Status.Phase).To(Equal(target),
+			"DGDR %s phase is %s, waiting for %s", name, dgdr.Status.Phase, target)
+	}, timeout, 5*time.Second).Should(Succeed())
+	return &dgdr
+}
+
+// kubectl runs a kubectl command and returns stdout/stderr.
+func kubectl(args ...string) (string, string, error) {
+	cmd := exec.Command("kubectl", args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+// getOutputConfigMap fetches the dgdr-output-<name> ConfigMap and returns its data map.
+func getOutputConfigMap(name string) map[string]string {
+	cmName := fmt.Sprintf("dgdr-output-%s", name)
+	stdout, _, err := kubectl("get", "configmap", cmName, "-n", flagNamespace, "-o", "json")
+	Expect(err).NotTo(HaveOccurred(), "ConfigMap %s not found", cmName)
+
+	var raw map[string]interface{}
+	Expect(json.Unmarshal([]byte(stdout), &raw)).To(Succeed())
+
+	data, ok := raw["data"].(map[string]interface{})
+	Expect(ok).To(BeTrue(), "ConfigMap %s has no data field", cmName)
+
+	result := make(map[string]string, len(data))
+	for k, v := range data {
+		result[k] = fmt.Sprint(v)
+	}
+	return result
+}
+
+// plannerRawExtension creates a raw JSON extension from a map (for Features.Planner).
+func plannerRawExtension(m map[string]interface{}) *k8sruntime.RawExtension {
+	raw, err := json.Marshal(m)
+	Expect(err).NotTo(HaveOccurred())
+	return &k8sruntime.RawExtension{Raw: raw}
+}
