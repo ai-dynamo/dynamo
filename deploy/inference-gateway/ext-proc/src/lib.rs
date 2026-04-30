@@ -19,5 +19,5 @@ pub mod proto;
 pub mod server;
 
 pub use epp::Router;
-pub use picker::{EndpointPicker, Endpoint, PickResult, RequestInfo};
+pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use server::ExtProcServer;

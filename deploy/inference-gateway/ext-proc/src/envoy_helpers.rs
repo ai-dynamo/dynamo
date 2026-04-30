@@ -281,7 +281,6 @@ fn build_chunked_body_responses(body: &[u8], set_eos: bool) -> Vec<CommonRespons
                         StreamedBodyResponse {
                             body: vec![],
                             end_of_stream: set_eos,
-                            ..Default::default()
                         },
                     ),
                 ),
@@ -305,7 +304,6 @@ fn build_chunked_body_responses(body: &[u8], set_eos: bool) -> Vec<CommonRespons
                         StreamedBodyResponse {
                             body: chunk.to_vec(),
                             end_of_stream: eos,
-                            ..Default::default()
                         },
                     ),
                 ),

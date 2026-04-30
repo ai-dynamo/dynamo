@@ -20,11 +20,11 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
-use crate::picker::{EndpointPicker, Endpoint, PickError, RequestInfo};
+use crate::picker::{Endpoint, EndpointPicker, PickError, RequestInfo};
 use crate::proto::envoy::service::ext_proc::v3::{
-    self as ext_proc,
+    self as ext_proc, ProcessingRequest, ProcessingResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
-    processing_request, ProcessingRequest, ProcessingResponse,
+    processing_request,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 
@@ -105,11 +105,11 @@ impl RequestContext {
             return out;
         }
 
-        if self.state == StreamState::RequestReceived {
-            if let Some(resp) = self.req_header_resp.take() {
-                out.push(resp);
-                self.state = StreamState::HeaderRequestResponseComplete;
-            }
+        if self.state == StreamState::RequestReceived
+            && let Some(resp) = self.req_header_resp.take()
+        {
+            out.push(resp);
+            self.state = StreamState::HeaderRequestResponseComplete;
         }
 
         if self.state == StreamState::HeaderRequestResponseComplete
@@ -119,18 +119,18 @@ impl RequestContext {
             self.state = StreamState::BodyRequestResponsesComplete;
         }
 
-        if self.state == StreamState::BodyRequestResponsesComplete {
-            if let Some(resp) = self.req_trailer_resp.take() {
-                out.push(resp);
-                self.state = StreamState::TrailerRequestResponsesComplete;
-            }
+        if self.state == StreamState::BodyRequestResponsesComplete
+            && let Some(resp) = self.req_trailer_resp.take()
+        {
+            out.push(resp);
+            self.state = StreamState::TrailerRequestResponsesComplete;
         }
 
-        if self.state == StreamState::ResponseReceived {
-            if let Some(resp) = self.resp_header_resp.take() {
-                out.push(resp);
-                self.state = StreamState::HeaderResponseResponseComplete;
-            }
+        if self.state == StreamState::ResponseReceived
+            && let Some(resp) = self.resp_header_resp.take()
+        {
+            out.push(resp);
+            self.state = StreamState::HeaderResponseResponseComplete;
         }
 
         if self.state == StreamState::HeaderResponseResponseComplete {
@@ -140,10 +140,10 @@ impl RequestContext {
             }
         }
 
-        if self.state == StreamState::BodyResponseResponsesComplete {
-            if let Some(resp) = self.resp_trailer_resp.take() {
-                out.push(resp);
-            }
+        if self.state == StreamState::BodyResponseResponsesComplete
+            && let Some(resp) = self.resp_trailer_resp.take()
+        {
+            out.push(resp);
         }
 
         out
@@ -183,10 +183,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle request headers phase.
     /// Mirrors Go LW-EPP `handleRequestHeaders` in `server.go`.
-    fn handle_request_headers(
-        ctx: &mut RequestContext,
-        hdr: &ext_proc::HttpHeaders,
-    ) {
+    fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
         ctx.request_received_at = Some(Instant::now());
 
         if hdr.end_of_stream {
@@ -197,13 +194,11 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
 
-            if let Some(id) = envoy_helpers::extract_header_value(
-                header_map,
-                metadata::REQUEST_ID_HEADER_KEY,
-            ) {
-                if !id.is_empty() {
-                    ctx.request_id = id;
-                }
+            if let Some(id) =
+                envoy_helpers::extract_header_value(header_map, metadata::REQUEST_ID_HEADER_KEY)
+                && !id.is_empty()
+            {
+                ctx.request_id = id;
             }
         }
 
@@ -233,7 +228,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         let result = picker
             .pick(&req_info, endpoints)
             .await
-            .map_err(|e| ExtProcError::from_pick_error(e))?;
+            .map_err(ExtProcError::from_pick_error)?;
 
         ctx.target_endpoint = result.endpoint.clone();
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
@@ -267,7 +262,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         let result = picker
             .pick(&req_info, endpoints)
             .await
-            .map_err(|e| ExtProcError::from_pick_error(e))?;
+            .map_err(ExtProcError::from_pick_error)?;
 
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
@@ -290,10 +285,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle response headers from the upstream model server.
-    fn handle_response_headers(
-        ctx: &mut RequestContext,
-        hdr: &ext_proc::HttpHeaders,
-    ) {
+    fn handle_response_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
         if let Some(header_map) = &hdr.headers {
             for h in &header_map.headers {
                 let key = h.key.to_ascii_lowercase();
@@ -310,10 +302,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle response body from the upstream model server.
-    fn handle_response_body(
-        ctx: &mut RequestContext,
-        body: &ext_proc::HttpBody,
-    ) {
+    fn handle_response_body(ctx: &mut RequestContext, body: &ext_proc::HttpBody) {
         let end_of_stream = body.end_of_stream;
         let chunk = &body.body;
         ctx.response_size += chunk.len();
@@ -327,11 +316,8 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 &ctx.target_model_name,
                 &ctx.incoming_model_name,
             );
-            ctx.resp_body_resp = envoy_helpers::build_response_body_responses(
-                &rewritten,
-                end_of_stream,
-                None,
-            );
+            ctx.resp_body_resp =
+                envoy_helpers::build_response_body_responses(&rewritten, end_of_stream, None);
         } else if end_of_stream {
             ctx.response_complete = true;
             let rewritten = envoy_helpers::rewrite_model_name(
@@ -339,11 +325,8 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 &ctx.target_model_name,
                 &ctx.incoming_model_name,
             );
-            ctx.resp_body_resp = envoy_helpers::build_response_body_responses(
-                &rewritten,
-                true,
-                None,
-            );
+            ctx.resp_body_resp =
+                envoy_helpers::build_response_body_responses(&rewritten, true, None);
         }
     }
 }
@@ -384,9 +367,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             if hdr.end_of_stream {
                                 let endpoints = endpoints_lock.read().await;
                                 if let Err(e) = ExtProcServer::handle_header_only_request(
-                                    &*picker,
-                                    &mut ctx,
-                                    &endpoints,
+                                    &*picker, &mut ctx, &endpoints,
                                 )
                                 .await
                                 {
@@ -403,10 +384,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 let raw_body = std::mem::take(&mut body_buf);
                                 let endpoints = endpoints_lock.read().await;
                                 if let Err(e) = ExtProcServer::handle_request_body(
-                                    &*picker,
-                                    &mut ctx,
-                                    &raw_body,
-                                    &endpoints,
+                                    &*picker, &mut ctx, &raw_body, &endpoints,
                                 )
                                 .await
                                 {
@@ -430,7 +408,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     let synthetic = ext_proc::HttpBody {
                                         body: full_body,
                                         end_of_stream: true,
-                                        ..Default::default()
                                     };
                                     ExtProcServer::<P>::handle_response_body(&mut ctx, &synthetic);
                                 }
@@ -444,7 +421,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     let synthetic = ext_proc::HttpBody {
                                         body: full_body,
                                         end_of_stream: true,
-                                        ..Default::default()
                                     };
                                     ExtProcServer::<P>::handle_response_body(&mut ctx, &synthetic);
                                 }

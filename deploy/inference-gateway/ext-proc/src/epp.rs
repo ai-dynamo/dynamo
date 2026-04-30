@@ -102,9 +102,7 @@ impl Router {
                 .await
                 .map(|_| ())
                 .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Runtime config watch closed before any workers appeared"
-                    )
+                    anyhow::anyhow!("Runtime config watch closed before any workers appeared")
                 })?;
             tracing::info!(
                 worker_count = config_watch.borrow().len(),
@@ -234,8 +232,7 @@ impl Router {
                 .await
                 .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
 
-            let cached_tokens =
-                overlap_blocks as usize * decode_router.block_size() as usize;
+            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
 
             decode_router
                 .add_request(
@@ -450,9 +447,7 @@ fn spawn_prefill_discovery_watcher(
                         {
                             let ep = comp.endpoint(endpoint);
                             if tx.send(ep).is_err() {
-                                tracing::debug!(
-                                    "PrefillRouter activation channel already closed"
-                                );
+                                tracing::debug!("PrefillRouter activation channel already closed");
                             }
                             return;
                         }
@@ -519,15 +514,6 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 // ---------------------------------------------------------------------------
 // EndpointPicker trait implementation (mirrors Go LW-EPP from GAIE #2834)
 // ---------------------------------------------------------------------------
-
-/// Build a worker_id → Endpoint mapping from the given endpoint slice.
-/// Uses `hash_pod_name` to convert pod names to Dynamo worker IDs.
-fn build_worker_map(endpoints: &[Endpoint]) -> Vec<(u64, &Endpoint)> {
-    endpoints
-        .iter()
-        .map(|ep| (hash_pod_name(&ep.pod_name), ep))
-        .collect()
-}
 
 /// Narrow `endpoints` down to only those whose address (or address:port)
 /// appears in the `candidate_subset` sent via `envoy.lb.subset_hint`.
@@ -613,10 +599,9 @@ impl EndpointPicker for Router {
                     worker_id = decode_worker.worker_id,
                     "Selected worker not in endpoint list, using first available"
                 );
-                effective.first().map_or_else(
-                    || endpoints[0].address_port(),
-                    |ep| ep.address_port(),
-                )
+                effective
+                    .first()
+                    .map_or_else(|| endpoints[0].address_port(), |ep| ep.address_port())
             });
 
         tracing::info!(
