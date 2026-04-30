@@ -49,7 +49,7 @@ class GMSAllocationManager:
         device: int = 0,
         *,
         allocation_retry_interval: float = 0.5,
-        allocation_retry_timeout: Optional[float] = 30.0,
+        allocation_retry_timeout: Optional[float] = 60.0,
     ):
         if allocation_retry_interval <= 0:
             raise ValueError(
