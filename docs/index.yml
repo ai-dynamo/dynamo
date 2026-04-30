@@ -68,10 +68,10 @@ navigation:
             path: kubernetes/README.md
           - page: Installation Guide
             path: kubernetes/installation-guide.md
-          - page: DGDR Reference
-            path: kubernetes/dgdr.md
           - page: Model Deployment Guide
             path: kubernetes/model-deployment-guide.md
+          - page: DGDR Reference
+            path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
           - page: Service Discovery
