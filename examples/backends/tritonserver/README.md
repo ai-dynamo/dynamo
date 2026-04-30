@@ -129,6 +129,7 @@ Options:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `BACKEND_DIR` | Path to Triton backends. The container image sets this to `/opt/tritonserver/backends`; local source builds use `backends/`. | `backends/` |
 | `DYN_DISCOVERY_BACKEND` | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` | `file` |
 | `DYN_LOG` | Log level (debug, info, warn, error) | `info` |
 | `DYN_HTTP_PORT` | Frontend HTTP port | `8000` |
