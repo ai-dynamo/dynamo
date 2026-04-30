@@ -3,6 +3,10 @@
 
 agent:
   enabled: true
+  extraArgs:
+    - --dwarf-unwinding-disable
+    - --python-unwinding-disable
+    - --ruby-unwinding-disable
   serviceMonitor:
     enabled: true
 
