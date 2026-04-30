@@ -1,22 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CUDA executor for GPU memory transfers.
+//! Device executor for GPU memory transfers (multi-backend: CUDA/HPU/XPU).
+//!
+//! This executor uses the device abstraction layer to support multiple hardware
+//! backends through a unified interface.
 
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::block_manager::v2::kernels::OperationalCopyBackend;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
-use cudarc::driver::result as cuda_result;
 use std::ops::Range;
 
-// #[cfg(test)]
-// mod cuda_kernel_tests;
-
-/// Execute a CUDA transfer between host and device memory.
+/// Execute a device transfer between host and device memory.
 ///
-/// This executor handles transfers involving GPU memory using CUDA APIs.
+/// This executor handles transfers involving GPU/HPU/XPU memory using device abstraction.
 /// Supports async and blocking transfers depending on the strategy.
 ///
 /// # Arguments
@@ -25,9 +24,9 @@ use std::ops::Range;
 /// * `src_block_ids` - Source block IDs to transfer
 /// * `dst_block_ids` - Destination block IDs to transfer
 /// * `layer_range` - Optional range of layers to transfer (None = all layers)
-/// * `strategy` - CUDA transfer strategy (H2D, D2H, D2D, async or blocking)
-/// * `ctx` - Transfer context with CUDA stream
-pub fn execute_cuda_transfer(
+/// * `strategy` - Device transfer strategy (H2D, D2H, D2D, async or blocking)
+/// * `ctx` - Transfer context with device stream
+pub fn execute_device_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     src_block_ids: &[usize],
@@ -59,15 +58,15 @@ pub fn execute_cuda_transfer(
     // Determine layer range
     let layers = layer_range.unwrap_or(0..src_layout.num_layers());
 
-    // Get appropriate CUDA stream based on transfer direction
-    let stream = match strategy {
-        TransferStrategy::CudaAsyncD2H | TransferStrategy::CudaBlockingD2H => ctx.d2h_stream(),
+    // Get appropriate device stream based on transfer direction
+    let device_stream = match strategy {
+        TransferStrategy::AsyncD2H | TransferStrategy::BlockingD2H => ctx.d2h_stream(),
         _ => ctx.h2d_stream(), // H2D and D2D use h2d_stream
     };
 
-    // Perform CUDA transfers based on strategy
+    // Perform device transfers based on strategy
     match strategy {
-        TransferStrategy::CudaAsyncH2D => {
+        TransferStrategy::AsyncH2D => {
             let backend = ctx.operational_backend();
             if let Err(e) = try_execute_operational_kernel(
                 src,
@@ -75,7 +74,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers.clone(),
-                stream.as_ref(),
+                device_stream,
                 backend,
             ) {
                 // Fallback to memcpy-based path
@@ -86,11 +85,11 @@ pub fn execute_cuda_transfer(
                     src_block_ids,
                     dst_block_ids,
                     layers,
-                    stream.as_ref(),
+                    device_stream,
                 )?;
             }
         }
-        TransferStrategy::CudaAsyncD2H => {
+        TransferStrategy::AsyncD2H => {
             let backend = ctx.operational_backend();
             if let Err(e) = try_execute_operational_kernel(
                 src,
@@ -98,7 +97,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers.clone(),
-                stream.as_ref(),
+                device_stream,
                 backend,
             ) {
                 // Fallback to memcpy-based path
@@ -109,11 +108,11 @@ pub fn execute_cuda_transfer(
                     src_block_ids,
                     dst_block_ids,
                     layers,
-                    stream.as_ref(),
+                    device_stream,
                 )?;
             }
         }
-        TransferStrategy::CudaAsyncD2D => {
+        TransferStrategy::AsyncD2D => {
             // Try kernel-based path first, fall back to memcpy on error
             let backend = ctx.operational_backend();
             if let Err(e) = try_execute_operational_kernel(
@@ -122,7 +121,7 @@ pub fn execute_cuda_transfer(
                 src_block_ids,
                 dst_block_ids,
                 layers.clone(),
-                stream.as_ref(),
+                device_stream,
                 backend,
             ) {
                 // Fallback to memcpy-based path
@@ -133,62 +132,60 @@ pub fn execute_cuda_transfer(
                     src_block_ids,
                     dst_block_ids,
                     layers,
-                    stream.as_ref(),
+                    device_stream,
                 )?;
             }
         }
-        TransferStrategy::CudaBlockingH2D => {
+        TransferStrategy::BlockingH2D => {
             execute_h2d(
                 src,
                 dst,
                 src_block_ids,
                 dst_block_ids,
                 layers,
-                stream.as_ref(),
+                device_stream,
             )?;
             // Synchronize immediately for blocking transfer
-            stream.synchronize()?;
+            device_stream.synchronize()?;
         }
-        TransferStrategy::CudaBlockingD2H => {
+        TransferStrategy::BlockingD2H => {
             execute_d2h(
                 src,
                 dst,
                 src_block_ids,
                 dst_block_ids,
                 layers,
-                stream.as_ref(),
+                device_stream,
             )?;
             // Synchronize immediately for blocking transfer
-            stream.synchronize()?;
+            device_stream.synchronize()?;
         }
         _ => {
-            return Err(anyhow!("Invalid CUDA transfer strategy: {:?}", strategy));
+            return Err(anyhow!("Invalid device transfer strategy: {:?}", strategy));
         }
     }
 
     // For async transfers, record an event and register it for completion tracking
     if matches!(
         strategy,
-        TransferStrategy::CudaAsyncH2D
-            | TransferStrategy::CudaAsyncD2H
-            | TransferStrategy::CudaAsyncD2D
+        TransferStrategy::AsyncH2D | TransferStrategy::AsyncD2H | TransferStrategy::AsyncD2D
     ) {
-        let event = stream.record_event(None)?;
-        Ok(ctx.register_cuda_event(event))
+        let event = device_stream.record_event()?;
+        Ok(ctx.register_device_event(event))
     } else {
         // Blocking transfers are already synchronized
         Ok(TransferCompleteNotification::completed())
     }
 }
 
-/// Execute host-to-device transfer.
+/// Execute host-to-device transfer using device abstraction.
 fn execute_h2d(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     src_block_ids: &[usize],
     dst_block_ids: &[usize],
     layers: Range<usize>,
-    stream: &cudarc::driver::CudaStream,
+    stream: &std::sync::Arc<crate::block_manager::v2::device::DeviceStream>,
 ) -> Result<()> {
     for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
@@ -212,7 +209,7 @@ fn execute_h2d(
                     let src_ptr = src_region.addr() as *const u8;
                     let dst_ptr = dst_region.addr() as u64;
                     let src_slice = std::slice::from_raw_parts(src_ptr, src_region.size());
-                    cuda_result::memcpy_htod_async(dst_ptr, src_slice, stream.cu_stream())?;
+                    stream.ops.copy_h2d(dst_ptr, src_slice)?;
                 }
             }
         }
@@ -220,14 +217,14 @@ fn execute_h2d(
     Ok(())
 }
 
-/// Execute device-to-host transfer.
+/// Execute device-to-host transfer using device abstraction.
 fn execute_d2h(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     src_block_ids: &[usize],
     dst_block_ids: &[usize],
     layers: Range<usize>,
-    stream: &cudarc::driver::CudaStream,
+    stream: &std::sync::Arc<crate::block_manager::v2::device::DeviceStream>,
 ) -> Result<()> {
     for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
@@ -251,7 +248,7 @@ fn execute_d2h(
                     let src_ptr = src_region.addr() as u64;
                     let dst_ptr = dst_region.addr() as *mut u8;
                     let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, dst_region.size());
-                    cuda_result::memcpy_dtoh_async(dst_slice, src_ptr, stream.cu_stream())?;
+                    stream.ops.copy_d2h(dst_slice, src_ptr)?;
                 }
             }
         }
@@ -259,14 +256,14 @@ fn execute_d2h(
     Ok(())
 }
 
-/// Execute device-to-device transfer.
+/// Execute device-to-device transfer using device abstraction.
 fn execute_d2d(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     src_block_ids: &[usize],
     dst_block_ids: &[usize],
     layers: Range<usize>,
-    stream: &cudarc::driver::CudaStream,
+    stream: &std::sync::Arc<crate::block_manager::v2::device::DeviceStream>,
 ) -> Result<()> {
     for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
@@ -289,12 +286,7 @@ fn execute_d2d(
                 unsafe {
                     let src_ptr = src_region.addr() as u64;
                     let dst_ptr = dst_region.addr() as u64;
-                    cuda_result::memcpy_dtod_async(
-                        dst_ptr,
-                        src_ptr,
-                        src_region.size(),
-                        stream.cu_stream(),
-                    )?;
+                    stream.ops.copy_d2d(dst_ptr, src_ptr, src_region.size())?;
                 }
             }
         }
@@ -311,7 +303,7 @@ pub(crate) fn try_execute_operational_kernel(
     _src_block_ids: &[usize],
     _dst_block_ids: &[usize],
     _layers: Range<usize>,
-    _stream: &cudarc::driver::CudaStream,
+    _stream: &std::sync::Arc<crate::block_manager::v2::device::DeviceStream>,
     _backend: OperationalCopyBackend,
 ) -> Result<()> {
     anyhow::bail!("Not implemented.");

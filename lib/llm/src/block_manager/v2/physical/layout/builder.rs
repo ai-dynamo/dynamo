@@ -31,6 +31,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::block_manager::v2::device::{DeviceBackend, DeviceContext};
 use crate::block_manager::v2::memory::{DeviceStorage, PinnedStorage};
 
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
@@ -48,13 +49,16 @@ pub enum LayoutKind {
 #[derive(Debug, Clone)]
 enum AllocationKind {
     System,
-    /// Pinned (page-locked) host memory. If `device_id` is Some, NUMA-aware
-    /// allocation is used on the GPU's NUMA node (when NUMA is enabled).
+    /// Pinned (page-locked) host memory. If numa_aware is true, NUMA-aware
+    /// allocation is used on the device's NUMA node (when NUMA is enabled).
     Pinned {
-        device_id: Option<u32>,
+        numa_aware: bool,
+        device_backend: DeviceBackend,
+        device_id: u32,
     },
 
     Device {
+        device_backend: DeviceBackend,
         device_id: u32,
     },
     Disk {
@@ -121,6 +125,12 @@ pub struct PhysicalLayoutBuilder<C, L, M> {
     config: Option<LayoutConfig>,
     layout_kind: Option<LayoutKind>,
     memory_plan: Option<MemoryPlan>,
+    // TODO(v2-layout-builder): `_device_backend` and `_device_id` are kept
+    // for compatibility/default allocation plumbing. If future audits confirm
+    // allocation paths can pass backend/device explicitly, remove these
+    // fields and simplify builder state/into_parts/from_parts signatures.
+    _device_backend: DeviceBackend,
+    _device_id: u32,
     _config: PhantomData<C>,
     _layout: PhantomData<L>,
     _memory: PhantomData<M>,
@@ -128,12 +138,19 @@ pub struct PhysicalLayoutBuilder<C, L, M> {
 
 impl PhysicalLayoutBuilder<NoConfig, NoLayout, NoMemory> {
     /// Create a new builder in its initial state.
-    pub fn new(agent: NixlAgent) -> Self {
+    ///
+    /// # Arguments
+    /// * `agent` - NIXL agent for memory registration
+    /// * `device_backend` - Device backend (CUDA, HPU, XPU) for device/pinned allocations
+    /// * `device_id` - Device ID for device/pinned allocations
+    pub fn new(agent: NixlAgent, device_backend: DeviceBackend, device_id: u32) -> Self {
         Self {
             agent,
             config: None,
             layout_kind: None,
             memory_plan: None,
+            _device_backend: device_backend,
+            _device_id: device_id,
             _config: PhantomData,
             _layout: PhantomData,
             _memory: PhantomData,
@@ -149,8 +166,17 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
         Option<LayoutConfig>,
         Option<LayoutKind>,
         Option<MemoryPlan>,
+        DeviceBackend,
+        u32,
     ) {
-        (self.agent, self.config, self.layout_kind, self.memory_plan)
+        (
+            self.agent,
+            self.config,
+            self.layout_kind,
+            self.memory_plan,
+            self._device_backend,
+            self._device_id,
+        )
     }
 
     fn from_parts<C2, L2, M2>(
@@ -158,12 +184,16 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
         config: Option<LayoutConfig>,
         layout_kind: Option<LayoutKind>,
         memory_plan: Option<MemoryPlan>,
+        device_backend: DeviceBackend,
+        device_id: u32,
     ) -> PhysicalLayoutBuilder<C2, L2, M2> {
         PhysicalLayoutBuilder {
             agent,
             config,
             layout_kind,
             memory_plan,
+            _device_backend: device_backend,
+            _device_id: device_id,
             _config: PhantomData,
             _layout: PhantomData,
             _memory: PhantomData,
@@ -174,12 +204,15 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
 impl<L, M> PhysicalLayoutBuilder<NoConfig, L, M> {
     /// Attach the [`LayoutConfig`] required to size the layout and allocations.
     pub fn with_config(self, config: LayoutConfig) -> PhysicalLayoutBuilder<HasConfig, L, M> {
-        let (agent, _config, layout_kind, memory_plan) = self.into_parts();
+        let (agent, _config, layout_kind, memory_plan, device_backend, device_id) =
+            self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, L, M>::from_parts(
             agent,
             Some(config),
             layout_kind,
             memory_plan,
+            device_backend,
+            device_id,
         )
     }
 }
@@ -187,12 +220,14 @@ impl<L, M> PhysicalLayoutBuilder<NoConfig, L, M> {
 impl<M> PhysicalLayoutBuilder<HasConfig, NoLayout, M> {
     /// Select the fully contiguous layout variant.
     pub fn fully_contiguous(self) -> PhysicalLayoutBuilder<HasConfig, HasLayout, M> {
-        let (agent, config, _layout, memory_plan) = self.into_parts();
+        let (agent, config, _layout, memory_plan, device_backend, device_id) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, HasLayout, M>::from_parts(
             agent,
             config,
             Some(LayoutKind::FullyContiguous),
             memory_plan,
+            device_backend,
+            device_id,
         )
     }
 
@@ -201,12 +236,14 @@ impl<M> PhysicalLayoutBuilder<HasConfig, NoLayout, M> {
         self,
         block_dim: BlockDimension,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, M> {
-        let (agent, config, _layout, memory_plan) = self.into_parts();
+        let (agent, config, _layout, memory_plan, device_backend, device_id) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, HasLayout, M>::from_parts(
             agent,
             config,
             Some(LayoutKind::LayerSeparate { block_dim }),
             memory_plan,
+            device_backend,
+            device_id,
         )
     }
 }
@@ -216,12 +253,14 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         self,
         plan: MemoryPlan,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, device_backend, device_id) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
             agent,
             config,
             layout_kind,
             Some(plan),
+            device_backend,
+            device_id,
         )
     }
 
@@ -232,21 +271,39 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     /// Allocate pinned (page-locked) host memory.
     ///
     /// # Arguments
-    /// * `device_id` - If `Some(id)`, enables NUMA-aware allocation on the GPU's NUMA node
-    ///   (disable with `DYN_MEMORY_DISABLE_NUMA=1`). If `None`, uses direct allocation.
+    /// * `device_id` - If `Some(id)`, sets the `numa_aware` flag and uses the specified device.
+    ///   If `None`, uses the builder's default device_id.
+    ///
+    /// # Note
+    /// **NUMA-aware allocation is not currently implemented.** The `numa_aware` flag is stored
+    /// but not used by the downstream allocator. All pinned allocations currently use the same
+    /// allocation strategy regardless of this flag. To implement NUMA-aware allocation, the flag
+    /// would need to be threaded through to `DeviceContextOps::allocate_pinned()` or the memory
+    /// allocator to select NUMA-local memory based on device topology.
     pub fn allocate_pinned(
         self,
         device_id: Option<u32>,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned { device_id }))
+        let device_backend = self._device_backend;
+        let actual_device_id = device_id.unwrap_or(self._device_id);
+        let numa_aware = device_id.is_some();
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned {
+            numa_aware,
+            device_backend,
+            device_id: actual_device_id,
+        }))
     }
 
-    /// Allocate device memory on the specified CUDA device (or the context device if `None`).
+    /// Allocate device memory on the specified device.
     pub fn allocate_device(
         self,
         device_id: u32,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Device { device_id }))
+        let device_backend = self._device_backend;
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Device {
+            device_backend,
+            device_id,
+        }))
     }
 
     /// Allocate disk-backed storage. When `path` is `None`, a temporary file is used.
@@ -265,7 +322,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     where
         S: MemoryRegion + NixlCompatible + 'static,
     {
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, device_backend, device_id) = self.into_parts();
         let entries = register_existing_regions(&agent, regions)?;
         Ok(
             PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
@@ -273,6 +330,8 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
                 config,
                 layout_kind,
                 Some(MemoryPlan::Provided(entries)),
+                device_backend,
+                device_id,
             ),
         )
     }
@@ -298,13 +357,15 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, device_backend, device_id) = self.into_parts();
         Ok(
             PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
                 agent,
                 config,
                 layout_kind,
                 Some(MemoryPlan::Provided(entries)),
+                device_backend,
+                device_id,
             ),
         )
     }
@@ -313,7 +374,8 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
 impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
     /// Finalize the builder, constructing the [`PhysicalLayout`].
     pub fn build(self) -> Result<PhysicalLayout> {
-        let (agent, config, layout_kind, memory_plan) = self.into_parts();
+        let (agent, config, layout_kind, memory_plan, device_backend, device_id) =
+            self.into_parts();
 
         let config = config.ok_or_else(|| anyhow!("layout config missing despite type state"))?;
         let layout_kind =
@@ -322,7 +384,13 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
             memory_plan.ok_or_else(|| anyhow!("memory plan missing despite type state"))?;
 
         let required_sizes = compute_allocation_sizes(&config, &layout_kind)?;
-        let entries = resolve_memory_plan(&agent, memory_plan, &required_sizes)?;
+        let entries = resolve_memory_plan(
+            &agent,
+            memory_plan,
+            &required_sizes,
+            device_backend,
+            device_id,
+        )?;
 
         validate_memory_sizes(&entries, &required_sizes)?;
         let kind = derive_storage_kind(&entries)?;
@@ -364,6 +432,8 @@ fn resolve_memory_plan(
     agent: &NixlAgent,
     plan: MemoryPlan,
     sizes: &[usize],
+    _device_backend: DeviceBackend,
+    _device_id: u32,
 ) -> Result<Vec<MemoryEntry>> {
     match plan {
         MemoryPlan::Provided(entries) => {
@@ -379,7 +449,9 @@ fn resolve_memory_plan(
                 .map(MemoryEntry::ensure_registered)
                 .collect()
         }
-        MemoryPlan::Allocate(strategy) => allocate_regions(agent, strategy, sizes),
+        MemoryPlan::Allocate(strategy) => {
+            allocate_regions(agent, strategy, sizes, _device_backend, _device_id)
+        }
     }
 }
 
@@ -387,6 +459,8 @@ fn allocate_regions(
     agent: &NixlAgent,
     strategy: AllocationKind,
     sizes: &[usize],
+    _device_backend: DeviceBackend,
+    _device_id: u32,
 ) -> Result<Vec<MemoryEntry>> {
     if sizes.is_empty() {
         return Ok(Vec::new());
@@ -396,13 +470,16 @@ fn allocate_regions(
 
     let base_entry = match strategy {
         AllocationKind::System => allocate_system_entry(reserve_size, agent)?,
-        AllocationKind::Pinned { device_id } => {
-            allocate_pinned_entry(reserve_size, agent, device_id)?
-        }
+        AllocationKind::Pinned {
+            numa_aware,
+            device_backend,
+            device_id,
+        } => allocate_pinned_entry(reserve_size, agent, numa_aware, device_backend, device_id)?,
 
-        AllocationKind::Device { device_id } => {
-            allocate_device_entry(reserve_size, agent, device_id)?
-        }
+        AllocationKind::Device {
+            device_backend,
+            device_id,
+        } => allocate_device_entry(reserve_size, agent, device_backend, device_id)?,
         AllocationKind::Disk { path } => allocate_disk_entry(reserve_size, agent, path)?,
     };
 
@@ -418,15 +495,30 @@ fn allocate_system_entry(size: usize, agent: &NixlAgent) -> Result<MemoryEntry> 
 fn allocate_pinned_entry(
     size: usize,
     agent: &NixlAgent,
-    device_id: Option<u32>,
+    _numa_aware: bool,
+    device_backend: DeviceBackend,
+    device_id: u32,
 ) -> Result<MemoryEntry> {
-    let storage = PinnedStorage::new_for_device(size, device_id)
+    let ctx = Arc::new(
+        DeviceContext::new(device_backend, device_id)
+            .map_err(|e| anyhow!("failed to create device context for pinned allocation: {e}"))?,
+    );
+    let storage = PinnedStorage::new(size, ctx)
         .map_err(|e| anyhow!("failed to allocate pinned memory ({size} bytes): {e}"))?;
     register_storage(storage, agent)
 }
 
-fn allocate_device_entry(size: usize, agent: &NixlAgent, device_id: u32) -> Result<MemoryEntry> {
-    let storage = DeviceStorage::new(size, device_id).map_err(|e| {
+fn allocate_device_entry(
+    size: usize,
+    agent: &NixlAgent,
+    device_backend: DeviceBackend,
+    device_id: u32,
+) -> Result<MemoryEntry> {
+    let ctx = Arc::new(
+        DeviceContext::new(device_backend, device_id)
+            .map_err(|e| anyhow!("failed to create device context for device allocation: {e}"))?,
+    );
+    let storage = DeviceStorage::new(size, ctx).map_err(|e| {
         anyhow!("failed to allocate device memory ({size} bytes) on device {device_id}: {e}")
     })?;
     register_storage(storage, agent)

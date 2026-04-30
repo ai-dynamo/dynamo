@@ -210,32 +210,105 @@ impl TransportManager {
         &self.context
     }
 
-    /// Get the H2D stream (for testing only).
+    /// Get the H2D stream as CUDA-specific type (for CUDA testing only).
+    ///
+    /// WARNING: This performs unsafe downcasting from DeviceStream to CudaStreamWrapper.
+    /// Only works when the backend is CUDA. Panics otherwise.
     #[cfg(all(test, feature = "testing-cuda"))]
     pub(crate) fn h2d_stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
-        self.context.h2d_stream()
+        Self::extract_cuda_stream(self.context.h2d_stream())
     }
 
-    /// Get the D2H stream (for testing only).
+    /// Get the D2H stream as CUDA-specific type (for CUDA testing only).
+    ///
+    /// WARNING: This performs unsafe downcasting from DeviceStream to CudaStreamWrapper.
+    /// Only works when the backend is CUDA. Panics otherwise.
     #[cfg(all(test, feature = "testing-cuda"))]
     #[allow(dead_code)]
     pub(crate) fn d2h_stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
-        self.context.d2h_stream()
+        Self::extract_cuda_stream(self.context.d2h_stream())
     }
 
     /// Get the CUDA context (for testing only).
+    ///
+    /// WARNING: This performs unsafe downcasting from DeviceContext to CudaContext.
+    /// Only works when the backend is CUDA. Panics otherwise.
     #[cfg(all(test, feature = "testing-cuda"))]
     pub(crate) fn cuda_context(&self) -> &std::sync::Arc<cudarc::driver::CudaContext> {
-        self.context.cuda_context()
+        Self::extract_cuda_context(self.context.device_context())
+    }
+
+    /// Helper to extract CUDA stream from DeviceStream (testing only).
+    ///
+    /// # Panics
+    /// Panics if the backend is not CUDA - this is a testing-only method that requires CUDA backend.
+    #[cfg(all(test, feature = "testing-cuda"))]
+    fn extract_cuda_stream(
+        stream: &std::sync::Arc<crate::block_manager::v2::device::DeviceStream>,
+    ) -> &std::sync::Arc<cudarc::driver::CudaStream> {
+        use crate::block_manager::v2::device::{DeviceBackend, cuda::CudaStreamWrapper};
+
+        // Validate backend is CUDA before performing unsafe downcast
+        assert_eq!(
+            stream.backend,
+            DeviceBackend::Cuda,
+            "extract_cuda_stream called on non-CUDA backend: {:?}",
+            stream.backend
+        );
+
+        unsafe {
+            let trait_ptr =
+                &*stream.ops as *const dyn crate::block_manager::v2::device::DeviceStreamOps;
+            let concrete_ptr = trait_ptr as *const CudaStreamWrapper;
+            (*concrete_ptr).inner()
+        }
+    }
+
+    /// Helper to extract CUDA context from DeviceContext (testing only).
+    ///
+    /// # Panics
+    /// Panics if the backend is not CUDA - this is a testing-only method that requires CUDA backend.
+    #[cfg(all(test, feature = "testing-cuda"))]
+    fn extract_cuda_context(
+        ctx: &std::sync::Arc<crate::block_manager::v2::device::DeviceContext>,
+    ) -> &std::sync::Arc<cudarc::driver::CudaContext> {
+        use crate::block_manager::v2::device::{DeviceBackend, cuda::CudaContext};
+
+        // Validate backend is CUDA before performing unsafe downcast
+        assert_eq!(
+            ctx.backend,
+            DeviceBackend::Cuda,
+            "extract_cuda_context called on non-CUDA backend: {:?}",
+            ctx.backend
+        );
+
+        unsafe {
+            let trait_ptr =
+                &*ctx.ops as *const dyn crate::block_manager::v2::device::DeviceContextOps;
+            let concrete_ptr = trait_ptr as *const CudaContext;
+            (*concrete_ptr).inner()
+        }
     }
 
     /// Register a CUDA event for completion (for testing only).
+    ///
+    /// Wraps the CUDA event in a DeviceEvent and registers it via the backend-agnostic path.
     #[cfg(all(test, feature = "testing-cuda"))]
     pub(crate) fn register_cuda_event(
         &self,
         event: cudarc::driver::CudaEvent,
     ) -> TransferCompleteNotification {
-        self.context.register_cuda_event(event)
+        use crate::block_manager::v2::device::{
+            DeviceBackend, DeviceEvent, cuda::CudaEventWrapper,
+        };
+
+        // Wrap CUDA event in backend-agnostic DeviceEvent
+        let device_event = DeviceEvent {
+            backend: DeviceBackend::Cuda,
+            ops: Box::new(CudaEventWrapper { event }),
+        };
+
+        self.context.register_device_event(device_event)
     }
 }
 
@@ -484,6 +557,7 @@ impl LayoutRegistry {
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use super::*;
+    use crate::block_manager::v2::device::DeviceBackend;
     use crate::block_manager::v2::physical::layout::LayoutConfig;
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
 
@@ -491,7 +565,13 @@ mod tests {
         NixlAgent::require_backends(name, &[]).expect("failed to create wrapped agent")
     }
 
+    fn get_test_backend() -> (DeviceBackend, u32) {
+        let backend = DeviceBackend::auto_detect().expect("No device backend available for test");
+        (backend, 0)
+    }
+
     fn make_test_layout(agent: &NixlAgent) -> PhysicalLayout {
+        let (backend, device_id) = get_test_backend();
         let config = LayoutConfig::builder()
             .num_blocks(2)
             .num_layers(2)
@@ -502,7 +582,7 @@ mod tests {
             .build()
             .unwrap();
 
-        PhysicalLayout::builder(agent.clone())
+        PhysicalLayout::builder(agent.clone(), backend, device_id)
             .with_config(config)
             .fully_contiguous()
             .allocate_system()

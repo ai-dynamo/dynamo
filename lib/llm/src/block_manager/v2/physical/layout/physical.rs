@@ -9,6 +9,8 @@ use super::{
     serialize::{LayoutDescriptor, LayoutTypeDetails},
 };
 
+use crate::block_manager::v2::device::DeviceBackend;
+
 use crate::block_manager::v2::memory::{MemoryRegion, StorageKind};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -66,8 +68,17 @@ impl NixlMetadata {
 
 impl PhysicalLayout {
     /// Create a typed builder that enforces NIXL registration.
-    pub fn builder(agent: NixlAgent) -> PhysicalLayoutBuilderDefault {
-        PhysicalLayoutBuilder::new(agent)
+    ///
+    /// # Arguments
+    /// * `agent` - NIXL agent for memory registration
+    /// * `device_backend` - Device backend (CUDA, HPU, XPU) for device/pinned allocations
+    /// * `device_id` - Device ID for device/pinned allocations
+    pub fn builder(
+        agent: NixlAgent,
+        device_backend: DeviceBackend,
+        device_id: u32,
+    ) -> PhysicalLayoutBuilderDefault {
+        PhysicalLayoutBuilder::new(agent, device_backend, device_id)
     }
 
     /// Create a new local physical layout.
