@@ -15,6 +15,8 @@ These changes build on the performance considerations outlined in our [first pos
 
 Agentic harnesses are still evolving quickly. Claude Code, Codex, and OpenClaw expose the same pressure points from different API surfaces, so the examples below focus on the core behaviors that custom serving stacks need to reproduce.
 
+![Standard server vs Dynamo across two turns of an agent loop. Each turn crosses the network at two edges: harness-to-server (where prompt stability decides cache reuse) and server-to-harness (where streaming tool dispatch decides when the harness can act). Dynamo changes both edges.](./images/fig-1-agent-loop.svg)
+
 ## Harness-Facing Dynamo Settings
 
 Our experiments used the newly released `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` model, though the same issues apply across models, reasoning parsers, and tool-call parsers.
@@ -52,6 +54,8 @@ These headers poison the KV cache and prevent it from being reused, even across 
 To restore KV-cache reuse, Dynamo added `--strip-anthropic-preamble`. The fix is mechanically small and operationally important: remove the unstable billing header before tokenization so that the stable prompt starts at token zero.
 
 The measured impact was large. On a Dynamo B200 deployment with a 52K-token prompt, a stable prefix landed at `168ms` TTFT. Keeping a varying per-session header in the prefix pushed that to `912ms`. Removing the billing header before tokenization brought it back to `169ms`. On this workload, the unstable header costs `744ms` per request and turns a reusable system prompt into a cold prefill. That is about a `5x` reduction in TTFT for new users hitting the same deployment or for the same user opening a new session.
+
+![TTFT across three prompt-prefix conditions on a 52K-token prompt: a stable prefix lands at 168 ms, the stripped Anthropic preamble at 169 ms, while a varying per-session billing header pushes TTFT to 912 ms — a single token at position zero is the difference between hot KV reuse and a full cold prefill.](./images/fig-2-ttft-prefix-stability.svg)
 
 ## The Nuances of Reasoning and Tool Parsing
 
@@ -159,6 +163,8 @@ data: {"choice_index":0,"tool_call":{"index":0,"id":"call-...","type":"function"
 ```
 
 That event tells the harness, in one shot, that the tool call is ready to execute. No harness-side delta assembly, no guessing whether the arguments are complete, and no custom parser living inside the harness. This makes Dynamo more easily compatible with custom harnesses.
+
+![Tool dispatch timing on a single turn. Standard servers surface the tool call only after the entire stream finishes; Dynamo emits a typed tool_call_dispatch event the moment the call is parsed, so the tool can run in parallel with the rest of the stream. Δt is the time saved per tool call.](./images/fig-3-streaming-dispatch-timeline.svg)
 
 ## Anthropic API Fidelity for Claude Code and OpenClaw
 
