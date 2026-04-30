@@ -22,9 +22,6 @@ A perf-benchmark Job for the GB200 disagg variant is provided alongside the depl
 
 Status: **Experimental** (Day-0). Modality: text only.
 
-> **⚠️ Known Day-0 issue (vLLM): thinking modes produce corrupted output.**
-> On the **vLLM** variant, requests with `chat_template_kwargs: {"thinking": true, ...}` emit malformed tokens (numeric tokens spliced mid-word, occasional special-token leakage). The bug is in the OSS port of DeepSeek-V4-Pro's sparse-attention path on the dsv4 vLLM stack and does not affect DeepSeek-V4-Flash on the same stack. Until the upstream fix lands, send `chat_template_kwargs: {"thinking": false}` in chat completion requests against the vLLM variant. Tool calling, structured output, and non-thinking responses work normally. The SGLang variant uses a different attention path (MXFP4 MoE + EAGLE MTP); exercise caution and verify output if testing thinking modes there.
-
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
@@ -312,7 +309,6 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 - **Image tag.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) ship with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace with your built Dynamo vLLM runtime tag — see Prerequisite 4. Both GB200 manifests expect an arm64 build.
 - **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe budget (`failureThreshold: 540` at `periodSeconds: 10`).
-- **Day-0 thinking modes.** Send `chat_template_kwargs: {"thinking": false}` until the upstream sparse-attention fix lands — see the callout at the top of this README.
 - **GB200: agg vs. disagg.** Both spread V4-Pro across two GB200 NVL4 trays via MNNVL/ComputeDomain. The agg variant runs one TP=8 group across both nodes (lower-latency, simpler topology, 2 pods); the disagg variant runs separate prefill and decode DP=8 workers (higher steady-state throughput at high concurrency, 4 pods). Use the agg variant for general-purpose serving and the disagg variant when prefill/decode separation pays off for the workload.
 
 ### SGLang-specific
