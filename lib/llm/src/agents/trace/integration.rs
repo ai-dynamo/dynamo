@@ -9,7 +9,8 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 use crate::agents::trace::{
-    AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy, AgentTraceRecord, WorkerInfo,
+    AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy, AgentTraceRecord,
+    DEFAULT_TOOL_EVENTS_TOPIC, WorkerInfo,
 };
 use crate::local_model::LocalModel;
 use crate::protocols::common::timing::RequestTracker;
@@ -87,7 +88,7 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
     local_model: &LocalModel,
 ) -> anyhow::Result<()> {
     let policy = super::policy().clone();
-    if !policy.tool_events_enabled {
+    if policy.tool_events_zmq_endpoint.is_none() {
         return Ok(());
     }
 
@@ -97,12 +98,11 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
         return Ok(());
     }
 
-    let namespace_name = tool_events_namespace(&policy, local_model);
+    let namespace_name = tool_events_namespace(local_model);
     let namespace = drt.namespace(namespace_name.clone())?;
-    let mut subscriber =
-        EventSubscriber::for_namespace(&namespace, policy.tool_events_topic.clone())
-            .await?
-            .typed::<AgentTraceRecord>();
+    let mut subscriber = EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
+        .await?
+        .typed::<AgentTraceRecord>();
 
     if TOOL_EVENT_INGEST_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -112,12 +112,11 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
         return Ok(());
     }
 
-    let topic = policy.tool_events_topic;
     let shutdown = drt.child_token();
     drt.runtime().secondary().spawn(async move {
         tracing::info!(
             namespace = %namespace_name,
-            topic = %topic,
+            topic = DEFAULT_TOOL_EVENTS_TOPIC,
             "Agent tool event ingest started"
         );
         loop {
@@ -167,16 +166,15 @@ async fn start_tool_event_relay_from_policy(
         return Ok(());
     }
 
-    let namespace_name = tool_events_namespace(policy, local_model);
+    let namespace_name = tool_events_namespace(local_model);
     let namespace = drt.namespace(namespace_name.clone())?;
     let component = namespace.component(local_model.endpoint_id().component.clone())?;
-    let topic = policy.tool_events_topic.clone();
     let relay = match AgentToolEventRelay::start(
         component,
         zmq_endpoint.clone(),
         policy.tool_events_zmq_topic.clone(),
         Some(namespace_name.clone()),
-        Some(topic.clone()),
+        Some(DEFAULT_TOOL_EVENTS_TOPIC.to_string()),
     )
     .await
     {
@@ -190,7 +188,7 @@ async fn start_tool_event_relay_from_policy(
     drt.runtime().secondary().spawn(async move {
         tracing::info!(
             namespace = %namespace_name,
-            topic = %topic,
+            topic = DEFAULT_TOOL_EVENTS_TOPIC,
             zmq_endpoint = %zmq_endpoint,
             "Agent tool event relay started"
         );
@@ -202,11 +200,10 @@ async fn start_tool_event_relay_from_policy(
     Ok(())
 }
 
-fn tool_events_namespace(policy: &AgentTracePolicy, local_model: &LocalModel) -> String {
-    policy
-        .tool_events_namespace
-        .clone()
-        .or_else(|| local_model.namespace().map(str::to_string))
+fn tool_events_namespace(local_model: &LocalModel) -> String {
+    local_model
+        .namespace()
+        .map(str::to_string)
         .unwrap_or_else(|| local_model.endpoint_id().namespace.clone())
 }
 

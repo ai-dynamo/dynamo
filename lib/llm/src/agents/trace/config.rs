@@ -3,11 +3,7 @@
 
 use std::sync::OnceLock;
 
-use dynamo_runtime::config::{
-    env_is_truthy, environment_names::llm::agent_trace as env_agent_trace,
-};
-
-use super::DEFAULT_TOOL_EVENTS_TOPIC;
+use dynamo_runtime::config::environment_names::llm::agent_trace as env_agent_trace;
 
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
@@ -24,9 +20,6 @@ pub struct AgentTracePolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
-    pub tool_events_enabled: bool,
-    pub tool_events_topic: String,
-    pub tool_events_namespace: Option<String>,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
 }
@@ -56,15 +49,6 @@ fn load_from_env() -> AgentTracePolicy {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let tool_events_topic = std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_TOPIC)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_TOOL_EVENTS_TOPIC.to_string());
-    let tool_events_namespace = std::env::var(env_agent_trace::DYN_AGENT_TRACE_NAMESPACE)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     let tool_events_zmq_endpoint =
         std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
@@ -75,8 +59,6 @@ fn load_from_env() -> AgentTracePolicy {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-    let tool_events_enabled = env_is_truthy(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS)
-        || tool_events_zmq_endpoint.is_some();
     let capacity = std::env::var(env_agent_trace::DYN_AGENT_TRACE_CAPACITY)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -101,7 +83,7 @@ fn load_from_env() -> AgentTracePolicy {
         .filter(|value| *value > 0);
 
     AgentTracePolicy {
-        enabled: !sinks.is_empty() || tool_events_enabled,
+        enabled: !sinks.is_empty() || tool_events_zmq_endpoint.is_some(),
         sinks,
         output_path,
         capacity,
@@ -109,9 +91,6 @@ fn load_from_env() -> AgentTracePolicy {
         jsonl_flush_interval_ms,
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
-        tool_events_enabled,
-        tool_events_topic,
-        tool_events_namespace,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
     }

@@ -39,6 +39,13 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
         return Ok(());
     }
 
+    if policy.tool_events_zmq_endpoint.is_some() && policy.sinks.is_empty() {
+        tracing::warn!(
+            tool_events_zmq_endpoint = ?policy.tool_events_zmq_endpoint,
+            "agent trace tool events are enabled but no local trace sinks are configured; set DYN_AGENT_TRACE_SINKS to write local trace records"
+        );
+    }
+
     BUS.init(policy.capacity);
     sink::spawn_workers_from_env(shutdown).await?;
 
