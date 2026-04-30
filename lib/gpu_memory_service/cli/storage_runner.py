@@ -98,17 +98,20 @@ def _run_load(args) -> None:
     socket_path = _resolve_socket(args.device, args.socket_path)
 
     logger.info(
-        "Loading GMS state: device=%s, socket=%s, input_dir=%s, clear_existing=%s",
+        "Loading GMS state: device=%s, socket=%s, input_dir=%s, "
+        "clear_existing=%s, transfer_backend=%s",
         args.device,
         socket_path,
         args.input_dir,
         not args.no_clear,
+        args.transfer_backend,
     )
 
     client = GMSStorageClient(
         socket_path=socket_path,
         device=args.device,
         timeout_ms=args.timeout_ms,
+        transfer_backend=args.transfer_backend,
     )
 
     id_map = client.load_to_gms(
@@ -130,6 +133,11 @@ _SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from gpu_memory_service.snapshot.transfer import (
+        DEFAULT_TRANSFER_BACKEND,
+        TRANSFER_BACKEND_CHOICES,
+    )
+
     parser = argparse.ArgumentParser(
         prog="gms-storage-client",
         description="Save and load GPU Memory Service state to/from disk.",
@@ -231,6 +239,19 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="Thread pool size for parallel shard reads (default: 8).",
+    )
+    load_p.add_argument(
+        "--transfer-backend",
+        choices=TRANSFER_BACKEND_CHOICES,
+        default=DEFAULT_TRANSFER_BACKEND,
+        help=(
+            "Byte transfer backend for restore. "
+            "'default' keeps the existing CPU-staged disk-to-GPU copy path; "
+            "'aio' uses Linux native AIO for CPU-staged file reads; "
+            "'nixl-gds' uses NIXL GDS_MT for direct file-to-GPU transfers; "
+            "'cufile-gds' uses direct cuFile reads with the --workers value "
+            "as the maximum in-flight read count."
+        ),
     )
     load_p.add_argument(
         "--no-clear",
