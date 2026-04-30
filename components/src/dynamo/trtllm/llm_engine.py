@@ -111,13 +111,16 @@ class TrtllmLLMEngine(LLMEngine):
             logging.info("Applying engine arg overrides: %s", overrides)
             deep_update(engine_args, overrides)
 
+        # Pull the *post-override* values from engine_args so the engine instance
+        # (and the EngineConfig the frontend reads in start()) stays in sync with
+        # what the underlying TRT-LLM engine actually got.
         engine = cls(
             engine_args=engine_args,
             model_name=config.model,
             served_model_name=config.served_model_name,
-            max_seq_len=config.max_seq_len,
-            max_batch_size=config.max_batch_size,
-            max_num_tokens=config.max_num_tokens,
+            max_seq_len=engine_args.get("max_seq_len", config.max_seq_len),
+            max_batch_size=engine_args.get("max_batch_size", config.max_batch_size),
+            max_num_tokens=engine_args.get("max_num_tokens", config.max_num_tokens),
             kv_block_size=config.kv_block_size,
         )
         worker_config = WorkerConfig.from_runtime_config(
