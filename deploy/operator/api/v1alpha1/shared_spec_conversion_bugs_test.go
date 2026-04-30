@@ -215,7 +215,7 @@ func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testin
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "metadata-only-container-order",
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Name: "hub-only-template-name"},
+					ObjectMeta: metav1.ObjectMeta{Name: testHubOnlyTemplateName},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: "main", Image: "worker:latest"},
@@ -240,7 +240,7 @@ func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testin
 	if !ok {
 		t.Fatalf("failed to decode %s: %s", annDCDHubSpec, raw)
 	}
-	if preserved.PodTemplate == nil || preserved.PodTemplate.Name != "hub-only-template-name" {
+	if preserved.PodTemplate == nil || preserved.PodTemplate.Name != testHubOnlyTemplateName {
 		t.Fatalf("expected preserved podTemplate metadata, got %#v", preserved.PodTemplate)
 	}
 	if len(preserved.PodTemplate.Spec.Containers) != 0 {
@@ -267,8 +267,8 @@ func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testin
 	if diff := cmp.Diff(wantOrder, gotOrder); diff != "" {
 		t.Fatalf("container order mismatch after live spoke reorder (-want +got):\n%s", diff)
 	}
-	if restored.Spec.PodTemplate.Name != "hub-only-template-name" {
-		t.Fatalf("podTemplate name = %q, want hub-only-template-name", restored.Spec.PodTemplate.Name)
+	if restored.Spec.PodTemplate.Name != testHubOnlyTemplateName {
+		t.Fatalf("podTemplate name = %q, want %s", restored.Spec.PodTemplate.Name, testHubOnlyTemplateName)
 	}
 }
 

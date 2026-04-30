@@ -241,6 +241,7 @@ func dcdHubSpecNeedsSave(src *v1beta1.DynamoComponentDeployment, save *v1beta1.D
 					src.Spec.PodTemplate != nil)
 }
 
+//nolint:unparam // Keep the structural conversion signature aligned; this direction does not currently need ctx.
 func convertDCDSpecFromHub(src *v1beta1.DynamoComponentDeploymentSpec, dst *DynamoComponentDeploymentSpec, restored *DynamoComponentDeploymentSpec, save *v1beta1.DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
 	if src == nil || dst == nil {
 		return nil

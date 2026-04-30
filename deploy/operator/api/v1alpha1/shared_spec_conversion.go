@@ -229,6 +229,12 @@ func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, 
 	if dst == nil || preserved == nil {
 		return
 	}
+	restoreSharedAlphaOnlySimpleFields(dst, preserved)
+	restoreSharedAlphaOnlyPodFields(dst, preserved, mainContainerPresent)
+	restoreSharedAlphaOnlyDisabledFeatures(dst, preserved)
+}
+
+func restoreSharedAlphaOnlySimpleFields(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
 	if dst.SubComponentType == "" {
 		dst.SubComponentType = preserved.SubComponentType
 	}
@@ -249,6 +255,9 @@ func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, 
 	if len(dst.Labels) == 0 {
 		dst.Labels = maps.Clone(preserved.Labels)
 	}
+}
+
+func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
 	if shouldRestorePreservedSharedMemory(dst.SharedMemory, preserved.SharedMemory) {
 		dst.SharedMemory = preserved.SharedMemory.DeepCopy()
 	}
@@ -269,6 +278,9 @@ func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, 
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
 		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
 	}
+}
+
+func restoreSharedAlphaOnlyDisabledFeatures(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
 	if dst.ScalingAdapter == nil && preserved.ScalingAdapter != nil && !preserved.ScalingAdapter.Enabled {
 		dst.ScalingAdapter = preserved.ScalingAdapter.DeepCopy()
 	}
@@ -467,6 +479,8 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 // convertSharedSpecFromHub converts fields represented by both versions from
 // src, restores only v1alpha1-only fields from restored, and writes v1beta1-only
 // fields to save.
+//
+//nolint:unparam // Keep the structural conversion signature aligned; this direction does not currently need ctx.
 func convertSharedSpecFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
 	if src == nil || dst == nil {
 		return nil
