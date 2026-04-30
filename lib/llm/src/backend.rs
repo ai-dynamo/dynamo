@@ -159,7 +159,7 @@ impl Backend {
             validate_engine_decode: self.validate_engine_decode,
             finished: false,
             tokenizer: tokenizer.clone(),
-            skip_special_tokens,
+            skip_special_tokens: params.skip_special_tokens,
         })
     }
 }
@@ -327,6 +327,15 @@ impl
                     data.text = text;
                     data.tokens = Some(tokens);
 
+                    // Per-entry decode is O(positions * top_k) per delta. Bounded in
+                    // practice (streaming: 1 * top_k <= 20) and dwarfed by serialization
+                    // on the same path, so we ship the simple version. Revisit if a
+                    // streaming flamegraph with top_logprobs=20 puts this above ~1%:
+                    // the cheapest win is a shared LRU on the Tokenizer keyed by
+                    // (token_id, skip_special_tokens) — top-k entries repeat heavily
+                    // across positions and requests. Do NOT batch as a single
+                    // decode(&[ids..]) call: BPE merge / leading-space rules differ
+                    // between single-token and sequence decode and will corrupt strings.
                     if let Some(top_logprobs) = data.top_logprobs.as_mut() {
                         for position in top_logprobs.iter_mut() {
                             for entry in position.iter_mut() {
