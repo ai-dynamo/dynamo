@@ -634,8 +634,7 @@ class Publisher:
                         block_mm_infos.append(
                             {
                                 "mm_objects": [
-                                    {"mm_hash": h, "offsets": []}
-                                    for h in mm_hashes
+                                    {"mm_hash": h, "offsets": []} for h in mm_hashes
                                 ]
                             }
                         )
