@@ -1736,10 +1736,30 @@ mod tests {
     #[test]
     fn test_parser_requires_special_tokens() {
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
-            (Some("gemma4"), None, true, "gemma4 tool-call only → required"),
-            (None, Some("gemma4"), true, "gemma4 reasoning only → required"),
-            (Some("gemma-4"), None, true, "gemma-4 hyphen alias (tool) → required"),
-            (None, Some("gemma-4"), true, "gemma-4 hyphen alias (reasoning) → required"),
+            (
+                Some("gemma4"),
+                None,
+                true,
+                "gemma4 tool-call only → required",
+            ),
+            (
+                None,
+                Some("gemma4"),
+                true,
+                "gemma4 reasoning only → required",
+            ),
+            (
+                Some("gemma-4"),
+                None,
+                true,
+                "gemma-4 hyphen alias (tool) → required",
+            ),
+            (
+                None,
+                Some("gemma-4"),
+                true,
+                "gemma-4 hyphen alias (reasoning) → required",
+            ),
             (
                 Some("gemma4"),
                 Some("gemma4"),
