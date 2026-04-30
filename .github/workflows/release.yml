@@ -293,7 +293,7 @@ jobs:
           # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
           echo ""
           echo "=== Planner Image ==="
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner-cpu"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
           copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
           # ---- Snapshot image ----
