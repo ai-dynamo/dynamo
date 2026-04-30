@@ -23,8 +23,9 @@ Check optional integrations only when they are installed:
 deploy/pre-deployment/pre-deployment-check.sh --require keda,opentelemetry,parca,lws-volcano --output json
 ```
 
-For the A4 k3s profile, Parca pins `parca-agent` to `v0.20.0`. Newer
-chart-compatible agent images currently fail on the Rocky 9.7 kernel while
-loading their BPF object with `argument list too long`; the pinned image keeps
-the node-level profiling DaemonSet healthy while the Parca server and
-ServiceMonitors remain enabled.
+For the A4 k3s profile, the Parca server remains enabled but the `parca-agent`
+DaemonSet is disabled. Chart-compatible agent images currently fail on the
+Rocky 9.7 kernel while loading their BPF object with `argument list too long`,
+which would keep the production app permanently degraded. Keep server-side Parca
+and ServiceMonitors active, and re-enable the agent only after validating a
+kernel/agent pair that remains healthy under Argo reconciliation.

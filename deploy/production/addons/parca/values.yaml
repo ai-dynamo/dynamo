@@ -2,13 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 agent:
-  enabled: true
-  image:
-    tag: "v0.20.0"
-  extraArgs:
-    - --dwarf-unwinding-disable
-    - --python-unwinding-disable
-    - --ruby-unwinding-disable
+  enabled: false
   serviceMonitor:
     enabled: true
 
