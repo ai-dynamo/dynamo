@@ -108,9 +108,8 @@ impl PrefillRequestDispatcher for RecordingDispatcher {
 /// ```json
 /// {
 ///   "model": "<model-id>",
-///   "prompt": null,                        // tokens carried in prompt_token_ids
+///   "prompt": [<token-id>, ...],           // pre-tokenized; vLLM accepts list[int] directly
 ///   "max_tokens": 1,                       // prefill-only; we only need KV state
-///   "prompt_token_ids": [...],
 ///   "kv_transfer_params": {                // surfaced to the connector;
 ///     "remote_prefill": { ... }            // shape == kvbm_disagg_protocol::TransferParams
 ///   }
@@ -158,11 +157,17 @@ impl PrefillRequestDispatcher for HttpVllmDispatcher {
             let transfer_params = kvbm_disagg_protocol::TransferParams::remote_prefill(
                 request.remote_prefill_params(),
             );
+            // vLLM `CompletionRequest.prompt` accepts `list[int]` directly
+            // (see `validate_prompt_and_prompt_embeds` in
+            // `vllm/entrypoints/openai/completion/protocol.py`); sending
+            // tokens as `prompt` skips re-tokenization. `prompt_token_ids`
+            // is a *response* field, not a request input — passing it
+            // alongside `"prompt": null` fails the validator with
+            // "Either prompt or prompt_embeds must be provided".
             let body = json!({
                 "model": self.model,
-                "prompt": null,
+                "prompt": request.token_ids,
                 "max_tokens": 1,
-                "prompt_token_ids": request.token_ids,
                 "kv_transfer_params": transfer_params,
             });
 
@@ -313,8 +318,12 @@ mod tests {
         assert_eq!(payload["model"].as_str(), Some("Qwen/Qwen3-0.6B"));
         assert_eq!(payload["max_tokens"].as_u64(), Some(1));
         assert!(
-            payload["prompt_token_ids"].is_array(),
-            "prompt_token_ids must be present"
+            payload["prompt"].is_array(),
+            "prompt must carry the token-id list — vLLM rejects `prompt: null`"
+        );
+        assert!(
+            payload["prompt_token_ids"].is_null(),
+            "prompt_token_ids is a response field, must not be sent as request input"
         );
         // kv_transfer_params must deserialize into kvbm_disagg_protocol::TransferParams
         // — this is the contract the prefill connector relies on via

@@ -98,9 +98,35 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         // attach/diff/pull; subsequent calls just return the
         // cached external-token count.
         let n = self.coordinator.ensure_started(request_id, remote)?;
+
+        // On-policy invariant (mirrors `Slot::finalize_match_check` in
+        // `connector/leader/slot.rs`, which encodes the same rule for
+        // local matches): `async_load = true` requires
+        // `matched_tokens > 0`. vLLM's scheduler asserts this at
+        // `vllm/v1/core/sched/scheduler.py` (search for
+        // `num_external_computed_tokens > 0` under `if load_kv_async:`).
+        //
+        // When `ensure_started` returns 0 — common when decode has no
+        // local-match cache for prefill to onboard from G2 — there is
+        // nothing to async-load. The CD setup (peer registration,
+        // session attach) has already completed synchronously inside
+        // `ensure_started`; the worker observer publishes blocks to
+        // decode as they're produced during the upcoming forward
+        // pass. Fall through to the inner gnmt so vLLM schedules
+        // normal compute on the prompt.
+        if n == 0 {
+            tracing::info!(
+                "prefill_gnmt: ensure_started returned 0 external tokens — \
+                 passthrough to inner so vLLM forward-passes the prompt"
+            );
+            return self
+                .inner
+                .get_num_new_matched_tokens(request_id, num_computed_tokens);
+        }
+
         tracing::info!(
             external_tokens = n,
-            "prefill_gnmt: ensure_started returned (Some(N), true)"
+            "prefill_gnmt: ensure_started returned (Some(N>0), true) — async onboard"
         );
         Ok((Some(n), true))
     }

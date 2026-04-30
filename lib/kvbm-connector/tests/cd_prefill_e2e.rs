@@ -388,6 +388,129 @@ async fn cd_prefill_non_cd_request_passes_through() -> Result<()> {
     Ok(())
 }
 
+/// Build a CD-bound harness where decode supplied **no** sequence
+/// hashes for prefill to onboard from G2. `inner_gnmt` controls the
+/// passthrough tuple the inner shim returns; the wrapper must surface
+/// it verbatim instead of forging `(Some(0), true)`.
+fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness {
+    let g2_manager = build_g2_manager(64);
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+
+    let inner = MockInnerLeaderShim::new(BLOCK_SIZE, g2_manager.clone());
+    let g1_block_ids: Vec<usize> = (1000..1000 + TOTAL_BLOCKS).collect();
+    let decode_g2_block_ids: Vec<usize> = (5000..5000 + TOTAL_BLOCKS).collect();
+
+    let session_id = uuid::Uuid::new_v4();
+    let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
+    // CD-bound but with **empty** sequence_hashes — mirrors the
+    // hub dispatcher payload when decode has no local-match cache to
+    // forward (the common golden-path case).
+    let transfer_params = Some(cd_transfer_params(
+        session_id,
+        decode_instance_id,
+        Vec::new(),
+    ));
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: 0,
+        local_match_blocks: 0,
+        all_hashes: all_hashes.clone(),
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(Vec::new())),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: inner_gnmt,
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params,
+    };
+    inner.install_slot("req-1", slot);
+
+    let transport = MockCdBlockTransport::new();
+    let workers = MockCdWorkerHook::new();
+    let factory = MockSessionFactory::new();
+    let coordinator = PrefillCoordinatorImpl::new(
+        inner.clone(),
+        transport.clone(),
+        workers.clone(),
+        factory.clone(),
+        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
+        tokio::runtime::Handle::current(),
+    );
+    let wrapper =
+        PrefillDisaggLeader::from_parts(inner.clone(), coordinator.clone(), workers.clone());
+
+    TestHarness {
+        wrapper,
+        coordinator,
+        inner,
+        transport,
+        workers,
+        factory,
+        all_hashes,
+        g1_block_ids,
+        decode_g2_block_ids,
+        output_blocks: Vec::new(),
+        decode_instance_id,
+    }
+}
+
+/// Regression: CD-bound prefill request with `sequence_hashes=[]` (no
+/// G2 cache hits to onboard) must NOT return `(Some(0), true)`.
+///
+/// vLLM's scheduler asserts `num_external_computed_tokens > 0` whenever
+/// `load_kv_async` is true (`vllm/v1/core/sched/scheduler.py`, search
+/// for `num_external_computed_tokens > 0` under `if load_kv_async:`).
+/// This invariant is also encoded locally in
+/// [`crate::connector::leader::slot::Slot::finalize_match_check`] —
+/// `(Some(matched_tokens), matched_tokens > 0)`.
+///
+/// History: shipping the smoke surfaced this as `EngineCore` panicking
+/// on the prefill side mid-request. The wrapper was unconditionally
+/// returning `(Some(n), true)` from `ensure_started` even when n=0,
+/// violating both the local invariant and vLLM's contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_no_g2_hits_passes_through_inner_gnmt() -> Result<()> {
+    // Inner returns the typical "fresh request, no local match" tuple.
+    let inner_gnmt = (Some(0), false);
+    let h = build_harness_cd_no_g2_hits(inner_gnmt);
+    h.wrapper.create_slot(make_request())?;
+
+    let result = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(
+        result, inner_gnmt,
+        "with empty sequence_hashes the wrapper must passthrough to inner — \
+         (Some(0), true) violates vLLM's load_kv_async invariant",
+    );
+
+    // Inner shim must have been consulted (the passthrough call).
+    // Coordinator's CD setup still ran inside ensure_started so the
+    // worker observer can publish blocks during the upcoming forward
+    // pass — but with no G2 hits there is no async onboard and the
+    // gnmt return is purely the inner's verdict.
+
+    Ok(())
+}
+
+/// Pin the `(Some(n>0), true)` half of the same invariant — the
+/// existing `cd_prefill_happy_path` already covers this implicitly
+/// (NUM_EXTERNAL > 0), but make the rule explicit alongside the n=0
+/// regression so the contract is visible in one place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_with_g2_hits_returns_async_load() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let n = count.expect("matched-tokens count must be Some when CD onboards");
+    assert!(n > 0, "n>0 required when async_load=true");
+    assert!(async_flag, "async_load=true required when n>0 onboards");
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_used(h: &TestHarness) {
     let _ = (
