@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg(feature = "testing")]
+
 //! Integration tests for `VeloSession` / `VeloSessionFactory` over a real
 //! velo TCP loopback pair.
 //!
@@ -88,11 +90,8 @@ async fn build_side() -> Side {
     leader
         .register_handlers()
         .expect("register leader handlers");
-    let factory = VeloSessionFactory::new(
-        Arc::clone(&velo),
-        leader,
-        tokio::runtime::Handle::current(),
-    );
+    let factory =
+        VeloSessionFactory::new(Arc::clone(&velo), leader, tokio::runtime::Handle::current());
     Side {
         velo,
         factory,
@@ -226,7 +225,10 @@ async fn close_from_holder_terminates_streams() -> Result<()> {
     let evt = tokio::time::timeout(Duration::from_secs(30), lifecycle.next())
         .await?
         .expect("detached lifecycle");
-    assert!(matches!(evt, LifecycleEvent::Detached { .. }), "got {evt:?}");
+    assert!(
+        matches!(evt, LifecycleEvent::Detached { .. }),
+        "got {evt:?}"
+    );
 
     // Commits stream sees Closed within timeout.
     let next = tokio::time::timeout(Duration::from_secs(30), commits.next()).await?;

@@ -113,6 +113,14 @@ pub struct RemotePrefillParams {
     pub decode_endpoint: Option<SessionEndpoint>,
     #[serde(default)]
     pub sequence_hashes: Vec<SequenceHash>,
+    /// Decode-side `num_computed_tokens`. Prefill needs this to
+    /// translate its 0-indexed position in `sequence_hashes`
+    /// (which carries decode's local-match slice) back to the
+    /// absolute token-block index in the original sequence —
+    /// `expected_hashes[i]` is at absolute position
+    /// `(num_computed_tokens / block_size) + i`.
+    #[serde(default)]
+    pub num_computed_tokens: usize,
 }
 
 impl RemotePrefillParams {
@@ -123,6 +131,7 @@ impl RemotePrefillParams {
             initiator_instance_id,
             decode_endpoint: None,
             sequence_hashes: Vec::new(),
+            num_computed_tokens: 0,
         }
     }
 }
@@ -152,6 +161,7 @@ impl RemotePrefillRequest {
             initiator_instance_id: self.initiator_instance_id,
             decode_endpoint: self.decode_endpoint.clone(),
             sequence_hashes: self.sequence_hashes.clone(),
+            num_computed_tokens: self.num_computed_tokens,
         }
     }
 

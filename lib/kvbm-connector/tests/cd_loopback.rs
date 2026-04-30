@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
 use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillCoordinatorImpl;
@@ -31,7 +32,6 @@ use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConnectorLeaderApi, DecodeDisaggLeader, PrefillDisaggLeader,
     RemotePrefillCoordinator,
 };
-use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_disagg_protocol::{
     DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
 };
@@ -149,11 +149,8 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         p_factory.clone(),
         tokio::runtime::Handle::current(),
     );
-    let p_wrapper = PrefillDisaggLeader::from_parts(
-        p_inner.clone(),
-        p_coordinator.clone(),
-        p_workers.clone(),
-    );
+    let p_wrapper =
+        PrefillDisaggLeader::from_parts(p_inner.clone(), p_coordinator.clone(), p_workers.clone());
 
     // ---------- Drive D-side GNMT (opens session, commits + makes-available local match) ----------
     d_wrapper.create_slot(make_request("req-1"))?;
@@ -184,6 +181,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         initiator_instance_id: d_instance_id,
         decode_endpoint: Some(decode_endpoint),
         sequence_hashes: local_match_hashes.clone(),
+        num_computed_tokens: COMPUTED_BLOCKS * BLOCK_SIZE,
     });
     p_inner.install_slot(
         "req-1",

@@ -72,6 +72,7 @@ fn cd_transfer_params(
         initiator_instance_id,
         decode_endpoint: Some(synthetic_decode_endpoint()),
         sequence_hashes: expected_hashes,
+        num_computed_tokens: 0,
     })
 }
 
@@ -203,10 +204,7 @@ async fn drive_setup(h: &TestHarness) -> Arc<MockSession> {
     // Inject the peer's commits, then the available blocks.
     session.inject_peer_commit(h.all_hashes.clone());
     session.inject_peer_finish_commits();
-    session.inject_peer_available(committed_blocks(
-        &h.decode_g2_block_ids,
-        &h.all_hashes,
-    ));
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
     session.inject_peer_drained();
 
     // Coordinator calls session.pull(...) once it's drained the
@@ -254,10 +252,8 @@ async fn cd_prefill_happy_path() -> Result<()> {
     h.transport.resolve_onboard(0, Ok(()));
 
     wait_until(|| h.workers.completed_contains("req-1")).await;
-    wait_until(|| {
-        h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete)
-    })
-    .await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete))
+        .await;
 
     // Forward-pass output: commit + make_available via the
     // production-shaped helper.
@@ -297,10 +293,7 @@ async fn cd_prefill_usaa_before_pull_completes() -> Result<()> {
     // session.pull() but we DON'T resolve it yet.
     session.inject_peer_commit(h.all_hashes.clone());
     session.inject_peer_finish_commits();
-    session.inject_peer_available(committed_blocks(
-        &h.decode_g2_block_ids,
-        &h.all_hashes,
-    ));
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
 
     session.wait_pull_count(1).await;
     assert!(matches!(
@@ -322,10 +315,8 @@ async fn cd_prefill_usaa_before_pull_completes() -> Result<()> {
     h.transport.resolve_onboard(0, Ok(()));
 
     wait_until(|| h.workers.completed_contains("req-1")).await;
-    wait_until(|| {
-        h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete)
-    })
-    .await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete))
+        .await;
 
     Ok(())
 }

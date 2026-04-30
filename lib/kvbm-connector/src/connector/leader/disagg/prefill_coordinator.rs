@@ -17,8 +17,9 @@
 //! interacts with the coordinator at the `ConnectorLeaderApi`
 //! boundary; the coordinator does not see vLLM directly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, anyhow};
@@ -50,11 +51,7 @@ pub trait PrefillCoordinator: Send + Sync {
     /// attach + commit/availability drain + chunked-pull
     /// pipeline asynchronously. Subsequent calls return the
     /// cached external-token count without side effects.
-    fn ensure_started(
-        &self,
-        request_id: &str,
-        params: &RemotePrefillParams,
-    ) -> Result<usize>;
+    fn ensure_started(&self, request_id: &str, params: &RemotePrefillParams) -> Result<usize>;
 
     /// USAA hand-off.
     ///
@@ -77,11 +74,7 @@ pub trait PrefillCoordinator: Send + Sync {
     /// blocks flow into [`commit_output_blocks`] automatically.
     /// For Phase A this is a no-op; tests call
     /// [`commit_output_blocks`] directly.
-    fn observe_forward(
-        &self,
-        request_id: &str,
-        meta: &KvConnectorMetadata,
-    ) -> Result<()>;
+    fn observe_forward(&self, request_id: &str, meta: &KvConnectorMetadata) -> Result<()>;
 
     /// Detach the slot side.
     ///
@@ -111,6 +104,12 @@ pub enum PrefillStatus {
 struct RequestState {
     num_external_tokens: usize,
     expected_hashes: Vec<SequenceHash>,
+    /// Decode-side `computed_blocks` — offset to add when
+    /// translating an `expected_hashes` index back to the
+    /// absolute token-block index in the original sequence.
+    /// `expected_hashes[i]` corresponds to absolute position
+    /// `computed_blocks_offset + i`.
+    computed_blocks_offset: usize,
     /// Attached session — populated once `factory.attach` resolves.
     session: Mutex<Option<Arc<dyn Session>>>,
     /// G1 destinations from USAA, stashed until pull/register
@@ -129,10 +128,15 @@ struct RequestState {
 }
 
 impl RequestState {
-    fn new(num_external_tokens: usize, expected_hashes: Vec<SequenceHash>) -> Self {
+    fn new(
+        num_external_tokens: usize,
+        expected_hashes: Vec<SequenceHash>,
+        computed_blocks_offset: usize,
+    ) -> Self {
         Self {
             num_external_tokens,
             expected_hashes,
+            computed_blocks_offset,
             session: Mutex::new(None),
             pending_g1: Mutex::new(None),
             registered_g2: Mutex::new(Vec::new()),
@@ -140,6 +144,121 @@ impl RequestState {
             pulls_complete: AtomicBool::new(false),
             onboarding_scheduled: AtomicBool::new(false),
             status: Mutex::new(PrefillStatus::Attaching),
+        }
+    }
+}
+
+// ============================================================================
+// ConditionalDecodeG2Observer
+// ============================================================================
+//
+// One observer instance, registered ONCE with the offload pipeline at
+// coordinator construction. Holds per-request residual hash sets; as the
+// pipeline registers G2 blocks, the observer pops matched hashes from the
+// matching request's set and forwards the matched blocks to
+// `commit_output_blocks`. When a request's residual goes empty, its entry
+// is auto-dropped.
+//
+// `break;` on first hash match: if two simultaneous requests share an
+// expected output hash (rare; would mean identical continuation blocks),
+// the first iterator-ordered request claims. Document and revisit only
+// if production hits the case.
+
+pub struct ConditionalDecodeG2Observer {
+    /// Per-request residual hashset: hashes we still expect to
+    /// see registered for this request. Entries removed as
+    /// matches land. Empty entry → dropped.
+    pending: Mutex<HashMap<String, HashSet<SequenceHash>>>,
+    /// Weak so observer outlives drops cleanly without holding
+    /// the coordinator alive.
+    coordinator: Mutex<Weak<PrefillCoordinatorImpl>>,
+}
+
+impl ConditionalDecodeG2Observer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            pending: Mutex::new(HashMap::new()),
+            coordinator: Mutex::new(Weak::new()),
+        })
+    }
+
+    fn install_coordinator(&self, coord: Weak<PrefillCoordinatorImpl>) {
+        *self.coordinator.lock() = coord;
+    }
+
+    /// Track a new request's expected output hashes. Idempotent —
+    /// re-tracking with a different set replaces the prior entry.
+    pub fn track_request(&self, request_id: String, expected: HashSet<SequenceHash>) {
+        self.pending.lock().insert(request_id, expected);
+    }
+
+    /// Drop residual entry for a request (e.g. on
+    /// `on_request_finished`). No-op if not tracked.
+    pub fn untrack_request(&self, request_id: &str) {
+        self.pending.lock().remove(request_id);
+    }
+
+    /// Test accessor: snapshot of remaining hashes for `request_id`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_for(&self, request_id: &str) -> Option<HashSet<SequenceHash>> {
+        self.pending.lock().get(request_id).cloned()
+    }
+
+    /// Test accessor: count of tracked requests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn tracked_count(&self) -> usize {
+        self.pending.lock().len()
+    }
+
+    /// Called by the offload pipeline's register-observer path
+    /// after each batch of G2 blocks is registered.
+    ///
+    /// Lock split: matches are computed under the `pending`
+    /// guard, then the guard is dropped before
+    /// `commit_output_blocks` is called (which acquires session
+    /// locks). Avoids cross-lock hazards.
+    pub fn observe(&self, blocks: &[ImmutableBlock<G2>]) {
+        let mut by_request: HashMap<String, Vec<ImmutableBlock<G2>>> = HashMap::new();
+        let mut empty_after: Vec<String> = Vec::new();
+        {
+            let mut pending = self.pending.lock();
+            for block in blocks {
+                let hash = block.sequence_hash();
+                // Linear scan over active CD requests. N expected
+                // small; if profiling shows hot, swap for a
+                // SequenceHash → request_id reverse index updated
+                // alongside `pending` mutations.
+                for (request_id, hashes) in pending.iter_mut() {
+                    if hashes.remove(&hash) {
+                        by_request
+                            .entry(request_id.clone())
+                            .or_default()
+                            .push(block.clone());
+                        break;
+                    }
+                }
+            }
+            for (request_id, hashes) in pending.iter() {
+                if hashes.is_empty() {
+                    empty_after.push(request_id.clone());
+                }
+            }
+            for request_id in &empty_after {
+                pending.remove(request_id);
+            }
+        }
+
+        let coord = self.coordinator.lock().upgrade();
+        if let Some(coord) = coord {
+            for (request_id, blocks) in by_request {
+                if let Err(err) = coord.commit_output_blocks(&request_id, blocks) {
+                    tracing::error!(
+                        request_id,
+                        error = %err,
+                        "commit_output_blocks failed from observer"
+                    );
+                }
+            }
         }
     }
 }
@@ -152,6 +271,9 @@ pub struct PrefillCoordinatorImpl {
     session_factory: Arc<dyn SessionFactory>,
     runtime: Handle,
     states: DashMap<String, Arc<RequestState>>,
+    /// Single observer instance, registered ONCE with the
+    /// offload pipeline. Holds per-request residual state.
+    observer: Arc<ConditionalDecodeG2Observer>,
     weak_self: std::sync::Weak<Self>,
 }
 
@@ -163,15 +285,39 @@ impl PrefillCoordinatorImpl {
         session_factory: Arc<dyn SessionFactory>,
         runtime: Handle,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| Self {
+        let observer = ConditionalDecodeG2Observer::new();
+        let coord = Arc::new_cyclic(|weak_self| Self {
             inner,
             transport,
             worker_hook,
             session_factory,
             runtime,
             states: DashMap::new(),
+            observer: Arc::clone(&observer),
             weak_self: weak_self.clone(),
-        })
+        });
+        // Wire the weak coordinator back into the observer so
+        // observe() can call commit_output_blocks.
+        observer.install_coordinator(Arc::downgrade(&coord));
+        coord
+    }
+
+    /// Accessor for the offload-pipeline observer. Phase B
+    /// `init.rs` wiring registers this with the G1→G2 pipeline:
+    /// `pipeline.add_register_observer(coord.observer_callback())`.
+    pub fn observer(&self) -> &Arc<ConditionalDecodeG2Observer> {
+        &self.observer
+    }
+
+    /// Returns a closure suitable for
+    /// `Pipeline::add_register_observer`. Captures
+    /// `Arc<ConditionalDecodeG2Observer>` so the closure stays
+    /// valid for the pipeline's lifetime.
+    pub fn observer_callback(
+        &self,
+    ) -> Arc<dyn Fn(&[ImmutableBlock<G2>]) + Send + Sync + 'static> {
+        let observer = Arc::clone(&self.observer);
+        Arc::new(move |blocks: &[ImmutableBlock<G2>]| observer.observe(blocks))
     }
 
     pub fn active_count(&self) -> usize {
@@ -204,16 +350,12 @@ impl PrefillCoordinatorImpl {
         let state = self
             .state_for(request_id)
             .ok_or_else(|| anyhow!("commit_output_blocks: unknown request {}", request_id))?;
-        let session = state
-            .session
-            .lock()
-            .clone()
-            .ok_or_else(|| {
-                anyhow!(
-                    "commit_output_blocks: session not attached for {}",
-                    request_id
-                )
-            })?;
+        let session = state.session.lock().clone().ok_or_else(|| {
+            anyhow!(
+                "commit_output_blocks: session not attached for {}",
+                request_id
+            )
+        })?;
 
         let hashes: Vec<SequenceHash> = blocks.iter().map(|b| b.sequence_hash()).collect();
         session.commit(hashes)?;
@@ -270,8 +412,7 @@ impl PrefillCoordinatorImpl {
         // 3. Drain availability and pull chunks as they land.
         *state.status.lock() = PrefillStatus::Pulling;
         let mut avail = session.availability();
-        let expected_set: HashSet<SequenceHash> =
-            state.expected_hashes.iter().copied().collect();
+        let expected_set: HashSet<SequenceHash> = state.expected_hashes.iter().copied().collect();
         let mut remaining: HashSet<SequenceHash> = expected_set.clone();
         let mut filled_index: usize = 0;
 
@@ -384,9 +525,15 @@ impl PrefillCoordinatorImpl {
                 );
             }
         }
+        // Translate the chunk's `expected_hashes`-relative range back
+        // to absolute token-block indices in the original sequence.
+        // `expected_hashes[i]` is at absolute position
+        // `computed_blocks_offset + i` (carry-forward #1).
+        let abs_start = state.computed_blocks_offset + token_range_start;
+        let abs_end = state.computed_blocks_offset + token_range_end;
         let token_blocks = self
             .inner
-            .token_blocks_for_range(request_id, token_range_start..token_range_end)?;
+            .token_blocks_for_range(request_id, abs_start..abs_end)?;
         let mut completes: Vec<CompleteBlock<G2>> = Vec::with_capacity(chunk_size);
         for (mutable, token_block) in filled.into_iter().zip(token_blocks.iter()) {
             completes.push(
@@ -407,10 +554,7 @@ impl PrefillCoordinatorImpl {
         state: &Arc<RequestState>,
         g1_dst_block_ids: Vec<BlockId>,
     ) -> Result<()> {
-        if state
-            .onboarding_scheduled
-            .swap(true, Ordering::AcqRel)
-        {
+        if state.onboarding_scheduled.swap(true, Ordering::AcqRel) {
             return Ok(()); // already scheduled
         }
         *state.status.lock() = PrefillStatus::OnboardingScheduled;
@@ -445,23 +589,38 @@ impl PrefillCoordinatorImpl {
 }
 
 impl PrefillCoordinator for PrefillCoordinatorImpl {
-    fn ensure_started(
-        &self,
-        request_id: &str,
-        params: &RemotePrefillParams,
-    ) -> Result<usize> {
+    fn ensure_started(&self, request_id: &str, params: &RemotePrefillParams) -> Result<usize> {
         if let Some(state) = self.state_for(request_id) {
             return Ok(state.num_external_tokens);
         }
 
         let block_size = self.inner.block_size();
         let num_external_tokens = params.sequence_hashes.len() * block_size;
+        let computed_blocks_offset = params.num_computed_tokens / block_size;
         let state = Arc::new(RequestState::new(
             num_external_tokens,
             params.sequence_hashes.clone(),
+            computed_blocks_offset,
         ));
         self.states
             .insert(request_id.to_string(), Arc::clone(&state));
+
+        // Compute prefill's expected output hashes and track them
+        // in the offload observer. Output hashes = full sequence
+        // hashes ⊖ what we pulled from decode (params.sequence_hashes).
+        // The observer pops matches as the offload pipeline
+        // registers G2 blocks.
+        let split = self.inner.slot_match_split(request_id)?;
+        let pulled: HashSet<SequenceHash> =
+            params.sequence_hashes.iter().copied().collect();
+        let expected_outputs: HashSet<SequenceHash> = split
+            .all_sequence_hashes
+            .iter()
+            .filter(|h| !pulled.contains(h))
+            .copied()
+            .collect();
+        self.observer
+            .track_request(request_id.to_string(), expected_outputs);
 
         let coord = self
             .arc_self()
@@ -529,14 +688,14 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         Ok(())
     }
 
-    fn observe_forward(
-        &self,
-        _request_id: &str,
-        _meta: &KvConnectorMetadata,
-    ) -> Result<()> {
-        // Production wiring of `Pipeline::add_register_observer`
-        // is Phase B. For A.4/A.5 the test drives output capture
-        // via `commit_output_blocks` directly. No-op for now.
+    fn observe_forward(&self, _request_id: &str, _meta: &KvConnectorMetadata) -> Result<()> {
+        // Tracking is now established at `ensure_started` time
+        // (where we know the request is CD-bound and can compute
+        // expected output hashes). The offload pipeline observer
+        // is registered ONCE at coordinator construction; this
+        // per-tick hook is no longer needed for output capture.
+        // Kept on the trait for now in case the wrapper has
+        // other forward-pass-time needs; remove in Phase B.
         Ok(())
     }
 
@@ -557,9 +716,143 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         *status = PrefillStatus::Released;
         drop(status);
         self.states.remove(request_id);
+        // Evict any residual observer entry for this request.
+        // Auto-drop on full match handles the happy path; this
+        // covers failure paths where some expected outputs never
+        // landed.
+        self.observer.untrack_request(request_id);
 
         // Suppress unused warning on the unused field — it's
         // checked in `on_usaa` via `pulls_complete` already.
         let _ = AtomicUsize::new(0);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::G2;
+    use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
+    use kvbm_engine::testing::token_blocks::create_token_sequence;
+    use kvbm_logical::manager::BlockManager;
+
+    const BLOCK_SIZE: usize = 16;
+
+    fn make_g2_manager(capacity: usize) -> Arc<BlockManager<G2>> {
+        let registry = TestRegistryBuilder::new().build();
+        Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(capacity)
+                .block_size(BLOCK_SIZE)
+                .registry(registry)
+                .build(),
+        )
+    }
+
+    fn make_blocks(
+        g2: &Arc<BlockManager<G2>>,
+        count: usize,
+        start_token: u32,
+    ) -> Vec<ImmutableBlock<G2>> {
+        let token_sequence = create_token_sequence(count, BLOCK_SIZE, start_token);
+        let mutables = g2.allocate_blocks(count).expect("alloc");
+        let completes: Vec<_> = mutables
+            .into_iter()
+            .zip(token_sequence.blocks().iter())
+            .map(|(m, tb)| m.complete(tb).expect("complete"))
+            .collect();
+        g2.register_blocks(completes)
+    }
+
+    /// Mixed-batch dispatch: two requests tracked with disjoint
+    /// expected-hash sets; one batch contains blocks for both
+    /// plus an unrelated block. Each request's residual should
+    /// be drained only by its own matches; the unrelated block
+    /// is silently ignored.
+    #[test]
+    fn mixed_batch_routes_per_request_and_ignores_unrelated() {
+        let observer = ConditionalDecodeG2Observer::new();
+        // No coordinator installed — observe()'s commit_output_blocks
+        // dispatch is a silent no-op. We test the pending-state
+        // transitions, not the downstream dispatch.
+
+        let mgr = make_g2_manager(8);
+        let a_blocks = make_blocks(&mgr, 2, 0); // hashes for "a"
+        let b_blocks = make_blocks(&mgr, 1, 100); // hashes for "b"
+        let unrelated = make_blocks(&mgr, 1, 9000); // not tracked
+
+        let a_hashes: HashSet<_> = a_blocks.iter().map(|b| b.sequence_hash()).collect();
+        let b_hashes: HashSet<_> = b_blocks.iter().map(|b| b.sequence_hash()).collect();
+
+        observer.track_request("a".into(), a_hashes.clone());
+        observer.track_request("b".into(), b_hashes.clone());
+        assert_eq!(observer.tracked_count(), 2);
+
+        // Mixed batch: 1 of "a"'s blocks, "b"'s block, unrelated.
+        let batch: Vec<_> = vec![
+            a_blocks[0].clone(),
+            b_blocks[0].clone(),
+            unrelated[0].clone(),
+        ];
+        observer.observe(&batch);
+
+        // "a" still has 1 hash residual (a_blocks[1] not yet seen).
+        let pending_a = observer.pending_for("a").expect("a still tracked");
+        assert_eq!(pending_a.len(), 1);
+        assert!(pending_a.contains(&a_blocks[1].sequence_hash()));
+
+        // "b" auto-dropped (its only hash matched).
+        assert!(
+            observer.pending_for("b").is_none(),
+            "b should be auto-dropped after full match"
+        );
+        assert_eq!(observer.tracked_count(), 1);
+
+        // Second batch with "a"'s remaining block — "a" should auto-drop.
+        observer.observe(&[a_blocks[1].clone()]);
+        assert!(observer.pending_for("a").is_none());
+        assert_eq!(observer.tracked_count(), 0);
+    }
+
+    /// untrack_request evicts a residual entry that didn't fully
+    /// drain (failure path).
+    #[test]
+    fn untrack_request_evicts_partial_residual() {
+        let observer = ConditionalDecodeG2Observer::new();
+        let mgr = make_g2_manager(4);
+        let blocks = make_blocks(&mgr, 3, 200);
+        let hashes: HashSet<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+
+        observer.track_request("req-fail".into(), hashes);
+        // Observe only 1 of 3 — residual non-empty.
+        observer.observe(&[blocks[0].clone()]);
+        assert_eq!(observer.pending_for("req-fail").unwrap().len(), 2);
+
+        observer.untrack_request("req-fail");
+        assert!(observer.pending_for("req-fail").is_none());
+    }
+
+    /// re-observing an already-popped block is a no-op
+    /// (idempotent against offload P-rule re-emission).
+    #[test]
+    fn re_observe_is_idempotent() {
+        let observer = ConditionalDecodeG2Observer::new();
+        let mgr = make_g2_manager(2);
+        let blocks = make_blocks(&mgr, 1, 300);
+        let hash = blocks[0].sequence_hash();
+
+        observer.track_request("a".into(), [hash].into_iter().collect());
+        observer.observe(&[blocks[0].clone()]);
+        // Auto-dropped after full match.
+        assert_eq!(observer.tracked_count(), 0);
+
+        // Re-observing the same block: no panic, no resurrection
+        // of the dropped entry.
+        observer.observe(&[blocks[0].clone()]);
+        assert_eq!(observer.tracked_count(), 0);
     }
 }
