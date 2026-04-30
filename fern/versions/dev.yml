@@ -141,6 +141,8 @@ navigation:
         slug: agents
         path: ../pages-dev/features/agentic_workloads.md
         contents:
+          - page: Agent Context and Tracing
+            path: ../pages-dev/agents/agent-context.md
           - page: SGLang for Agentic Workloads
             path: ../pages-dev/backends/sglang/agents.md
       - page: Chat Processors
