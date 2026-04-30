@@ -120,9 +120,12 @@ Significantly reduces GPU compute costs by running on preemptible Spot VM node p
 # Delete all Dynamo Graph Deployments
 kubectl delete dynamographdeployments.nvidia.com --all --all-namespaces
 
-# Uninstall Dynamo Platform and CRDs
-helm uninstall dynamo-platform -n dynamo-system
-helm uninstall dynamo-crds -n dynamo-system
+# Uninstall Dynamo Platform
+export NAMESPACE=${NAMESPACE:-dynamo-system}
+helm uninstall dynamo-platform -n $NAMESPACE
+
+# If running Dynamo < 1.0 with a separate CRDs chart:
+# helm uninstall dynamo-crds -n $NAMESPACE
 ```
 
 If you want to delete the GPU Operator, follow the [Uninstalling the NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/uninstall.html) guide.

@@ -118,8 +118,11 @@ Follow the [EFS setup guide](efs.md) to create an EFS file system and make it av
 
 ### Install Dynamo Platform
 ```bash
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-"${DYNAMO_RELEASE_VERSION}".tgz
-helm install dynamo-platform dynamo-platform-"${DYNAMO_RELEASE_VERSION}".tgz --namespace "${DYNAMO_NAMESPACE}" --create-namespace
+helm install dynamo-platform \
+  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
+  --version "$DYNAMO_RELEASE_VERSION" \
+  --namespace "$DYNAMO_NAMESPACE" \
+  --create-namespace
 ```
 
 ### Setup HuggingFace TOKEN

@@ -12,7 +12,7 @@ title: AKS Spot VMs
 
 When a node pool uses Spot VMs, AKS automatically applies the following taint to all nodes in that pool:
 
-```text
+```yaml
 kubernetes.azure.com/scalesetpriority=spot:NoSchedule
 ```
 
@@ -32,7 +32,7 @@ tolerations:
 
 ## Deploying Dynamo on Spot Nodes
 
-The Dynamo platform Helm chart includes a pre-built values file for Spot VM deployments — `examples/deployments/AKS/values-aks-spot.yaml` — which adds the required toleration to all Dynamo components:
+The Dynamo platform Helm chart includes a pre-built values file for Spot VM deployments — [`examples/deployments/AKS/values-aks-spot.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/AKS/values-aks-spot.yaml) — which adds the required toleration to all Dynamo components:
 
 - Dynamo operator controller manager
 - Webhook CA inject and cert generation jobs
