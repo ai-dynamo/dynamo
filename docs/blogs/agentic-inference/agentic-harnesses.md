@@ -1,3 +1,12 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+subtitle: "Matej Kosec, Ishan Dhanani, Benjamin Klieger, Dan Gil and Alec Flowers — April 2026"
+description: "Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo"
+keywords: agentic inference, responses api, messages api, tool calling, interleaved reasoning, prefix caching, agent hints, Dynamo
+last-updated: Apr 30, 2026
+---
+
 # Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo
 
 An agentic exchange must preserve a structured interaction: assistant turns interleave reasoning with one or more tool calls, and subsequent user turns return the corresponding tool results to the model context. Reasoning replay is model- and turn-dependent: some reasoning should be retained, while some should be dropped. The inference engine is responsible for this more expressive interaction and for producing correctly segmented API results. Tool-call parsing and reasoning parsing need to happen before the attached harness consumes the response. High-value agentic workflows such as coding also depend on a responsive harness experience: reasoning segments, tool-call events, and request metadata need to stream back as the turn unfolds instead of arriving after a final text response. This post covers lessons from running real agentic clients against Dynamo: how we hardened parser and API coverage and how those parser layers became standalone reusable crates.
