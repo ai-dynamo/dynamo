@@ -808,37 +808,6 @@ class KvEventPublisher:
         ...
 
 
-class AgentToolEventRelay:
-    """
-    Relay that bridges msgpack-encoded agent tool trace records from a local
-    ZMQ PUB socket to the Dynamo event plane.
-    """
-
-    def __init__(
-        self,
-        endpoint: Endpoint,
-        zmq_endpoint: str,
-        zmq_topic: Optional[str] = None,
-        namespace: Optional[str] = None,
-        topic: Optional[str] = None,
-    ) -> None:
-        """
-        Create a relay.
-
-        Args:
-            endpoint: Dynamo component endpoint (provides runtime + discovery).
-            zmq_endpoint: Local ZMQ PUB address to subscribe to.
-            zmq_topic: Optional ZMQ topic filter. Defaults to all topics.
-            namespace: Optional Dynamo event-plane namespace override.
-            topic: Optional Dynamo event-plane topic override.
-        """
-        ...
-
-    def shutdown(self) -> None:
-        """Shut down the relay task."""
-        ...
-
-
 class FpmEventRelay:
     """
     Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
