@@ -99,6 +99,70 @@ func TestBugDCD_HubPodTemplateContainerOrderRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testing.T) {
+	hub := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "metadata-only-container-order", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "metadata-only-container-order",
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Name: "hub-only-template-name"},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "worker:latest"},
+							{Name: "metrics", Image: "metrics:latest"},
+							{Name: "logger", Image: "logger:latest"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	raw := spoke.Annotations[annDCDHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve hub-only podTemplate metadata", annDCDHubSpec)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to decode %s: %s", annDCDHubSpec, raw)
+	}
+	if preserved.PodTemplate == nil || preserved.PodTemplate.Name != "hub-only-template-name" {
+		t.Fatalf("expected preserved podTemplate metadata, got %#v", preserved.PodTemplate)
+	}
+	if len(preserved.PodTemplate.Spec.Containers) != 0 {
+		t.Fatalf("metadata-only podTemplate save preserved container order: %#v", preserved.PodTemplate.Spec.Containers)
+	}
+
+	if spoke.Spec.ExtraPodSpec == nil ||
+		spoke.Spec.ExtraPodSpec.PodSpec == nil ||
+		len(spoke.Spec.ExtraPodSpec.PodSpec.Containers) != 2 {
+		t.Fatalf("expected two spoke sidecars, got %#v", spoke.Spec.ExtraPodSpec)
+	}
+	spoke.Spec.ExtraPodSpec.PodSpec.Containers[0], spoke.Spec.ExtraPodSpec.PodSpec.Containers[1] =
+		spoke.Spec.ExtraPodSpec.PodSpec.Containers[1], spoke.Spec.ExtraPodSpec.PodSpec.Containers[0]
+
+	restored := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	gotOrder := make([]string, 0, len(restored.Spec.PodTemplate.Spec.Containers))
+	for _, container := range restored.Spec.PodTemplate.Spec.Containers {
+		gotOrder = append(gotOrder, container.Name)
+	}
+	wantOrder := []string{"main", "logger", "metrics"}
+	if diff := cmp.Diff(wantOrder, gotOrder); diff != "" {
+		t.Fatalf("container order mismatch after live spoke reorder (-want +got):\n%s", diff)
+	}
+	if restored.Spec.PodTemplate.Name != "hub-only-template-name" {
+		t.Fatalf("podTemplate name = %q, want hub-only-template-name", restored.Spec.PodTemplate.Name)
+	}
+}
+
 func TestBugDCD_HubEditToEnvFromSecretOptionalRoundTrips(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},

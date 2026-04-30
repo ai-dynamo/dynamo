@@ -337,6 +337,113 @@ func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	}
 }
 
+func TestDCD_RoundTrip_PodTemplateKeepsGeneratedMainMarker(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-main-marker", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:   "generated-main-marker",
+				FrontendSidecar: ptr.To(defaultFrontendSidecarContainerName),
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main"},
+							{
+								Name:  defaultFrontendSidecarContainerName,
+								Image: "frontend:v1",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	raw := spoke.Annotations[annDCDHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve generated main marker", annDCDHubSpec)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+	}
+	main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok || !containerHasOnlyName(main) {
+		t.Fatalf("expected sparse generated main marker, got %#v", preserved.PodTemplate.Spec.Containers)
+	}
+
+	got := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(src.Spec.PodTemplate, got.Spec.PodTemplate, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_RoundTrip_CompilationCacheWithoutGeneratedMountKeepsMarker(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "compilation-cache-no-mount", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "compilation-cache-no-mount",
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "cache-pvc",
+					MountPath: "/opt/cache",
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: "main",
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{Command: []string{"ready"}},
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	raw := spoke.Annotations[annDCDHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve absent generated compilation-cache mount", annDCDHubSpec)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+	}
+	main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok || !containerHasOnlyName(main) {
+		t.Fatalf("expected sparse main marker for absent generated mount, got %#v", preserved.PodTemplate.Spec.Containers)
+	}
+
+	got := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	gotMain, ok := findContainerByName(got.Spec.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("expected restored main container, got %#v", got.Spec.PodTemplate.Spec.Containers)
+	}
+	if len(gotMain.VolumeMounts) != 0 {
+		t.Fatalf("generated compilation-cache mount was restored: %#v", gotMain.VolumeMounts)
+	}
+	if diff := cmp.Diff(src.Spec.PodTemplate, got.Spec.PodTemplate, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pt-overlay", Namespace: "ns"},

@@ -732,18 +732,27 @@ func sparseSharedHubOnlyPodTemplate(src, projected *corev1.PodTemplateSpec, fron
 		return nil
 	}
 	meta := sharedHubOnlyPodTemplateMetadata(src)
+
+	// Keep metadata, generated-shape markers, and container order as separate
+	// save signals so metadata-only preservation cannot freeze live sidecar order.
 	needsMetadataSave := !apiequality.Semantic.DeepEqual(meta, metav1.ObjectMeta{})
-	needsContainerSave := sharedHubOnlyPodTemplateContainersNeedSave(src, projected, frontendSidecar)
-	if !needsMetadataSave && !needsContainerSave {
+	needsGeneratedMainMarker := sharedHubOnlyPodTemplateGeneratedMainNeedsSave(src, projected)
+	needsContainerOrderSave := sharedHubOnlyPodTemplateContainerOrderNeedsSave(src, projected)
+	needsFrontendSidecarKey := frontendSidecar != "" && podTemplateHasContainer(src, frontendSidecar)
+	if !needsMetadataSave && !needsGeneratedMainMarker && !needsContainerOrderSave && !needsFrontendSidecarKey &&
+		!sharedHubOnlyPodTemplateContainerFieldsNeedSave(src, projected) {
 		return nil
 	}
 	out := &corev1.PodTemplateSpec{}
 	if needsMetadataSave {
 		out.ObjectMeta = meta
 	}
-	saveSharedHubOnlyPodTemplateContainers(src, projected, out)
+	saveSharedHubOnlyPodTemplateContainers(src, projected, out, needsContainerOrderSave, frontendSidecar)
+	if !needsMetadataSave && len(out.Spec.Containers) == 0 && !needsGeneratedMainMarker {
+		return nil
+	}
 	// A non-nil empty PodTemplate preserves that the hub intentionally had no
-	// regular containers, even when the v1alpha1 projection generates "main".
+	// generated "main" container, even when the v1alpha1 projection creates one.
 	return out
 }
 
@@ -754,12 +763,31 @@ func sharedHubOnlyPodTemplateMetadata(src *corev1.PodTemplateSpec) metav1.Object
 	return meta
 }
 
-func sharedHubOnlyPodTemplateContainersNeedSave(src, projected *corev1.PodTemplateSpec, frontendSidecar string) bool {
-	if src == nil {
+func sharedHubOnlyPodTemplateGeneratedMainNeedsSave(src, projected *corev1.PodTemplateSpec) bool {
+	if src == nil || projected == nil {
 		return false
 	}
-	if frontendSidecar != "" && podTemplateHasContainer(src, frontendSidecar) {
-		return true
+	return !hasContainerNamed(src.Spec.Containers, mainContainerName) &&
+		hasContainerNamed(projected.Spec.Containers, mainContainerName)
+}
+
+func sharedHubOnlyPodTemplateContainerOrderNeedsSave(src, projected *corev1.PodTemplateSpec) bool {
+	if src == nil || projected == nil {
+		return false
+	}
+	srcNames := podTemplateContainerNames(src)
+	projectedNames := podTemplateContainerNames(projected)
+	if !hasContainerNamed(src.Spec.Containers, mainContainerName) {
+		projectedNames = slices.DeleteFunc(projectedNames, func(name string) bool {
+			return name == mainContainerName
+		})
+	}
+	return !slices.Equal(srcNames, projectedNames)
+}
+
+func sharedHubOnlyPodTemplateContainerFieldsNeedSave(src, projected *corev1.PodTemplateSpec) bool {
+	if src == nil {
+		return false
 	}
 	if projected == nil {
 		return len(src.Spec.Containers) > 0
@@ -767,20 +795,55 @@ func sharedHubOnlyPodTemplateContainersNeedSave(src, projected *corev1.PodTempla
 	return !apiequality.Semantic.DeepEqual(src.Spec.Containers, projected.Spec.Containers)
 }
 
-func saveSharedHubOnlyPodTemplateContainers(src, projected, save *corev1.PodTemplateSpec) {
+func podTemplateContainerNames(podTemplate *corev1.PodTemplateSpec) []string {
+	if podTemplate == nil {
+		return nil
+	}
+	names := make([]string, 0, len(podTemplate.Spec.Containers))
+	for _, container := range podTemplate.Spec.Containers {
+		names = append(names, container.Name)
+	}
+	return names
+}
+
+func saveSharedHubOnlyPodTemplateContainers(src, projected, save *corev1.PodTemplateSpec, preserveOrder bool, frontendSidecar string) {
 	projectedContainers := []corev1.Container(nil)
 	if projected != nil {
 		projectedContainers = projected.Spec.Containers
 	}
 	for _, srcContainer := range src.Spec.Containers {
 		savedContainer := corev1.Container{Name: srcContainer.Name}
-		if projectedContainer, ok := findContainerByName(projectedContainers, srcContainer.Name); ok {
+		projectedContainerFound := false
+		var projectedContainer corev1.Container
+		if found, ok := findContainerByName(projectedContainers, srcContainer.Name); ok {
+			projectedContainerFound = true
+			projectedContainer = found
 			saveSharedHubOnlyContainerFields(&savedContainer, srcContainer, projectedContainer)
 		} else if !containerHasOnlyName(srcContainer) {
 			savedContainer = *srcContainer.DeepCopy()
 		}
-		save.Spec.Containers = append(save.Spec.Containers, savedContainer)
+		if preserveOrder ||
+			srcContainer.Name == frontendSidecar ||
+			sharedGeneratedMainContainerKeyNeedsSave(srcContainer, projectedContainer, projectedContainerFound) ||
+			!containerHasOnlyName(savedContainer) {
+			save.Spec.Containers = append(save.Spec.Containers, savedContainer)
+		}
 	}
+}
+
+func sharedGeneratedMainContainerKeyNeedsSave(src, projected corev1.Container, projectedContainerFound bool) bool {
+	if !projectedContainerFound || src.Name != mainContainerName {
+		return false
+	}
+	if containerHasOnlyName(src) {
+		return true
+	}
+	for _, projectedMount := range projected.VolumeMounts {
+		if _, ok := findPreservedVolumeMount(src.VolumeMounts, projectedMount); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func saveSharedHubOnlyContainerFields(save *corev1.Container, src, projected corev1.Container) {
