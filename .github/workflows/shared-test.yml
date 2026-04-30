@@ -179,6 +179,23 @@ jobs:
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           dind_as_sidecar: 'true'
           enable_coverage: ${{ inputs.enable_coverage }}
+      - name: Run GPU tests (parallel)
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu_parallel"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
+          # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
+          parallel_mode: 'auto'
+          max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
+          dind_as_sidecar: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
