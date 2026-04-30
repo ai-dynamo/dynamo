@@ -367,6 +367,61 @@ mod tests {
         assert_eq!(request.remote_prefill_params().unwrap(), Some(remote));
     }
 
+    /// Pin the wire format the hub dispatcher
+    /// (`kvbm-hub::features::conditional_disagg::dispatcher::HttpVllmDispatcher`)
+    /// is required to emit.
+    ///
+    /// History: an earlier dispatcher build wrote
+    /// `kv_transfer_params: { kvbm_remote_prefill_v1: <RemotePrefillParams>,
+    /// request_id: ... }`. Serde silently ignores unknown fields, so
+    /// `serde_json::from_value::<TransferParams>` returned
+    /// `Ok(TransferParams { remote_prefill: None })` and the prefill leader
+    /// fell through to the inner non-CD passthrough — the bug Stage 10
+    /// closed. This test pins the contract so a regression to a wrapper-key
+    /// shape fails immediately rather than only surfacing as "B.2 hangs".
+    #[test]
+    fn dispatcher_wire_format_deserializes_to_transfer_params() {
+        let remote =
+            RemotePrefillParams::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4().into());
+        // Construct the JSON the dispatcher emits today: the value of
+        // `kv_transfer_params` is `serde_json::to_value(TransferParams)`.
+        let dispatcher_kv_transfer_params =
+            serde_json::to_value(TransferParams::remote_prefill(remote.clone())).unwrap();
+
+        // Sanity check the wire shape itself: the field key is `remote_prefill`,
+        // not a versioned wrapper key. If anything renames this, callers that
+        // build the value by hand (e.g. tests, REST clients) need to follow.
+        assert!(
+            dispatcher_kv_transfer_params
+                .get("remote_prefill")
+                .is_some(),
+            "TransferParams JSON must carry a top-level `remote_prefill` field; \
+             got {dispatcher_kv_transfer_params}"
+        );
+
+        let request = Request::with_token_limits(
+            "req-dispatcher-wire",
+            vec![1_u32, 2, 3],
+            None,
+            None,
+            None,
+            Some(128),
+            Some(RequestMetadata::with_kv_transfer_params(
+                dispatcher_kv_transfer_params,
+            )),
+        );
+
+        let parsed = request
+            .disagg_transfer_params()
+            .expect("dispatcher payload must deserialize as TransferParams");
+        assert_eq!(
+            parsed,
+            Some(TransferParams::remote_prefill(remote.clone())),
+            "round-trip must preserve RemotePrefillParams"
+        );
+        assert_eq!(request.remote_prefill_params().unwrap(), Some(remote));
+    }
+
     #[test]
     fn disagg_transfer_params_report_malformed_payload() {
         let request = Request::with_token_limits(
