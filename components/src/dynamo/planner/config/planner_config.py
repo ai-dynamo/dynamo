@@ -182,6 +182,9 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
+        if self.ttft <= 0:
+            raise ValueError(f"ttft must be > 0, got {self.ttft}")
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)
