@@ -238,13 +238,27 @@ fn build_score_response(tiered: &TieredMatchDetails, block_size: u32) -> ScoreRe
 
     let mut instances: HashMap<String, InstanceTierBreakdown> = HashMap::new();
 
-    for (worker, blocks) in &device.scores {
-        let gpu_blocks = *blocks;
-        let cpu_blocks = gpu_blocks + ext(host_extension, worker);
+    // Collect the union of all workers seen in device tier and extension tiers.
+    let mut all_workers = std::collections::HashSet::new();
+    for worker in device.scores.keys() {
+        all_workers.insert(worker.clone());
+    }
+    for extension in [host_extension, disk_extension, external_extension]
+        .iter()
+        .filter_map(|&e| e)
+    {
+        for worker in extension.hits.keys() {
+            all_workers.insert(worker.clone());
+        }
+    }
+
+    for worker in all_workers {
+        let gpu_blocks = device.scores.get(&worker).copied().unwrap_or(0);
+        let cpu_blocks = gpu_blocks + ext(host_extension, &worker);
         // Treat External as further-away storage and roll it into the disk
         // bucket alongside Disk; both extensions stack on top of host-pinned.
         let disk_blocks =
-            cpu_blocks + ext(disk_extension, worker) + ext(external_extension, worker);
+            cpu_blocks + ext(disk_extension, &worker) + ext(external_extension, &worker);
 
         let gpu_tokens = gpu_blocks * block_size;
         let cpu_tokens = cpu_blocks * block_size;
