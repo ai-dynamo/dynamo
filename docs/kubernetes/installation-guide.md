@@ -135,7 +135,11 @@ kubectl get pods -n $NAMESPACE
 
 The Dynamo install command above includes commented flags for each optional component. Install the component first, then uncomment the corresponding flag before running `helm install` in Step 2 (or run `helm upgrade --reuse-values` with the flag if you've already installed Dynamo).
 
-### Grove + KAI Scheduler
+### Multinode:
+
+Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for details on orchestrator selection and configuration.
+
+#### Grove + KAI Scheduler
 
 There are two ways to enable Grove and KAI Scheduler, controlled by which flags you uncomment in the Dynamo install command:
 
@@ -152,7 +156,31 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 
-**Alternative: LWS + Volcano** — If you are not using Grove for multinode, you can use LeaderWorkerSet for multinode deployments with Volcano for gang scheduling. See [LWS Installation](https://github.com/kubernetes-sigs/lws#installation), [Volcano Installation](https://volcano.sh/en/docs/installation/), and the [Multinode Deployment Guide](./deployment/multinode-deployment.md).
+#### LWS + Volcano
+
+If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) (>= v0.7.0) with [Volcano](https://volcano.sh/en/docs/installation/) for gang scheduling. Both must be installed before deploying multinode workloads.
+
+1. Install Volcano:
+
+```bash
+helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
+helm repo update
+helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
+```
+
+2. Install LWS (>= v0.7.0) with Volcano gang scheduling enabled:
+
+```bash
+export LWS_VERSION=0.8.0
+helm install lws oci://registry.k8s.io/lws/charts/lws \
+  --version=$LWS_VERSION \
+  --namespace lws-system \
+  --create-namespace \
+  --set gangSchedulingManagement.schedulerProvider=volcano \
+  --wait --timeout 300s
+```
+
+See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://volcano.sh/en/docs/) for configuration options, and the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for orchestrator selection.
 
 ### Network Operator / RDMA
 
