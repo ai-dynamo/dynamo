@@ -42,7 +42,7 @@ Status: **Experimental** (Day-0). Modality: text only.
 
 ## Quick Start
 
-Common setup (run once — applies to both variants):
+Common setup (run once — applies to all variants):
 
 ```bash
 export NAMESPACE=dynamo-demo
@@ -162,7 +162,7 @@ Same OpenAI-renderer wiring as the B200 variant; differences below come from the
 | `--moe-backend deep_gemm_mega_moe` | DeepGEMM "mega MoE" kernel — the optimized FP8 MoE path for V4 expert routing on Blackwell |
 | `NCCL_NVLS_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `VLLM_USE_NCCL_SYMM_MEM=1` | Enable NVLink Sharp (NVLS) multicast for one-shot all-reduce on the tray |
 
-### SGLang (`sglang/agg/deploy.yaml`)
+### SGLang B200 (`sglang/agg/deploy.yaml`)
 
 | Flag | Purpose |
 |------|---------|
@@ -185,13 +185,13 @@ Same OpenAI-renderer wiring as the B200 variant; differences below come from the
 
 Recipe-level (per-variant) settings:
 
-| | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) |
-|---|---|---|
-| **Backend image** | Standard Dynamo vLLM runtime | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` |
-| **Parallelism** | DP=4 + Expert Parallel, TP=1 | TP=4 |
-| **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 |
-| **KV cache** | FP8, block size 256 | engine default |
-| **Speculative decoding** | — | EAGLE MTP (3 steps / 4 draft tokens) |
+| | vLLM B200 (`vllm-agg-b200`) | vLLM GB200 (`vllm-agg-gb200`) | SGLang B200 (`sglang-agg`) | SGLang GB200 (`sglang-agg-gb200`) |
+|---|---|---|---|---|
+| **Backend image** | Standard Dynamo vLLM runtime | Standard Dynamo vLLM runtime (arm64) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-gb200-dev.1` |
+| **Parallelism** | DP=4 + Expert Parallel, TP=1 | TP=4 + Expert Parallel | TP=4 | TP=4 |
+| **MoE backend** | vLLM's V4 expert kernel (FP4) | DeepGEMM mega MoE | FlashInfer MXFP4 | FlashInfer MXFP4 |
+| **KV cache** | FP8, block size 256 | FP8, block size 256 | engine default | engine default |
+| **Speculative decoding** | — | — | EAGLE MTP (3 steps / 4 draft tokens) | EAGLE MTP (3 steps / 4 draft tokens) |
 
 ## Verifying Reasoning
 
