@@ -47,7 +47,8 @@ xpu-sycl = ["dep:kvbm-kernels", "kvbm-kernels/xpu_permute_kernels", "dep:oneapi-
 [[bin]]
 name = "validate_numa_placement"
 path = "bin/validate_numa_placement.rs"
-required-features = ["cuda"]
+# Builds under either backend; at runtime the binary reports which backends
+# were compiled in and refuses to use a backend that wasn't.
 
 [[example]]
 name = "bench_transfer"
