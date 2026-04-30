@@ -494,23 +494,44 @@ impl WorkerPruneManagerInner {
     }
 
     fn queue_due(&self, now: Instant) {
-        let workers: Vec<_> = self.workers.iter().map(|entry| *entry.key()).collect();
         let mut expired = Vec::new();
 
-        for worker in workers {
+        loop {
+            let Some((Reverse(expiry), worker)) = ({
+                let mut expiries = self
+                    .next_expiries
+                    .lock()
+                    .expect("worker expiry index mutex poisoned");
+                let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
+                    break;
+                };
+                if expiry > now {
+                    break;
+                }
+                expiries.pop()
+            }) else {
+                break;
+            };
+
             let (mut worker_expired, next_expiry) = {
                 let Some(state) = self.workers.get(&worker) else {
                     continue;
                 };
                 let mut state = state.lock().expect("worker prune state mutex poisoned");
-                let expired = state.pop_expired(now);
-                let next_expiry = state.peek_next_valid_expiry();
-                (expired, next_expiry)
+                let next_valid = state.peek_next_valid_expiry();
+                if next_valid != Some(expiry) {
+                    (Vec::new(), next_valid)
+                } else {
+                    let expired = state.pop_expired(now);
+                    let next_expiry = state.peek_next_valid_expiry();
+                    (expired, next_expiry)
+                }
             };
-            expired.append(&mut worker_expired);
+
             if let Some(next_expiry) = next_expiry {
                 self.push_worker_expiry(worker, next_expiry);
             }
+            expired.append(&mut worker_expired);
         }
 
         if expired.is_empty() {
@@ -544,6 +565,14 @@ mod tests {
                 .lock()
                 .expect("worker expiry index mutex poisoned")
                 .len()
+        }
+    }
+
+    fn test_block(worker: WorkerWithDpRank, key: u64, seq_position: usize) -> BlockEntry {
+        BlockEntry {
+            key: ExternalSequenceBlockHash(key),
+            worker,
+            seq_position,
         }
     }
 
@@ -634,14 +663,51 @@ mod tests {
         let worker = WorkerWithDpRank::from_worker_id(7);
 
         for idx in 0..=WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD {
-            manager.insert_block_entries(vec![BlockEntry {
-                key: ExternalSequenceBlockHash(100 + idx as u64),
-                worker,
-                seq_position: idx,
-            }]);
+            manager.insert_block_entries(vec![test_block(worker, 100 + idx as u64, idx)]);
         }
 
         assert_eq!(manager.worker_expiry_heap_len(), 1);
+        manager.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_expiry_queue_drains_staggered_workers() {
+        const TTL: Duration = Duration::from_secs(10);
+        let manager = WorkerPruneManager::new(PruneConfig { ttl: TTL });
+        let first_worker = WorkerWithDpRank::from_worker_id(1);
+        let second_worker = WorkerWithDpRank::from_worker_id(2);
+
+        let first = test_block(first_worker, 101, 0);
+        let second = test_block(second_worker, 202, 0);
+
+        manager.insert_block_entries(vec![first]);
+        time::advance(Duration::from_secs(5)).await;
+        manager.insert_block_entries(vec![second]);
+
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.drain_due_and_pending(Instant::now()), vec![first]);
+
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.drain_due_and_pending(Instant::now()), vec![second]);
+        manager.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_expiry_queue_ignores_stale_global_entries() {
+        const TTL: Duration = Duration::from_secs(10);
+        let manager = WorkerPruneManager::new(PruneConfig { ttl: TTL });
+        let worker = WorkerWithDpRank::from_worker_id(7);
+        let block = test_block(worker, 707, 0);
+
+        manager.insert_block_entries(vec![block]);
+        time::advance(Duration::from_secs(5)).await;
+        manager.insert_block_entries(vec![block]);
+
+        time::advance(Duration::from_secs(5)).await;
+        assert!(manager.drain_due_and_pending(Instant::now()).is_empty());
+
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.drain_due_and_pending(Instant::now()), vec![block]);
         manager.shutdown();
     }
 }
