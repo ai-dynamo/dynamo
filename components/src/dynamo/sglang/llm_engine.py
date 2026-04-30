@@ -9,6 +9,7 @@ and feature gap details.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import AsyncGenerator
@@ -32,11 +33,13 @@ logger = logging.getLogger(__name__)
 
 
 class SglangLLMEngine(LLMEngine):
-    def __init__(self, server_args):
+    def __init__(self, server_args, dynamo_args):
         self.server_args = server_args
+        self.dynamo_args = dynamo_args
         self.engine = None
         self._input_param_manager = None
         self._skip_tokenizer_init = server_args.skip_tokenizer_init
+        self._use_sglang_tokenizer = dynamo_args.use_sglang_tokenizer
 
     @classmethod
     async def from_args(
@@ -47,12 +50,10 @@ class SglangLLMEngine(LLMEngine):
         dynamo_args = config.dynamo_args
 
         model_input = (
-            ModelInput.Text
-            if not server_args.skip_tokenizer_init
-            else ModelInput.Tokens
+            ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
         )
 
-        engine = cls(server_args)
+        engine = cls(server_args, dynamo_args)
         worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
@@ -179,7 +180,7 @@ class SglangLLMEngine(LLMEngine):
             logger.info("SGLang engine shutdown")
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
-        if self._skip_tokenizer_init:
+        if not self._use_sglang_tokenizer:
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
             param_mapping = {
@@ -188,6 +189,9 @@ class SglangLLMEngine(LLMEngine):
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
         else:
             param_mapping = {
@@ -195,13 +199,27 @@ class SglangLLMEngine(LLMEngine):
                 "top_p": request.get("top_p"),
                 "top_k": request.get("top_k"),
                 "max_new_tokens": request.get("max_tokens"),
+                **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
         return {k: v for k, v in param_mapping.items() if v is not None}
+
+    @staticmethod
+    def _get_guided_decoding_params(guided_decoding: object) -> dict:
+        if isinstance(guided_decoding, dict):
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                return {"json_schema": json.dumps(json_schema)}
+            structural_tag = guided_decoding.get("structural_tag")
+            if structural_tag is not None:
+                if hasattr(structural_tag, "model_dump"):
+                    structural_tag = structural_tag.model_dump()
+                return {"structural_tag": json.dumps(structural_tag)}
+        return {}
 
     def _get_input_param(self, request: GenerateRequest) -> dict:
         assert self._input_param_manager is not None, "Engine not initialized"
         request_input = self._input_param_manager.get_input_param(
-            request, use_tokenizer=not self._skip_tokenizer_init
+            request, use_tokenizer=self._use_sglang_tokenizer
         )
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
