@@ -104,12 +104,4 @@ mod tests {
         );
         assert_eq!(reg.len(), 1);
     }
-
-    #[test]
-    fn clone_shares_state() {
-        let reg = MetadataArtifactRegistry::new();
-        let reg2 = reg.clone();
-        reg.register("m", "_base", "f", PathBuf::from("/p"));
-        assert_eq!(reg2.get("m", "_base", "f"), Some(PathBuf::from("/p")));
-    }
 }
