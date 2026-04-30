@@ -98,6 +98,10 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
+    if let Err(e) = crate::agents::trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Agent trace initialization failed; continuing without trace sink");
+    }
+
     // Initialize audit bus + sink workers (off hot path; fan-out supported)
     if crate::audit::config::policy().enabled {
         let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")

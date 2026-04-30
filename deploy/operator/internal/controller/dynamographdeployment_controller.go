@@ -1140,7 +1140,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.Ingress)
 
-	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+	}
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
 	if err != nil {

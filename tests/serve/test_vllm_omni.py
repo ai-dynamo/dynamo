@@ -221,6 +221,22 @@ vllm_omni_configs = {
                 expected_response=[],
                 expected_log=[],
             ),
+            # Streaming video generation
+            VideoGenerationPayload(
+                body={
+                    "prompt": "Dog running on a beach",
+                    "size": "480x272",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 10,
+                        "num_frames": 17,
+                    },
+                },
+                repeat_count=1,
+                http_stream=True,
+                expected_response=[],
+                expected_log=[],
+            ),
         ],
     ),
 }

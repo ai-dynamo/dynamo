@@ -27,17 +27,23 @@ use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
 };
 
+mod batching;
+mod dedup;
 mod event_processor;
+mod sinks;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
 #[cfg(test)]
-use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop};
-use event_processor::{
-    EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
-};
+use batching::BatchingState;
+#[cfg(test)]
+use dedup::EventDedupFilter;
+#[cfg(test)]
+use event_processor::run_event_processor_loop;
+use event_processor::{start_event_processor, start_event_processor_jetstream};
+use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 

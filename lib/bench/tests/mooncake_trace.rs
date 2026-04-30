@@ -9,14 +9,16 @@ mod common;
 #[path = "../kv_router/mooncake_shared.rs"]
 mod mooncake_shared;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{generate_replay_artifacts, process_mooncake_trace};
+use common::{WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace};
+use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
+use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, WorkerWithDpRank};
 use dynamo_mocker::loadgen::{SessionTrace, Trace, TurnTrace};
 use mooncake_shared::{MooncakeBenchmarkConfig, MooncakeIndexerConfig, run_benchmark};
 use tempfile::NamedTempFile;
@@ -26,6 +28,113 @@ const NUM_GPU_BLOCKS: usize = 16384;
 const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
 const BENCHMARK_DURATION_MS: u64 = 2000;
 const NUM_EVENT_WORKERS: usize = 4;
+
+type NormalizedOverlapScores = BTreeMap<WorkerWithDpRank, u32>;
+
+#[derive(Clone)]
+enum ReplayEntryKind {
+    Request(Vec<LocalBlockHash>),
+    Event(KvCacheEvent),
+}
+
+#[derive(Clone)]
+struct ReplayEntry {
+    timestamp_us: u64,
+    worker_id: u64,
+    kind_rank: u8,
+    kind: ReplayEntryKind,
+}
+
+fn collect_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<ReplayEntry> {
+    let mut entries = Vec::new();
+    for (worker_id, artifact) in artifacts.iter().enumerate() {
+        entries.extend(artifact.requests.iter().map(|request| ReplayEntry {
+            timestamp_us: request.timestamp_us,
+            worker_id: worker_id as u64,
+            kind_rank: 0,
+            kind: ReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
+        }));
+        entries.extend(artifact.kv_events.iter().map(|event| ReplayEntry {
+            timestamp_us: event.timestamp_us,
+            worker_id: worker_id as u64,
+            kind_rank: 1,
+            kind: ReplayEntryKind::Event(event.event.clone()),
+        }));
+    }
+    entries.sort_by_key(|entry| (entry.timestamp_us, entry.kind_rank, entry.worker_id));
+    entries
+}
+
+async fn collect_overlap_scores_for_replay(
+    config: &MooncakeIndexerConfig,
+    artifacts: &[WorkerReplayArtifacts],
+) -> anyhow::Result<Vec<NormalizedOverlapScores>> {
+    let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()));
+    let entries = collect_replay_entries(artifacts);
+    let mut scores = Vec::new();
+    let mut idx = 0;
+
+    while idx < entries.len() {
+        let timestamp_us = entries[idx].timestamp_us;
+        while idx < entries.len() && entries[idx].timestamp_us == timestamp_us {
+            match &entries[idx].kind {
+                ReplayEntryKind::Request(request) => {
+                    let overlap = indexer.find_matches(request.clone()).await?;
+                    scores.push(overlap.scores.into_iter().collect());
+                }
+                ReplayEntryKind::Event(event) => {
+                    indexer
+                        .apply_event(RouterEvent::new(entries[idx].worker_id, event.clone()))
+                        .await;
+                }
+            }
+            idx += 1;
+        }
+        indexer.flush().await;
+    }
+
+    indexer.shutdown();
+    Ok(scores)
+}
+
+async fn assert_overlap_score_parity(
+    variants: &[MooncakeIndexerConfig],
+    artifacts: &[WorkerReplayArtifacts],
+) -> anyhow::Result<()> {
+    let mut expected_name = None;
+    let mut expected_scores = Vec::new();
+
+    for config in variants {
+        let actual_scores = collect_overlap_scores_for_replay(config, artifacts).await?;
+        if expected_name.is_none() {
+            expected_name = Some(config.short_name().to_string());
+            expected_scores = actual_scores;
+            continue;
+        }
+
+        assert_eq!(
+            actual_scores.len(),
+            expected_scores.len(),
+            "{} produced a different number of request overlap results than {}",
+            config.short_name(),
+            expected_name.as_deref().unwrap()
+        );
+
+        for (request_idx, (actual, expected)) in
+            actual_scores.iter().zip(expected_scores.iter()).enumerate()
+        {
+            assert_eq!(
+                actual,
+                expected,
+                "{} overlap scores diverged from {} at replay request {request_idx}",
+                config.short_name(),
+                expected_name.as_deref().unwrap()
+            );
+        }
+    }
+
+    Ok(())
+}
 
 #[test]
 fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<()> {
@@ -152,7 +261,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
     ];
 
-    for config in variants {
+    for config in &variants {
         support::reset_warning_count(&warning_count);
 
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -196,6 +305,8 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
             config.short_name()
         );
     }
+
+    assert_overlap_score_parity(&variants, &artifacts).await?;
 
     Ok(())
 }
