@@ -38,6 +38,15 @@ const (
 	dgdrAliasBefore                 = "before"
 )
 
+func decodeDGDRHubSpecSaveForTest(t *testing.T, raw string) dgdrHubSpecPreservation {
+	t.Helper()
+	var saved dgdrHubSpecPreservation
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	}
+	return saved
+}
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
@@ -1116,15 +1125,12 @@ func TestDGDR_SparseHubSpecOmitsRepresentableFields(t *testing.T) {
 	if raw == "" {
 		t.Fatalf("expected %s to preserve hub-only searchStrategy", annDGDRHubSpec)
 	}
-	var saved v1beta1.DynamoGraphDeploymentRequestSpec
-	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
-		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	saved := decodeDGDRHubSpecSaveForTest(t, raw)
+	if saved.Spec.Model != "" || saved.Spec.Backend != "" || saved.Spec.Image != "" {
+		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved.Spec)
 	}
-	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
-		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved)
-	}
-	if saved.SearchStrategy != v1beta1.SearchStrategyThorough {
-		t.Fatalf("saved searchStrategy = %q, want %q", saved.SearchStrategy, v1beta1.SearchStrategyThorough)
+	if saved.Spec.SearchStrategy != v1beta1.SearchStrategyThorough {
+		t.Fatalf("saved searchStrategy = %q, want %q", saved.Spec.SearchStrategy, v1beta1.SearchStrategyThorough)
 	}
 }
 
@@ -1147,12 +1153,12 @@ func TestDGDR_SparseHubSpecNilAutoApplyOmitsRepresentableFields(t *testing.T) {
 	if raw == "" {
 		t.Fatalf("expected %s to preserve nil AutoApply shape", annDGDRHubSpec)
 	}
-	var saved v1beta1.DynamoGraphDeploymentRequestSpec
-	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
-		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	saved := decodeDGDRHubSpecSaveForTest(t, raw)
+	if saved.Spec.Model != "" || saved.Spec.Backend != "" || saved.Spec.Image != "" {
+		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved.Spec)
 	}
-	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
-		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved)
+	if !saved.AutoApplyNil {
+		t.Fatalf("AutoApplyNil = false, want true")
 	}
 
 	restored := &v1beta1.DynamoGraphDeploymentRequest{}
@@ -1211,15 +1217,12 @@ func TestDGDR_SparseHubSpecWorkloadWithoutSLAOmitsRepresentableFields(t *testing
 	if raw == "" {
 		t.Fatalf("expected %s to preserve workload-without-sla shape", annDGDRHubSpec)
 	}
-	var saved v1beta1.DynamoGraphDeploymentRequestSpec
-	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
-		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	saved := decodeDGDRHubSpecSaveForTest(t, raw)
+	if saved.Spec.Model != "" || saved.Spec.Backend != "" || saved.Spec.Image != "" {
+		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved.Spec)
 	}
-	if saved.Model != "" || saved.Backend != "" || saved.Image != "" {
-		t.Fatalf(dgdrHubSaveRepresentedFieldsMsg, saved)
-	}
-	if saved.Workload == nil || saved.Workload.ISL != nil {
-		t.Fatalf("saved Workload = %#v, want sparse shape marker without represented ISL", saved.Workload)
+	if saved.Spec.Workload == nil || saved.Spec.Workload.ISL != nil {
+		t.Fatalf("saved Workload = %#v, want sparse shape marker without represented ISL", saved.Spec.Workload)
 	}
 
 	restored := &v1beta1.DynamoGraphDeploymentRequest{}
@@ -1292,6 +1295,33 @@ func TestDGDR_HubDGDNameDoesNotCreateDeploymentAnnotation(t *testing.T) {
 	}
 }
 
+func TestDGDR_HubDeployedPhaseRespectsIntermediateSpokeCreatedEdit(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "deployed-with-dgd"},
+		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
+			Phase:   v1beta1.DGDRPhaseDeployed,
+			DGDName: "created-dgd",
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if spoke.Status.Deployment == nil {
+		t.Fatalf("Deployment = nil, want created deployment")
+	}
+	spoke.Status.Deployment.Created = false
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
+		t.Fatalf("Phase = %q, want %q", restored.Status.Phase, v1beta1.DGDRPhaseReady)
+	}
+}
+
 func TestDGDR_EmptyStateRoundTrips(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "empty-state"},
@@ -1310,6 +1340,26 @@ func TestDGDR_EmptyStateRoundTrips(t *testing.T) {
 	}
 	if spoke.Status.State != "" {
 		t.Fatalf("State = %q, want empty", spoke.Status.State)
+	}
+}
+
+func TestDGDR_SpokeStatusPreservationDoesNotWriteFingerprint(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-status-fingerprint"},
+		Status: DynamoGraphDeploymentRequestStatus{
+			State: DGDRStateDeploymentDeleted,
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if _, ok := hub.Annotations[annDGDRSpokeStatus]; !ok {
+		t.Fatalf("expected %s to preserve lossy state", annDGDRSpokeStatus)
+	}
+	if _, ok := hub.Annotations[annDGDRSpokeHubStatus]; ok {
+		t.Fatalf("unexpected fingerprint annotation %s: %v", annDGDRSpokeHubStatus, hub.Annotations)
 	}
 }
 

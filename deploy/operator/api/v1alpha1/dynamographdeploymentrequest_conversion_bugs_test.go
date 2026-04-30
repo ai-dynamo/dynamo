@@ -18,7 +18,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
 	"testing"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -145,18 +144,15 @@ func TestBugDGDR_SparseHubSpecSaveOmitsRepresentableContextFields(t *testing.T) 
 	if raw == "" {
 		t.Fatalf("expected %s to preserve hub-only searchStrategy", annDGDRHubSpec)
 	}
-	var saved v1beta1.DynamoGraphDeploymentRequestSpec
-	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
-		t.Fatalf("unmarshal %s: %v", annDGDRHubSpec, err)
+	saved := decodeDGDRHubSpecSaveForTest(t, raw)
+	if saved.Spec.SearchStrategy != v1beta1.SearchStrategyThorough {
+		t.Fatalf("saved searchStrategy = %q, want %q", saved.Spec.SearchStrategy, v1beta1.SearchStrategyThorough)
 	}
-	if saved.SearchStrategy != v1beta1.SearchStrategyThorough {
-		t.Fatalf("saved searchStrategy = %q, want %q", saved.SearchStrategy, v1beta1.SearchStrategyThorough)
+	if saved.Spec.AutoApply != nil {
+		t.Fatalf("hub save included representable AutoApply: %v", *saved.Spec.AutoApply)
 	}
-	if saved.AutoApply != nil {
-		t.Fatalf("hub save included representable AutoApply: %v", *saved.AutoApply)
-	}
-	if saved.ModelCache != nil {
-		t.Fatalf("hub save included representable ModelCache: %#v", saved.ModelCache)
+	if saved.Spec.ModelCache != nil {
+		t.Fatalf("hub save included representable ModelCache: %#v", saved.Spec.ModelCache)
 	}
 }
 
