@@ -506,10 +506,7 @@ func restoreDGDRHubSpecAnnotation(src *DynamoGraphDeploymentRequest) *dgdrHubSpe
 	if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
 		return nil
 	}
-	envelope.Spec = sparseDGDRLegacyHubSpecSave(&legacy)
-	if dgdrLegacyHubSpecMarksNilAutoApply(&legacy) {
-		envelope.AutoApplyNil = true
-	}
+	envelope = sparseDGDRLegacyHubSpecSave(&legacy)
 	if dgdrHubSpecSaveIsZero(&envelope) {
 		return nil
 	}
@@ -537,22 +534,13 @@ func restoreDGDRHubStatusAnnotation(src *DynamoGraphDeploymentRequest) *dgdrHubS
 	return &envelope
 }
 
-func sparseDGDRLegacyHubSpecSave(legacy *v1beta1.DynamoGraphDeploymentRequestSpec) v1beta1.DynamoGraphDeploymentRequestSpec {
+func sparseDGDRLegacyHubSpecSave(legacy *v1beta1.DynamoGraphDeploymentRequestSpec) dgdrHubSpecSave {
 	if legacy == nil {
-		return v1beta1.DynamoGraphDeploymentRequestSpec{}
+		return dgdrHubSpecSave{}
 	}
 	var save dgdrHubSpecSave
 	saveDGDRHubOnlySpec(legacy, &save)
-	save.AutoApplyNil = false
-	return save.Spec
-}
-
-func dgdrLegacyHubSpecMarksNilAutoApply(legacy *v1beta1.DynamoGraphDeploymentRequestSpec) bool {
-	if legacy == nil {
-		return false
-	}
-	return legacy.Features != nil &&
-		apiequality.Semantic.DeepEqual(legacy.Features, &v1beta1.FeaturesSpec{})
+	return save
 }
 
 func dgdrLegacyHubStatusHasPhase(raw string) bool {

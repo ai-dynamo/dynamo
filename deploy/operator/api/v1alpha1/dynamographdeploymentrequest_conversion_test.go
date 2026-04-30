@@ -1194,6 +1194,35 @@ func TestDGDR_LegacyHubSpecEmptyFeaturesMarkerRestoresNilAutoApply(t *testing.T)
 	}
 }
 
+func TestDGDR_LegacyHubSpecFeatureSaveRestoresNilAutoApply(t *testing.T) {
+	src := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "legacy-feature-nil-autoapply",
+			Annotations: map[string]string{
+				annDGDRHubSpec: `{"features":{"mocker":{}}}`,
+			},
+		},
+		Spec: DynamoGraphDeploymentRequestSpec{
+			Model:     "llama",
+			Backend:   "vllm",
+			AutoApply: true,
+		},
+	}
+
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if restored.Spec.AutoApply != nil {
+		t.Fatalf("AutoApply = %v, want nil from legacy feature save", *restored.Spec.AutoApply)
+	}
+	if restored.Spec.Features == nil ||
+		restored.Spec.Features.Mocker == nil ||
+		restored.Spec.Features.Mocker.Enabled {
+		t.Fatalf("Features = %#v, want disabled mocker restored from legacy feature save", restored.Spec.Features)
+	}
+}
+
 func TestDGDR_LegacyHubSpecDropsRepresentableContextFields(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
