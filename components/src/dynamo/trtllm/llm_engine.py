@@ -34,7 +34,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.llm import ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,7 @@ class TrtllmLLMEngine(LLMEngine):
                 )
                 sys.exit(1)
             logging.info("Applying engine arg overrides: %s", overrides)
+            warn_override_collisions(engine_args, overrides)
             deep_update(engine_args, overrides)
 
         # Pull the *post-override* values from engine_args so the engine instance
