@@ -76,11 +76,11 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	saveDCDAlphaOnlyStatus(&src.Status, &statusSave)
 	emptyServiceNameSave := dcdEmptyServiceNameNeedsSave(src, dst)
 	generatedPodTemplateSave := !hubOrigin && dst.Spec.PodTemplate != nil
-	preserveSpec := generatedPodTemplateSave || emptyServiceNameSave || !dcdAlphaSpecSaveIsZero(&spokeSave)
+	saveSpec := generatedPodTemplateSave || emptyServiceNameSave || !dcdAlphaSpecSaveIsZero(&spokeSave)
 
 	convertDCDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
-	if preserveSpec || !dcdAlphaStatusSaveIsZero(&statusSave) {
-		preserveDCDSpoke(&spokeSave, preserveSpec, emptyServiceNameSave, &statusSave, dst)
+	if saveSpec || !dcdAlphaStatusSaveIsZero(&statusSave) {
+		saveDCDSpokeAnnotations(&spokeSave, saveSpec, emptyServiceNameSave, &statusSave, dst)
 	}
 	return nil
 }
@@ -132,8 +132,8 @@ func dcdEmptyServiceNameNeedsSave(src *DynamoComponentDeployment, dst *v1beta1.D
 		dst.Spec.ComponentName == src.ObjectMeta.Name
 }
 
-func preserveDCDSpoke(specSave *DynamoComponentDeploymentSpec, preserveSpec bool, emptyServiceName bool, statusSave *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeployment) {
-	if preserveSpec {
+func saveDCDSpokeAnnotations(specSave *DynamoComponentDeploymentSpec, saveSpec bool, emptyServiceName bool, statusSave *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeployment) {
+	if saveSpec {
 		data, err := marshalDCDSpokeSpec(specSave, emptyServiceName)
 		if err == nil {
 			setAnnOnObj(&dst.ObjectMeta, annDCDSpokeSpec, string(data))
