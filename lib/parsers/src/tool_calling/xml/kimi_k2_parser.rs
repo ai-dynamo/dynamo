@@ -477,7 +477,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.5, REPORT.8208 (PR #8208)
+    #[test] // CASE.5 (PR #8208)
     fn test_parse_malformed_no_section_end() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;

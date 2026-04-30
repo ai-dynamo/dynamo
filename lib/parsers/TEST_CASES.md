@@ -10,12 +10,12 @@ Category layout:
 - **`CASE.1`–`CASE.15`** — **Generic**. Apply to every parser regardless of grammar.
 - **`CASE.xml1`–`CASE.xml2`** — XML-family only (hermes, glm47, qwen3_coder, minimax_m2, kimi_k2).
 - **`CASE.harmony1`** — Harmony only (gpt-oss).
-- **`REPORT.<n>`** — **Regression markers** (not a test category). Tag a test
-  with `REPORT.<incident-number>` when the test exists because a customer
-  ticket / GitHub issue / PR uncovered a real bug. The number after `REPORT.`
-  is the original incident reference, not a sequential test-category slot.
-  Renamed from the legacy `CASE.16` label, which was misleading because it
-  suggested an "every parser must cover this" contract.
+
+Tests that exist because of a specific customer-reported bug should
+include the originating ticket / PR / issue reference inline in the
+`#[test]` comment — e.g. `#[test] // CASE.5 (PR #8208)`. The CASE
+label is the categorical claim; the parenthetical is the audit trail.
+No separate "regression" taxonomy is needed.
 
 Per-model gap tracking lives elsewhere (not in this repo).
 
@@ -38,8 +38,6 @@ Per-model gap tracking lives elsewhere (not in this repo).
 - **`CASE.13`** Normal text interleaved with tool calls.
 - **`CASE.14`** Empty content / empty `tool_calls` array / null response.
 - **`CASE.15`** Duplicate tool calls (same name twice). No test anywhere in the repo; universal gap.
-
-(`CASE.16` retired — see `REPORT.<n>` regression markers above.)
 
 ### XML-family (`CASE.xml*`)
 
@@ -218,24 +216,20 @@ arguments.
   IDs. (The runtime / client is responsible for deciding whether duplicate
   invocation is intended.)
 
-## `REPORT.<n>` — Regression marker for a customer-reported bug
+## Customer-incident regression tests
 
-Tag a test with `REPORT.<n>` (e.g. `REPORT.8208` for PR #8208, or
-`REPORT.DIS-1234` for a Linear ticket) when the test exists *because* a
-real customer report uncovered a bug. The marker is bookkeeping — it lets
-future maintainers trace the test back to the originating incident.
+When a test exists because a specific customer ticket / PR / GH issue
+uncovered a bug, include that reference inline in the `#[test]` comment:
 
-- Not a category every parser needs to cover in advance; cells populate
-  as bugs are reported and fixed.
-- Pre-existing tests labelled `CASE.16` were renamed to `REPORT.<n>` in
-  this PR. The old `CASE.16` label was misleading — it appeared next to
-  generic test categories like `CASE.1`–`CASE.15` and implied parsers
-  needed to cover it proactively.
-- Existing examples:
-  - `xml/kimi_k2_parser.rs::test_parse_malformed_no_section_end`
-    → `REPORT.8208`
-  - `lib/llm/tests/test_streaming_tool_parsers.rs::test_kimi_k2_streaming_truncated_mid_argument_no_call_end`
-    → also `REPORT.8208` (same incident, different layer)
+```rust
+#[test] // CASE.5 (PR #8208)
+fn test_parse_malformed_no_section_end() { ... }
+```
+
+The CASE label still names the category being exercised; the
+parenthetical names the originating incident. Greppable from both
+directions: `grep -r 'CASE.5'` finds all CASE.5 tests; `grep -r '#8208'`
+finds every test tied to that incident across layers.
 
 ---
 
@@ -284,7 +278,6 @@ into tool-call extraction while surfacing `analysis` as reasoning and
 | Category block | Parsers | Notes |
 | -- | -- | -- |
 | `CASE.1`–`CASE.15` (generic) | All | Required contract for every parser |
-| `REPORT.<n>` (regression) | Per-incident | Bookkeeping marker, not a contract |
 | `CASE.xml1`–`CASE.xml2` | XML-family only | Entity decoding + schema-aware coercion |
 | `CASE.harmony1` | Harmony only | Channel routing |
 

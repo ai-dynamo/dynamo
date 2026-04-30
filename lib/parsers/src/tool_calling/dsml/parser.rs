@@ -328,8 +328,8 @@ mod tests {
     //   - (CASE.4 missing-parameter-close & middle-invoke-truncation now
     //     pinned: see test_parse_deepseek_v4_missing_parameter_close_loses_param,
     //     test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next.)
-    //   - REPORT.<n> regression markers — V4 is hours old (2026-04-24);
-    //     no customer bugs filed yet, so no `REPORT.<n>` tests exist.
+    // No customer-incident regression tests yet — V4 is hours old
+    // (2026-04-24) and no bugs have been filed against it.
     // -------------------------------------------------------------------
 
     /// `CASE.8` — streaming start-token detection (V4 variant).
