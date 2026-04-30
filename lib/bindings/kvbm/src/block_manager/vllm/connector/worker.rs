@@ -338,7 +338,7 @@ impl Worker for KvConnectorWorker {
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
+            event_sync_blocking(self.layer_events[self.layers_complete - 1])?;
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,
