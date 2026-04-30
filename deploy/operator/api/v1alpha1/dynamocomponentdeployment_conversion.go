@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,11 +36,11 @@ const (
 	annDCDHubSpec     = "nvidia.com/dcd-hub-spec"
 	annDCDSpokeSpec   = "nvidia.com/dcd-spoke-spec"
 	annDCDSpokeStatus = "nvidia.com/dcd-spoke-status"
-	annDCDHubOrigin   = "nvidia.com/dcd-hub-origin"
+
+	preservedDCDEmptyServiceNamePath = "serviceName"
 )
 
 type dcdConversionContext struct {
-	carrier             *annCarrier
 	objectName          string
 	includeOriginSplits bool
 }
@@ -60,17 +59,12 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDCDHubSpec); ok && raw != "" {
 		if spec, ok := restoreDCDHubSpec(raw); ok {
 			preservedHubSpec = &spec
-			delAnnFromObj(&dst.ObjectMeta, annDCDHubSpec)
 		}
 	}
-	hubOrigin := preservedHubSpec != nil || dst.ObjectMeta.Annotations[annDCDHubOrigin] == annotationTrue
-	delAnnFromObj(&dst.ObjectMeta, annDCDHubOrigin)
-	if hubOrigin {
-		scrubDCDAnnotations(&dst.ObjectMeta)
-	}
+	hubOrigin := preservedHubSpec != nil
+	scrubDCDInternalAnnotations(&dst.ObjectMeta)
 
 	ctx := dcdConversionContext{
-		carrier:             newDCDCarrier(&dst.ObjectMeta),
 		objectName:          dst.ObjectMeta.Name,
 		includeOriginSplits: !hubOrigin,
 	}
@@ -80,13 +74,13 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	var statusSave DynamoComponentDeploymentStatus
 	saveDCDAlphaOnlyStatus(&src.Status, &statusSave)
-	preserveSpoke := !hubOrigin ||
-		!dcdAlphaSpecSaveIsZero(&spokeSave) ||
-		!dcdAlphaStatusSaveIsZero(&statusSave)
+	emptyServiceNameSave := dcdEmptyServiceNameNeedsSave(src, dst)
+	generatedPodTemplateSave := !hubOrigin && dst.Spec.PodTemplate != nil
+	preserveSpec := generatedPodTemplateSave || emptyServiceNameSave || !dcdAlphaSpecSaveIsZero(&spokeSave)
 
 	convertDCDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
-	if preserveSpoke {
-		preserveDCDSpoke(&spokeSave, &statusSave, dst)
+	if preserveSpec || !dcdAlphaStatusSaveIsZero(&statusSave) {
+		preserveDCDSpoke(&spokeSave, preserveSpec, emptyServiceNameSave, &statusSave, dst)
 	}
 	return nil
 }
@@ -103,35 +97,44 @@ func convertDCDSpecToHub(src *DynamoComponentDeploymentSpec, dst *v1beta1.Dynamo
 	if restored != nil {
 		preservedShared = &restored.DynamoComponentDeploymentSharedSpec
 	}
-	if preservedShared != nil && preservedShared.PodTemplate != nil {
-		ctx.carrier.set(suffixPodTemplateOrig, annotationTrue)
-	}
 	var sharedSave *DynamoComponentDeploymentSharedSpec
 	if save != nil {
 		sharedSave = &save.DynamoComponentDeploymentSharedSpec
 	}
 	sharedCtx := sharedSpecConversionContext{
-		carrier:             ctx.carrier,
 		includeOriginSplits: ctx.includeOriginSplits,
+		podTemplateOrigin:   preservedShared != nil && preservedShared.PodTemplate != nil,
 	}
 	if err := convertSharedSpecToHub(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
 		return err
 	}
 
 	// v1beta1 requires DCD.spec.name. When a v1alpha1-origin DCD omits
-	// ServiceName, fall back to ObjectMeta.Name for schema validity and leave a
-	// marker so ConvertFrom can restore the omitted v1alpha1 field.
-	if dst.ComponentName == "" && ctx.includeOriginSplits {
+	// ServiceName, fall back to ObjectMeta.Name for schema validity. The
+	// sparse spoke save records whether the v1alpha1 field was truly empty.
+	if dst.ComponentName == "" {
 		dst.ComponentName = ctx.objectName
-		ctx.carrier.set(suffixServiceName, "")
+	}
+
+	// Restore target-only fields that the live source cannot represent.
+	if restored != nil && restored.ComponentName == "" && dst.ComponentName == ctx.objectName {
+		dst.ComponentName = ""
 	}
 
 	return nil
 }
 
-func preserveDCDSpoke(specSave *DynamoComponentDeploymentSpec, statusSave *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeployment) {
-	if !dcdAlphaSpecSaveIsZero(specSave) {
-		data, err := marshalDCDSpokeSpec(specSave)
+func dcdEmptyServiceNameNeedsSave(src *DynamoComponentDeployment, dst *v1beta1.DynamoComponentDeployment) bool {
+	return src != nil &&
+		dst != nil &&
+		src.Spec.ServiceName == "" &&
+		src.ObjectMeta.Name != "" &&
+		dst.Spec.ComponentName == src.ObjectMeta.Name
+}
+
+func preserveDCDSpoke(specSave *DynamoComponentDeploymentSpec, preserveSpec bool, emptyServiceName bool, statusSave *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeployment) {
+	if preserveSpec {
+		data, err := marshalDCDSpokeSpec(specSave, emptyServiceName)
 		if err == nil {
 			setAnnOnObj(&dst.ObjectMeta, annDCDSpokeSpec, string(data))
 		}
@@ -141,27 +144,19 @@ func preserveDCDSpoke(specSave *DynamoComponentDeploymentSpec, statusSave *Dynam
 	}
 }
 
-func fillDCDSpokeFromPreserved(dstSpec *DynamoComponentDeploymentSpec, dstStatus *DynamoComponentDeploymentStatus, preservedSpec *DynamoComponentDeploymentSpec, preservedStatus *DynamoComponentDeploymentStatus, objectName string) {
-	if preservedSpec != nil && dcdPreservedSpokeSpecHasFullShape(preservedSpec) {
-		if preservedSpec.ServiceName == "" && dstSpec.ServiceName == objectName {
-			dstSpec.ServiceName = ""
-		}
+func restoreDCDAlphaOnlySpecFromSaved(dstSpec *DynamoComponentDeploymentSpec, emptyServiceName bool, objectName string) {
+	if emptyServiceName && dstSpec.ServiceName == objectName {
+		dstSpec.ServiceName = ""
 	}
+}
+
+func restoreDCDAlphaOnlyStatusFromSaved(dstStatus *DynamoComponentDeploymentStatus, preservedStatus *DynamoComponentDeploymentStatus) {
 	if preservedStatus != nil && len(dstStatus.PodSelector) == 0 && len(preservedStatus.PodSelector) > 0 {
 		dstStatus.PodSelector = maps.Clone(preservedStatus.PodSelector)
 	}
 	if preservedStatus != nil && shouldRestoreSavedComponentName(dstStatus.Service, preservedStatus.Service) {
 		dstStatus.Service.ComponentName = preservedStatus.Service.ComponentName
 	}
-}
-
-func dcdPreservedSpokeSpecHasFullShape(preservedSpec *DynamoComponentDeploymentSpec) bool {
-	if preservedSpec == nil {
-		return false
-	}
-	var sparse DynamoComponentDeploymentSpec
-	saveSharedAlphaOnlySpec(&preservedSpec.DynamoComponentDeploymentSharedSpec, &sparse.DynamoComponentDeploymentSharedSpec, true)
-	return !apiequality.Semantic.DeepEqual(*preservedSpec, sparse)
 }
 
 func dcdAlphaSpecSaveIsZero(save *DynamoComponentDeploymentSpec) bool {
@@ -200,10 +195,13 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	var preservedSpokeSpec *DynamoComponentDeploymentSpec
+	var preservedSpokeEmptyServiceName bool
 	var preservedSpokeStatus *DynamoComponentDeploymentStatus
+	spokeOrigin := hasDCDSpokeAnnotations(&dst.ObjectMeta)
 	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDCDSpokeSpec); ok && raw != "" {
-		if spec, ok := restoreDCDSpokeSpec(raw); ok {
+		if spec, emptyServiceName, ok := restoreDCDSpokeSpec(raw); ok {
 			preservedSpokeSpec = &spec
+			preservedSpokeEmptyServiceName = emptyServiceName
 		}
 	}
 	if status, ok := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDSpokeStatus); ok {
@@ -211,7 +209,6 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	ctx := dcdConversionContext{
-		carrier:    newDCDCarrier(&dst.ObjectMeta),
 		objectName: src.ObjectMeta.Name,
 	}
 	var hubSave v1beta1.DynamoComponentDeploymentSpec
@@ -220,34 +217,28 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	convertDCDStatusFromHub(&src.Status, &dst.Status, nil, nil, ctx)
-	fillDCDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus, src.ObjectMeta.Name)
-	scrubDCDAnnotations(&dst.ObjectMeta)
-	if preservedSpokeSpec != nil || preservedSpokeStatus != nil {
-		delAnnFromObj(&dst.ObjectMeta, annDCDSpokeSpec)
-		delAnnFromObj(&dst.ObjectMeta, annDCDSpokeStatus)
-	}
-	if !dcdHubSpecSaveIsZero(&hubSave) {
+	restoreDCDAlphaOnlySpecFromSaved(&dst.Spec, preservedSpokeEmptyServiceName, src.ObjectMeta.Name)
+	restoreDCDAlphaOnlyStatusFromSaved(&dst.Status, preservedSpokeStatus)
+	scrubDCDInternalAnnotations(&dst.ObjectMeta)
+
+	if dcdHubSpecNeedsSave(src, &hubSave, !spokeOrigin) {
+		hubSave.ComponentName = src.Spec.ComponentName
 		data, err := marshalDCDHubSpec(&hubSave)
 		if err != nil {
 			return fmt.Errorf("preserve DCD hub spec: %w", err)
 		}
 		setAnnOnObj(&dst.ObjectMeta, annDCDHubSpec, string(data))
-	} else if dcdHubOriginMarkerNeeded(src) && (!hasDCDInternalAnnotations(src.ObjectMeta.Annotations) || dcdEmptyHubNameNeedsOriginMarker(src)) {
-		setAnnOnObj(&dst.ObjectMeta, annDCDHubOrigin, annotationTrue)
 	}
 	return nil
 }
 
-func dcdHubOriginMarkerNeeded(src *v1beta1.DynamoComponentDeployment) bool {
-	return src != nil && (src.Spec.ComponentName == "" || src.Spec.PodTemplate != nil)
-}
-
-func dcdEmptyHubNameNeedsOriginMarker(src *v1beta1.DynamoComponentDeployment) bool {
-	if src == nil || src.Spec.ComponentName != "" {
-		return false
-	}
-	_, hasServiceNameOrigin := newDCDCarrier(&src.ObjectMeta).get(suffixServiceName)
-	return !hasServiceNameOrigin
+func dcdHubSpecNeedsSave(src *v1beta1.DynamoComponentDeployment, save *v1beta1.DynamoComponentDeploymentSpec, saveHubOrigin bool) bool {
+	return !dcdHubSpecSaveIsZero(save) ||
+		src != nil &&
+			(src.Spec.ComponentName == "" &&
+				src.ObjectMeta.Name != "" ||
+				saveHubOrigin &&
+					src.Spec.PodTemplate != nil)
 }
 
 func convertDCDSpecFromHub(src *v1beta1.DynamoComponentDeploymentSpec, dst *DynamoComponentDeploymentSpec, restored *DynamoComponentDeploymentSpec, save *v1beta1.DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
@@ -266,17 +257,9 @@ func convertDCDSpecFromHub(src *v1beta1.DynamoComponentDeploymentSpec, dst *Dyna
 	if save != nil {
 		sharedSave = &save.DynamoComponentDeploymentSharedSpec
 	}
-	sharedCtx := sharedSpecConversionContext{
-		carrier: ctx.carrier,
-	}
+	sharedCtx := sharedSpecConversionContext{}
 	if err := convertSharedSpecFromHub(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
 		return err
-	}
-	if v, ok := ctx.carrier.get(suffixServiceName); ok {
-		if v == "" && src.ComponentName == ctx.objectName {
-			dst.ServiceName = ""
-		}
-		ctx.carrier.del(suffixServiceName)
 	}
 
 	return nil
@@ -298,36 +281,43 @@ func restoreDCDHubSpec(raw string) (v1beta1.DynamoComponentDeploymentSpec, bool)
 	})
 }
 
-func marshalDCDSpokeSpec(src *DynamoComponentDeploymentSpec) ([]byte, error) {
+func marshalDCDSpokeSpec(src *DynamoComponentDeploymentSpec, emptyServiceName bool) ([]byte, error) {
 	return marshalPreservedSpec(*src.DeepCopy(), func(spec *DynamoComponentDeploymentSpec, records *[]preservedRawJSON) {
+		if emptyServiceName {
+			*records = append(*records, preservedRawJSON{
+				Path: preservedDCDEmptyServiceNamePath,
+				Nil:  true,
+			})
+		}
 		if spec.EPPConfig != nil {
 			preserveEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
 		}
 	})
 }
 
-func restoreDCDSpokeSpec(raw string) (DynamoComponentDeploymentSpec, bool) {
-	return restorePreservedSpec(raw, func(spec *DynamoComponentDeploymentSpec, records []preservedRawJSON) {
+func restoreDCDSpokeSpec(raw string) (DynamoComponentDeploymentSpec, bool, bool) {
+	emptyServiceName := false
+	spec, ok := restorePreservedSpec(raw, func(spec *DynamoComponentDeploymentSpec, records []preservedRawJSON) {
+		for _, record := range records {
+			if record.Path == preservedDCDEmptyServiceNamePath && record.Nil {
+				emptyServiceName = true
+			}
+		}
 		if spec.EPPConfig != nil {
 			restoreEPPPluginParameters(spec.EPPConfig.Config, "eppConfig/config", records)
 		}
 	})
+	return spec, emptyServiceName, ok
 }
 
 func dcdHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSpec) bool {
 	return save == nil || sharedHubSpecSaveIsZero(&save.DynamoComponentDeploymentSharedSpec)
 }
 
-func hasDCDInternalAnnotations(annotations map[string]string) bool {
-	for key := range annotations {
-		if key == annDCDHubSpec ||
-			key == annDCDSpokeSpec ||
-			key == annDCDSpokeStatus ||
-			strings.HasPrefix(key, annDCDPrefix) {
-			return true
-		}
-	}
-	return false
+func hasDCDSpokeAnnotations(obj metav1.Object) bool {
+	_, hasSpec := getAnnFromObj(obj, annDCDSpokeSpec)
+	_, hasStatus := getAnnFromObj(obj, annDCDSpokeStatus)
+	return hasSpec || hasStatus
 }
 
 //nolint:unparam // Keep the structural conversion signature; this leaf has no preserved fields.
@@ -367,8 +357,12 @@ func convertDCDStatusFromHub(src *v1beta1.DynamoComponentDeploymentStatus, dst *
 	}
 }
 
-// scrubDCDAnnotations removes any lingering "nvidia.com/dcd-*" keys that
-// shared-spec conversion did not consume.
-func scrubDCDAnnotations(obj *metav1.ObjectMeta) {
-	scrubAnnotationsByPrefix(obj, annDCDPrefix)
+func scrubDCDInternalAnnotations(obj metav1.Object) {
+	for _, key := range []string{
+		annDCDHubSpec,
+		annDCDSpokeSpec,
+		annDCDSpokeStatus,
+	} {
+		delAnnFromObj(obj, key)
+	}
 }

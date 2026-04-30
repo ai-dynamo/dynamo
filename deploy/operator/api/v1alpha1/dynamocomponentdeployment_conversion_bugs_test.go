@@ -31,7 +31,7 @@ func TestDCD_DivergedLegacyCarrierDoesNotOverrideSparseSpokeSave(t *testing.T) {
 		DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 			DynamoNamespace: &savedNamespace,
 		},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("marshal DCD spoke spec: %v", err)
 	}
@@ -41,8 +41,8 @@ func TestDCD_DivergedLegacyCarrierDoesNotOverrideSparseSpokeSave(t *testing.T) {
 			Name:      "dcd",
 			Namespace: "ns",
 			Annotations: map[string]string{
-				annDCDSpokeSpec:                      string(data),
-				annDCDPrefix + suffixDynamoNamespace: "stale",
+				annDCDSpokeSpec:                   string(data),
+				"nvidia.com/dcd-dynamo-namespace": "stale",
 			},
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{

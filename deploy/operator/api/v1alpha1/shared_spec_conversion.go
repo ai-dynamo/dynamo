@@ -20,19 +20,17 @@
 // DynamoComponentDeploymentSharedSpec is the payload that differs most between
 // v1alpha1 and v1beta1: v1alpha1 has ten per-service pod-configuration fields,
 // v1beta1 replaces them with a single corev1.PodTemplateSpec plus a few
-// first-class fields. The heavy lifting (podTemplate <-> flat fields,
-// experimental block, origin annotations for lossy conversions) lives here so
-// that the DGD and DCD conversion entry points stay thin.
+// first-class fields. The heavy lifting (podTemplate <-> flat fields and the
+// experimental block) lives here so that the DGD and DCD conversion entry
+// points stay thin.
 //
 // Round-trip fidelity
 //
 // Every v1beta1 field that has no v1alpha1 equivalent, and every v1alpha1
-// field that has no v1beta1 equivalent, is stashed under a reserved
-// "nvidia.com/dgd-..." or "nvidia.com/dcd-..." annotation so that
-// ConvertTo(ConvertFrom(V)) == V for every v1beta1 input V. The annotation
-// namespace is operator-managed; user-set annotations with the same prefix
-// are parsed best-effort (an unparseable value is ignored rather than
-// erroring) and dropped on ConvertFrom once consumed.
+// field that has no v1beta1 equivalent, is saved by the caller in a sparse
+// typed spec/status annotation. This file only restores from the typed
+// preserved value it receives; it does not read or write annotation side
+// channels.
 
 package v1alpha1
 
@@ -42,7 +40,6 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-	"strings"
 
 	"github.com/imdario/mergo"
 	corev1 "k8s.io/api/core/v1"
@@ -70,129 +67,8 @@ const (
 	// Resources.{Requests,Limits}.GPU without specifying GPUType.
 	defaultGPUResourceName = corev1.ResourceName("nvidia.com/gpu")
 
-	annotationTrue                 = "true"
-	annotationPodTemplateGenerated = "generated"
-
-	// Shared-spec annotation key suffixes. Combined with the parent DCD
-	// object's prefix ("nvidia.com/dcd-") to form the full annotation key.
-	//
-	// suffixServiceName preserves standalone DCDs where ServiceName was omitted
-	// and v1beta1 used ObjectMeta.Name as the fallback.
-	suffixServiceName      = "service-name"
-	suffixDynamoNamespace  = "dynamo-namespace"
-	suffixAutoscaling      = "autoscaling"
-	suffixIngress          = "ingress"
-	suffixSubComponentType = "sub-component-type"
-	suffixEnvFromSecret    = "env-from-secret"
-	suffixAnnotations      = "annotations"
-	suffixLabels           = "labels"
-	suffixSharedMemOrigin  = "shared-memory-origin"
-	suffixResourcesOrigin  = "resources-origin"
-	suffixVolumeMountsOrig = "volume-mounts-origin"
-	suffixPodTemplateOrig  = "pod-template-origin"
-	suffixPodMetadataOrig  = "pod-metadata-origin"
-	suffixFrontendSidecar  = "frontend-sidecar-origin"
-	// suffixFrontendSidecarRef is used for v1beta1-first inputs that set
-	// FrontendSidecar to a container name without a v1alpha1 origin. The
-	// referenced container flows through ExtraPodSpec.PodSpec.Containers
-	// as a regular user sidecar on the v1alpha1 side.
-	suffixFrontendSidecarRef = "frontend-sidecar-ref"
-	suffixExperimentalOrig   = "experimental-origin"
-	suffixGMSDisabled        = "gms-disabled-payload"
-	suffixFailoverDisabled   = "failover-disabled-payload"
-	suffixCheckpointDisabled = "checkpoint-disabled-payload"
-	suffixScalingDisabled    = "scaling-adapter-disabled"
-
-	// DCD-scoped annotation keys (standalone DCDs carry origin data on their
-	// own metadata rather than on a parent DGD).
-	annDCDPrefix = "nvidia.com/dcd-"
+	annotationTrue = "true"
 )
-
-// annCarrier wraps a Kubernetes object's annotation bag for a standalone DCD.
-// DGD uses typed sparse spec/status annotations instead of per-component
-// annotation carriers.
-type annCarrier struct {
-	obj    metav1.Object
-	prefix string
-}
-
-// newDCDCarrier returns a carrier scoped to a standalone DCD: keys are of the
-// form "nvidia.com/dcd-<suffix>".
-func newDCDCarrier(obj metav1.Object) *annCarrier {
-	return &annCarrier{obj: obj, prefix: annDCDPrefix}
-}
-
-func (c *annCarrier) key(suffix string) string { return c.prefix + suffix }
-
-func (c *annCarrier) set(suffix, value string) {
-	if c == nil {
-		return
-	}
-	anns := c.obj.GetAnnotations()
-	if anns == nil {
-		anns = map[string]string{}
-	}
-	anns[c.key(suffix)] = value
-	c.obj.SetAnnotations(anns)
-}
-
-func (c *annCarrier) get(suffix string) (string, bool) {
-	if c == nil {
-		return "", false
-	}
-	anns := c.obj.GetAnnotations()
-	if anns == nil {
-		return "", false
-	}
-	v, ok := anns[c.key(suffix)]
-	return v, ok
-}
-
-func (c *annCarrier) del(suffix string) {
-	if c == nil {
-		return
-	}
-	anns := c.obj.GetAnnotations()
-	if anns == nil {
-		return
-	}
-	delete(anns, c.key(suffix))
-	if len(anns) == 0 {
-		c.obj.SetAnnotations(nil)
-	} else {
-		c.obj.SetAnnotations(anns)
-	}
-}
-
-func setJSONAnn(c *annCarrier, suffix string, value any) {
-	if c == nil {
-		return
-	}
-	data, err := json.Marshal(value)
-	if err != nil {
-		return
-	}
-	c.set(suffix, string(data))
-}
-
-func popJSONAnn[T any](c *annCarrier, suffix string) (T, bool) {
-	var out T
-	if c == nil {
-		return out, false
-	}
-	raw, ok := c.get(suffix)
-	if !ok {
-		return out, false
-	}
-	c.del(suffix)
-	if raw == "" {
-		return out, false
-	}
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return out, false
-	}
-	return out, true
-}
 
 // setAnnOnObj is a convenience for object-level preservation annotations.
 func setAnnOnObj(obj metav1.Object, key, value string) {
@@ -256,31 +132,11 @@ func delAnnFromObj(obj metav1.Object, key string) {
 	}
 }
 
-// scrubAnnotationsByPrefix removes every annotation whose key starts with
-// prefix, collapsing the map back to nil if nothing remains. Used by the DGD
-// and DCD ConvertFrom paths to clean up any reserved origin keys that were
-// not consumed (e.g. v1alpha1 client left a stale entry).
-func scrubAnnotationsByPrefix(obj metav1.Object, prefix string) {
-	anns := obj.GetAnnotations()
-	if len(anns) == 0 {
-		return
-	}
-	maps.DeleteFunc(anns, func(k, _ string) bool {
-		return strings.HasPrefix(k, prefix)
-	})
-	if len(anns) == 0 {
-		obj.SetAnnotations(nil)
-	} else {
-		obj.SetAnnotations(anns)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Shared-spec conversion entry points
 // ---------------------------------------------------------------------------
 
 type sharedSpecConversionContext struct {
-	carrier             *annCarrier
 	includeOriginSplits bool
 	podTemplateOrigin   bool
 }
@@ -299,13 +155,6 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 	// validator, which matches the intended behaviour.
 	dst.ComponentType = v1beta1.ComponentType(src.ComponentType)
 
-	// SubComponentType has no v1beta1 equivalent -- the "prefill"/"decode"
-	// values are first-class ComponentType enum values in v1beta1. Stash the
-	// raw string on the carrier so round-trip restores the original wording.
-	if src.SubComponentType != "" && ctx.carrier != nil {
-		ctx.carrier.set(suffixSubComponentType, src.SubComponentType)
-	}
-
 	// v1alpha1 ServiceName <-> v1beta1 ComponentName: the same logical
 	// identifier, renamed at v1beta1 to align with the
 	// `spec.components` rename. For DGD components the caller overrides
@@ -313,11 +162,6 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 	// source of truth on v1alpha1); for standalone DCDs the caller falls
 	// back to ObjectMeta.Name when src.ServiceName is empty.
 	dst.ComponentName = src.ServiceName
-
-	// DynamoNamespace (deprecated) -> annotation.
-	if src.DynamoNamespace != nil && ctx.carrier != nil {
-		ctx.carrier.set(suffixDynamoNamespace, *src.DynamoNamespace)
-	}
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
@@ -346,12 +190,8 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 		}
 	}
 
-	if ctx.carrier != nil {
-		preserveV1Alpha1OnlySharedFields(src, ctx.carrier)
-	}
-
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
-	if err := convertSharedMemoryTo(src.SharedMemory, dst, ctx.carrier); err != nil {
+	if err := convertSharedMemoryTo(src.SharedMemory, dst); err != nil {
 		return err
 	}
 
@@ -368,10 +208,10 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 	}
 
 	// scalingAdapter: drop Enabled bool, keep presence semantics.
-	convertScalingAdapterTo(src.ScalingAdapter, dst, ctx.carrier)
+	convertScalingAdapterTo(src.ScalingAdapter, dst)
 
 	// experimental block: gpuMemoryService, failover, checkpoint.
-	convertExperimentalTo(src, dst, ctx.carrier)
+	convertExperimentalTo(src, dst)
 
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
 	if err := buildPodTemplateTo(src, dst, ctx); err != nil {
@@ -383,38 +223,6 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 		saveSharedAlphaOnlySpec(src, save, ctx.includeOriginSplits)
 	}
 	return nil
-}
-
-func preserveV1Alpha1OnlySharedFields(src *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	// Autoscaling -> annotation (deprecated, removed in v1beta1).
-	if src.Autoscaling != nil {
-		setJSONAnn(c, suffixAutoscaling, src.Autoscaling)
-	}
-	// Ingress -> annotation (removed in v1beta1).
-	if src.Ingress != nil {
-		setJSONAnn(c, suffixIngress, src.Ingress)
-	}
-	// EnvFromSecret -> podTemplate.containers[main].envFrom; preserve the
-	// pointer string so ConvertFrom can distinguish it from native envFrom.
-	if src.EnvFromSecret != nil {
-		c.set(suffixEnvFromSecret, *src.EnvFromSecret)
-	}
-	// Per-service Annotations / Labels apply beyond podTemplate.metadata.
-	if len(src.Annotations) > 0 {
-		setJSONAnn(c, suffixAnnotations, src.Annotations)
-	}
-	if len(src.Labels) > 0 {
-		setJSONAnn(c, suffixLabels, src.Labels)
-	}
-	if extraPodMetadataNeedsPreservation(src.ExtraPodMetadata) {
-		setJSONAnn(c, suffixPodMetadataOrig, src.ExtraPodMetadata)
-	}
-	if src.Resources != nil && !reflect.DeepEqual(src.Resources, resourcesFromNative(resourcesToNative(src.Resources))) {
-		setJSONAnn(c, suffixResourcesOrigin, src.Resources)
-	}
-	if len(src.VolumeMounts) > 0 && !volumeMountsRoundTripThroughHub(src.VolumeMounts) {
-		setJSONAnn(c, suffixVolumeMountsOrig, src.VolumeMounts)
-	}
 }
 
 func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
@@ -681,44 +489,22 @@ func convertSharedSpecFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, 
 	}
 
 	dst.ServiceName = src.ComponentName
-	if ctx.carrier != nil {
-		// Restore annotation-preserved v1alpha1 fields.
-		if v, ok := ctx.carrier.get(suffixSubComponentType); ok {
-			dst.SubComponentType = v
-			ctx.carrier.del(suffixSubComponentType)
-		}
-		if v, ok := ctx.carrier.get(suffixDynamoNamespace); ok {
-			dst.DynamoNamespace = ptr.To(v)
-			ctx.carrier.del(suffixDynamoNamespace)
-		}
-		if as, ok := popJSONAnn[Autoscaling](ctx.carrier, suffixAutoscaling); ok {
-			dst.Autoscaling = &as
-		}
-		if ing, ok := popJSONAnn[IngressSpec](ctx.carrier, suffixIngress); ok {
-			dst.Ingress = &ing
-		}
-		if m, ok := popJSONAnn[map[string]string](ctx.carrier, suffixAnnotations); ok {
-			dst.Annotations = m
-		}
-		if m, ok := popJSONAnn[map[string]string](ctx.carrier, suffixLabels); ok {
-			dst.Labels = m
-		}
-	}
+
 	// sharedMemorySize -> SharedMemorySpec.
-	convertSharedMemoryFrom(src.SharedMemorySize, dst, ctx.carrier)
+	convertSharedMemoryFrom(src.SharedMemorySize, dst)
 
 	// compilationCache + podTemplate volumeMounts -> VolumeMounts.
 	convertVolumeMountsFrom(src, dst)
 
 	// experimental -> GPUMemoryService, Failover, Checkpoint.
-	convertExperimentalFrom(src, dst, ctx.carrier)
+	convertExperimentalFrom(src, dst)
 
 	// scalingAdapter presence -> Enabled=true; annotation -> Enabled=false payload.
-	convertScalingAdapterFrom(src.ScalingAdapter, dst, ctx.carrier)
+	convertScalingAdapterFrom(src.ScalingAdapter, dst)
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
 	// Resources + Envs + Probes (+ FrontendSidecar).
-	if err := decomposePodTemplate(src, dst, restored, ctx.carrier); err != nil {
+	if err := decomposePodTemplate(src, dst, restored); err != nil {
 		return err
 	}
 
@@ -956,60 +742,21 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // Shared-memory
 // ---------------------------------------------------------------------------
 
-func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
+func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) error {
 	if src == nil {
 		return nil
 	}
-	// Disabled=true -> size "0" (no origin annotation needed: convertSharedMemoryFrom
-	// interprets a zero quantity without origin as Disabled=true, which is the
-	// canonical meaning of sharedMemorySize=0 on the v1beta1 side).
-	// Disabled=false with Size=X -> X.
-	// Disabled=false with Size=zero -> empty struct, which has no v1beta1
-	// equivalent; stash via annotation to preserve the explicit pointer.
 	if src.Disabled {
 		dst.SharedMemorySize = ptr.To(resource.MustParse("0"))
-		if !src.Size.IsZero() {
-			setJSONAnn(c, suffixSharedMemOrigin, src)
-		}
 		return nil
 	}
-	// Not disabled, with a set size -> copy verbatim.
 	if !src.Size.IsZero() {
 		dst.SharedMemorySize = ptr.To(src.Size.DeepCopy())
-		return nil
 	}
-	// Disabled=false, Size=zero -> this is an empty struct. ConvertFrom must
-	// be able to reproduce "&SharedMemorySpec{}", distinct from a nil pointer.
-	c.set(suffixSharedMemOrigin, "empty")
 	return nil
 }
 
-func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	if v, ok := c.get(suffixSharedMemOrigin); ok {
-		c.del(suffixSharedMemOrigin)
-		if src != nil && src.Sign() != 0 {
-			dst.SharedMemory = &SharedMemorySpec{Size: src.DeepCopy()}
-			return
-		}
-		if v == "empty" {
-			// A bare SharedMemorySpec{} carries Size: Quantity{}, which
-			// serializes to "0" because resource.Quantity is a non-pointer
-			// struct (encoding/json's `omitempty` does not treat structs
-			// as empty). After the etcd JSON round-trip, Size comes back
-			// as a canonical zero Quantity that is NOT reflect.DeepEqual
-			// to the Go zero value, which would cause every
-			// kubectl apply to bump `.metadata.generation`. Emit the
-			// canonical zero form directly so reapplies are idempotent.
-			// See convertSharedMemoryFrom(disabled) for the twin case.
-			dst.SharedMemory = &SharedMemorySpec{Size: resource.MustParse("0")}
-			return
-		}
-		var sharedMemory SharedMemorySpec
-		if err := json.Unmarshal([]byte(v), &sharedMemory); err == nil {
-			dst.SharedMemory = &sharedMemory
-			return
-		}
-	}
+func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploymentSharedSpec) {
 	if src == nil {
 		return
 	}
@@ -1068,33 +815,18 @@ func convertVolumeMountsFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 // Scaling adapter (Enabled flag removed in v1beta1)
 // ---------------------------------------------------------------------------
 
-func convertScalingAdapterTo(src *ScalingAdapter, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func convertScalingAdapterTo(src *ScalingAdapter, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	if src == nil {
 		return
 	}
 	if src.Enabled {
 		dst.ScalingAdapter = &v1beta1.ScalingAdapter{}
-		return
 	}
-	// Enabled=false with a populated struct is unreachable today (no other
-	// fields on v1alpha1 ScalingAdapter) but we still record presence so the
-	// v1alpha1 -> v1beta1 -> v1alpha1 round-trip preserves the caller's
-	// explicit "&ScalingAdapter{Enabled:false}" pointer.
-	c.set(suffixScalingDisabled, annotationTrue)
 }
 
-func convertScalingAdapterFrom(src *v1beta1.ScalingAdapter, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func convertScalingAdapterFrom(src *v1beta1.ScalingAdapter, dst *DynamoComponentDeploymentSharedSpec) {
 	if src != nil {
 		dst.ScalingAdapter = &ScalingAdapter{Enabled: true}
-		// Drop any stale v1alpha1-first "disabled" annotation: v1beta1 is
-		// authoritative in this direction and an enabled v1beta1 entry
-		// must not resurrect a previous Enabled:false on the next round.
-		c.del(suffixScalingDisabled)
-		return
-	}
-	if _, ok := c.get(suffixScalingDisabled); ok {
-		dst.ScalingAdapter = &ScalingAdapter{Enabled: false}
-		c.del(suffixScalingDisabled)
 	}
 }
 
@@ -1146,17 +878,13 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
-func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	var exp *v1beta1.ExperimentalSpec
 	ensureExp := func() *v1beta1.ExperimentalSpec {
 		if exp == nil {
 			exp = &v1beta1.ExperimentalSpec{}
 		}
 		return exp
-	}
-	if _, ok := c.get(suffixExperimentalOrig); ok {
-		ensureExp()
-		c.del(suffixExperimentalOrig)
 	}
 
 	if src.GPUMemoryService != nil {
@@ -1165,13 +893,6 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 				Mode:            gmsModeToV1beta1(src.GPUMemoryService.Mode),
 				DeviceClassName: src.GPUMemoryService.DeviceClassName,
 			}
-		} else if !gmsIsZeroPayload(src.GPUMemoryService) {
-			setJSONAnn(c, suffixGMSDisabled, src.GPUMemoryService)
-		} else {
-			// Enabled=false with an otherwise-empty payload is semantically
-			// indistinguishable from absence; still preserve the explicit
-			// pointer so round-trip reproduces &GPUMemoryServiceSpec{}.
-			c.set(suffixGMSDisabled, `{}`)
 		}
 	}
 
@@ -1181,47 +902,25 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 				Mode:       gmsModeToV1beta1(src.Failover.Mode),
 				NumShadows: src.Failover.NumShadows,
 			}
-		} else if !failoverIsZeroPayload(src.Failover) {
-			setJSONAnn(c, suffixFailoverDisabled, src.Failover)
-		} else {
-			c.set(suffixFailoverDisabled, `{}`)
 		}
 	}
 
 	if src.Checkpoint != nil {
 		if src.Checkpoint.Enabled {
 			ensureExp().Checkpoint = checkpointToV1beta1(src.Checkpoint)
-		} else if !checkpointIsZeroPayload(src.Checkpoint) {
-			setJSONAnn(c, suffixCheckpointDisabled, src.Checkpoint)
-		} else {
-			c.set(suffixCheckpointDisabled, `{}`)
 		}
 	}
 
 	dst.Experimental = exp
 }
 
-func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	// For each experimental sub-block, if v1beta1 declares the feature we
-	// drop any stale "*-disabled-payload" annotation: v1beta1 is
-	// authoritative in this direction and an enabled v1beta1 entry must
-	// not resurrect a previous Enabled:false on the next round-trip.
-	if src.Experimental != nil &&
-		src.Experimental.GPUMemoryService == nil &&
-		src.Experimental.Failover == nil &&
-		src.Experimental.Checkpoint == nil {
-		c.set(suffixExperimentalOrig, annotationTrue)
-	}
+func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{
 			Enabled:         true,
 			Mode:            gmsModeFromV1beta1(src.Experimental.GPUMemoryService.Mode),
 			DeviceClassName: src.Experimental.GPUMemoryService.DeviceClassName,
 		}
-		c.del(suffixGMSDisabled)
-	} else if g, ok := popJSONAnn[GPUMemoryServiceSpec](c, suffixGMSDisabled); ok {
-		g.Enabled = false
-		dst.GPUMemoryService = &g
 	}
 
 	if src.Experimental != nil && src.Experimental.Failover != nil {
@@ -1230,31 +929,11 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 			Mode:       gmsModeFromV1beta1(src.Experimental.Failover.Mode),
 			NumShadows: src.Experimental.Failover.NumShadows,
 		}
-		c.del(suffixFailoverDisabled)
-	} else if f, ok := popJSONAnn[FailoverSpec](c, suffixFailoverDisabled); ok {
-		f.Enabled = false
-		dst.Failover = &f
 	}
 
 	if src.Experimental != nil && src.Experimental.Checkpoint != nil {
 		dst.Checkpoint = checkpointFromV1beta1(src.Experimental.Checkpoint, true)
-		c.del(suffixCheckpointDisabled)
-	} else if cp, ok := popJSONAnn[ServiceCheckpointConfig](c, suffixCheckpointDisabled); ok {
-		cp.Enabled = false
-		dst.Checkpoint = &cp
 	}
-}
-
-func gmsIsZeroPayload(s *GPUMemoryServiceSpec) bool {
-	return s.Mode == "" && s.DeviceClassName == ""
-}
-
-func failoverIsZeroPayload(s *FailoverSpec) bool {
-	return s.Mode == "" && s.NumShadows == 0
-}
-
-func checkpointIsZeroPayload(s *ServiceCheckpointConfig) bool {
-	return s.Mode == "" && s.CheckpointRef == nil && s.Identity == nil
 }
 
 func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpointConfig {
@@ -1317,31 +996,15 @@ func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool)
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
 // over dedicated fields, except for env which is additive.
 func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
-	c := ctx.carrier
-	_, podTemplateOrigin := c.get(suffixPodTemplateOrig)
-	podTemplateOrigin = podTemplateOrigin || ctx.podTemplateOrigin
-	frontendSidecarRef, hasFrontendSidecarRef := c.get(suffixFrontendSidecarRef)
-	if hasFrontendSidecarRef && !hasPodTemplateContent(src, podTemplateOrigin) {
-		dst.FrontendSidecar = ptr.To(frontendSidecarRef)
-		c.del(suffixFrontendSidecarRef)
-		return nil
-	}
-	podTpl, err := buildSharedPodTemplateFromAlpha(src, podTemplateOrigin, hasFrontendSidecarRef)
+	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.podTemplateOrigin, false)
 	if err != nil {
 		return err
 	}
 	if podTpl == nil {
 		return nil
 	}
-	c.del(suffixPodTemplateOrig)
 
-	// FrontendSidecar: full container spec -> name reference; v1beta1-first
-	// name references are restored from the carrier.
-	setFrontendSidecarReferenceToHub(src, dst, c)
-
-	if !podTemplateOrigin && ctx.includeOriginSplits {
-		c.set(suffixPodTemplateOrig, annotationPodTemplateGenerated)
-	}
+	setFrontendSidecarReferenceToHub(src, dst)
 	dst.PodTemplate = podTpl
 	return nil
 }
@@ -1428,23 +1091,9 @@ func buildSharedPodTemplateFromAlpha(src *DynamoComponentDeploymentSharedSpec, p
 	return podTpl, nil
 }
 
-func setFrontendSidecarReferenceToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func setFrontendSidecarReferenceToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	if src.FrontendSidecar != nil {
-		// Stash origin so ConvertFrom can reproduce the full spec on the
-		// v1alpha1 side without depending on the podTemplate sidecar.
-		setJSONAnn(c, suffixFrontendSidecar, src.FrontendSidecar)
 		dst.FrontendSidecar = ptr.To(defaultFrontendSidecarContainerName)
-		// Drop any stale v1beta1-first ref annotation; the origin annotation
-		// is authoritative in this direction.
-		c.del(suffixFrontendSidecarRef)
-		return
-	}
-	if v, ok := c.get(suffixFrontendSidecarRef); ok {
-		// v1beta1-first input: the named container is already present in
-		// podTpl.Spec.Containers (via ExtraPodSpec.PodSpec.Containers).
-		// Restore the pointer without duplicating the container.
-		dst.FrontendSidecar = ptr.To(v)
-		c.del(suffixFrontendSidecarRef)
 	}
 }
 
@@ -1482,17 +1131,16 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 }
 
 // decomposePodTemplate inverts buildPodTemplateTo.
-func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec, c *annCarrier) error {
+func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) error {
 	if src.PodTemplate == nil {
-		decomposeMissingPodTemplate(src, dst, restored, c)
+		decomposeMissingPodTemplate(src, dst, restored)
 		return nil
 	}
 
 	podTpl := src.PodTemplate.DeepCopy()
-	markPodTemplateOrigin(c)
 
 	// ExtraPodMetadata from podTemplate.metadata.
-	restoreExtraPodMetadataFromPodTemplate(podTpl, dst, c)
+	restoreExtraPodMetadataFromPodTemplate(podTpl, dst)
 
 	// Pick out the main container; leave everything else as podSpec sidecars.
 	var main *corev1.Container
@@ -1506,23 +1154,12 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst,
 		other = append(other, podTpl.Spec.Containers[i])
 	}
 
-	// FrontendSidecar handling. Two cases:
-	//
-	//   a) v1alpha1 origin annotation present -> the v1alpha1 side had a full
-	//      FrontendSidecarSpec. Restore it from the annotation and drop the
-	//      corresponding container from `other` (v1alpha1 does not carry the
-	//      container in extraPodSpec.containers in this case).
-	//
-	//   b) No v1alpha1 origin annotation (v1beta1-first input). There is no
-	//      way to fit a name-only pointer into v1alpha1's schema, so we let
-	//      the referenced container flow through as a regular sidecar on
-	//      extraPodSpec.containers and stash the name under a reserved
-	//      annotation so that ConvertTo can reassemble the v1beta1 pointer
-	//      without duplicating the container.
-	other = restoreFrontendSidecarFromPodTemplate(src, dst, restored, c, other)
+	// FrontendSidecar name references have no native v1alpha1 representation.
+	// Keep v1beta1-first references in the sparse hub save; restore
+	// v1alpha1-origin sidecars from the sparse spoke save.
+	other = restoreFrontendSidecarFromPodTemplate(src, dst, restored, other)
 
-	restoreEnvFromSecretFromMain(main, dst, c)
-	restoreDedicatedFieldsFromMain(main, dst, c)
+	restoreDedicatedFieldsFromMain(main, dst)
 
 	// Put everything non-main into ExtraPodSpec. The main-container fields
 	// that v1alpha1 can represent directly have already been moved into their
@@ -1557,47 +1194,14 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst,
 	return nil
 }
 
-func decomposeMissingPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	if meta, ok := popJSONAnn[ExtraPodMetadata](c, suffixPodMetadataOrig); ok {
-		dst.ExtraPodMetadata = &meta
-	}
-	// Restore FrontendSidecar from origin annotation even if there is no
-	// podTemplate (uncommon but possible for manual edits).
-	if fs, ok := popJSONAnn[FrontendSidecarSpec](c, suffixFrontendSidecar); ok {
-		dst.FrontendSidecar = &fs
-	}
+func decomposeMissingPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) {
 	if fs, ok := restoredDefaultFrontendSidecar(src, restored); ok {
 		dst.FrontendSidecar = fs.DeepCopy()
-		return
-	}
-	if src.FrontendSidecar != nil {
-		c.set(suffixFrontendSidecarRef, *src.FrontendSidecar)
 	}
 }
 
-func markPodTemplateOrigin(c *annCarrier) {
-	if v, ok := c.get(suffixPodTemplateOrig); ok {
-		c.del(suffixPodTemplateOrig)
-		if v != annotationPodTemplateGenerated {
-			c.set(suffixPodTemplateOrig, annotationTrue)
-		}
-		return
-	}
-	c.set(suffixPodTemplateOrig, annotationTrue)
-}
-
-func restoreExtraPodMetadataFromPodTemplate(podTpl *corev1.PodTemplateSpec, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func restoreExtraPodMetadataFromPodTemplate(podTpl *corev1.PodTemplateSpec, dst *DynamoComponentDeploymentSharedSpec) {
 	hasMetadata := len(podTpl.Annotations) > 0 || len(podTpl.Labels) > 0
-	if v, ok := c.get(suffixPodMetadataOrig); ok {
-		var meta ExtraPodMetadata
-		if err := json.Unmarshal([]byte(v), &meta); err == nil && !hasMetadata {
-			dst.ExtraPodMetadata = &meta
-		} else if hasMetadata {
-			dst.ExtraPodMetadata = extraPodMetadataFromPodTemplate(podTpl)
-		}
-		c.del(suffixPodMetadataOrig)
-		return
-	}
 	if hasMetadata {
 		dst.ExtraPodMetadata = extraPodMetadataFromPodTemplate(podTpl)
 	}
@@ -1610,7 +1214,7 @@ func extraPodMetadataFromPodTemplate(podTpl *corev1.PodTemplateSpec) *ExtraPodMe
 	}
 }
 
-func restoreFrontendSidecarFromPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec, c *annCarrier, other []corev1.Container) []corev1.Container {
+func restoreFrontendSidecarFromPodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec, other []corev1.Container) []corev1.Container {
 	if src.FrontendSidecar == nil {
 		return other
 	}
@@ -1626,27 +1230,7 @@ func restoreFrontendSidecarFromPodTemplate(src *v1beta1.DynamoComponentDeploymen
 		dst.FrontendSidecar = fs.DeepCopy()
 		return other
 	}
-	v, ok := c.get(suffixFrontendSidecar)
-	if !ok {
-		c.set(suffixFrontendSidecarRef, sidecarName)
-		return other
-	}
-	c.del(suffixFrontendSidecar)
-
-	var fs FrontendSidecarSpec
-	if err := json.Unmarshal([]byte(v), &fs); err != nil || sidecarName != defaultFrontendSidecarContainerName {
-		c.set(suffixFrontendSidecarRef, sidecarName)
-		return other
-	}
-	ctr, ok := findContainerByName(other, sidecarName)
-	if !ok {
-		c.set(suffixFrontendSidecarRef, sidecarName)
-		return other
-	}
-	dst.FrontendSidecar = frontendSidecarSpecFromContainer(ctr, &fs)
-	return slices.DeleteFunc(other, func(candidate corev1.Container) bool {
-		return candidate.Name == sidecarName
-	})
+	return other
 }
 
 func restoredDefaultFrontendSidecar(src *v1beta1.DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec) (*FrontendSidecarSpec, bool) {
@@ -2021,60 +1605,23 @@ func volumeMountOriginsMatchNative(origin []VolumeMount, native []corev1.VolumeM
 	return true
 }
 
-func restoreEnvFromSecretFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
-	if v, ok := c.get(suffixEnvFromSecret); ok {
-		if main != nil && envFromSecretMatches(main.EnvFrom, v) {
-			dst.EnvFromSecret = ptr.To(v)
-		}
-		c.del(suffixEnvFromSecret)
-	}
-}
-
-func restoreDedicatedFieldsFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec, c *annCarrier) {
+func restoreDedicatedFieldsFromMain(main *corev1.Container, dst *DynamoComponentDeploymentSharedSpec) {
 	if main == nil {
-		c.del(suffixResourcesOrigin)
-		c.del(suffixVolumeMountsOrig)
 		return
 	}
 
-	if v, ok := c.get(suffixResourcesOrigin); ok {
-		var resources Resources
-		if err := json.Unmarshal([]byte(v), &resources); err == nil {
-			if resourceRequirementsEqual(main.Resources, resourcesToNative(&resources)) {
-				dst.Resources = &resources
-				main.Resources = corev1.ResourceRequirements{}
-			} else if native := resourcesFromNative(main.Resources); native != nil {
-				dst.Resources = native
-				main.Resources = corev1.ResourceRequirements{}
-			}
-		}
-		c.del(suffixResourcesOrigin)
-	} else if resources := resourcesFromNative(main.Resources); resources != nil {
+	if resources := resourcesFromNative(main.Resources); resources != nil {
 		dst.Resources = resources
 		main.Resources = corev1.ResourceRequirements{}
 	}
 
-	if v, ok := c.get(suffixVolumeMountsOrig); ok {
-		var volumeMounts []VolumeMount
-		if err := json.Unmarshal([]byte(v), &volumeMounts); err == nil {
-			if volumeMountOriginsMatchNative(volumeMounts, main.VolumeMounts) {
-				dst.VolumeMounts = volumeMounts
-				main.VolumeMounts = nil
-			} else {
-				restoreFlatVolumeMountsFromMain(main, dst)
-			}
-		}
-		c.del(suffixVolumeMountsOrig)
-	} else if len(main.VolumeMounts) > 0 {
+	if len(main.VolumeMounts) > 0 {
 		restoreFlatVolumeMountsFromMain(main, dst)
 	}
 
 	if len(main.Env) > 0 {
 		dst.Envs = slices.Clone(main.Env)
 		main.Env = nil
-	}
-	if dst.EnvFromSecret != nil && envFromSecretMatches(main.EnvFrom, *dst.EnvFromSecret) {
-		main.EnvFrom = nil
 	}
 	if main.LivenessProbe != nil {
 		dst.LivenessProbe = main.LivenessProbe.DeepCopy()

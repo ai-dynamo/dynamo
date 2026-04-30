@@ -340,7 +340,7 @@ func TestBugDCD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyCont
 		t.Fatalf("expected preserved generated frontend sidecar remainder, got %#v", preserved.PodTemplate)
 	}
 
-	// Stage 2 edit: the v1alpha1 carrier removes the generated frontend sidecar
+	// Stage 2 edit: the v1alpha1 object removes the generated frontend sidecar
 	// field but leaves preservation annotations untouched.
 	spoke.Spec.FrontendSidecar = nil
 
@@ -405,7 +405,7 @@ func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 		t.Fatalf("expected sparse preserved sidecar key only, got %#v", preservedSidecar)
 	}
 
-	// Stage 2 edit: the v1alpha1 carrier removes the representable sidecar
+	// Stage 2 edit: the v1alpha1 object removes the representable sidecar
 	// container but leaves preservation annotations untouched.
 	spoke.Spec.ExtraPodSpec.PodSpec.Containers = nil
 
@@ -460,7 +460,7 @@ func TestBugDGD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyCont
 		t.Fatalf("expected preserved generated frontend sidecar remainder, got %#v", preserved.Components[0].PodTemplate)
 	}
 
-	// Stage 2 edit: the v1alpha1 carrier removes the generated frontend sidecar
+	// Stage 2 edit: the v1alpha1 object removes the generated frontend sidecar
 	// field but leaves preservation annotations untouched.
 	component := spoke.Spec.Services["frontend"]
 	component.FrontendSidecar = nil
@@ -533,7 +533,7 @@ func TestDGD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 		t.Fatalf("expected sparse preserved sidecar key only, got %#v", preservedSidecar)
 	}
 
-	// Stage 2 edit: the v1alpha1 carrier removes the representable sidecar
+	// Stage 2 edit: the v1alpha1 object removes the representable sidecar
 	// container but leaves preservation annotations untouched.
 	component.ExtraPodSpec.PodSpec.Containers = nil
 
