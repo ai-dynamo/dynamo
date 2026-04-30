@@ -26,8 +26,13 @@ static TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 /// support function names with dashes (common in MCP tools, e.g. `mcp__portal__search-documents`).
 fn get_tool_call_regex(config: &KimiK2ParserConfig) -> &'static Regex {
     TOOL_CALL_REGEX.get_or_init(|| {
+        // Arguments capture is intentionally permissive (`.*?`) rather than
+        // `\{...\}` so that truncated JSON (e.g. `{"location":"NYC` from
+        // max_tokens / EOS) still matches. The downstream `serde_json::from_str`
+        // is the validator: well-formed payloads parse, malformed/truncated
+        // ones fall back to the raw-string arguments path.
         let pattern = format!(
-            r"(?s){}\s*(?P<function_id>[\w.\-]+:\d+)\s*{}\s*(?P<arguments>\{{.*?\}})\s*{}",
+            r"(?s){}\s*(?P<function_id>[\w.\-]+:\d+)\s*{}\s*(?P<arguments>.*?)\s*{}",
             regex::escape(&config.call_start),
             regex::escape(&config.argument_begin),
             regex::escape(&config.call_end),
@@ -455,26 +460,23 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    // Pin current behavior when JSON args are truncated mid-value (e.g.
-    // max_tokens fires inside `"location":"NYC` with no closing quote)
-    // INSIDE complete `<|tool_call_end|>` + `<|tool_calls_section_end|>`
-    // fences. Distinct from `test_parse_invalid_json_falls_back_to_raw_string`
-    // (which uses syntactically-bad-but-complete JSON and falls back to a
-    // raw string) and from `test_parse_truncated_mid_argument_no_section_end`
-    // (which omits the closing fences entirely). This is the
-    // "fences-complete-but-payload-truncated" cell — Kimi today drops the
-    // call instead of falling back. Promoting to fallback is a parser change.
+    // Recovery for truncated JSON args inside complete fences (e.g.
+    // max_tokens fires inside `"location":"NYC` with no closing quote).
+    // The arg-capture regex now accepts any payload between
+    // `<|tool_call_argument_begin|>` and `<|tool_call_end|>`; downstream
+    // `serde_json::from_str` falls back to raw-string arguments when the
+    // payload doesn't parse, matching the behavior of the existing
+    // `test_parse_invalid_json_falls_back_to_raw_string` case.
     #[test] // CASE.4
-    fn test_parse_truncated_json_inside_complete_fences_silent_drop() {
+    fn test_parse_truncated_json_inside_complete_fences_recovers() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC<|tool_call_end|><|tool_calls_section_end|>"#;
 
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "Kimi K2 today drops calls with truncated JSON args even when fences are complete"
-        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        // Truncated JSON falls back to raw-string arguments.
+        assert_eq!(calls[0].function.arguments, r#"{"location":"NYC"#);
     }
 
     #[test] // CASE.5 (PR #8208)

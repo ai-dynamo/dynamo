@@ -53,6 +53,17 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
                     return Some(format!("[{}]", matches.join(",")));
                 }
             }
+            // Recovery: outer end-token absent (max_tokens / EOS truncation). If
+            // the start token is present and the trailing slice looks like JSON,
+            // treat EOF as the end token. Downstream `serde_json::from_str` is
+            // the validator: well-formed payloads recover, malformed ones still
+            // fall through to the normal-text path.
+            if let Some(start_pos) = input.find(start_token) {
+                let tail = input[start_pos + start_token.len()..].trim();
+                if tail.starts_with('{') || tail.starts_with('[') {
+                    return Some(tail.to_string());
+                }
+            }
             None
         }
         Err(_) => None,
@@ -110,6 +121,51 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         return Some(String::new());
     }
     Some(format!("[{}]", items.join(",")))
+}
+
+/// Attempt to repair JSON truncated by max_tokens / EOS. Walks the input
+/// tracking string state and brace/bracket nesting; on EOF closes any
+/// open string and pops outstanding closers. Returns `Some(repaired)` only
+/// when at least one closer needed to be appended (so we don't churn
+/// already-valid JSON).
+pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for c in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    if !in_string && stack.is_empty() {
+        return None;
+    }
+    let mut repaired = s.to_string();
+    if in_string {
+        repaired.push('"');
+    }
+    while let Some(closer) = stack.pop() {
+        repaired.push(closer);
+    }
+    Some(repaired)
 }
 
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
@@ -327,6 +383,39 @@ pub fn try_tool_call_parse_basic_json(
         }
         // Return with whatever results we have, even if empty (e.g., [] is a valid empty array)
         return Ok((results, Some(normal_text)));
+    }
+
+    // Truncation recovery: balance unclosed strings/braces (common
+    // max_tokens / EOS pattern) and retry the same three parses.
+    if let Some(repaired) = try_repair_truncated_json(json) {
+        let repaired = repaired.as_str();
+        if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(repaired) {
+            return Ok((
+                vec![parse(single.name, single.parameters)?],
+                Some(normal_text),
+            ));
+        } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(repaired) {
+            return Ok((
+                vec![parse(single.name, single.arguments)?],
+                Some(normal_text),
+            ));
+        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(repaired) {
+            let mut results = Vec::new();
+            for item in array {
+                if let Ok(func_args) =
+                    serde_json::from_value::<CalledFunctionArguments>(item.clone())
+                {
+                    results.push(parse(func_args.name, func_args.arguments)?);
+                } else if let Ok(func_params) =
+                    serde_json::from_value::<CalledFunctionParameters>(item)
+                {
+                    results.push(parse(func_params.name, func_params.parameters)?);
+                }
+            }
+            if !results.is_empty() {
+                return Ok((results, Some(normal_text)));
+            }
+        }
     }
 
     // If we found a start token but no valid JSON, return empty content

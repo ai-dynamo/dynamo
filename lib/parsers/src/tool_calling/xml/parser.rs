@@ -138,7 +138,20 @@ fn extract_tool_calls(
 
                 cursor = abs_end;
             } else {
-                // No end token found -> treat the rest as normal text.
+                // Recovery: outer end token absent (max_tokens / EOS truncation).
+                // Only attempt recovery when the trailing slice contains a
+                // function-start opener — that's the structural signal a real
+                // tool call was emitted, so plain text starting with
+                // `<tool_call>` is preserved verbatim.
+                let block = &text[abs_start..];
+                let function_start = &config.function_start_token;
+                if block.contains(function_start.as_str())
+                    && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
+                    && !parsed_calls.is_empty()
+                {
+                    calls.append(&mut parsed_calls);
+                    break;
+                }
                 normal_parts.push(&text[abs_start..]);
                 break;
             }
@@ -902,15 +915,13 @@ rust programming
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
     }
 
-    // Pin current behavior when the OUTER </tool_call> fence is absent due
-    // to max_tokens / EOS truncation. The qwen3_coder dialect (which uses
-    // XmlParserConfig::default()) silently drops the in-flight call today
-    // — the failure mode TEST_CASES.md flags. Distinct
-    // from `test_parse_missing_*_closing_tag` above, which exercises missing
-    // INNER close tags (a separate, already-recovering path).
+    // Recovery for missing outer </tool_call> (max_tokens / EOS truncation):
+    // when the inner function block is well-formed, treat EOF as the end
+    // token and extract the call. Recovery is gated on a function-start
+    // opener in the trailing slice so plain text that happens to start with
+    // `<tool_call>` is preserved verbatim.
     #[test] // CASE.5 — qwen3_coder
-    fn test_parse_qwen3_no_outer_close_silent_drop() {
-        // Inner content fully complete; only outer </tool_call> missing.
+    fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
 <function=get_weather>
 <parameter=city>
@@ -918,18 +929,15 @@ NYC
 </parameter>
 </function>"#;
 
-        let (calls, normal_text) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "qwen3_coder today drops the in-flight call when </tool_call> is missing"
-        );
-        assert_eq!(normal_text, Some(input.to_string()));
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     #[test] // CASE.5 — minimax_m2
-    fn test_parse_minimax_m2_no_outer_close_silent_drop() {
+    fn test_parse_minimax_m2_no_outer_close_recovers() {
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
             tool_call_end_token: "</minimax:tool_call>".to_string(),
@@ -938,16 +946,13 @@ NYC
             parameter_start_token: "<parameter name=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
         };
-        // Inner invoke fully closed; only outer </minimax:tool_call> missing.
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
 
-        let (calls, normal_text) = try_tool_call_parse_xml(input, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "minimax_m2 today drops the in-flight call when </minimax:tool_call> is missing"
-        );
-        assert_eq!(normal_text, Some(input.to_string()));
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     #[test] // CASE.18
