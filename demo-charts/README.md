@@ -34,6 +34,12 @@ Each dot is one request's TTFT. Both lines look similar pre-kill. Post-kill: fai
 
 ![ttft_scatter](demo-failover/ttft_scatter.png)
 
+### Per-user decode rate (tok/s/user) over time
+
+Each dot is one request's `output_token_throughput_per_user`; bold lines are the 30 s mean per setup. Pre-kill both setups ramp from ~200 down to ~95 as concurrency saturates. Post-kill: baseline scatter goes silent until ~+250 s; failover line stays continuous, hovering near the 100 tok/s/user SLA threshold.
+
+![tok_per_user_over_time](demo-failover/tok_per_user_over_time.png)
+
 ### Goodput per 30-second window
 
 Successful (SLA-meeting) request count per 30 s. Pre-kill both setups deliver ~10–14 successes per 30 s. Post-kill: baseline holds at zero for the entire ~5-min cold restart window, then surfaces a few late completions; failover dips briefly and re-establishes a steady ~5–7 successes/30 s.
