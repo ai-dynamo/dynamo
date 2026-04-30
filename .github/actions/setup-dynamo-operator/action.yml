@@ -36,6 +36,10 @@ inputs:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
+  storage_version:
+    description: 'Storage version for alpha-storage Dynamo CRDs: DGD, DCD, and DGDSA (v1alpha1 or v1beta1)'
+    required: false
+    default: 'v1alpha1'
 
 outputs:
   namespace:
@@ -47,6 +51,9 @@ outputs:
   operator_tag:
     description: 'Resolved operator tag'
     value: ${{ steps.resolve-names.outputs.operator_tag }}
+  storage_version:
+    description: 'Resolved storage version for alpha-storage Dynamo CRDs'
+    value: ${{ steps.resolve-names.outputs.storage_version }}
 
 runs:
   using: "composite"
@@ -57,8 +64,18 @@ runs:
       env:
         INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
         INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
+        INPUT_STORAGE_VERSION: ${{ inputs.storage_version }}
         BRANCH: ${{ github.ref_name }}
       run: |
+        case "${INPUT_STORAGE_VERSION}" in
+          v1alpha1|v1beta1)
+            ;;
+          *)
+            echo "::error::storage_version must be v1alpha1 or v1beta1, got '${INPUT_STORAGE_VERSION}'"
+            exit 1
+            ;;
+        esac
+
         if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
           echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
         else
@@ -76,6 +93,7 @@ runs:
         fi
 
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
+        echo "storage_version=${INPUT_STORAGE_VERSION}" >> "$GITHUB_OUTPUT"
 
     - name: Setup host kubeconfig
       shell: bash
@@ -197,6 +215,69 @@ runs:
         echo "::group::Wait for operator rollout inside vCluster"
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
           rollout status deployment -n default --watch --timeout=900s
+        echo "::endgroup::"
+
+    - name: Switch alpha-storage CRDs to v1beta1 storage
+      if: ${{ inputs.storage_version == 'v1beta1' }}
+      shell: bash
+      run: |
+        echo "::group::Switch alpha-storage Dynamo CRDs to v1beta1 storage"
+        set -euo pipefail
+
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+
+        # Patch after operator readiness so the conversion webhook is already
+        # registered. The deploy tests still write v1alpha1 objects, forcing
+        # apiserver conversion before persisting them as v1beta1.
+        wait_for_conversion_webhook() {
+          local crd="$1"
+          local strategy=""
+
+          for _ in $(seq 1 60); do
+            strategy=$(kubectl --kubeconfig="${VKUBECONFIG}" get crd "${crd}" -o jsonpath='{.spec.conversion.strategy}' 2>/dev/null || true)
+            if [ "${strategy}" = "Webhook" ]; then
+              return 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::CRD ${crd} did not get conversion webhook configuration"
+          return 1
+        }
+
+        switch_storage_to_v1beta1() {
+          local crd="$1"
+          local alpha_index
+          local beta_index
+
+          wait_for_conversion_webhook "${crd}"
+
+          alpha_index=$(kubectl --kubeconfig="${VKUBECONFIG}" get crd "${crd}" -o go-template='{{range $i, $v := .spec.versions}}{{if eq $v.name "v1alpha1"}}{{$i}}{{end}}{{end}}')
+          beta_index=$(kubectl --kubeconfig="${VKUBECONFIG}" get crd "${crd}" -o go-template='{{range $i, $v := .spec.versions}}{{if eq $v.name "v1beta1"}}{{$i}}{{end}}{{end}}')
+
+          if [ -z "${alpha_index}" ] || [ -z "${beta_index}" ]; then
+            echo "::error::CRD ${crd} must serve both v1alpha1 and v1beta1"
+            exit 1
+          fi
+
+          kubectl --kubeconfig="${VKUBECONFIG}" patch crd "${crd}" --type=json -p="[
+            {\"op\":\"replace\",\"path\":\"/spec/versions/${alpha_index}/storage\",\"value\":false},
+            {\"op\":\"replace\",\"path\":\"/spec/versions/${beta_index}/storage\",\"value\":true}
+          ]"
+
+          kubectl --kubeconfig="${VKUBECONFIG}" wait --for=condition=Established "crd/${crd}" --timeout=60s
+          kubectl --kubeconfig="${VKUBECONFIG}" get crd "${crd}" \
+            -o jsonpath='{range .spec.versions[*]}{.name}={.storage}{" "}{end}{"\n"}'
+        }
+
+        for crd in \
+          dynamographdeployments.nvidia.com \
+          dynamocomponentdeployments.nvidia.com \
+          dynamographdeploymentscalingadapters.nvidia.com
+        do
+          switch_storage_to_v1beta1 "${crd}"
+        done
+
         echo "::endgroup::"
 
     - name: Debug deployment failure

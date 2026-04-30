@@ -651,6 +651,7 @@ jobs:
       namespace: ${{ steps.setup.outputs.namespace }}
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
+      storage_version: ${{ steps.setup.outputs.storage_version }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - name: Setup vCluster and operator
@@ -660,6 +661,7 @@ jobs:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
         operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+        storage_version: ${{ vars.DYNAMO_OPERATOR_STORAGE_VERSION || 'v1alpha1' }}
         hf_token: ${{ secrets.HF_TOKEN }}
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
@@ -674,6 +676,7 @@ jobs:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      storage_version: ${{ needs.deploy-operator.outputs.storage_version }}
     secrets: inherit
 
   deploy-test-sglang:
@@ -686,6 +689,7 @@ jobs:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      storage_version: ${{ needs.deploy-operator.outputs.storage_version }}
     secrets: inherit
 
   deploy-test-trtllm:
@@ -698,6 +702,7 @@ jobs:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      storage_version: ${{ needs.deploy-operator.outputs.storage_version }}
     secrets: inherit
 
   deploy-cleanup:
@@ -743,6 +748,7 @@ jobs:
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          storage_version: ${{ needs.deploy-operator.outputs.storage_version }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}

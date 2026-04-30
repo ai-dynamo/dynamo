@@ -30,6 +30,11 @@ on:
         description: 'Operator image tag'
         type: string
         required: true
+      storage_version:
+        description: 'Storage version for alpha-storage Dynamo CRDs'
+        type: string
+        required: false
+        default: v1alpha1
 
 jobs:
   deploy-test:
@@ -62,6 +67,7 @@ jobs:
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ inputs.operator_tag }}
+          storage_version: ${{ inputs.storage_version }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
