@@ -1,29 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# DynamoGraphDeployment for deepseek-ai/DeepSeek-V4-Flash on vLLM,
-# aggregated serving on NVIDIA GB200.
-#
-# Upstream vLLM recipe (GB200 variant):
-#   https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash?features=tool_calling,reasoning&hardware=gb200
-#
-# Shape: 1 replica x 4 GB200 GPUs (single NVL4 tray), TP=4 + Expert Parallel.
-#
-# Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
-#        includes the DeepSeek-V4 stack and an arm64 build of FlashInfer with
-#        the TRT-LLM allreduce kernels. See `../container/README.md` for the
-#        reference build -- it overlays dynamo on vllm/vllm-openai:deepseekv4-cu130.
-#
-# Weights: served from the `model-cache` PVC populated by
-#          `../../model-cache/model-download.yaml`.
-#
-# Prerequisites:
-#   - Cluster has GB200 nodes labeled `nvidia.com/gpu.product=NVIDIA-GB200`
-#     and tainted `kubernetes.io/arch=arm64:NoSchedule`
-#   - `model-cache` PVC bound in the target namespace with V4-Flash weights
-#     pre-staged (see `../../model-cache/model-download.yaml`). For a one-shot
-#     download into the PVC, set `HF_HUB_OFFLINE=0` on the first run.
-#   - `hf-token-secret` with `HF_TOKEN`/`HUGGING_FACE_HUB_TOKEN` (gated repo)
+# DeepSeek-V4-Flash on vLLM, aggregated, GB200 (TP=4 + EP, single NVL4 tray).
+# Image: replace `:my-tag` with an arm64 Dynamo + vLLM build.
+# Weights: pre-staged on the `model-cache` PVC by `../../model-cache/model-download.yaml`.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -41,9 +21,6 @@ spec:
         - name: model-cache
           mountPoint: /opt/models
       extraPodSpec:
-        # GB200 nodes are arm64 and typically tainted to keep non-GPU
-        # workloads off them. The frontend is small but must run on the
-        # same arch as the worker image.
         nodeSelector:
           kubernetes.io/arch: arm64
           nvidia.com/gpu.product: NVIDIA-GB200
@@ -81,9 +58,7 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-          # Up to ~60 min for first launch: weight load + FlashInfer autotune +
-          # cudagraph warmup. periodSeconds * failureThreshold = 10 * 360 = 3600s
-          # (matches VLLM_ENGINE_READY_TIMEOUT_S below).
+          # ~60 min budget for first launch (10 * 360 = 3600s).
           startupProbe:
             httpGet:
               path: /health
@@ -98,22 +73,17 @@ spec:
               value: deepseek-ai/DeepSeek-V4-Flash
             - name: HF_HOME
               value: /opt/models
-            # Read weights from the PVC only; flip to "0" for a first-run
-            # cold download into the PVC or use the `model-download-job.yaml` job.
+            # Set to "0" for a one-shot cold download into the PVC.
             - name: HF_HUB_OFFLINE
               value: "1"
-            # Give the engine room to finish first-launch init.
             - name: VLLM_ENGINE_READY_TIMEOUT_S
               value: "3600"
-            # Stabilize TP/EP all-reduces.
             - name: VLLM_USE_NCCL_SYMM_MEM
               value: "1"
             - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: NCCL_CUMEM_ENABLE
               value: "1"
-            # GB200 NVL72 has NVLink Sharp / NVLS multicast for one-shot
-            # all-reduce on the same tray.
             - name: NCCL_NVLS_ENABLE
               value: "1"
             - name: NCCL_P2P_LEVEL
