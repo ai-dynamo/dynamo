@@ -10,7 +10,9 @@ mod mooncake_shared;
 
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
-use mooncake_shared::{run_benchmark, MooncakeBenchmarkConfig, MooncakeIndexerConfig};
+use mooncake_shared::{
+    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig, run_benchmark,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -129,6 +131,10 @@ struct Args {
     /// `0 < overlap < threshold`.
     #[clap(long)]
     overlap_threshold_blocks: Option<u32>,
+
+    /// Use approximate routing-decision writes instead of offline-generated KV events.
+    #[clap(long)]
+    approx: bool,
 
     /// Output path for the shard-size CSV produced when `shard-metrics` feature
     /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
@@ -372,13 +378,19 @@ async fn main() -> anyhow::Result<()> {
         args.common.num_unique_inference_workers,
         args.common.seed,
     )?;
-    let artifacts = generate_replay_artifacts(
-        &traces,
-        args.common.num_gpu_blocks,
-        args.common.block_size,
-        args.common.trace_simulation_duration_ms,
-    )
-    .await?;
+    let benchmark_input = if args.approx {
+        MooncakeBenchmarkInput::Approx(traces.clone())
+    } else {
+        MooncakeBenchmarkInput::KvEvents(
+            generate_replay_artifacts(
+                &traces,
+                args.common.num_gpu_blocks,
+                args.common.block_size,
+                args.common.trace_simulation_duration_ms,
+            )
+            .await?,
+        )
+    };
 
     let indexer_names: Vec<String> = if args.compare.is_empty() {
         vec![args.get_indexer().to_config().short_name().to_string()]
@@ -419,13 +431,20 @@ async fn main() -> anyhow::Result<()> {
 
             for &dur_ms in durations {
                 println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
-                let indexer = config.build(
-                    args.common.block_size,
-                    Arc::new(KvIndexerMetrics::new_unregistered()),
-                );
+                let indexer = if args.approx {
+                    config.build_approximate(
+                        args.common.block_size,
+                        Arc::new(KvIndexerMetrics::new_unregistered()),
+                    )?
+                } else {
+                    config.build(
+                        args.common.block_size,
+                        Arc::new(KvIndexerMetrics::new_unregistered()),
+                    )
+                };
                 let run = run_benchmark(
                     indexer,
-                    artifacts.clone(),
+                    benchmark_input.clone(),
                     MooncakeBenchmarkConfig {
                         benchmark_duration_ms: dur_ms,
                         inference_worker_duplication_factor: args
@@ -434,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
                         count_events: config.supports_remove(),
                         find_matches_concurrency: args.find_matches_concurrency,
                         overlap_threshold_blocks: args.overlap_threshold_blocks,
+                        block_size: args.common.block_size,
                     },
                 )
                 .await?;
@@ -499,8 +519,6 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
         println!("Sweep results saved to {}", json_path);
     } else {
-        drop(traces);
-
         for name in &indexer_names {
             println!("\nBenchmarking indexer: {}", name);
             let config = if args.compare.is_empty() {
@@ -508,10 +526,17 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)?
             };
-            let indexer = config.build(
-                args.common.block_size,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
-            );
+            let indexer = if args.approx {
+                config.build_approximate(
+                    args.common.block_size,
+                    Arc::new(KvIndexerMetrics::new_unregistered()),
+                )?
+            } else {
+                config.build(
+                    args.common.block_size,
+                    Arc::new(KvIndexerMetrics::new_unregistered()),
+                )
+            };
 
             // Start shard-size sampler if a CSV path was provided.
             let shard_cancel = CancellationToken::new();
@@ -527,7 +552,7 @@ async fn main() -> anyhow::Result<()> {
 
             let run = run_benchmark(
                 indexer.clone(),
-                artifacts.clone(),
+                benchmark_input.clone(),
                 MooncakeBenchmarkConfig {
                     benchmark_duration_ms: args.common.benchmark_duration_ms,
                     inference_worker_duplication_factor: args
@@ -536,6 +561,7 @@ async fn main() -> anyhow::Result<()> {
                     count_events: config.supports_remove(),
                     find_matches_concurrency: args.find_matches_concurrency,
                     overlap_threshold_blocks: args.overlap_threshold_blocks,
+                    block_size: args.common.block_size,
                 },
             )
             .await?;
