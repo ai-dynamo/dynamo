@@ -54,6 +54,20 @@ struct Cli {
     /// (overrides KVBM_HUB_HEARTBEAT_MAX_FAILURES).
     #[arg(long)]
     heartbeat_max_failures: Option<u32>,
+
+    /// Enable hub-driven prefill dispatcher: when set, the hub spawns a
+    /// background worker that drains the CD prefill queue and POSTs each
+    /// dequeued request to this URL's `/v1/completions` endpoint
+    /// (typically the prefill vLLM frontend). Single-prefill only;
+    /// multi-prefill routing is a future enhancement.
+    #[arg(long)]
+    prefill_vllm_url: Option<String>,
+
+    /// Model name passed in dispatched POST bodies. Must match the
+    /// `--model` flag the prefill vLLM was started with. Required when
+    /// `--prefill-vllm-url` is set.
+    #[arg(long)]
+    prefill_vllm_model: Option<String>,
 }
 
 fn build_config(cli: &Cli) -> anyhow::Result<HubConfig> {
@@ -102,6 +116,32 @@ async fn main() -> anyhow::Result<()> {
         "starting kvbm-hub"
     );
 
+    // Build the CD manager, optionally with the HTTP dispatcher.
+    let cd_manager = match (&cli.prefill_vllm_url, &cli.prefill_vllm_model) {
+        (Some(url), Some(model)) => {
+            let dispatcher =
+                kvbm_hub::HttpVllmDispatcher::new(url.clone(), model.clone())?;
+            tracing::info!(
+                prefill_url = %url,
+                prefill_model = %model,
+                "CD prefill dispatcher enabled (HTTP → vLLM frontend)"
+            );
+            kvbm_hub::ConditionalDisaggManager::new()
+                .with_dispatcher(dispatcher as Arc<dyn kvbm_hub::PrefillRequestDispatcher>)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!(
+                "--prefill-vllm-url and --prefill-vllm-model must be specified together"
+            );
+        }
+        (None, None) => {
+            tracing::info!(
+                "CD prefill dispatcher disabled (set --prefill-vllm-url + --prefill-vllm-model to enable)"
+            );
+            kvbm_hub::ConditionalDisaggManager::new()
+        }
+    };
+
     let mut builder = kvbm_hub::create_server_builder()
         .bind_addr(config.bind_addr)
         .discovery_port(config.discovery_port)
@@ -110,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
         .prune_interval(Duration::from_secs(config.prune_interval_secs))
         .heartbeat_interval(Duration::from_secs(config.heartbeat_interval_secs))
         .heartbeat_max_failures(config.heartbeat_max_failures)
-        .add_feature_manager(Arc::new(kvbm_hub::ConditionalDisaggManager::new()))
+        .add_feature_manager(Arc::new(cd_manager))
         .add_feature_manager(Arc::new(kvbm_hub::ConnectorControlManager::new()));
 
     if let Some(velo_port) = config.velo_port {

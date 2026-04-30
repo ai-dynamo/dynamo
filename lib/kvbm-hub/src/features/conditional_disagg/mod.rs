@@ -4,7 +4,11 @@
 //! ConditionalDisagg feature — hub-side manager and client-side wrapper.
 
 pub mod client;
+pub mod dispatcher;
 pub mod manager;
 
 pub use client::ConditionalDisaggClient;
+pub use dispatcher::{
+    DispatchOutcome, HttpVllmDispatcher, PrefillRequestDispatcher, RecordingDispatcher,
+};
 pub use manager::ConditionalDisaggManager;

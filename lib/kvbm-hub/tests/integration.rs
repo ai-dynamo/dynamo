@@ -1121,3 +1121,177 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
         "decode must not be allowed to pull"
     );
 }
+
+// ---- ConditionalDisagg dispatcher integration -------------------------------
+
+fn init_tracing() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,kvbm_hub=debug")),
+            )
+            .with_test_writer()
+            .try_init();
+    });
+}
+
+/// Variant of `start_server_with_cd` that installs a `RecordingDispatcher`.
+/// Returns the server, transport, manager, and the dispatcher handle so
+/// the test can assert which requests the worker handed off.
+async fn start_server_with_cd_dispatcher() -> (
+    HubServer,
+    Arc<velo_transports::tcp::TcpTransport>,
+    Arc<ConditionalDisaggManager>,
+    Arc<kvbm_hub::RecordingDispatcher>,
+) {
+    let transport = new_velo_transport();
+    let dispatcher = kvbm_hub::RecordingDispatcher::new();
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(
+        ConditionalDisaggManager::new()
+            .with_dispatcher(Arc::clone(&dispatcher) as Arc<dyn kvbm_hub::PrefillRequestDispatcher>),
+    );
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_transport(Arc::clone(&transport) as Arc<dyn Transport>)
+        .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
+        .serve()
+        .await
+        .expect("start test server with CD dispatcher");
+    (server, transport, cd_manager, dispatcher)
+}
+
+/// Hub-side dispatcher worker drains the prefill queue and hands each
+/// request to the configured dispatcher implementation. Decode-side
+/// `push_prefill_request` should arrive at the recorder within seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatcher_worker_drains_queue_and_invokes_dispatcher() {
+    init_tracing();
+    let (server, _hub_transport, _cd, dispatcher) = start_server_with_cd_dispatcher().await;
+
+    // Decode client + velo so the push has the messenger backing it.
+    let d_velo = new_velo().await;
+    let d_hub = build_client(&server);
+    d_hub.register_handlers(&d_velo).unwrap();
+    let d_cd = ConditionalDisaggClient::new(
+        Arc::clone(&d_hub),
+        Arc::clone(&d_velo),
+        ConditionalDisaggRole::Decode,
+    );
+    let d_hub_id = d_cd
+        .register(d_velo.peer_info())
+        .await
+        .unwrap()
+        .expect("hub velo id");
+    let hub_peer = d_hub.discover_by_instance_id(d_hub_id).await.unwrap();
+    d_velo.register_peer(hub_peer).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Push two requests; the worker should drain both.
+    let req_one = PrefillRequest {
+        protocol_version: DISAGG_PROTOCOL_VERSION,
+        request_id: "dispatch-test-1".to_string(),
+        session_id: uuid::Uuid::new_v4(),
+        initiator_instance_id: d_velo.instance_id(),
+        decode_endpoint: None,
+        sequence_hashes: vec![],
+        token_ids: vec![10, 20, 30],
+        num_computed_tokens: 0,
+    };
+    let req_two = PrefillRequest {
+        request_id: "dispatch-test-2".to_string(),
+        ..req_one.clone()
+    };
+    d_cd.push_prefill_request(&req_one).await.unwrap();
+    d_cd.push_prefill_request(&req_two).await.unwrap();
+
+    // Wait for the worker to drain. The pump is a spawned task on the
+    // hub's runtime; poll the recorder rather than sleeping a fixed
+    // window so the test is fast on a hot loop and still robust under
+    // load.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while dispatcher.len() < 2 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let recorded = dispatcher.recorded();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "dispatcher should have received both pushed requests, got {}",
+        recorded.len()
+    );
+    assert_eq!(recorded[0].request_id, "dispatch-test-1");
+    assert_eq!(recorded[1].request_id, "dispatch-test-2");
+}
+
+/// Hub configured WITHOUT a dispatcher — push must still succeed (the
+/// queue handler is still installed) but nothing drains; this is the
+/// pre-dispatcher behavior, preserved for backward compat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_dispatcher_does_not_spawn_worker() {
+    let (server, _hub_transport, _cd) = start_server_with_cd().await;
+
+    let d_velo = new_velo().await;
+    let d_hub = build_client(&server);
+    d_hub.register_handlers(&d_velo).unwrap();
+    let d_cd = ConditionalDisaggClient::new(
+        Arc::clone(&d_hub),
+        Arc::clone(&d_velo),
+        ConditionalDisaggRole::Decode,
+    );
+    let d_hub_id = d_cd
+        .register(d_velo.peer_info())
+        .await
+        .unwrap()
+        .expect("hub velo id");
+    let hub_peer = d_hub.discover_by_instance_id(d_hub_id).await.unwrap();
+    d_velo.register_peer(hub_peer).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let req = PrefillRequest {
+        protocol_version: DISAGG_PROTOCOL_VERSION,
+        request_id: "no-dispatcher".to_string(),
+        session_id: uuid::Uuid::new_v4(),
+        initiator_instance_id: d_velo.instance_id(),
+        decode_endpoint: None,
+        sequence_hashes: vec![],
+        token_ids: vec![1],
+        num_computed_tokens: 0,
+    };
+    // Push succeeds — queue is installed by `attach`, dispatcher absence
+    // doesn't change that.
+    d_cd.push_prefill_request(&req).await.unwrap();
+    // Without a dispatcher there's nothing to drain — a passive consumer
+    // (prefill client) can still pull as before.
+    let p_velo = new_velo().await;
+    let p_hub = build_client(&server);
+    p_hub.register_handlers(&p_velo).unwrap();
+    let p_cd = ConditionalDisaggClient::new(
+        Arc::clone(&p_hub),
+        Arc::clone(&p_velo),
+        ConditionalDisaggRole::Prefill,
+    );
+    let p_hub_id = p_cd
+        .register(p_velo.peer_info())
+        .await
+        .unwrap()
+        .expect("hub velo id");
+    // Wire the hub's PeerInfo into prefill's velo so the queue RPC can
+    // round-trip back through the TCP transport.
+    let p_hub_peer = p_hub.discover_by_instance_id(p_hub_id).await.unwrap();
+    p_velo.register_peer(p_hub_peer).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let pulled = p_cd
+        .pull_prefill_request(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(
+        pulled.is_some(),
+        "passive pull path should still receive the queued request"
+    );
+}
