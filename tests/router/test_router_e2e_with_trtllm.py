@@ -163,7 +163,10 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
                 command.extend(
-                    ["--extra-engine-args", DISAGG_EXTRA_ENGINE_ARGS[disaggregation_mode]]
+                    [
+                        "--extra-engine-args",
+                        DISAGG_EXTRA_ENGINE_ARGS[disaggregation_mode],
+                    ]
                 )
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
