@@ -86,5 +86,6 @@ You can deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeploy
 - **[Examples](trtllm-examples.md)**: All deployment patterns with launch scripts
 - **[KV Cache Transfer](trtllm-kv-cache-transfer.md)**: KV cache transfer methods for disaggregated serving
 - **[Observability](trtllm-observability.md)**: Metrics and monitoring
+- **[Attention-DP FPM Metrics Repro](trtllm-attention-dp-fpm-repro.md)**: Local build, launch, and metrics capture for attention-DP FPM validation
 - **[Multinode Examples](multinode/trtllm-multinode-examples.md)**: Multi-node deployment with SLURM
 - **[Deploying TensorRT-LLM with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)**: Kubernetes deployment guide

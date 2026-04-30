@@ -26,6 +26,10 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,6 +40,37 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
 ]
+
+
+@pytest.fixture()
+def publisher_mod(monkeypatch):
+    prometheus_mod = types.ModuleType("dynamo.common.utils.prometheus")
+    prometheus_mod.LLMBackendMetrics = object
+
+    llm_mod = types.ModuleType("dynamo.llm")
+    llm_mod.FpmDirectPublisher = MagicMock(name="FpmDirectPublisher")
+    llm_mod.KvEventPublisher = MagicMock(name="KvEventPublisher")
+    llm_mod.WorkerMetricsPublisher = MagicMock(name="WorkerMetricsPublisher")
+
+    monkeypatch.setitem(sys.modules, "dynamo", types.ModuleType("dynamo"))
+    monkeypatch.setitem(sys.modules, "dynamo.common", types.ModuleType("dynamo.common"))
+    monkeypatch.setitem(
+        sys.modules, "dynamo.common.utils", types.ModuleType("dynamo.common.utils")
+    )
+    monkeypatch.setitem(sys.modules, "dynamo.common.utils.prometheus", prometheus_mod)
+    monkeypatch.setitem(sys.modules, "dynamo.llm", llm_mod)
+
+    repo_root = Path(__file__).resolve().parents[5]
+    publisher_path = repo_root / "components/src/dynamo/trtllm/publisher.py"
+    spec = importlib.util.spec_from_file_location(
+        "_trtllm_publisher_under_test", publisher_path
+    )
+    assert spec is not None
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # Default IBS values used by every test that doesn't override. Mirrors the
@@ -214,21 +249,19 @@ def test_iter_latency_ms_to_wall_time_secs_conversion():
 
 
 # ---------------------------------------------------------------------------
-# Publisher.initialize() gate behavior (attention-DP off vs on)
+# Publisher.initialize() FPM channel behavior
 # ---------------------------------------------------------------------------
 
 
-def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: bool):
+def _build_publisher_stub(monkeypatch, publisher_mod, *, attention_dp_size: int):
     """Bypass Publisher.__init__ (heavy deps) and seed only the attributes
     initialize() reads or writes. All side-effecty subsystems are stubbed
-    via ``monkeypatch`` so initialize() reaches the FPM gate cleanly without
-    needing a blanket try/except to swallow upstream failures.
+    via ``monkeypatch`` so initialize() reaches FPM initialization cleanly
+    without needing a blanket try/except to swallow upstream failures.
     """
     import asyncio
     import queue
     import threading
-
-    from dynamo.trtllm import publisher as publisher_mod
 
     engine = MagicMock()
     engine.get_attention_dp_size.return_value = attention_dp_size
@@ -244,7 +277,6 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.enable_local_indexer = False
     pub.metrics_collector = None
     pub.attention_dp_size = attention_dp_size
-    pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
     pub.metrics_publisher = None
     pub.fpm_publisher = None
@@ -261,8 +293,8 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     monkeypatch.setattr(publisher_mod, "FpmDirectPublisher", fake_fpm_cls)
     # WorkerMetricsPublisher and KvEventPublisher both reach into the Rust
     # binding and validate their endpoint arg as a real Endpoint — replace
-    # with MagicMock factories so initialize() can complete past the FPM
-    # gate without dragging in a real Endpoint.
+    # with MagicMock factories so initialize() can complete FPM initialization
+    # without dragging in a real Endpoint.
     monkeypatch.setattr(publisher_mod, "WorkerMetricsPublisher", MagicMock())
     monkeypatch.setattr(publisher_mod, "KvEventPublisher", MagicMock())
 
@@ -286,13 +318,16 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     return pub, publisher_mod, fake_fpm_cls
 
 
-def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
-    monkeypatch,
+@pytest.mark.parametrize("attention_dp_size", [1, 4])
+def test_publisher_initialize_constructs_single_fpm_channel(
+    monkeypatch, publisher_mod, attention_dp_size
 ):
-    """Under non-attention-DP (attention_dp_size == 1, fpm_enabled == True),
-    Publisher.initialize() constructs FpmDirectPublisher with dp_size=1."""
+    """TRT-LLM publishes one logical FPM stream per engine. Under
+    attention-DP, rank 0 emits an engine-wide aggregate, so the Dynamo side
+    still creates exactly one FPM channel and does not allocate heartbeat-only
+    channels for ranks 1..N-1."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
-        monkeypatch, attention_dp_size=1, fpm_enabled=True
+        monkeypatch, publisher_mod, attention_dp_size=attention_dp_size
     )
     pub.initialize()
     fake_fpm_cls.assert_called_once()
@@ -302,33 +337,17 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert pub.fpm_publisher is not None
 
 
-def test_publisher_does_not_init_fpm_publisher_under_attention_dp(monkeypatch):
-    """Under attention-DP (attention_dp_size > 1, fpm_enabled == False), the
-    gate suppresses FpmDirectPublisher construction. pub.fpm_publisher stays
-    None so handle_stat's existing ``if self.fpm_publisher is not None:``
-    guard skips all FPM publishes — the Planner sees ZERO messages from this
-    worker (strictly better than fake-idle pollution)."""
-    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
-        monkeypatch, attention_dp_size=4, fpm_enabled=False
-    )
-    pub.initialize()
-    fake_fpm_cls.assert_not_called()
-    assert pub.fpm_publisher is None
-
-
 # ---------------------------------------------------------------------------
 # First-stat schema probe
 # ---------------------------------------------------------------------------
 
 
-def _build_schema_probe_publisher(fpm_publisher_mock=None):
+def _build_schema_probe_publisher(publisher_mod, fpm_publisher_mock=None):
     """Minimal Publisher instance for direct _check_fpm_schema testing.
 
     Bypasses __init__ (heavy deps) and seeds only the attributes the probe
     method reads or writes: fpm_publisher and _fpm_schema_checked.
     """
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.fpm_publisher = (
         fpm_publisher_mock if fpm_publisher_mock is not None else MagicMock()
@@ -337,8 +356,8 @@ def _build_schema_probe_publisher(fpm_publisher_mock=None):
     return pub, publisher_mod
 
 
-def test_schema_probe_all_fields_present_keeps_publisher():
-    pub, _ = _build_schema_probe_publisher()
+def test_schema_probe_all_fields_present_keeps_publisher(publisher_mod):
+    pub, _ = _build_schema_probe_publisher(publisher_mod)
     original_publisher = pub.fpm_publisher
 
     pub._check_fpm_schema(_build_fake_stat())
@@ -349,11 +368,13 @@ def test_schema_probe_all_fields_present_keeps_publisher():
 
 
 @pytest.mark.parametrize("missing_field", list(_DEFAULT_IBS.keys()))
-def test_schema_probe_missing_single_ibs_field_disables_publisher(missing_field):
+def test_schema_probe_missing_single_ibs_field_disables_publisher(
+    publisher_mod, missing_field
+):
     """Strict probe: any one of the 11 required IBS fields missing must
     disable the publisher. Covers each field independently so a rename
     upstream or a selective-backport TRT-LLM never slips through."""
-    pub, _ = _build_schema_probe_publisher()
+    pub, _ = _build_schema_probe_publisher(publisher_mod)
     original_publisher = pub.fpm_publisher
 
     stat = _build_fake_stat()
@@ -365,11 +386,11 @@ def test_schema_probe_missing_single_ibs_field_disables_publisher(missing_field)
     original_publisher.shutdown.assert_called_once()
 
 
-def test_schema_probe_missing_ibs_dict_disables_publisher_legacy_trtllm():
+def test_schema_probe_missing_ibs_dict_disables_publisher_legacy_trtllm(publisher_mod):
     """Legacy TRT-LLM case: stat dict has iterLatencyMS + attentionDpRank but
     no inflightBatchingStats nested object (pre-#13199 schema). Must disable
     without error."""
-    pub, _ = _build_schema_probe_publisher()
+    pub, _ = _build_schema_probe_publisher(publisher_mod)
     original_publisher = pub.fpm_publisher
 
     pub._check_fpm_schema({"iterLatencyMS": 10.0, "attentionDpRank": 0})
@@ -379,11 +400,11 @@ def test_schema_probe_missing_ibs_dict_disables_publisher_legacy_trtllm():
     original_publisher.shutdown.assert_called_once()
 
 
-def test_schema_probe_ibs_not_a_dict_disables_publisher():
+def test_schema_probe_ibs_not_a_dict_disables_publisher(publisher_mod):
     """Defensive: if a future TRT-LLM ever emits inflightBatchingStats as
     something other than a dict (e.g. null on engine init), treat it as a
     schema mismatch rather than crashing in the probe."""
-    pub, _ = _build_schema_probe_publisher()
+    pub, _ = _build_schema_probe_publisher(publisher_mod)
     original_publisher = pub.fpm_publisher
 
     pub._check_fpm_schema({"inflightBatchingStats": None})
@@ -392,10 +413,11 @@ def test_schema_probe_ibs_not_a_dict_disables_publisher():
     original_publisher.shutdown.assert_called_once()
 
 
-def test_schema_probe_noop_when_fpm_publisher_already_none():
-    """Attention-DP gate already set fpm_publisher = None; probe must not
-    blow up and must still flip _fpm_schema_checked so we do not re-enter."""
-    pub, _ = _build_schema_probe_publisher(fpm_publisher_mock=None)
+def test_schema_probe_noop_when_fpm_publisher_already_none(publisher_mod):
+    """If initialization failed and fpm_publisher is already None, the probe
+    must not blow up and must still flip _fpm_schema_checked so we do not
+    re-enter."""
+    pub, _ = _build_schema_probe_publisher(publisher_mod, fpm_publisher_mock=None)
     pub.fpm_publisher = None
 
     pub._check_fpm_schema(_build_fake_stat())
@@ -404,11 +426,11 @@ def test_schema_probe_noop_when_fpm_publisher_already_none():
     assert pub.fpm_publisher is None
 
 
-def test_schema_probe_shutdown_exception_still_disables_publisher():
+def test_schema_probe_shutdown_exception_still_disables_publisher(publisher_mod):
     """If the Rust shutdown call raises, we still None out the publisher —
     the primary goal is to suppress further emission, not to succeed at
     shutdown. Protects against leaking emission through a shutdown failure."""
-    pub, _ = _build_schema_probe_publisher()
+    pub, _ = _build_schema_probe_publisher(publisher_mod)
     pub.fpm_publisher.shutdown.side_effect = RuntimeError("tokio runtime gone")
 
     stat = _build_fake_stat()
@@ -419,11 +441,11 @@ def test_schema_probe_shutdown_exception_still_disables_publisher():
     assert pub._fpm_schema_checked is True
 
 
-def test_handle_stat_probe_gate_fires_once_and_skips_subsequent_stats():
+def test_handle_stat_probe_gate_fires_once_and_skips_subsequent_stats(publisher_mod):
     """Simulate the handle_stat dispatch pattern: on the first stat the probe
     runs; on the next stat the gate short-circuits. Ensures we do not re-check
     per iteration (which would be wasteful and could race a late schema bump)."""
-    pub, _ = _build_schema_probe_publisher()
+    pub, _ = _build_schema_probe_publisher(publisher_mod)
     original_publisher = pub.fpm_publisher
 
     if pub.fpm_publisher is not None and not pub._fpm_schema_checked:
@@ -439,12 +461,10 @@ def test_handle_stat_probe_gate_fires_once_and_skips_subsequent_stats():
     original_publisher.shutdown.assert_not_called()
 
 
-def test_schema_probe_field_list_matches_default_ibs_set():
+def test_schema_probe_field_list_matches_default_ibs_set(publisher_mod):
     """Guardrail: the required-fields tuple must stay in sync with the IBS
     default fixture. If someone adds an IBS field to the production reader
     but forgets the probe constant (or vice versa), this test catches it."""
-    from dynamo.trtllm import publisher as publisher_mod
-
     assert set(publisher_mod._FPM_REQUIRED_IBS_FIELDS) == set(_DEFAULT_IBS.keys())
 
 
