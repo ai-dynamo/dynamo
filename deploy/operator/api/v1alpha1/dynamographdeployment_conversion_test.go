@@ -130,7 +130,7 @@ func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	}
 }
 
-func TestDGD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+func TestDGD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{
@@ -157,8 +157,28 @@ func TestDGD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T)
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if _, ok := spoke.Annotations[annDGDHubSpec]; !ok {
-		t.Fatalf("expected current hub-only edit to be preserved in %q", annDGDHubSpec)
+	if raw, ok := spoke.Annotations[annDGDHubSpec]; ok {
+		preserved, ok := restoreDGDHubSpec(raw)
+		if !ok {
+			t.Fatalf("failed to restore %q payload: %s", annDGDHubSpec, raw)
+		}
+		if len(preserved.Components) != 1 {
+			t.Fatalf("expected one preserved component, got %#v", preserved.Components)
+		}
+		main, ok := findContainerByName(preserved.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+		if !ok {
+			t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.Components[0].PodTemplate)
+		}
+		if main.Image != "" {
+			t.Fatalf("representable main-container image was preserved: %#v", main)
+		}
+	}
+	component := spoke.Spec.Services["worker"]
+	if component == nil || component.ExtraPodSpec == nil || component.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("expected podTemplate main container to be represented in ExtraPodSpec, got %#v", component)
+	}
+	if got := component.ExtraPodSpec.MainContainer.Image; got != "worker:edited" {
+		t.Fatalf("ExtraPodSpec.MainContainer.Image = %q, want worker:edited", got)
 	}
 
 	restored := &v1beta1.DynamoGraphDeployment{}
@@ -1093,6 +1113,41 @@ func TestDGD_ConvertFrom_ScrubsLingeringAnnotations(t *testing.T) {
 	}
 	if v, ok := a.ObjectMeta.Annotations["user/keep-me"]; !ok || v != "kept" {
 		t.Errorf("user annotations must be preserved, got %v", a.ObjectMeta.Annotations)
+	}
+}
+
+func TestDGD_ConvertFrom_ScrubsLegacySpokeHubAnnotation(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-spoke-hub",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				annDGDSpokeHubLegacy: `{"spec":{},"status":{}}`,
+				"user/keep-me":       "kept",
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if _, ok := spoke.Annotations[annDGDSpokeHubLegacy]; ok {
+		t.Fatalf("legacy annotation was not scrubbed from spoke: %v", spoke.Annotations)
+	}
+	if v, ok := spoke.Annotations["user/keep-me"]; !ok || v != "kept" {
+		t.Fatalf("user annotations must be preserved, got %v", spoke.Annotations)
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if _, ok := hub.Annotations[annDGDSpokeHubLegacy]; ok {
+		t.Fatalf("legacy annotation leaked back to hub: %v", hub.Annotations)
+	}
+	if v, ok := hub.Annotations["user/keep-me"]; !ok || v != "kept" {
+		t.Fatalf("user annotations must be preserved, got %v", hub.Annotations)
 	}
 }
 

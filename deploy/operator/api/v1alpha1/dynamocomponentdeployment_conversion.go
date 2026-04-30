@@ -37,15 +37,12 @@ const (
 	annDCDHubSpec     = "nvidia.com/dcd-hub-spec"
 	annDCDSpokeSpec   = "nvidia.com/dcd-spoke-spec"
 	annDCDSpokeStatus = "nvidia.com/dcd-spoke-status"
-	annDCDSpokeHub    = "nvidia.com/dcd-spoke-hub"
 	annDCDHubOrigin   = "nvidia.com/dcd-hub-origin"
 )
 
 type dcdConversionContext struct {
 	carrier             *annCarrier
-	sourceCarrier       *annCarrier
 	objectName          string
-	sourceUnmodified    bool
 	includeOriginSplits bool
 }
 
@@ -90,7 +87,6 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	convertDCDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
 	if preserveSpoke {
 		preserveDCDSpoke(&spokeSave, &statusSave, dst)
-		preserveDCDSpokeHub(dst)
 	}
 	return nil
 }
@@ -193,22 +189,6 @@ func dcdAlphaStatusSaveIsZero(save *DynamoComponentDeploymentStatus) bool {
 			save.Service == nil
 }
 
-func preserveDCDSpokeHub(dst *v1beta1.DynamoComponentDeployment) {
-	spec, err := marshalDCDHubSpec(&dst.Spec)
-	if err != nil {
-		return
-	}
-	setHubSnapshotAnn(&dst.ObjectMeta, annDCDSpokeHub, spec, dst.Status)
-}
-
-func dcdSpokeHubUnmodified(src *v1beta1.DynamoComponentDeployment) bool {
-	spec, err := marshalDCDHubSpec(&src.Spec)
-	if err != nil {
-		return false
-	}
-	return hubSnapshotAnnMatches(&src.ObjectMeta, annDCDSpokeHub, spec, src.Status)
-}
-
 // ConvertFrom converts from the hub (v1beta1) DynamoComponentDeployment into
 // this v1alpha1 instance.
 func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
@@ -229,14 +209,10 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	if status, ok := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDSpokeStatus); ok {
 		preservedSpokeStatus = &status
 	}
-	_, hadSpokeHubSnapshot := getAnnFromObj(&dst.ObjectMeta, annDCDSpokeHub)
-	spokeHubUnmodified := dcdSpokeHubUnmodified(src)
 
 	ctx := dcdConversionContext{
-		carrier:          newDCDCarrier(&dst.ObjectMeta),
-		sourceCarrier:    newDCDCarrier(&src.ObjectMeta),
-		objectName:       src.ObjectMeta.Name,
-		sourceUnmodified: spokeHubUnmodified,
+		carrier:    newDCDCarrier(&dst.ObjectMeta),
+		objectName: src.ObjectMeta.Name,
 	}
 	var hubSave v1beta1.DynamoComponentDeploymentSpec
 	if err := convertDCDSpecFromHub(&src.Spec, &dst.Spec, preservedSpokeSpec, &hubSave, ctx); err != nil {
@@ -246,10 +222,9 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	convertDCDStatusFromHub(&src.Status, &dst.Status, nil, nil, ctx)
 	fillDCDSpokeFromPreserved(&dst.Spec, &dst.Status, preservedSpokeSpec, preservedSpokeStatus, src.ObjectMeta.Name)
 	scrubDCDAnnotations(&dst.ObjectMeta)
-	if preservedSpokeSpec != nil || preservedSpokeStatus != nil || hadSpokeHubSnapshot {
+	if preservedSpokeSpec != nil || preservedSpokeStatus != nil {
 		delAnnFromObj(&dst.ObjectMeta, annDCDSpokeSpec)
 		delAnnFromObj(&dst.ObjectMeta, annDCDSpokeStatus)
-		delAnnFromObj(&dst.ObjectMeta, annDCDSpokeHub)
 	}
 	if !dcdHubSpecSaveIsZero(&hubSave) {
 		data, err := marshalDCDHubSpec(&hubSave)
@@ -257,10 +232,22 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			return fmt.Errorf("preserve DCD hub spec: %w", err)
 		}
 		setAnnOnObj(&dst.ObjectMeta, annDCDHubSpec, string(data))
-	} else if !hasDCDInternalAnnotations(src.ObjectMeta.Annotations) {
+	} else if dcdHubOriginMarkerNeeded(src) && (!hasDCDInternalAnnotations(src.ObjectMeta.Annotations) || dcdEmptyHubNameNeedsOriginMarker(src)) {
 		setAnnOnObj(&dst.ObjectMeta, annDCDHubOrigin, annotationTrue)
 	}
 	return nil
+}
+
+func dcdHubOriginMarkerNeeded(src *v1beta1.DynamoComponentDeployment) bool {
+	return src != nil && (src.Spec.ComponentName == "" || src.Spec.PodTemplate != nil)
+}
+
+func dcdEmptyHubNameNeedsOriginMarker(src *v1beta1.DynamoComponentDeployment) bool {
+	if src == nil || src.Spec.ComponentName != "" {
+		return false
+	}
+	_, hasServiceNameOrigin := newDCDCarrier(&src.ObjectMeta).get(suffixServiceName)
+	return !hasServiceNameOrigin
 }
 
 func convertDCDSpecFromHub(src *v1beta1.DynamoComponentDeploymentSpec, dst *DynamoComponentDeploymentSpec, restored *DynamoComponentDeploymentSpec, save *v1beta1.DynamoComponentDeploymentSpec, ctx dcdConversionContext) error {
@@ -280,9 +267,7 @@ func convertDCDSpecFromHub(src *v1beta1.DynamoComponentDeploymentSpec, dst *Dyna
 		sharedSave = &save.DynamoComponentDeploymentSharedSpec
 	}
 	sharedCtx := sharedSpecConversionContext{
-		carrier:          ctx.carrier,
-		sourceCarrier:    ctx.sourceCarrier,
-		sourceUnmodified: ctx.sourceUnmodified,
+		carrier: ctx.carrier,
 	}
 	if err := convertSharedSpecFromHub(&src.DynamoComponentDeploymentSharedSpec, &dst.DynamoComponentDeploymentSharedSpec, preservedShared, sharedSave, sharedCtx); err != nil {
 		return err
@@ -338,7 +323,6 @@ func hasDCDInternalAnnotations(annotations map[string]string) bool {
 		if key == annDCDHubSpec ||
 			key == annDCDSpokeSpec ||
 			key == annDCDSpokeStatus ||
-			key == annDCDSpokeHub ||
 			strings.HasPrefix(key, annDCDPrefix) {
 			return true
 		}

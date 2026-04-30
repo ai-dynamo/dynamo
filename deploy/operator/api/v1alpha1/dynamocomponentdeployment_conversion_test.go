@@ -146,7 +146,7 @@ func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
 	}
 }
 
-func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T) {
+func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) {
 	src := &DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
 		Spec: DynamoComponentDeploymentSpec{
@@ -171,8 +171,24 @@ func TestDCD_IntermediateHubOnlyEditsArePreservedWithSpokeSnapshot(t *testing.T)
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if _, ok := spoke.Annotations[annDCDHubSpec]; !ok {
-		t.Fatalf("expected current hub-only edit to be preserved in %q", annDCDHubSpec)
+	if raw, ok := spoke.Annotations[annDCDHubSpec]; ok {
+		preserved, ok := restoreDCDHubSpec(raw)
+		if !ok {
+			t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		}
+		main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+		if !ok {
+			t.Fatalf("expected sparse preserved main-container key, got %#v", preserved.PodTemplate)
+		}
+		if main.Image != "" {
+			t.Fatalf("representable main-container image was preserved: %#v", main)
+		}
+	}
+	if spoke.Spec.ExtraPodSpec == nil || spoke.Spec.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("expected podTemplate main container to be represented in ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec)
+	}
+	if got := spoke.Spec.ExtraPodSpec.MainContainer.Image; got != "worker:edited" {
+		t.Fatalf("ExtraPodSpec.MainContainer.Image = %q, want worker:edited", got)
 	}
 
 	restored := &v1beta1.DynamoComponentDeployment{}
@@ -318,6 +334,113 @@ func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	got := dcdRoundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_RoundTrip_PodTemplateKeepsGeneratedMainMarker(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-main-marker", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:   "generated-main-marker",
+				FrontendSidecar: ptr.To(defaultFrontendSidecarContainerName),
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main"},
+							{
+								Name:  defaultFrontendSidecarContainerName,
+								Image: "frontend:v1",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	raw := spoke.Annotations[annDCDHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve generated main marker", annDCDHubSpec)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+	}
+	main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok || !containerHasOnlyName(main) {
+		t.Fatalf("expected sparse generated main marker, got %#v", preserved.PodTemplate.Spec.Containers)
+	}
+
+	got := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(src.Spec.PodTemplate, got.Spec.PodTemplate, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_RoundTrip_CompilationCacheWithoutGeneratedMountKeepsMarker(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "compilation-cache-no-mount", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "compilation-cache-no-mount",
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "cache-pvc",
+					MountPath: "/opt/cache",
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: "main",
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{Command: []string{"ready"}},
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	raw := spoke.Annotations[annDCDHubSpec]
+	if raw == "" {
+		t.Fatalf("expected %s to preserve absent generated compilation-cache mount", annDCDHubSpec)
+	}
+	preserved, ok := restoreDCDHubSpec(raw)
+	if !ok {
+		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+	}
+	main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok || !containerHasOnlyName(main) {
+		t.Fatalf("expected sparse main marker for absent generated mount, got %#v", preserved.PodTemplate.Spec.Containers)
+	}
+
+	got := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	gotMain, ok := findContainerByName(got.Spec.PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("expected restored main container, got %#v", got.Spec.PodTemplate.Spec.Containers)
+	}
+	if len(gotMain.VolumeMounts) != 0 {
+		t.Fatalf("generated compilation-cache mount was restored: %#v", gotMain.VolumeMounts)
+	}
+	if diff := cmp.Diff(src.Spec.PodTemplate, got.Spec.PodTemplate, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -668,7 +791,7 @@ func TestDCD_ConvertFrom_DoesNotTagHubOriginWhenInternalAnnotationsExist(t *test
 			Name:      "internal-annotation",
 			Namespace: "ns",
 			Annotations: map[string]string{
-				annDCDSpokeHub: "corrupt",
+				annDCDSpokeSpec: "corrupt",
 			},
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{

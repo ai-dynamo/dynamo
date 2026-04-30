@@ -19,10 +19,11 @@ directory should enforce these rules.
 
 Live object fields are the source of truth.
 
-Preservation annotations are allowed to store coarse snapshots, including full
-spec/status payloads, but restore logic must use them only as old-value caches.
-Annotations must not overlay, underlay, or otherwise override fields that are
-representable by the API version being converted from.
+Preservation annotations should store sparse typed payloads. Some legacy
+annotations may still contain coarse snapshots, including full spec/status
+payloads, but restore logic must use them only as old-value caches. Annotations
+must not overlay, underlay, or otherwise override fields that are representable
+by the API version being converted from.
 
 This is about representability in the version's schema, not whether a specific
 object currently represents the field with a non-zero value. If a field can be
@@ -67,7 +68,7 @@ Conversion helpers should generally follow a `src`, `dst`, `restored`, `save`,
 `ctx` shape:
 
 ```go
-func convert_v1beta1_Foo_To_v1alpha1_Foo(
+func convertFooFromHub(
 	src *v1beta1.Foo,
 	dst *Foo,
 	restored *Foo,
@@ -96,13 +97,34 @@ The parameters have fixed meaning:
   plus matching keys needed to locate those fields later.
 - `ctx`: typed high-level context needed by lower-level helpers.
 
-This mirrors the conversion-gen style, but because these conversions are
-handwritten, context should be typed instead of `any`. Avoid one global context
-type; prefer small family-specific contexts such as `dgdConversionContext`,
-`dcdConversionContext`, `dgdrConversionContext`, and
-`sharedSpecConversionContext`. Context should carry only cross-cutting
-information that leaves cannot derive from their local `src/restored/save`
-arguments.
+This mirrors conversion-gen's parameter discipline, not its generated function
+names. Because these conversions are handwritten, context should be typed
+instead of `any`. Avoid one global context type; prefer small family-specific
+contexts such as `dgdConversionContext`, `dcdConversionContext`,
+`dgdrConversionContext`, and `sharedSpecConversionContext`. Context should
+carry only cross-cutting information that leaves cannot derive from their local
+`src/restored/save` arguments.
+
+## Helper Naming
+
+Conversion helper names should be consistent and reveal the helper's role:
+
+- `convert<Scope><Subject>ToHub` / `convert<Scope><Subject>FromHub`: convert
+  live representable fields and call local restore/save sections.
+- `restore<Scope><TargetOnly|HubOnly|AlphaOnly><Subject>`: copy only fields
+  the source version cannot represent from `restored` into `dst`.
+- `save<Scope><SourceOnly|HubOnly|AlphaOnly><Subject>`: copy only fields the
+  target version cannot represent from `src` into `save`.
+- `ensure<Scope>Save<Subject>...`: allocate nested objects inside the sparse
+  `save` payload and return the location the caller should fill.
+- `<scope><Subject><Predicate>`: answer a side-effect-free question used by
+  restore/save code, such as whether a live object still matches a preserved
+  key.
+
+Use the same `Scope` words that appear in the converted type or shared helper
+family, such as `DGD`, `DCD`, `DGDR`, and `Shared`. Avoid ambiguous verbs such
+as `preserve` for conversion policy: use `restore` when reading `restored`, and
+`save` when writing `save`.
 
 ## Preservation Annotations
 
@@ -123,7 +145,7 @@ source-version fields that the target version cannot represent:
 ```go
 // Save source-only fields that dst cannot represent.
 save.FrontendSidecar = src.FrontendSidecar
-save.PodTemplate = src.PodTemplate
+save.PodTemplate = sparseHubOnlyPodTemplateRemainder(src.PodTemplate, projected)
 if experimentalIsHubOnlyShape(src.Experimental) {
 	save.Experimental = src.Experimental
 }
