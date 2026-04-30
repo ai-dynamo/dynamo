@@ -47,6 +47,12 @@ use crate::InstanceId;
 /// coordinator can be a singleton owning a `DashMap` of
 /// per-request state.
 pub trait PrefillCoordinator: Send + Sync {
+    /// Whether this coordinator is tracking an active CD prefill
+    /// for `request_id`. Used by the prefill leader at USAA time
+    /// to route around the inner's `update_state_after_alloc` flow
+    /// (which would otherwise demand a `PreparingToOnboard` slot
+    /// state we never installed).
+    fn has_active_request(&self, request_id: &str) -> bool;
     /// Idempotent per-request init.
     ///
     /// First call for a `request_id` installs state and spawns
@@ -380,6 +386,10 @@ impl PrefillCoordinatorImpl {
         self.states
             .get(request_id)
             .map(|entry| *entry.value().status.lock())
+    }
+
+    pub fn has_active_request(&self, request_id: &str) -> bool {
+        self.states.contains_key(request_id)
     }
 
     fn state_for(&self, request_id: &str) -> Option<Arc<RequestState>> {
@@ -756,6 +766,10 @@ impl PrefillCoordinatorImpl {
 }
 
 impl PrefillCoordinator for PrefillCoordinatorImpl {
+    fn has_active_request(&self, request_id: &str) -> bool {
+        self.states.contains_key(request_id)
+    }
+
     fn ensure_started(&self, request_id: &str, params: &RemotePrefillParams) -> Result<usize> {
         if let Some(state) = self.state_for(request_id) {
             return Ok(state.num_external_tokens);
@@ -795,6 +809,20 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
             .ok_or_else(|| anyhow!("coordinator weak_self upgrade failed"))?;
         let request_id_owned = request_id.to_string();
         let params_owned = params.clone();
+        // Audit on the gnmt-thread BEFORE the spawn so the trace
+        // shows the setup intent inline with usaa/build_meta. The
+        // matching `session_factory_attach` event lands later on
+        // the tokio runtime — peer-resolve + velo metadata exchange
+        // are deliberately off the vLLM scheduler hot path. Forward
+        // pass is gated on `finished_recving`, not on attach.
+        crate::audit!(
+            "session_setup_spawned",
+            role = "prefill",
+            request_id = %request_id_owned,
+            session_id = %params.session_id,
+            initiator = %params.initiator_instance_id,
+            num_sequence_hashes = params.sequence_hashes.len()
+        );
         self.runtime.spawn(async move {
             if let Err(err) = coord
                 .run_setup(request_id_owned.clone(), params_owned, state)
@@ -821,6 +849,21 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
             // Non-CD or already cleaned up: nothing to do.
             return Ok(());
         };
+        // After async-load (G2→G1) completes vLLM still drives
+        // subsequent USAAs for the same request with
+        // num_external_tokens=0 (the load is "done"). The
+        // coordinator's tracked state may have non-zero
+        // num_external_tokens from the initial setup. With the
+        // CdOnboardingPayload Drop now leaving state in place
+        // (so the offload-pipeline observer can publish net-new
+        // G2 blocks back), we hit those follow-up USAAs while
+        // state still says num_external_tokens=N. No-op them —
+        // the meaningful USAA already kicked the onboard. This
+        // mirrors the decode-leader's "post-onboard USAAs are
+        // no-ops" pattern (plan §13.4 #6).
+        if num_external_tokens == 0 && state.num_external_tokens > 0 {
+            return Ok(());
+        }
         // num_external_tokens here is what vLLM passes through from
         // the prefill leader's gnmt return. With the leader's n=0
         // short-circuit (`prefill_leader::ensure_started_zero_passthrough`),

@@ -239,11 +239,15 @@ async fn cd_prefill_happy_path() -> Result<()> {
     h.wrapper
         .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
 
+    // CD-bound requests bypass inner.update_state_after_alloc:
+    // the coordinator's RequestState owns the onboarding flow, so
+    // the prefill leader skips inner to avoid start_onboarding's
+    // PreparingToOnboard precondition. usaa_passthrough_calls
+    // must therefore be empty for CD-tracked requests.
     let slot = h.inner.slot("req-1").unwrap();
     {
         let calls = slot.usaa_passthrough_calls.lock();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, h.g1_block_ids);
+        assert_eq!(calls.len(), 0, "CD-bound USAA must NOT delegate to inner");
     }
 
     // G2→G1 onboard fires.
@@ -509,6 +513,78 @@ async fn cd_prefill_with_g2_hits_returns_async_load() -> Result<()> {
     let n = count.expect("matched-tokens count must be Some when CD onboards");
     assert!(n > 0, "n>0 required when async_load=true");
     assert!(async_flag, "async_load=true required when n>0 onboards");
+
+    Ok(())
+}
+
+/// Regression for #24: dropping the prefill `CdOnboardingPayload`
+/// (which simulates `process_finished_onboarding` taking the slot's
+/// `OnboardingState` after async-load completes) must NOT close the
+/// session. The prefill side still needs to forward-pass + offload
+/// + publish net-new G2 blocks to decode via `commit_output_blocks`,
+/// which calls `session.commit` / `session.make_available`. If the
+/// Drop closes the session, those publishes hit a closed channel
+/// and decode's `run_remote_pipeline` hangs forever.
+///
+/// History: in the two-request smoke, R2's prefill side completed
+/// async-load → process_finished_onboarding fired → payload Drop
+/// called `coordinator.on_request_finished` → session closed at
+/// T+7ms. Offload G1→G2 of the 1 net-new block landed at T+18ms,
+/// observer.observe → commit_output_blocks → commit on a closed
+/// session = silent failure. Decode hung at curl-90s timeout.
+/// Fix: payload Drop is now an audit-only no-op; session lifecycle
+/// is owned by `PrefillDisaggLeader::request_finished`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_payload_drop_does_not_close_session() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    let session = drive_setup(&h).await;
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    // Simulate `process_finished_onboarding` taking the cd_payload
+    // off the slot. In production this fires immediately after
+    // async-load (G2→G1) completes; the payload's Drop runs.
+    let slot = h.inner.slot("req-1").unwrap();
+    let payload = slot.installed_cd_payload.lock().take();
+    assert!(payload.is_some(), "expected cd_payload to be installed");
+    drop(payload);
+
+    // Session must still be open AND coordinator state must still
+    // be tracked — the offload-pipeline observer + publish-back to
+    // decode happen AFTER this drop in production.
+    assert!(
+        session.closed_reason().is_none(),
+        "Drop must not close the session — publish-back hasn't happened yet"
+    );
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "coordinator state must persist past async-load drop"
+    );
+
+    // The post-drop publish-back path: simulate the offload
+    // observer calling commit_output_blocks. This must succeed.
+    h.coordinator
+        .commit_output_blocks("req-1", h.output_blocks.clone())?;
+    wait_until(|| !session.commit_calls().is_empty()).await;
+    let commits = session.commit_calls();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].len(), 2);
+
+    // Only vLLM's `request_finished` closes the session.
+    let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| h.coordinator.active_count() == 0).await;
+    assert!(session.closed_reason().is_some());
 
     Ok(())
 }

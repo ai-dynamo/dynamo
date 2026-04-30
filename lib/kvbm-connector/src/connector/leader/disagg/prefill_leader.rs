@@ -24,6 +24,52 @@ use super::ConnectorLeaderApi;
 use super::prefill_coordinator::PrefillCoordinator;
 use super::transport::{CdWorkerHook, InnerLeaderShim};
 
+/// RAII payload installed on the prefill slot's `OnboardingState`
+/// when a CD-bound request enters the wrapper with n>0 (decode
+/// forwarded local-match cache that prefill must pull). Drop is
+/// called when `process_finished_onboarding` takes the
+/// `OnboardingState`; gives the canonical cleanup point a hook
+/// to observe async-load completion. The Drop intentionally does
+/// NOT call `coordinator.on_request_finished` — that would close
+/// the session before the prefill side has forward-passed and
+/// offloaded its net-new G2 blocks (which need to be published
+/// back to decode via `session.commit` / `make_available` from
+/// the offload-pipeline observer). Session lifecycle is owned
+/// solely by `PrefillDisaggLeader::request_finished` (vLLM's
+/// signal), which fires after offload settles.
+struct PrefillCdOnboardingPayload {
+    request_id: String,
+    #[allow(dead_code)]
+    coordinator: std::sync::Weak<dyn PrefillCoordinator>,
+}
+
+impl std::fmt::Debug for PrefillCdOnboardingPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrefillCdOnboardingPayload")
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
+impl crate::connector::leader::slot::CdOnboardingPayload for PrefillCdOnboardingPayload {}
+
+impl Drop for PrefillCdOnboardingPayload {
+    fn drop(&mut self) {
+        // Audit-only marker: emitted when async-load (G2→G1) for
+        // the pulled-from-decode prefix is complete and the slot's
+        // OnboardingState has been taken by
+        // `process_finished_onboarding`. Subsequent forward-pass +
+        // G1→G2 offload + publish-back to decode all happen AFTER
+        // this drop. Do NOT close the session here — see struct
+        // doc above.
+        crate::audit!(
+            "prefill_cd_payload_drop",
+            role = "prefill",
+            request_id = %self.request_id
+        );
+    }
+}
+
 pub struct PrefillDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
     coordinator: Arc<dyn PrefillCoordinator>,
@@ -183,6 +229,39 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
             request_id,
             external_tokens = n
         );
+        // Install a CD onboarding payload so the slot's
+        // transaction state machine matches the
+        // `(Some(n), true)` async-load promise we're about to
+        // return to vLLM. Without this, vLLM's eventual
+        // `finished_recving` runs `process_finished_onboarding`
+        // against an Inactive slot and ERRORs (mirror of the
+        // decode-side fix landed earlier).
+        let payload = Box::new(PrefillCdOnboardingPayload {
+            request_id: request_id.to_string(),
+            coordinator: Arc::downgrade(&self.coordinator),
+        });
+        if let Err(err) = self
+            .inner
+            .install_cd_onboarding_payload(request_id, payload)
+        {
+            tracing::error!(
+                error = %err,
+                "prefill_gnmt: install_cd_onboarding_payload failed"
+            );
+            crate::audit!(
+                "prefill_cd_payload_install_failed",
+                role = "prefill",
+                request_id,
+                error = %err
+            );
+            return Err(err);
+        }
+        crate::audit!(
+            "prefill_cd_payload_installed",
+            role = "prefill",
+            request_id,
+            external_tokens = n
+        );
         let r: Result<(Option<usize>, bool)> = Ok((Some(n), true));
         audit_gnmt_exit("prefill", request_id, &r);
         r
@@ -194,20 +273,34 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
+        let cd_bound = self.coordinator.has_active_request(request_id);
         crate::audit!(
             "usaa_entry",
             role = "prefill",
             request_id,
             num_block_ids = block_ids.len(),
-            num_external_tokens
+            num_external_tokens,
+            cd_bound
         );
-        // Always call inner first.
-        self.inner
-            .update_state_after_alloc(request_id, block_ids.clone(), num_external_tokens)?;
+        // For CD-bound requests, the coordinator owns the
+        // onboarding state machine. The inner's
+        // update_state_after_alloc would call
+        // `start_onboarding` which expects a `PreparingToOnboard`
+        // slot state — the prefill CD wrapper never installs that
+        // (the CD coordinator's RequestState is the parallel
+        // bookkeeping). Bypass the inner here; the coordinator's
+        // `on_usaa` handles G1 destinations + the kick.
+        //
+        // Non-CD requests still flow through the canonical inner
+        // path.
+        if !cd_bound {
+            self.inner.update_state_after_alloc(
+                request_id,
+                block_ids.clone(),
+                num_external_tokens,
+            )?;
+        }
 
-        // For CD-bound requests, hand the deltas to the
-        // coordinator. Non-CD requests have no coordinator
-        // state and `on_usaa` is a no-op.
         let r = self
             .coordinator
             .on_usaa(request_id, &block_ids, num_external_tokens);
