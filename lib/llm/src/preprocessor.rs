@@ -772,18 +772,6 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Tool-continuation turns (last message role=tool) gate the force-
-        // reasoning flag off: the model produces the final user-facing answer
-        // directly from the tool result and typically does not re-enter
-        // reasoning, so leaving the parser in forced-reasoning mode would
-        // mislabel the final answer as reasoning_content. Matches SGLang's
-        // observed behavior for Kimi K2.5 tool-result follow-ups.
-        let last_is_tool = matches!(
-            request.inner.messages.last(),
-            Some(ChatCompletionRequestMessage::Tool(_))
-        );
-        let prompt_injected_reasoning = prompt_injected_reasoning && !last_is_tool;
-
         // tool_choice=required/named forces the backend into guided decoding,
         // which constrains output to a bare JSON shape with no reasoning
         // wrapper. Running the reasoning parser on that output is both
