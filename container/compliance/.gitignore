@@ -1,0 +1,4 @@
+# License-lookup cache (default lives at ~/.cache/dynamo-compliance/, but
+# also exclude any in-tree copies in case --license-cache is pointed here).
+license-lookup.sqlite
+*.license-cache.sqlite

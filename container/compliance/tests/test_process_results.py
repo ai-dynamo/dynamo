@@ -222,6 +222,47 @@ def test_csv_backwards_compat_bytes(tmp_path: Path):
     assert out_csv.read_bytes() == expected
 
 
+def test_dedupe_csv_rows_collapses_same_key_prefer_known_license():
+    rows = [
+        {
+            "package_name": "pyyaml",
+            "version": "6.0.1",
+            "type": "python",
+            "spdx_license": "UNKNOWN",
+        },
+        {
+            "package_name": "pyyaml",
+            "version": "6.0.1",
+            "type": "python",
+            "spdx_license": "MIT",
+        },
+        {
+            "package_name": "pyyaml",
+            "version": "6.0.1",
+            "type": "dpkg",
+            "spdx_license": "MIT",
+        },
+    ]
+    out = pr._dedupe_csv_rows(rows)
+    assert len(out) == 2  # python keeps MIT, dpkg row preserved separately
+    by_type = {r["type"]: r for r in out}
+    assert by_type["python"]["spdx_license"] == "MIT"
+    assert by_type["dpkg"]["spdx_license"] == "MIT"
+
+
+def test_dedupe_flag_drops_duplicate_rows_in_csv(tmp_path: Path):
+    """End-to-end: --dedupe collapses a duplicate (name, version, type) in the CSV."""
+    (tmp_path / "dpkg.tsv").write_text("libfoo\t1.0\tApache-2.0\n", encoding="utf-8")
+    (tmp_path / "python.tsv").write_text(
+        "pyyaml\t6.0.1\tUNKNOWN\npyyaml\t6.0.1\tMIT\n", encoding="utf-8"
+    )
+    out_csv = tmp_path / "out.csv"
+    _run_script(["--target-dir", str(tmp_path), "--output", str(out_csv), "--dedupe"])
+    body = out_csv.read_bytes()
+    assert body.count(b"pyyaml") == 1
+    assert b"pyyaml,6.0.1,python,MIT" in body
+
+
 def test_attributions_dir_override(tmp_path: Path):
     src = tmp_path / "src"
     src.mkdir()

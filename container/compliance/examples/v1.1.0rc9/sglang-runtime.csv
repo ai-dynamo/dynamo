@@ -418,192 +418,232 @@ xml-core,0.19,dpkg,GPL-2.0-only AND GPL-2.0-or-later
 xz-utils,5.6.1+really5.4.5-1ubuntu0.2,dpkg,LicenseRef-Autoconf AND GPL-2.0-only AND GPL-2.0-or-later AND GPL-3.0-only AND LGPL-2.0-only AND LGPL-2.1-only AND LGPL-2.1-or-later AND LicenseRef-PD AND LicenseRef-PD-debian AND LicenseRef-config-h AND LicenseRef-noderivs AND LicenseRef-permissive-fsf AND LicenseRef-permissive-nowarranty AND LicenseRef-probably-PD
 zlib1g,1:1.3.dfsg-3.1ubuntu2.1,dpkg,Zlib
 zlib1g-dev,1:1.3.dfsg-3.1ubuntu2.1,dpkg,Zlib
-cel.dev/expr,v0.24.0,go,UNKNOWN
-emperror.dev/errors,v0.8.1,go,UNKNOWN
-github.com/AdaLogics/go-fuzz-headers,v0.0.0-20230811130428-ced1acdcaa24,go,UNKNOWN
-github.com/AdamKorcz/go-118-fuzz-build,v0.0.0-20230306123547-8075edf89bb0,go,UNKNOWN
-github.com/ai-dynamo/grove/operator/api,v0.1.0-alpha.6,go,UNKNOWN
-github.com/antlr4-go/antlr/v4,v4.13.0,go,UNKNOWN
-github.com/beorn7/perks,v1.0.1,go,UNKNOWN
-github.com/blang/semver/v4,v4.0.0,go,UNKNOWN
-github.com/bsm/gomega,v1.27.10,go,UNKNOWN
-github.com/cenkalti/backoff/v5,v5.0.3,go,UNKNOWN
-github.com/cespare/xxhash/v2,v2.3.0,go,UNKNOWN
-github.com/checkpoint-restore/go-criu/v8,v8.2.0,go,UNKNOWN
-github.com/cncf/xds/go,v0.0.0-20251022180443-0feb69152e9f,go,UNKNOWN
-github.com/containerd/cgroups,v1.1.0,go,UNKNOWN
-github.com/containerd/containerd,v1.7.30,go,UNKNOWN
-github.com/containerd/containerd/api,v1.8.0,go,UNKNOWN
-github.com/containerd/continuity,v0.4.4,go,UNKNOWN
-github.com/containerd/errdefs,v0.3.0,go,UNKNOWN
-github.com/containerd/fifo,v1.1.0,go,UNKNOWN
-github.com/containerd/log,v0.1.0,go,UNKNOWN
-github.com/containerd/platforms,v0.2.1,go,UNKNOWN
-github.com/containerd/ttrpc,v1.2.7,go,UNKNOWN
-github.com/containerd/typeurl/v2,v2.1.1,go,UNKNOWN
-github.com/cyphar/filepath-securejoin,v0.5.1,go,UNKNOWN
-github.com/davecgh/go-spew,v1.1.1,go,UNKNOWN
-github.com/davecgh/go-spew,v1.1.2-0.20180830191138-d8f796af33cc,go,UNKNOWN
-github.com/dennwc/varint,v1.0.0,go,UNKNOWN
-github.com/distribution/reference,v0.6.0,go,UNKNOWN
-github.com/docker/go-events,v0.0.0-20190806004212-e31b211e4f1c,go,UNKNOWN
-github.com/emicklei/go-restful/v3,v3.12.2,go,UNKNOWN
-github.com/emicklei/go-restful/v3,v3.13.0,go,UNKNOWN
-github.com/envoyproxy/go-control-plane/envoy,v1.36.0,go,UNKNOWN
-github.com/envoyproxy/protoc-gen-validate,v1.2.1,go,UNKNOWN
-github.com/evanphx/json-patch,v5.7.0+incompatible,go,UNKNOWN
-github.com/evanphx/json-patch/v5,v5.9.11,go,UNKNOWN
-github.com/felixge/httpsnoop,v1.0.4,go,UNKNOWN
-github.com/fsnotify/fsnotify,v1.9.0,go,UNKNOWN
-github.com/fxamacker/cbor/v2,v2.9.0,go,UNKNOWN
-github.com/go-logr/logr,v1.4.3,go,UNKNOWN
-github.com/go-logr/stdr,v1.2.2,go,UNKNOWN
-github.com/go-logr/zapr,v1.3.0,go,UNKNOWN
-github.com/go-openapi/jsonpointer,v0.21.0,go,UNKNOWN
-github.com/go-openapi/jsonpointer,v0.21.2,go,UNKNOWN
-github.com/go-openapi/jsonreference,v0.20.2,go,UNKNOWN
-github.com/go-openapi/jsonreference,v0.21.0,go,UNKNOWN
-github.com/go-openapi/swag,v0.23.0,go,UNKNOWN
-github.com/go-openapi/swag,v0.23.1,go,UNKNOWN
-github.com/go-task/slim-sprig/v3,v3.0.0,go,UNKNOWN
-github.com/gogo/protobuf,v1.3.2,go,UNKNOWN
-github.com/golang/groupcache,v0.0.0-20210331224755-41bb18bfe9da,go,UNKNOWN
-github.com/golang/protobuf,v1.5.4,go,UNKNOWN
-github.com/google/btree,v1.1.3,go,UNKNOWN
-github.com/google/cel-go,v0.26.0,go,UNKNOWN
-github.com/google/gnostic-models,v0.7.0,go,UNKNOWN
-github.com/google/go-cmp,v0.7.0,go,UNKNOWN
-github.com/google/pprof,v0.0.0-20250923004556-9e5a51aed1e8,go,UNKNOWN
-github.com/google/uuid,v1.6.0,go,UNKNOWN
-github.com/grafana/regexp,v0.0.0-20250905093917-f7b3be9d1853,go,UNKNOWN
-github.com/grpc-ecosystem/grpc-gateway/v2,v2.27.2,go,UNKNOWN
-github.com/grpc-ecosystem/grpc-gateway/v2,v2.27.3,go,UNKNOWN
-github.com/hashicorp/golang-lru/v2,v2.0.7,go,UNKNOWN
-github.com/imdario/mergo,v0.3.16,go,UNKNOWN
-github.com/inconshreveable/mousetrap,v1.1.0,go,UNKNOWN
-github.com/josharian/intern,v1.0.0,go,UNKNOWN
-github.com/json-iterator/go,v1.1.12,go,UNKNOWN
-github.com/klauspost/compress,v1.18.0,go,UNKNOWN
-github.com/mailru/easyjson,v0.7.7,go,UNKNOWN
-github.com/mailru/easyjson,v0.9.0,go,UNKNOWN
-github.com/Masterminds/semver/v3,v3.4.0,go,UNKNOWN
-github.com/Microsoft/go-winio,v0.6.2,go,UNKNOWN
-github.com/Microsoft/hcsshim,v0.11.7,go,UNKNOWN
-github.com/moby/locker,v1.0.1,go,UNKNOWN
-github.com/moby/sys/mountinfo,v0.7.1,go,UNKNOWN
-github.com/moby/sys/sequential,v0.5.0,go,UNKNOWN
-github.com/moby/sys/signal,v0.7.0,go,UNKNOWN
-github.com/moby/sys/user,v0.3.0,go,UNKNOWN
-github.com/moby/sys/userns,v0.1.0,go,UNKNOWN
-github.com/modern-go/concurrent,v0.0.0-20180306012644-bacd9c7ef1dd,go,UNKNOWN
-github.com/modern-go/reflect2,v1.0.3-0.20250322232337-35a7c28c31ee,go,UNKNOWN
-github.com/munnerz/goautoneg,v0.0.0-20191010083416-a7dc8b61c822,go,UNKNOWN
-github.com/onsi/ginkgo/v2,v2.27.3,go,UNKNOWN
-github.com/onsi/gomega,v1.38.3,go,UNKNOWN
-github.com/open-policy-agent/cert-controller,v0.14.0,go,UNKNOWN
-github.com/opencontainers/go-digest,v1.0.0,go,UNKNOWN
-github.com/opencontainers/image-spec,v1.1.0,go,UNKNOWN
-github.com/opencontainers/runtime-spec,v1.2.0,go,UNKNOWN
-github.com/opencontainers/selinux,v1.13.1,go,UNKNOWN
-github.com/pkg/errors,v0.9.1,go,UNKNOWN
-github.com/planetscale/vtprotobuf,v0.6.1-0.20240319094008-0393e58bdf10,go,UNKNOWN
-github.com/pmezard/go-difflib,v1.0.0,go,UNKNOWN
-github.com/pmezard/go-difflib,v1.0.1-0.20181226105442-5d4384ee4fb2,go,UNKNOWN
-github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring,v0.71.2,go,UNKNOWN
-github.com/prometheus/client_golang,v1.23.2,go,UNKNOWN
-github.com/prometheus/client_model,v0.6.2,go,UNKNOWN
-github.com/prometheus/common,v0.67.4,go,UNKNOWN
-github.com/prometheus/common,v0.67.5,go,UNKNOWN
-github.com/prometheus/procfs,v0.16.1,go,UNKNOWN
-github.com/prometheus/procfs,v0.17.0,go,UNKNOWN
-github.com/prometheus/prometheus,v0.308.1,go,UNKNOWN
-github.com/sirupsen/logrus,v1.9.3,go,UNKNOWN
-github.com/spf13/cobra,v1.9.1,go,UNKNOWN
-github.com/spf13/pflag,v1.0.10,go,UNKNOWN
-github.com/stoewer/go-strcase,v1.3.0,go,UNKNOWN
-github.com/stretchr/testify,v1.11.1,go,UNKNOWN
-github.com/x448/float16,v0.8.4,go,UNKNOWN
-go.opencensus.io,v0.24.0,go,UNKNOWN
-go.opentelemetry.io/auto/sdk,v1.2.1,go,UNKNOWN
-go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp,v0.61.0,go,UNKNOWN
-go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp,v0.63.0,go,UNKNOWN
-go.opentelemetry.io/otel,v1.40.0,go,UNKNOWN
-go.opentelemetry.io/otel/exporters/otlp/otlptrace,v1.38.0,go,UNKNOWN
-go.opentelemetry.io/otel/exporters/otlp/otlptrace,v1.39.0,go,UNKNOWN
-go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc,v1.38.0,go,UNKNOWN
-go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc,v1.39.0,go,UNKNOWN
-go.opentelemetry.io/otel/exporters/stdout/stdouttrace,v1.39.0,go,UNKNOWN
-go.opentelemetry.io/otel/metric,v1.40.0,go,UNKNOWN
-go.opentelemetry.io/otel/sdk,v1.40.0,go,UNKNOWN
-go.opentelemetry.io/otel/sdk/metric,v1.40.0,go,UNKNOWN
-go.opentelemetry.io/otel/trace,v1.40.0,go,UNKNOWN
-go.opentelemetry.io/proto/otlp,v1.7.1,go,UNKNOWN
-go.opentelemetry.io/proto/otlp,v1.9.0,go,UNKNOWN
-go.uber.org/atomic,v1.11.0,go,UNKNOWN
-go.uber.org/multierr,v1.11.0,go,UNKNOWN
-go.uber.org/zap,v1.27.1,go,UNKNOWN
-go.yaml.in/yaml/v2,v2.4.3,go,UNKNOWN
-go.yaml.in/yaml/v3,v3.0.4,go,UNKNOWN
-golang.org/x/crypto,v0.48.0,go,UNKNOWN
-golang.org/x/exp,v0.0.0-20250808145144-a408d31f581a,go,UNKNOWN
-golang.org/x/mod,v0.32.0,go,UNKNOWN
-golang.org/x/net,v0.47.0,go,UNKNOWN
-golang.org/x/net,v0.49.0,go,UNKNOWN
-golang.org/x/oauth2,v0.30.0,go,UNKNOWN
-golang.org/x/oauth2,v0.32.0,go,UNKNOWN
-golang.org/x/oauth2,v0.34.0,go,UNKNOWN
-golang.org/x/sync,v0.18.0,go,UNKNOWN
-golang.org/x/sync,v0.19.0,go,UNKNOWN
-golang.org/x/sys,v0.40.0,go,UNKNOWN
-golang.org/x/sys,v0.41.0,go,UNKNOWN
-golang.org/x/term,v0.37.0,go,UNKNOWN
-golang.org/x/term,v0.40.0,go,UNKNOWN
-golang.org/x/text,v0.31.0,go,UNKNOWN
-golang.org/x/text,v0.34.0,go,UNKNOWN
-golang.org/x/time,v0.12.0,go,UNKNOWN
-golang.org/x/time,v0.13.0,go,UNKNOWN
-golang.org/x/tools,v0.41.0,go,UNKNOWN
-gomodules.xyz/jsonpatch/v2,v2.4.0,go,UNKNOWN
-google.golang.org/genproto,v0.0.0-20231211222908-989df2bf70f3,go,UNKNOWN
-google.golang.org/genproto/googleapis/api,v0.0.0-20251202230838-ff82c1b0f217,go,UNKNOWN
-google.golang.org/genproto/googleapis/rpc,v0.0.0-20250528174236-200df99c418a,go,UNKNOWN
-google.golang.org/genproto/googleapis/rpc,v0.0.0-20251124214823-79d6a2a48846,go,UNKNOWN
-google.golang.org/genproto/googleapis/rpc,v0.0.0-20251202230838-ff82c1b0f217,go,UNKNOWN
-google.golang.org/grpc,v1.72.2,go,UNKNOWN
-google.golang.org/grpc,v1.76.0,go,UNKNOWN
-google.golang.org/grpc,v1.78.0,go,UNKNOWN
-google.golang.org/protobuf,v1.36.11,go,UNKNOWN
-gopkg.in/evanphx/json-patch.v4,v4.13.0,go,UNKNOWN
-gopkg.in/inf.v0,v0.9.1,go,UNKNOWN
-gopkg.in/yaml.v3,v3.0.1,go,UNKNOWN
-istio.io/api,v1.23.1,go,UNKNOWN
-istio.io/client-go,v1.23.1,go,UNKNOWN
-k8s.io/api,v0.34.3,go,UNKNOWN
-k8s.io/api,v0.35.0,go,UNKNOWN
-k8s.io/apiextensions-apiserver,v0.34.3,go,UNKNOWN
-k8s.io/apimachinery,v0.34.3,go,UNKNOWN
-k8s.io/apimachinery,v0.35.0,go,UNKNOWN
-k8s.io/apiserver,v0.34.3,go,UNKNOWN
-k8s.io/client-go,v0.34.3,go,UNKNOWN
-k8s.io/client-go,v0.35.0,go,UNKNOWN
-k8s.io/component-base,v0.34.3,go,UNKNOWN
-k8s.io/klog/v2,v2.130.1,go,UNKNOWN
-k8s.io/kube-openapi,v0.0.0-20250814151709-d7b6acb124c3,go,UNKNOWN
-k8s.io/kube-openapi,v0.0.0-20250910181357-589584f1c912,go,UNKNOWN
-k8s.io/kubelet,v0.35.0,go,UNKNOWN
-k8s.io/utils,v0.0.0-20250820121507-0af2bda4dd1d,go,UNKNOWN
-k8s.io/utils,v0.0.0-20251002143259-bc988d571ff4,go,UNKNOWN
-sigs.k8s.io/apiserver-network-proxy/konnectivity-client,v0.31.2,go,UNKNOWN
-sigs.k8s.io/controller-runtime,v0.22.4,go,UNKNOWN
-sigs.k8s.io/gateway-api-inference-extension,v1.2.0,go,UNKNOWN
-sigs.k8s.io/gateway-api-inference-extension,v1.2.1,go,UNKNOWN
-sigs.k8s.io/json,v0.0.0-20250730193827-2d320260d730,go,UNKNOWN
-sigs.k8s.io/lws,v0.6.1,go,UNKNOWN
-sigs.k8s.io/randfill,v1.0.0,go,UNKNOWN
-sigs.k8s.io/structured-merge-diff/v6,v6.3.1,go,UNKNOWN
-sigs.k8s.io/structured-merge-diff/v6,v6.3.2-0.20260122202528-d9cc6641c482,go,UNKNOWN
-sigs.k8s.io/yaml,v1.6.0,go,UNKNOWN
-volcano.sh/apis,v1.12.2,go,UNKNOWN
+cel.dev/expr,v0.25.1,go,Apache-2.0
+emperror.dev/errors,v0.8.1,go,MIT
+github.com/AdaLogics/go-fuzz-headers,v0.0.0-20230811130428-ced1acdcaa24,go,Apache-2.0
+github.com/AdamKorcz/go-118-fuzz-build,v0.0.0-20230306123547-8075edf89bb0,go,Apache-2.0
+github.com/ai-dynamo/grove/operator/api,v0.1.0-alpha.8,go,Apache-2.0
+github.com/antlr4-go/antlr/v4,v4.13.0,go,BSD-3-Clause
+github.com/antlr4-go/antlr/v4,v4.13.1,go,BSD-3-Clause
+github.com/beorn7/perks,v1.0.1,go,MIT
+github.com/blang/semver/v4,v4.0.0,go,MIT
+github.com/bsm/gomega,v1.27.10,go,MIT
+github.com/cenkalti/backoff/v4,v4.3.0,go,MIT
+github.com/cenkalti/backoff/v5,v5.0.3,go,MIT
+github.com/cespare/xxhash/v2,v2.3.0,go,MIT
+github.com/checkpoint-restore/go-criu/v8,v8.2.0,go,Apache-2.0
+github.com/cncf/xds/go,v0.0.0-20251210132809-ee656c7534f5,go,Apache-2.0
+github.com/containerd/cgroups,v1.1.0,go,Apache-2.0
+github.com/containerd/containerd,v1.7.30,go,Apache-2.0
+github.com/containerd/containerd/api,v1.8.0,go,Apache-2.0
+github.com/containerd/continuity,v0.4.4,go,Apache-2.0
+github.com/containerd/errdefs,v0.3.0,go,Apache-2.0
+github.com/containerd/fifo,v1.1.0,go,Apache-2.0
+github.com/containerd/log,v0.1.0,go,Apache-2.0
+github.com/containerd/platforms,v0.2.1,go,Apache-2.0
+github.com/containerd/ttrpc,v1.2.7,go,Apache-2.0
+github.com/containerd/typeurl/v2,v2.1.1,go,Apache-2.0
+github.com/cyphar/filepath-securejoin,v0.5.1,go,BSD-3-Clause AND MPL-2.0
+github.com/davecgh/go-spew,v1.1.1,go,ISC
+github.com/davecgh/go-spew,v1.1.2-0.20180830191138-d8f796af33cc,go,ISC
+github.com/dennwc/varint,v1.0.0,go,MIT
+github.com/distribution/reference,v0.6.0,go,Apache-2.0
+github.com/docker/go-events,v0.0.0-20190806004212-e31b211e4f1c,go,Apache-2.0
+github.com/emicklei/go-restful/v3,v3.12.2,go,MIT
+github.com/emicklei/go-restful/v3,v3.13.0,go,MIT
+github.com/envoyproxy/go-control-plane/envoy,v1.37.0,go,Apache-2.0
+github.com/envoyproxy/protoc-gen-validate,v1.3.0,go,Apache-2.0
+github.com/evanphx/json-patch,v5.7.0+incompatible,go,BSD-3-Clause
+github.com/evanphx/json-patch/v5,v5.9.11,go,BSD-3-Clause
+github.com/felixge/httpsnoop,v1.0.4,go,MIT
+github.com/fsnotify/fsnotify,v1.9.0,go,BSD-3-Clause
+github.com/fxamacker/cbor/v2,v2.9.0,go,MIT
+github.com/go-logr/logr,v1.4.3,go,Apache-2.0
+github.com/go-logr/stdr,v1.2.2,go,Apache-2.0
+github.com/go-logr/zapr,v1.3.0,go,Apache-2.0
+github.com/go-openapi/jsonpointer,v0.21.0,go,Apache-2.0
+github.com/go-openapi/jsonpointer,v0.21.2,go,Apache-2.0
+github.com/go-openapi/jsonpointer,v0.22.4,go,Apache-2.0
+github.com/go-openapi/jsonreference,v0.20.2,go,Apache-2.0
+github.com/go-openapi/jsonreference,v0.21.0,go,Apache-2.0
+github.com/go-openapi/jsonreference,v0.21.4,go,Apache-2.0
+github.com/go-openapi/swag,v0.23.0,go,Apache-2.0
+github.com/go-openapi/swag,v0.23.1,go,Apache-2.0
+github.com/go-openapi/swag,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/cmdutils,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/conv,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/fileutils,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/jsonname,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/jsonutils,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/loading,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/mangling,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/netutils,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/stringutils,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/typeutils,v0.25.4,go,Apache-2.0
+github.com/go-openapi/swag/yamlutils,v0.25.4,go,Apache-2.0
+github.com/go-task/slim-sprig/v3,v3.0.0,go,MIT
+github.com/gogo/protobuf,v1.3.2,go,BSD-3-Clause
+github.com/golang/groupcache,v0.0.0-20210331224755-41bb18bfe9da,go,Apache-2.0
+github.com/golang/protobuf,v1.5.4,go,BSD-3-Clause
+github.com/google/btree,v1.1.3,go,Apache-2.0
+github.com/google/cel-go,v0.26.0,go,Apache-2.0 AND BSD-3-Clause
+github.com/google/cel-go,v0.28.0,go,Apache-2.0 AND BSD-3-Clause
+github.com/google/gnostic-models,v0.7.0,go,Apache-2.0
+github.com/google/go-cmp,v0.7.0,go,BSD-3-Clause
+github.com/google/pprof,v0.0.0-20250923004556-9e5a51aed1e8,go,Apache-2.0 AND BSD-3-Clause
+github.com/google/uuid,v1.6.0,go,BSD-3-Clause
+github.com/grafana/regexp,v0.0.0-20250905093917-f7b3be9d1853,go,BSD-3-Clause
+github.com/grpc-ecosystem/grpc-gateway/v2,v2.26.3,go,BSD-3-Clause
+github.com/grpc-ecosystem/grpc-gateway/v2,v2.27.2,go,BSD-3-Clause
+github.com/grpc-ecosystem/grpc-gateway/v2,v2.28.0,go,BSD-3-Clause
+github.com/hashicorp/golang-lru/v2,v2.0.7,go,MPL-2.0
+github.com/imdario/mergo,v0.3.16,go,BSD-3-Clause
+github.com/inconshreveable/mousetrap,v1.1.0,go,Apache-2.0
+github.com/jellydator/ttlcache/v3,v3.4.0,go,MIT
+github.com/josharian/intern,v1.0.0,go,MIT
+github.com/json-iterator/go,v1.1.12,go,MIT
+github.com/klauspost/compress,v1.18.0,go,BSD-3-Clause AND Apache-2.0 AND MIT
+github.com/mailru/easyjson,v0.7.7,go,MIT
+github.com/mailru/easyjson,v0.9.0,go,MIT
+github.com/Masterminds/semver/v3,v3.4.0,go,MIT
+github.com/Microsoft/go-winio,v0.6.2,go,MIT
+github.com/Microsoft/hcsshim,v0.11.7,go,MIT AND Apache-2.0
+github.com/moby/locker,v1.0.1,go,Apache-2.0
+github.com/moby/sys/mountinfo,v0.7.1,go,Apache-2.0
+github.com/moby/sys/sequential,v0.5.0,go,Apache-2.0
+github.com/moby/sys/signal,v0.7.0,go,Apache-2.0
+github.com/moby/sys/user,v0.3.0,go,Apache-2.0
+github.com/moby/sys/userns,v0.1.0,go,Apache-2.0
+github.com/modern-go/concurrent,v0.0.0-20180306012644-bacd9c7ef1dd,go,Apache-2.0
+github.com/modern-go/reflect2,v1.0.3-0.20250322232337-35a7c28c31ee,go,Apache-2.0
+github.com/munnerz/goautoneg,v0.0.0-20191010083416-a7dc8b61c822,go,BSD-3-Clause
+github.com/onsi/ginkgo/v2,v2.27.3,go,MIT
+github.com/onsi/gomega,v1.38.3,go,MIT
+github.com/open-policy-agent/cert-controller,v0.14.0,go,Apache-2.0
+github.com/opencontainers/go-digest,v1.0.0,go,Apache-2.0 AND CC-BY-SA-4.0
+github.com/opencontainers/image-spec,v1.1.0,go,Apache-2.0
+github.com/opencontainers/runtime-spec,v1.2.0,go,Apache-2.0
+github.com/opencontainers/selinux,v1.13.1,go,Apache-2.0
+github.com/pkg/errors,v0.9.1,go,BSD-2-Clause
+github.com/planetscale/vtprotobuf,v0.6.1-0.20240319094008-0393e58bdf10,go,BSD-3-Clause AND MIT
+github.com/pmezard/go-difflib,v1.0.0,go,BSD-3-Clause
+github.com/pmezard/go-difflib,v1.0.1-0.20181226105442-5d4384ee4fb2,go,BSD-3-Clause
+github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring,v0.71.2,go,Apache-2.0
+github.com/prometheus/client_golang,v1.23.2,go,Apache-2.0 AND BSD-3-Clause
+github.com/prometheus/client_model,v0.6.2,go,Apache-2.0
+github.com/prometheus/common,v0.66.1,go,Apache-2.0
+github.com/prometheus/common,v0.67.5,go,Apache-2.0
+github.com/prometheus/procfs,v0.16.1,go,Apache-2.0
+github.com/prometheus/procfs,v0.17.0,go,Apache-2.0
+github.com/prometheus/procfs,v0.19.2,go,Apache-2.0
+github.com/prometheus/prometheus,v0.310.0,go,Apache-2.0
+github.com/sirupsen/logrus,v1.9.3,go,MIT
+github.com/spf13/cobra,v1.10.1,go,Apache-2.0
+github.com/spf13/cobra,v1.10.2,go,Apache-2.0
+github.com/spf13/pflag,v1.0.10,go,BSD-3-Clause
+github.com/spf13/pflag,v1.0.9,go,BSD-3-Clause
+github.com/stoewer/go-strcase,v1.3.0,go,MIT
+github.com/stretchr/testify,v1.11.1,go,MIT
+github.com/x448/float16,v0.8.4,go,MIT
+go.opencensus.io,v0.24.0,go,Apache-2.0
+go.opentelemetry.io/auto/sdk,v1.2.1,go,Apache-2.0
+go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc,v0.60.0,go,Apache-2.0
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp,v0.61.0,go,Apache-2.0
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp,v0.63.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp,v0.65.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel,v1.41.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/exporters/otlp/otlptrace,v1.34.0,go,Apache-2.0
+go.opentelemetry.io/otel/exporters/otlp/otlptrace,v1.38.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/exporters/otlp/otlptrace,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc,v1.34.0,go,Apache-2.0
+go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc,v1.38.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/exporters/stdout/stdouttrace,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/metric,v1.41.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/metric,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/sdk,v1.40.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/sdk,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/trace,v1.41.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/otel/trace,v1.43.0,go,Apache-2.0 AND BSD-3-Clause
+go.opentelemetry.io/proto/otlp,v1.10.0,go,Apache-2.0
+go.opentelemetry.io/proto/otlp,v1.5.0,go,Apache-2.0
+go.opentelemetry.io/proto/otlp,v1.7.1,go,Apache-2.0
+go.uber.org/atomic,v1.11.0,go,MIT
+go.uber.org/multierr,v1.11.0,go,MIT
+go.uber.org/zap,v1.27.1,go,MIT
+go.yaml.in/yaml/v2,v2.4.3,go,Apache-2.0
+go.yaml.in/yaml/v3,v3.0.4,go,MIT AND Apache-2.0
+golang.org/x/crypto,v0.48.0,go,BSD-3-Clause
+golang.org/x/exp,v0.0.0-20250808145144-a408d31f581a,go,BSD-3-Clause
+golang.org/x/exp,v0.0.0-20260112195511-716be5621a96,go,BSD-3-Clause
+golang.org/x/mod,v0.32.0,go,BSD-3-Clause
+golang.org/x/net,v0.48.0,go,BSD-3-Clause
+golang.org/x/net,v0.49.0,go,BSD-3-Clause
+golang.org/x/net,v0.52.0,go,BSD-3-Clause
+golang.org/x/oauth2,v0.34.0,go,BSD-3-Clause
+golang.org/x/oauth2,v0.35.0,go,BSD-3-Clause
+golang.org/x/sync,v0.19.0,go,BSD-3-Clause
+golang.org/x/sync,v0.20.0,go,BSD-3-Clause
+golang.org/x/sys,v0.40.0,go,BSD-3-Clause
+golang.org/x/sys,v0.41.0,go,BSD-3-Clause
+golang.org/x/sys,v0.42.0,go,BSD-3-Clause
+golang.org/x/term,v0.38.0,go,BSD-3-Clause
+golang.org/x/term,v0.40.0,go,BSD-3-Clause
+golang.org/x/term,v0.41.0,go,BSD-3-Clause
+golang.org/x/text,v0.32.0,go,BSD-3-Clause
+golang.org/x/text,v0.34.0,go,BSD-3-Clause
+golang.org/x/text,v0.35.0,go,BSD-3-Clause
+golang.org/x/time,v0.12.0,go,BSD-3-Clause
+golang.org/x/time,v0.13.0,go,BSD-3-Clause
+golang.org/x/time,v0.15.0,go,BSD-3-Clause
+golang.org/x/tools,v0.41.0,go,BSD-3-Clause
+gomodules.xyz/jsonpatch/v2,v2.4.0,go,Apache-2.0
+google.golang.org/genproto,v0.0.0-20231211222908-989df2bf70f3,go,Apache-2.0
+google.golang.org/genproto/googleapis/api,v0.0.0-20251202230838-ff82c1b0f217,go,Apache-2.0
+google.golang.org/genproto/googleapis/api,v0.0.0-20260401024825-9d38bb4040a9,go,Apache-2.0
+google.golang.org/genproto/googleapis/rpc,v0.0.0-20251202230838-ff82c1b0f217,go,Apache-2.0
+google.golang.org/genproto/googleapis/rpc,v0.0.0-20260401024825-9d38bb4040a9,go,Apache-2.0
+google.golang.org/grpc,v1.79.3,go,Apache-2.0
+google.golang.org/grpc,v1.80.0,go,Apache-2.0
+google.golang.org/protobuf,v1.36.11,go,BSD-3-Clause
+gopkg.in/evanphx/json-patch.v4,v4.13.0,go,BSD-3-Clause
+gopkg.in/inf.v0,v0.9.1,go,BSD-3-Clause
+gopkg.in/yaml.v3,v3.0.1,go,MIT AND Apache-2.0
+istio.io/api,v1.23.1,go,Apache-2.0 AND BSD-3-Clause AND MIT
+istio.io/client-go,v1.23.1,go,Apache-2.0 AND ISC AND MIT AND BSD-3-Clause AND BSD-2-Clause
+k8s.io/api,v0.34.3,go,Apache-2.0
+k8s.io/api,v0.35.3,go,Apache-2.0
+k8s.io/apiextensions-apiserver,v0.34.3,go,Apache-2.0
+k8s.io/apiextensions-apiserver,v0.35.3,go,Apache-2.0
+k8s.io/apimachinery,v0.34.3,go,Apache-2.0 AND BSD-3-Clause
+k8s.io/apimachinery,v0.35.3,go,Apache-2.0 AND BSD-3-Clause
+k8s.io/apiserver,v0.34.3,go,Apache-2.0
+k8s.io/apiserver,v0.35.3,go,Apache-2.0
+k8s.io/client-go,v0.34.3,go,Apache-2.0 AND BSD-3-Clause
+k8s.io/client-go,v0.35.3,go,Apache-2.0 AND BSD-3-Clause
+k8s.io/component-base,v0.34.3,go,Apache-2.0
+k8s.io/component-base,v0.35.3,go,Apache-2.0
+k8s.io/cri-api,v0.34.3,go,Apache-2.0
+k8s.io/cri-client,v0.34.3,go,Apache-2.0
+k8s.io/klog/v2,v2.130.1,go,Apache-2.0
+k8s.io/kube-openapi,v0.0.0-20250910181357-589584f1c912,go,Apache-2.0 AND BSD-3-Clause AND MIT
+k8s.io/kube-openapi,v0.0.0-20260127142750-a19766b6e2d4,go,Apache-2.0 AND BSD-3-Clause AND MIT
+k8s.io/kubelet,v0.34.3,go,Apache-2.0
+k8s.io/utils,v0.0.0-20251002143259-bc988d571ff4,go,Apache-2.0 AND BSD-3-Clause
+k8s.io/utils,v0.0.0-20260108192941-914a6e750570,go,Apache-2.0 AND BSD-3-Clause
+sigs.k8s.io/apiserver-network-proxy/konnectivity-client,v0.31.2,go,Apache-2.0
+sigs.k8s.io/controller-runtime,v0.22.4,go,Apache-2.0
+sigs.k8s.io/controller-runtime,v0.23.3,go,Apache-2.0
+sigs.k8s.io/gateway-api-inference-extension,v0.0.0-20260416154104-206d40dca75d,go,Apache-2.0
+sigs.k8s.io/gateway-api-inference-extension,v1.2.0,go,Apache-2.0
+sigs.k8s.io/json,v0.0.0-20250730193827-2d320260d730,go,Apache-2.0 AND BSD-3-Clause
+sigs.k8s.io/lws,v0.6.1,go,Apache-2.0
+sigs.k8s.io/randfill,v1.0.0,go,Apache-2.0
+sigs.k8s.io/structured-merge-diff/v6,v6.3.1,go,Apache-2.0
+sigs.k8s.io/structured-merge-diff/v6,v6.3.2,go,Apache-2.0
+sigs.k8s.io/yaml,v1.6.0,go,MIT AND BSD-3-Clause AND Apache-2.0
+volcano.sh/apis,v1.12.2,go,Apache-2.0
 aws-sdk-cpp,,native,Apache-2.0
 criu,,native,GPL-2.0-only
 cuda-checkpoint,,native,NVIDIA-Software-License
@@ -627,7 +667,7 @@ aiohttp,3.13.5,python,(Apache-2.0 AND MIT)
 aiosignal,1.4.0,python,LicenseRef-Apache-2.0
 airportsdata,20260315,python,MIT
 annotated-doc,0.0.4,python,MIT
-annotated-types,0.7.0,python,UNKNOWN
+annotated-types,0.7.0,python,MIT
 anthropic,0.92.0,python,MIT
 anyio,4.13.0,python,MIT
 apache-tvm-ffi,0.1.10,python,LicenseRef-Apache-2.0
@@ -638,10 +678,10 @@ autocommand,2.2.2,python,LicenseRef-LGPLv3
 av,16.1.0,python,BSD-3-Clause
 backports-tarfile,1.2.0,python,MIT
 black,26.3.1,python,MIT
-blinker,1.7.0,python,UNKNOWN
+blinker,1.7.0,python,MIT
 blobfile,3.0.0,python,LicenseRef-Public-Domain
 build,1.4.2,python,MIT
-cache-dit,1.3.0,python,UNKNOWN
+cache-dit,1.3.0,python,Apache-2.0
 certifi,2026.2.25,python,MPL-2.0
 cffi,2.0.0,python,MIT
 cfgv,3.5.0,python,MIT
@@ -650,7 +690,6 @@ click,8.3.2,python,BSD-3-Clause
 cloudpickle,3.1.2,python,BSD-3-Clause
 compressed-tensors,0.15.0,python,LicenseRef-Apache-2.0
 contourpy,1.3.3,python,BSD-3-Clause
-cryptography,41.0.7,python,(Apache-2.0 OR BSD-3-Clause)
 cryptography,41.0.7,python,(Apache-2.0 OR BSD-3-Clause)
 cubloaty,0.1.0b3,python,Apache-2.0
 cuda-bindings,12.9.6,python,LicenseRef-NVIDIA-SOFTWARE-LICENSE
@@ -663,7 +702,6 @@ datasets,4.8.4,python,LicenseRef-Apache-2.0
 dbus-python,1.3.2,python,LicenseRef-Expat--MIT-X11-
 decorator,5.2.1,python,BSD-2-Clause
 deep-ep,1.2.1,python,UNKNOWN
-deep-ep,1.2.1,python,UNKNOWN
 diffusers,0.37.0,python,LicenseRef-Apache-2.0-License
 dill,0.4.1,python,BSD-3-Clause
 diskcache,5.6.3,python,LicenseRef-Apache-2.0
@@ -672,7 +710,7 @@ distro,1.9.0,python,LicenseRef-Apache-License--Version-2.0
 docstring-parser,0.17.0,python,MIT
 einops,0.8.2,python,MIT
 executing,2.2.1,python,MIT
-fastapi,0.111.0,python,UNKNOWN
+fastapi,0.111.0,python,MIT
 fastapi,0.135.3,python,MIT
 filelock,3.25.2,python,MIT
 flash-attn-4,4.0.0b8,python,LicenseRef-BSD-3-Clause-License
@@ -683,12 +721,12 @@ fonttools,4.62.1,python,MIT
 frozenlist,1.8.0,python,Apache-2.0
 fsspec,2026.2.0,python,BSD-3-Clause
 genson,1.3.0,python,MIT
-gguf,0.18.0,python,UNKNOWN
+gguf,0.18.0,python,MIT
 google-api-core,2.30.2,python,LicenseRef-Apache-2.0
 google-auth,2.49.1,python,LicenseRef-Apache-2.0
 google-cloud-core,2.5.1,python,LicenseRef-Apache-2.0
 google-cloud-storage,3.10.1,python,LicenseRef-Apache-2.0
-google-crc32c,1.8.0,python,UNKNOWN
+google-crc32c,1.8.0,python,Apache-2.0
 google-resumable-media,2.8.2,python,LicenseRef-Apache-2.0
 googleapis-common-protos,1.74.0,python,LicenseRef-Apache-2.0
 gpu-memory-service,0.9.0,python,Apache-2.0
@@ -700,16 +738,15 @@ hf-xet,1.4.3,python,Apache-2.0
 html5lib,1.1,python,LicenseRef-MIT-License
 httpcore,1.0.9,python,BSD-3-Clause
 httplib2,0.20.4,python,MIT
-httpx,0.26.0,python,UNKNOWN
+httpx,0.26.0,python,BSD-3-Clause
 httpx,0.28.1,python,BSD-3-Clause
 huggingface-hub,1.9.2,python,Apache-2.0
 humanize,4.15.0,python,MIT
-icdiff,2.0.10,python,UNKNOWN
+icdiff,2.0.10,python,PSF-2.0
 identify,2.6.18,python,MIT
 idna,3.11,python,BSD-3-Clause
 imageio,2.36.0,python,BSD-2-Clause
 imageio-ffmpeg,0.5.1,python,BSD-2-Clause
-importlib-metadata,8.7.1,python,Apache-2.0
 importlib-metadata,8.7.1,python,Apache-2.0
 inflect,7.5.0,python,MIT
 iniconfig,2.3.0,python,MIT
@@ -721,29 +758,29 @@ jaraco-context,6.1.0,python,MIT
 jaraco-functools,4.4.0,python,MIT
 jaraco-text,4.0.0,python,MIT
 jedi,0.19.2,python,MIT
-jinja2,3.1.6,python,UNKNOWN
-jiter,0.13.0,python,UNKNOWN
+jinja2,3.1.6,python,BSD-3-Clause
+jiter,0.13.0,python,MIT
 jsonschema,4.26.0,python,MIT
 jsonschema-specifications,2025.9.1,python,MIT
 kiwisolver,1.5.0,python,LicenseRef-4e89b2eeb82ea10ec61119c814f2ca0bbccdc22b72d0eb4f5542ef08f6a73ed2
-kubernetes,28.1.0,python,UNKNOWN
+kubernetes,28.1.0,python,Apache-2.0
 lark,1.3.1,python,MIT
 launchpadlib,1.11.0,python,LicenseRef-LGPL-v3
 lazr-restfulclient,0.14.6,python,LicenseRef-LGPL-v3
 lazr-uri,1.0.6,python,LicenseRef-LGPL-v3
 lazy-loader,0.5,python,BSD-3-Clause
 llguidance,0.7.30,python,MIT
-loguru,0.7.3,python,UNKNOWN
+loguru,0.7.3,python,MIT
 lxml,6.0.2,python,BSD-3-Clause
-markdown-it-py,4.0.0,python,UNKNOWN
+markdown-it-py,4.0.0,python,MIT
 markupsafe,3.0.3,python,BSD-3-Clause
 matplotlib,3.10.8,python,LicenseRef-3cb2c7aa8ec1f91fe59071d47f0d875cd1381b51d1cbf3ec8e225168c552597a
-matplotlib-inline,0.2.1,python,UNKNOWN
+matplotlib-inline,0.2.1,python,BSD-3-Clause
 maturin,1.12.6,python,(MIT OR Apache-2.0)
 mdurl,0.1.2,python,MIT
 mistral-common,1.11.0,python,Apache-2.0
 modelscope,1.35.3,python,Apache-2.0
-mooncake-transfer-engine,0.3.9,python,UNKNOWN
+mooncake-transfer-engine,0.3.9,python,Apache-2.0
 more-itertools,10.8.0,python,MIT
 more-itertools,11.0.1,python,MIT
 moviepy,2.2.1,python,LicenseRef-MIT-License
@@ -754,7 +791,7 @@ multiprocess,0.70.19,python,BSD-3-Clause
 mypy-extensions,1.1.0,python,MIT
 nest-asyncio,1.6.0,python,LicenseRef-BSD
 networkx,3.6.1,python,BSD-3-Clause
-ninja,1.13.0,python,UNKNOWN
+ninja,1.13.0,python,Apache-2.0 AND BSD-3-Clause
 nixl,1.0.0,python,(MIT AND Apache-2.0)
 nixl-cu12,1.0.0,python,(MIT AND Apache-2.0)
 nodeenv,1.10.0,python,LicenseRef-BSD
@@ -795,11 +832,10 @@ orjson,3.11.8,python,MPL-2.0 AND (Apache-2.0 OR MIT)
 outlines,0.1.11,python,Apache-2.0
 outlines-core,0.1.26,python,Apache-2.0
 packaging,26.0,python,(Apache-2.0 OR BSD-2-Clause)
-packaging,26.0,python,(Apache-2.0 OR BSD-2-Clause)
 pandas,3.0.2,python,LicenseRef-6dc1ad62d707e8dda646a5461c66fff8e6497c8656e04ccee9a64d411b017d65
 parso,0.8.6,python,MIT
 partial-json-parser,0.2.1.1.post7,python,MIT
-pathspec,1.0.4,python,UNKNOWN
+pathspec,1.0.4,python,MPL-2.0
 pexpect,4.9.0,python,LicenseRef-ISC-license
 pillow,12.2.0,python,MIT-CMU
 pip,26.0.1,python,MIT
@@ -809,14 +845,14 @@ pluggy,1.6.0,python,MIT
 pre-commit,4.5.1,python,MIT
 proglog,0.1.12,python,MIT
 prometheus-client,0.24.1,python,(Apache-2.0 AND BSD-2-Clause)
-prompt-toolkit,3.0.52,python,UNKNOWN
+prompt-toolkit,3.0.52,python,BSD-3-Clause
 propcache,0.4.1,python,Apache-2.0
 proto-plus,1.27.2,python,LicenseRef-Apache-2.0
 protobuf,6.33.6,python,LicenseRef-3-Clause-BSD-License
 psutil,7.2.2,python,BSD-3-Clause
 ptyprocess,0.7.0,python,LicenseRef-UNKNOWN
 pure-eval,0.2.3,python,MIT
-py-spy,0.4.1,python,UNKNOWN
+py-spy,0.4.1,python,MIT
 pyarrow,23.0.1,python,Apache-2.0
 pyasn1,0.6.3,python,BSD-2-Clause
 pyasn1-modules,0.4.2,python,LicenseRef-BSD
@@ -825,24 +861,23 @@ pycountry,26.2.16,python,LGPL-2.1-only
 pycparser,3.0,python,BSD-3-Clause
 pycryptodomex,3.23.0,python,LicenseRef-BSD--Public-Domain
 pydantic,2.12.5,python,MIT
-pydantic,2.5.3,python,UNKNOWN
+pydantic,2.5.3,python,MIT
 pydantic-core,2.41.5,python,MIT
 pydantic-extra-types,2.11.2,python,MIT
 pygments,2.20.0,python,BSD-2-Clause
 pygobject,3.48.2,python,LicenseRef-GNU-LGPL
 pyjwt,2.7.0,python,MIT
-pyparsing,3.1.1,python,UNKNOWN
+pyparsing,3.1.1,python,MIT
 pyproject-hooks,1.2.0,python,MIT
 pytest,9.0.3,python,MIT
 python-apt,2.7.7+ubuntu5.2,python,LicenseRef-GNU-GPL
 python-dateutil,2.9.0.post0,python,LicenseRef-Dual-License
 python-discovery,1.2.2,python,MIT
 python-dotenv,1.2.2,python,BSD-3-Clause
-python-multipart,0.0.20,python,UNKNOWN
+python-multipart,0.0.20,python,Apache-2.0
 python-multipart,0.0.24,python,Apache-2.0
 pytokens,0.4.1,python,MIT
 pyyaml,6.0.1,python,MIT
-pyyaml,6.0.1,python,UNKNOWN
 pyzmq,27.1.0,python,BSD-3-Clause
 quack-kernels,0.3.9,python,UNKNOWN
 referencing,0.37.0,python,MIT
@@ -852,15 +887,14 @@ requests,2.33.1,python,Apache-2.0
 rich,14.3.3,python,MIT
 rpds-py,0.30.0,python,MIT
 runai-model-streamer,0.15.8,python,LicenseRef-UNKNOWN
-safetensors,0.7.0,python,UNKNOWN
+safetensors,0.7.0,python,Apache-2.0
 scikit-build-core,0.12.2,python,Apache-2.0
 scikit-image,0.25.2,python,LicenseRef-851b13cf1a1d28fd3e8a25f705c95ebd36f63e5283c736760e6ec765bf6b86ab
 scipy,1.17.1,python,BSD-3-Clause
-sentencepiece,0.2.1,python,UNKNOWN
+sentencepiece,0.2.1,python,Apache-2.0
 setproctitle,1.3.7,python,BSD-3-Clause
 setuptools,82.0.1,python,MIT
-sglang,0.5.10.post1,python,UNKNOWN
-sglang,0.5.10.post1,python,UNKNOWN
+sglang,0.5.10.post1,python,Apache-2.0
 sglang-kernel,0.4.1,python,Apache-2.0
 sglang-router,0.3.2,python,Apache-2.0
 shellingham,1.5.4,python,LicenseRef-ISC-License
@@ -870,7 +904,7 @@ smg-grpc-proto,0.4.5,python,Apache-2.0
 smg-grpc-servicer,0.5.1,python,Apache-2.0
 sniffio,1.3.1,python,(MIT OR Apache-2.0)
 soundfile,0.13.1,python,LicenseRef-BSD-3-Clause-License
-st-attn,0.0.7,python,UNKNOWN
+st-attn,0.0.7,python,Apache-2.0
 stack-data,0.6.3,python,MIT
 starlette,1.0.0,python,BSD-3-Clause
 sympy,1.14.0,python,LicenseRef-BSD
@@ -879,7 +913,7 @@ termplotlib,0.3.9,python,GPL-3.0-or-later
 tifffile,2026.3.3,python,BSD-3-Clause
 tiktoken,0.12.0,python,MIT
 timm,1.0.16,python,Apache-2.0
-tokenizers,0.22.2,python,UNKNOWN
+tokenizers,0.22.2,python,Apache-2.0
 tomli,2.4.0,python,MIT
 torch,2.9.1+cu129,python,BSD-3-Clause
 torch-c-dlpack-ext,0.1.5,python,Apache-2.0
@@ -892,957 +926,947 @@ tqdm,4.67.3,python,(MPL-2.0 AND MIT)
 traitlets,5.14.3,python,BSD-3-Clause
 transformers,5.3.0,python,LicenseRef-Apache-2.0-License
 trimesh,4.11.5,python,MIT
-triton,3.5.1,python,UNKNOWN
+triton,3.5.1,python,MIT
 typeguard,4.5.1,python,MIT
 typer,0.24.1,python,MIT
 typing-extensions,4.15.0,python,PSF-2.0
 typing-inspection,0.4.2,python,MIT
 urllib3,2.6.3,python,MIT
 uv,0.11.5,python,(MIT OR Apache-2.0)
-uvicorn,0.27.0,python,UNKNOWN
+uvicorn,0.27.0,python,BSD-3-Clause
 uvicorn,0.44.0,python,BSD-3-Clause
 uvloop,0.22.1,python,LicenseRef-MIT-License
 virtualenv,21.2.0,python,MIT
-vsa,0.0.4,python,UNKNOWN
+vsa,0.0.4,python,Apache-2.0
 wadllib,1.3.6,python,LicenseRef-LGPL-v3
 watchfiles,1.1.1,python,MIT
 wcwidth,0.6.0,python,MIT
 webencodings,0.5.1,python,LicenseRef-BSD
-wheel,0.46.3,python,MIT
 wheel,0.46.3,python,MIT
 xatlas,0.0.11,python,MIT
 xgrammar,0.1.32,python,LicenseRef-Apache-2.0
 xxhash,3.6.0,python,LicenseRef-BSD
 yarl,1.23.0,python,Apache-2.0
 zipp,3.23.0,python,MIT
-zipp,3.23.0,python,MIT
-adler2,2.0.1,rust,UNKNOWN
-ahash,0.8.12,rust,UNKNOWN
-aho-corasick,1.1.4,rust,UNKNOWN
-aligned,0.4.3,rust,UNKNOWN
-aligned-vec,0.6.4,rust,UNKNOWN
-allocator-api2,0.2.21,rust,UNKNOWN
-android_system_properties,0.1.5,rust,UNKNOWN
-anes,0.1.6,rust,UNKNOWN
-anstream,1.0.0,rust,UNKNOWN
-anstyle,1.0.14,rust,UNKNOWN
-anstyle-parse,1.0.0,rust,UNKNOWN
-anstyle-query,1.1.5,rust,UNKNOWN
-anstyle-wincon,3.0.11,rust,UNKNOWN
-anyhow,1.0.102,rust,UNKNOWN
-approx,0.5.1,rust,UNKNOWN
-arbitrary,1.4.2,rust,UNKNOWN
-arc-swap,1.9.1,rust,UNKNOWN
-arg_enum_proc_macro,0.3.4,rust,UNKNOWN
-arraydeque,0.5.1,rust,UNKNOWN
-arrayref,0.3.9,rust,UNKNOWN
-arrayvec,0.7.6,rust,UNKNOWN
-as-slice,0.2.1,rust,UNKNOWN
-assert-json-diff,2.0.2,rust,UNKNOWN
-assert_matches,1.5.0,rust,UNKNOWN
-async-broadcast,0.7.2,rust,UNKNOWN
-async-nats,0.45.0,rust,UNKNOWN
-async-once-cell,0.5.4,rust,UNKNOWN
-async-openai,0.34.0,rust,UNKNOWN
-async-stream,0.3.6,rust,UNKNOWN
-async-stream-impl,0.3.6,rust,UNKNOWN
-async-trait,0.1.89,rust,UNKNOWN
-atomic,0.6.1,rust,UNKNOWN
-atomic-waker,1.1.2,rust,UNKNOWN
-atty,0.2.14,rust,UNKNOWN
-autocfg,1.5.0,rust,UNKNOWN
-av-scenechange,0.14.1,rust,UNKNOWN
-av1-grain,0.2.5,rust,UNKNOWN
-avif-serialize,0.8.8,rust,UNKNOWN
-aws-config,1.8.14,rust,UNKNOWN
-aws-credential-types,1.2.12,rust,UNKNOWN
-aws-lc-rs,1.16.3,rust,UNKNOWN
-aws-lc-sys,0.40.0,rust,UNKNOWN
-aws-runtime,1.7.0,rust,UNKNOWN
-aws-sdk-s3,1.123.0,rust,UNKNOWN
-aws-sdk-sso,1.94.0,rust,UNKNOWN
-aws-sdk-ssooidc,1.96.0,rust,UNKNOWN
-aws-sdk-sts,1.98.0,rust,UNKNOWN
-aws-sigv4,1.4.0,rust,UNKNOWN
-aws-smithy-async,1.2.12,rust,UNKNOWN
-aws-smithy-checksums,0.64.4,rust,UNKNOWN
-aws-smithy-eventstream,0.60.19,rust,UNKNOWN
-aws-smithy-http,0.63.4,rust,UNKNOWN
-aws-smithy-http-client,1.1.10,rust,UNKNOWN
-aws-smithy-json,0.62.4,rust,UNKNOWN
-aws-smithy-observability,0.2.5,rust,UNKNOWN
-aws-smithy-query,0.60.14,rust,UNKNOWN
-aws-smithy-runtime,1.10.1,rust,UNKNOWN
-aws-smithy-runtime-api,1.11.4,rust,UNKNOWN
-aws-smithy-types,1.4.4,rust,UNKNOWN
-aws-smithy-xml,0.60.15,rust,UNKNOWN
-aws-types,1.3.12,rust,UNKNOWN
-axum,0.7.9,rust,UNKNOWN
-axum,0.8.4,rust,UNKNOWN
-axum-core,0.4.5,rust,UNKNOWN
-axum-core,0.5.6,rust,UNKNOWN
-axum-macros,0.5.1,rust,UNKNOWN
-axum-server,0.7.3,rust,UNKNOWN
-backon,1.6.0,rust,UNKNOWN
-base16ct,0.1.1,rust,UNKNOWN
-base64,0.13.1,rust,UNKNOWN
-base64,0.21.7,rust,UNKNOWN
-base64,0.22.1,rust,UNKNOWN
-base64-simd,0.8.0,rust,UNKNOWN
-base64ct,1.8.3,rust,UNKNOWN
-bincode,1.3.3,rust,UNKNOWN
-bincode,2.0.1,rust,UNKNOWN
-bincode_derive,2.0.1,rust,UNKNOWN
-bindgen,0.71.1,rust,UNKNOWN
-bindgen,0.72.1,rust,UNKNOWN
-bit-set,0.5.3,rust,UNKNOWN
-bit-set,0.8.0,rust,UNKNOWN
-bit-vec,0.6.3,rust,UNKNOWN
-bit-vec,0.8.0,rust,UNKNOWN
-bit_field,0.10.3,rust,UNKNOWN
-bitflags,1.3.2,rust,UNKNOWN
-bitflags,2.11.1,rust,UNKNOWN
-bitstream-io,4.10.0,rust,UNKNOWN
-blake3,1.8.4,rust,UNKNOWN
-block-buffer,0.10.4,rust,UNKNOWN
-block2,0.6.2,rust,UNKNOWN
-bs58,0.5.1,rust,UNKNOWN
-bs62,0.1.4,rust,UNKNOWN
-bstr,1.12.1,rust,UNKNOWN
-built,0.8.0,rust,UNKNOWN
-bumpalo,3.20.2,rust,UNKNOWN
-bytecount,0.6.9,rust,UNKNOWN
-bytemuck,1.25.0,rust,UNKNOWN
-byteorder,1.5.0,rust,UNKNOWN
-byteorder-lite,0.1.0,rust,UNKNOWN
-bytes,1.11.1,rust,UNKNOWN
-bytes-utils,0.1.4,rust,UNKNOWN
-cast,0.3.0,rust,UNKNOWN
-castaway,0.2.4,rust,UNKNOWN
-cbindgen,0.27.0,rust,UNKNOWN
-cc,1.2.61,rust,UNKNOWN
-cexpr,0.6.0,rust,UNKNOWN
-cfg-expr,0.15.8,rust,UNKNOWN
-cfg-if,1.0.4,rust,UNKNOWN
-cfg_aliases,0.2.1,rust,UNKNOWN
-chrono,0.4.44,rust,UNKNOWN
-ciborium,0.2.2,rust,UNKNOWN
-ciborium-io,0.2.2,rust,UNKNOWN
-ciborium-ll,0.2.2,rust,UNKNOWN
-clang-sys,1.8.1,rust,UNKNOWN
-clap,2.34.0,rust,UNKNOWN
-clap,4.6.1,rust,UNKNOWN
-clap_builder,4.6.0,rust,UNKNOWN
-clap_derive,4.6.1,rust,UNKNOWN
-clap_lex,1.1.0,rust,UNKNOWN
-cmake,0.1.58,rust,UNKNOWN
-color_quant,1.1.0,rust,UNKNOWN
-colorchoice,1.0.5,rust,UNKNOWN
-colored,3.1.1,rust,UNKNOWN
-compact_str,0.9.0,rust,UNKNOWN
-concurrent-queue,2.5.0,rust,UNKNOWN
-config,0.15.22,rust,UNKNOWN
-console,0.15.11,rust,UNKNOWN
-console,0.16.3,rust,UNKNOWN
-console-api,0.8.1,rust,UNKNOWN
-console-subscriber,0.4.1,rust,UNKNOWN
-const-oid,0.9.6,rust,UNKNOWN
-const-random,0.1.18,rust,UNKNOWN
-const-random-macro,0.1.16,rust,UNKNOWN
-constant_time_eq,0.4.2,rust,UNKNOWN
-convert_case,0.6.0,rust,UNKNOWN
-core-foundation,0.10.1,rust,UNKNOWN
-core-foundation,0.9.4,rust,UNKNOWN
-core-foundation-sys,0.8.7,rust,UNKNOWN
-cpufeatures,0.2.17,rust,UNKNOWN
-cpufeatures,0.3.0,rust,UNKNOWN
-crc,3.3.0,rust,UNKNOWN
-crc-catalog,2.4.0,rust,UNKNOWN
-crc-fast,1.9.0,rust,UNKNOWN
-crc32fast,1.5.0,rust,UNKNOWN
-criterion,0.3.6,rust,UNKNOWN
-criterion,0.5.1,rust,UNKNOWN
-criterion-plot,0.4.5,rust,UNKNOWN
-criterion-plot,0.5.0,rust,UNKNOWN
-crossbeam,0.8.4,rust,UNKNOWN
-crossbeam-channel,0.5.15,rust,UNKNOWN
-crossbeam-deque,0.8.6,rust,UNKNOWN
-crossbeam-epoch,0.9.18,rust,UNKNOWN
-crossbeam-queue,0.3.12,rust,UNKNOWN
-crossbeam-utils,0.8.21,rust,UNKNOWN
-crunchy,0.2.4,rust,UNKNOWN
-crypto-bigint,0.4.9,rust,UNKNOWN
-crypto-bigint,0.5.5,rust,UNKNOWN
-crypto-common,0.1.7,rust,UNKNOWN
-csv,1.4.0,rust,UNKNOWN
-csv-core,0.1.13,rust,UNKNOWN
-ctor,0.1.26,rust,UNKNOWN
-cudarc,0.19.3,rust,UNKNOWN
-curve25519-dalek,4.1.3,rust,UNKNOWN
-curve25519-dalek-derive,0.1.1,rust,UNKNOWN
-daachorse,1.0.1,rust,UNKNOWN
-darling,0.20.11,rust,UNKNOWN
-darling,0.21.3,rust,UNKNOWN
-darling,0.23.0,rust,UNKNOWN
-darling_core,0.20.11,rust,UNKNOWN
-darling_core,0.21.3,rust,UNKNOWN
-darling_core,0.23.0,rust,UNKNOWN
-darling_macro,0.20.11,rust,UNKNOWN
-darling_macro,0.21.3,rust,UNKNOWN
-darling_macro,0.23.0,rust,UNKNOWN
-dary_heap,0.3.9,rust,UNKNOWN
-dashmap,6.1.0,rust,UNKNOWN
-data-encoding,2.11.0,rust,UNKNOWN
-defmac,0.1.3,rust,UNKNOWN
-der,0.6.1,rust,UNKNOWN
-der,0.7.10,rust,UNKNOWN
-deranged,0.5.8,rust,UNKNOWN
-derive-getters,0.5.0,rust,UNKNOWN
-derive_arbitrary,1.4.2,rust,UNKNOWN
-derive_builder,0.20.2,rust,UNKNOWN
-derive_builder_core,0.20.2,rust,UNKNOWN
-derive_builder_macro,0.20.2,rust,UNKNOWN
-derive_more,1.0.0,rust,UNKNOWN
-derive_more,2.1.1,rust,UNKNOWN
-derive_more-impl,1.0.0,rust,UNKNOWN
-derive_more-impl,2.1.1,rust,UNKNOWN
-dialoguer,0.11.0,rust,UNKNOWN
-digest,0.10.7,rust,UNKNOWN
-dircpy,0.3.20,rust,UNKNOWN
-dirs,6.0.0,rust,UNKNOWN
-dirs-sys,0.5.0,rust,UNKNOWN
-dispatch2,0.3.1,rust,UNKNOWN
-displaydoc,0.2.5,rust,UNKNOWN
-dlv-list,0.5.2,rust,UNKNOWN
-dunce,1.0.5,rust,UNKNOWN
-dyn-clone,1.0.20,rust,UNKNOWN
-dynamo-backend-common,1.2.0,rust,UNKNOWN
-dynamo-mocker-backend,1.2.0,rust,UNKNOWN
-dynamo-protocols,1.2.0,rust,UNKNOWN
-dynamo-tokenizers,1.2.0,rust,UNKNOWN
-ecdsa,0.14.8,rust,UNKNOWN
-ed25519,2.2.3,rust,UNKNOWN
-ed25519-dalek,2.2.0,rust,UNKNOWN
-educe,0.6.0,rust,UNKNOWN
-either,1.15.0,rust,UNKNOWN
-elliptic-curve,0.12.3,rust,UNKNOWN
-encode_unicode,1.0.0,rust,UNKNOWN
-encoding_rs,0.8.35,rust,UNKNOWN
-enum-ordinalize,4.3.2,rust,UNKNOWN
-enum-ordinalize-derive,4.3.2,rust,UNKNOWN
-equator,0.4.2,rust,UNKNOWN
-equator-macro,0.4.2,rust,UNKNOWN
-equivalent,1.0.2,rust,UNKNOWN
-erased-serde,0.4.10,rust,UNKNOWN
-errno,0.3.14,rust,UNKNOWN
-esaxx-rs,0.1.10,rust,UNKNOWN
-etcd-client,0.17.0,rust,UNKNOWN
-event-listener,5.4.1,rust,UNKNOWN
-event-listener-strategy,0.5.4,rust,UNKNOWN
-exr,1.74.0,rust,UNKNOWN
-fancy-regex,0.11.0,rust,UNKNOWN
-fancy-regex,0.13.0,rust,UNKNOWN
-fancy-regex,0.17.0,rust,UNKNOWN
-fastokens,0.1.1,rust,UNKNOWN
-fastrand,2.4.1,rust,UNKNOWN
-fax,0.2.6,rust,UNKNOWN
-fax_derive,0.2.0,rust,UNKNOWN
-fdeflate,0.3.7,rust,UNKNOWN
-ff,0.12.1,rust,UNKNOWN
-ffmpeg-next,8.1.0,rust,UNKNOWN
-ffmpeg-sys-next,8.1.0,rust,UNKNOWN
-fiat-crypto,0.2.9,rust,UNKNOWN
-figment,0.10.19,rust,UNKNOWN
-filetime,0.2.27,rust,UNKNOWN
-find-msvc-tools,0.1.9,rust,UNKNOWN
-fixedbitset,0.5.7,rust,UNKNOWN
-flate2,1.1.9,rust,UNKNOWN
-flume,0.11.1,rust,UNKNOWN
-flume,0.12.0,rust,UNKNOWN
-fnv,1.0.7,rust,UNKNOWN
-foldhash,0.1.5,rust,UNKNOWN
-foldhash,0.2.0,rust,UNKNOWN
-form_urlencoded,1.2.2,rust,UNKNOWN
-fraction,0.13.1,rust,UNKNOWN
-fs-err,3.3.0,rust,UNKNOWN
-fs4,0.13.1,rust,UNKNOWN
-fs_extra,1.3.0,rust,UNKNOWN
-fsevent-sys,4.1.0,rust,UNKNOWN
-futures,0.3.32,rust,UNKNOWN
-futures-channel,0.3.32,rust,UNKNOWN
-futures-core,0.3.32,rust,UNKNOWN
-futures-executor,0.3.32,rust,UNKNOWN
-futures-io,0.3.32,rust,UNKNOWN
-futures-macro,0.3.32,rust,UNKNOWN
-futures-sink,0.3.32,rust,UNKNOWN
-futures-task,0.3.32,rust,UNKNOWN
-futures-timer,3.0.3,rust,UNKNOWN
-futures-util,0.3.32,rust,UNKNOWN
-galil-seiferas,0.1.5,rust,UNKNOWN
-generic-array,0.14.7,rust,UNKNOWN
-getopts,0.2.24,rust,UNKNOWN
-getrandom,0.2.17,rust,UNKNOWN
-getrandom,0.3.4,rust,UNKNOWN
-getrandom,0.4.2,rust,UNKNOWN
-getset,0.1.6,rust,UNKNOWN
-gif,0.14.2,rust,UNKNOWN
-glob,0.3.3,rust,UNKNOWN
-globset,0.4.18,rust,UNKNOWN
-gloo-timers,0.3.0,rust,UNKNOWN
-group,0.12.1,rust,UNKNOWN
-h2,0.3.27,rust,UNKNOWN
-h2,0.4.13,rust,UNKNOWN
-half,1.8.3,rust,UNKNOWN
-half,2.7.1,rust,UNKNOWN
-hashbrown,0.12.3,rust,UNKNOWN
-hashbrown,0.14.5,rust,UNKNOWN
-hashbrown,0.15.5,rust,UNKNOWN
-hashbrown,0.16.1,rust,UNKNOWN
-hashbrown,0.17.0,rust,UNKNOWN
-hashlink,0.10.0,rust,UNKNOWN
-hdrhistogram,7.5.4,rust,UNKNOWN
-heck,0.4.1,rust,UNKNOWN
-heck,0.5.0,rust,UNKNOWN
-hermit-abi,0.1.19,rust,UNKNOWN
-hermit-abi,0.5.2,rust,UNKNOWN
-hex,0.4.3,rust,UNKNOWN
-hf-hub,0.4.3,rust,UNKNOWN
-hmac,0.12.1,rust,UNKNOWN
-home,0.5.12,rust,UNKNOWN
-hostname,0.4.2,rust,UNKNOWN
-http,0.2.12,rust,UNKNOWN
-http,1.4.0,rust,UNKNOWN
-http-body,0.4.6,rust,UNKNOWN
-http-body,1.0.1,rust,UNKNOWN
-http-body-util,0.1.3,rust,UNKNOWN
-httparse,1.10.1,rust,UNKNOWN
-httpdate,1.0.3,rust,UNKNOWN
-humantime,2.3.0,rust,UNKNOWN
-hyper,0.14.32,rust,UNKNOWN
-hyper,1.9.0,rust,UNKNOWN
-hyper-rustls,0.24.2,rust,UNKNOWN
-hyper-rustls,0.27.9,rust,UNKNOWN
-hyper-timeout,0.5.2,rust,UNKNOWN
-hyper-util,0.1.20,rust,UNKNOWN
-iana-time-zone,0.1.65,rust,UNKNOWN
-iana-time-zone-haiku,0.1.2,rust,UNKNOWN
-icu_collections,2.2.0,rust,UNKNOWN
-icu_locale_core,2.2.0,rust,UNKNOWN
-icu_normalizer,2.2.0,rust,UNKNOWN
-icu_normalizer_data,2.2.0,rust,UNKNOWN
-icu_properties,2.2.0,rust,UNKNOWN
-icu_properties_data,2.2.0,rust,UNKNOWN
-icu_provider,2.2.0,rust,UNKNOWN
-id-arena,2.3.0,rust,UNKNOWN
-ident_case,1.0.1,rust,UNKNOWN
-idna,1.1.0,rust,UNKNOWN
-idna_adapter,1.2.1,rust,UNKNOWN
-image,0.25.10,rust,UNKNOWN
-image-webp,0.2.4,rust,UNKNOWN
-imgref,1.12.0,rust,UNKNOWN
-indexmap,1.9.3,rust,UNKNOWN
-indexmap,2.14.0,rust,UNKNOWN
-indicatif,0.17.11,rust,UNKNOWN
-indicatif,0.18.4,rust,UNKNOWN
-inlinable_string,0.1.15,rust,UNKNOWN
-inotify,0.9.6,rust,UNKNOWN
-inotify-sys,0.1.5,rust,UNKNOWN
-insta,1.47.2,rust,UNKNOWN
-interpolate_name,0.2.4,rust,UNKNOWN
-ipnet,2.12.0,rust,UNKNOWN
-iri-string,0.7.12,rust,UNKNOWN
-is-macro,0.3.7,rust,UNKNOWN
-is-terminal,0.4.17,rust,UNKNOWN
-is_terminal_polyfill,1.70.2,rust,UNKNOWN
-iso8601,0.6.3,rust,UNKNOWN
-itertools,0.10.5,rust,UNKNOWN
-itertools,0.11.0,rust,UNKNOWN
-itertools,0.13.0,rust,UNKNOWN
-itertools,0.14.0,rust,UNKNOWN
-itoa,1.0.18,rust,UNKNOWN
-jiff,0.2.24,rust,UNKNOWN
-jiff-static,0.2.24,rust,UNKNOWN
-jiff-tzdb,0.1.6,rust,UNKNOWN
-jiff-tzdb-platform,0.1.3,rust,UNKNOWN
-jobserver,0.1.34,rust,UNKNOWN
-js-sys,0.3.95,rust,UNKNOWN
-json-five,0.3.1,rust,UNKNOWN
-json-patch,4.1.0,rust,UNKNOWN
-json5,0.4.1,rust,UNKNOWN
-jsonpath-rust,0.7.5,rust,UNKNOWN
-jsonptr,0.7.1,rust,UNKNOWN
-jsonschema,0.17.1,rust,UNKNOWN
-jwalk,0.8.1,rust,UNKNOWN
-k8s-openapi,0.26.1,rust,UNKNOWN
-kqueue,1.1.1,rust,UNKNOWN
-kqueue-sys,1.0.4,rust,UNKNOWN
-kube,2.0.1,rust,UNKNOWN
-kube-client,2.0.1,rust,UNKNOWN
-kube-core,2.0.1,rust,UNKNOWN
-kube-derive,2.0.1,rust,UNKNOWN
-kube-runtime,2.0.1,rust,UNKNOWN
-kvbm-common,1.2.0,rust,UNKNOWN
-kvbm-config,1.2.0,rust,UNKNOWN
-kvbm-engine,1.2.0,rust,UNKNOWN
-kvbm-physical,1.2.0,rust,UNKNOWN
-lalrpop-util,0.20.2,rust,UNKNOWN
-lazy_static,1.5.0,rust,UNKNOWN
-leb128fmt,0.1.0,rust,UNKNOWN
-lebe,0.5.3,rust,UNKNOWN
-libc,0.2.186,rust,UNKNOWN
-libfuzzer-sys,0.4.12,rust,UNKNOWN
-libloading,0.8.9,rust,UNKNOWN
-libloading,0.9.0,rust,UNKNOWN
-libm,0.2.16,rust,UNKNOWN
-libredox,0.1.16,rust,UNKNOWN
-linux-raw-sys,0.12.1,rust,UNKNOWN
-linux-raw-sys,0.4.15,rust,UNKNOWN
-litemap,0.8.2,rust,UNKNOWN
-local-ip-address,0.6.12,rust,UNKNOWN
-lock_api,0.4.14,rust,UNKNOWN
-log,0.4.29,rust,UNKNOWN
-loop9,0.1.5,rust,UNKNOWN
-lru,0.12.5,rust,UNKNOWN
-lru,0.16.4,rust,UNKNOWN
-lru-slab,0.1.2,rust,UNKNOWN
-macro_rules_attribute,0.2.2,rust,UNKNOWN
-macro_rules_attribute-proc_macro,0.2.2,rust,UNKNOWN
-malachite,0.4.22,rust,UNKNOWN
-malachite-base,0.4.22,rust,UNKNOWN
-malachite-bigint,0.2.3,rust,UNKNOWN
-malachite-nz,0.4.22,rust,UNKNOWN
-malachite-q,0.4.22,rust,UNKNOWN
-matchers,0.2.0,rust,UNKNOWN
-matchit,0.7.3,rust,UNKNOWN
-matchit,0.8.4,rust,UNKNOWN
-matrixmultiply,0.3.10,rust,UNKNOWN
-maybe-rayon,0.1.1,rust,UNKNOWN
-md-5,0.10.6,rust,UNKNOWN
-memchr,2.8.0,rust,UNKNOWN
-memfile,0.3.2,rust,UNKNOWN
-memmap2,0.9.10,rust,UNKNOWN
-memo-map,0.3.3,rust,UNKNOWN
-memoffset,0.7.1,rust,UNKNOWN
-memoffset,0.9.1,rust,UNKNOWN
-mime,0.3.17,rust,UNKNOWN
-mime_guess,2.0.5,rust,UNKNOWN
-minijinja,2.19.0,rust,UNKNOWN
-minijinja-contrib,2.19.0,rust,UNKNOWN
-minimal-lexical,0.2.1,rust,UNKNOWN
-miniz_oxide,0.8.9,rust,UNKNOWN
-minstant,0.1.7,rust,UNKNOWN
-mio,0.8.11,rust,UNKNOWN
-mio,1.1.1,rust,UNKNOWN
-mockito,1.7.2,rust,UNKNOWN
-modelexpress-client,0.3.0,rust,UNKNOWN
-modelexpress-common,0.3.0,rust,UNKNOWN
-monostate,0.1.18,rust,UNKNOWN
-monostate-impl,0.1.18,rust,UNKNOWN
-moxcms,0.8.1,rust,UNKNOWN
-multimap,0.10.1,rust,UNKNOWN
-nanorand,0.7.0,rust,UNKNOWN
-ndarray,0.16.1,rust,UNKNOWN
-ndarray,0.17.2,rust,UNKNOWN
-ndarray-interp,0.5.0,rust,UNKNOWN
-ndarray-npy,0.9.1,rust,UNKNOWN
-neli,0.7.4,rust,UNKNOWN
-neli-proc-macros,0.2.2,rust,UNKNOWN
-new_debug_unreachable,1.0.6,rust,UNKNOWN
-nix,0.26.4,rust,UNKNOWN
-nix,0.30.1,rust,UNKNOWN
-nixl-sys,0.10.1,rust,UNKNOWN
-nkeys,0.4.5,rust,UNKNOWN
-no_std_io2,0.9.3,rust,UNKNOWN
-nom,7.1.3,rust,UNKNOWN
-nom,8.0.0,rust,UNKNOWN
-nonmax,0.5.5,rust,UNKNOWN
-noop_proc_macro,0.3.0,rust,UNKNOWN
-notify,6.1.1,rust,UNKNOWN
-nu-ansi-term,0.50.3,rust,UNKNOWN
-nuid,0.5.0,rust,UNKNOWN
-num,0.4.3,rust,UNKNOWN
-num-bigint,0.4.6,rust,UNKNOWN
-num-cmp,0.1.0,rust,UNKNOWN
-num-complex,0.4.6,rust,UNKNOWN
-num-conv,0.2.1,rust,UNKNOWN
-num-derive,0.4.2,rust,UNKNOWN
-num-integer,0.1.46,rust,UNKNOWN
-num-iter,0.1.45,rust,UNKNOWN
-num-rational,0.4.2,rust,UNKNOWN
-num-traits,0.2.19,rust,UNKNOWN
-num_cpus,1.17.0,rust,UNKNOWN
-num_threads,0.1.7,rust,UNKNOWN
-number_prefix,0.4.0,rust,UNKNOWN
-nvtx,1.3.0,rust,UNKNOWN
-objc2,0.6.4,rust,UNKNOWN
-objc2-cloud-kit,0.3.2,rust,UNKNOWN
-objc2-core-data,0.3.2,rust,UNKNOWN
-objc2-core-foundation,0.3.2,rust,UNKNOWN
-objc2-core-graphics,0.3.2,rust,UNKNOWN
-objc2-core-image,0.3.2,rust,UNKNOWN
-objc2-core-location,0.3.2,rust,UNKNOWN
-objc2-core-text,0.3.2,rust,UNKNOWN
-objc2-encode,4.1.0,rust,UNKNOWN
-objc2-foundation,0.3.2,rust,UNKNOWN
-objc2-io-surface,0.3.2,rust,UNKNOWN
-objc2-quartz-core,0.3.2,rust,UNKNOWN
-objc2-ui-kit,0.3.2,rust,UNKNOWN
-objc2-user-notifications,0.3.2,rust,UNKNOWN
-object_store,0.12.5,rust,UNKNOWN
-offset-allocator,0.2.0,rust,UNKNOWN
-once_cell,1.21.4,rust,UNKNOWN
-once_cell_polyfill,1.70.2,rust,UNKNOWN
-oneshot,0.1.13,rust,UNKNOWN
-onig,6.5.1,rust,UNKNOWN
-onig_sys,69.9.1,rust,UNKNOWN
-oorandom,11.1.5,rust,UNKNOWN
-openai-harmony,0.0.3,rust,UNKNOWN
-openssl-probe,0.1.6,rust,UNKNOWN
-openssl-probe,0.2.1,rust,UNKNOWN
-opentelemetry,0.31.0,rust,UNKNOWN
-opentelemetry-appender-tracing,0.31.1,rust,UNKNOWN
-opentelemetry-http,0.31.0,rust,UNKNOWN
-opentelemetry-otlp,0.31.1,rust,UNKNOWN
-opentelemetry-proto,0.31.0,rust,UNKNOWN
-opentelemetry_sdk,0.31.0,rust,UNKNOWN
-option-ext,0.2.0,rust,UNKNOWN
-ordered-float,2.10.1,rust,UNKNOWN
-ordered-float,4.6.0,rust,UNKNOWN
-ordered-multimap,0.7.3,rust,UNKNOWN
-os_info,3.14.0,rust,UNKNOWN
-outref,0.5.2,rust,UNKNOWN
-p256,0.11.1,rust,UNKNOWN
-parking,2.2.1,rust,UNKNOWN
-parking_lot,0.12.5,rust,UNKNOWN
-parking_lot_core,0.9.12,rust,UNKNOWN
-paste,1.0.15,rust,UNKNOWN
-pastey,0.1.1,rust,UNKNOWN
-pathdiff,0.2.3,rust,UNKNOWN
-pcre2,0.2.11,rust,UNKNOWN
-pcre2-sys,0.2.10,rust,UNKNOWN
-pear,0.2.9,rust,UNKNOWN
-pear_codegen,0.2.9,rust,UNKNOWN
-pem,3.0.6,rust,UNKNOWN
-pem-rfc7468,0.7.0,rust,UNKNOWN
-percent-encoding,2.3.2,rust,UNKNOWN
-pest,2.8.6,rust,UNKNOWN
-pest_derive,2.8.6,rust,UNKNOWN
-pest_generator,2.8.6,rust,UNKNOWN
-pest_meta,2.8.6,rust,UNKNOWN
-petgraph,0.7.1,rust,UNKNOWN
-petgraph,0.8.3,rust,UNKNOWN
-phf,0.11.3,rust,UNKNOWN
-phf_codegen,0.11.3,rust,UNKNOWN
-phf_generator,0.11.3,rust,UNKNOWN
-phf_shared,0.11.3,rust,UNKNOWN
-pin-project,1.1.11,rust,UNKNOWN
-pin-project-internal,1.1.11,rust,UNKNOWN
-pin-project-lite,0.2.17,rust,UNKNOWN
-pin-utils,0.1.0,rust,UNKNOWN
-pkcs8,0.10.2,rust,UNKNOWN
-pkcs8,0.9.0,rust,UNKNOWN
-pkg-config,0.3.33,rust,UNKNOWN
-plain,0.2.3,rust,UNKNOWN
-plotters,0.3.7,rust,UNKNOWN
-plotters-backend,0.3.7,rust,UNKNOWN
-plotters-svg,0.3.7,rust,UNKNOWN
-png,0.18.1,rust,UNKNOWN
-portable-atomic,1.13.1,rust,UNKNOWN
-portable-atomic-util,0.2.7,rust,UNKNOWN
-potential_utf,0.1.5,rust,UNKNOWN
-powerfmt,0.2.0,rust,UNKNOWN
-ppv-lite86,0.2.21,rust,UNKNOWN
-prettyplease,0.2.37,rust,UNKNOWN
-proc-macro-crate,3.5.0,rust,UNKNOWN
-proc-macro-error-attr2,2.0.0,rust,UNKNOWN
-proc-macro-error2,2.0.1,rust,UNKNOWN
-proc-macro2,1.0.106,rust,UNKNOWN
-proc-macro2-diagnostics,0.10.1,rust,UNKNOWN
-profiling,1.0.17,rust,UNKNOWN
-profiling-procmacros,1.0.17,rust,UNKNOWN
-prometheus,0.14.0,rust,UNKNOWN
-proptest,1.11.0,rust,UNKNOWN
-prost,0.13.5,rust,UNKNOWN
-prost,0.14.3,rust,UNKNOWN
-prost-build,0.13.5,rust,UNKNOWN
-prost-build,0.14.3,rust,UNKNOWN
-prost-derive,0.13.5,rust,UNKNOWN
-prost-derive,0.14.3,rust,UNKNOWN
-prost-types,0.13.5,rust,UNKNOWN
-prost-types,0.14.3,rust,UNKNOWN
-protobuf,3.7.2,rust,UNKNOWN
-protobuf-support,3.7.2,rust,UNKNOWN
-pulldown-cmark,0.13.3,rust,UNKNOWN
-pulldown-cmark-to-cmark,22.0.0,rust,UNKNOWN
-pxfm,0.1.29,rust,UNKNOWN
-py_literal,0.4.0,rust,UNKNOWN
-qoi,0.4.1,rust,UNKNOWN
-quick-error,1.2.3,rust,UNKNOWN
-quick-error,2.0.1,rust,UNKNOWN
-quick-xml,0.38.4,rust,UNKNOWN
-quinn,0.11.9,rust,UNKNOWN
-quinn-proto,0.11.14,rust,UNKNOWN
-quinn-udp,0.5.14,rust,UNKNOWN
-quote,1.0.45,rust,UNKNOWN
-r-efi,5.3.0,rust,UNKNOWN
-r-efi,6.0.0,rust,UNKNOWN
-rand,0.8.6,rust,UNKNOWN
-rand,0.9.4,rust,UNKNOWN
-rand_chacha,0.3.1,rust,UNKNOWN
-rand_chacha,0.9.0,rust,UNKNOWN
-rand_core,0.6.4,rust,UNKNOWN
-rand_core,0.9.5,rust,UNKNOWN
-rand_distr,0.5.1,rust,UNKNOWN
-rand_xorshift,0.4.0,rust,UNKNOWN
-rav1e,0.8.1,rust,UNKNOWN
-ravif,0.13.0,rust,UNKNOWN
-rawpointer,0.2.1,rust,UNKNOWN
-rayon,1.12.0,rust,UNKNOWN
-rayon-cond,0.4.0,rust,UNKNOWN
-rayon-core,1.13.0,rust,UNKNOWN
-redox_syscall,0.5.18,rust,UNKNOWN
-redox_syscall,0.7.4,rust,UNKNOWN
-redox_users,0.5.2,rust,UNKNOWN
-ref-cast,1.0.25,rust,UNKNOWN
-ref-cast-impl,1.0.25,rust,UNKNOWN
-regex,1.12.3,rust,UNKNOWN
-regex-automata,0.4.14,rust,UNKNOWN
-regex-lite,0.1.9,rust,UNKNOWN
-regex-syntax,0.8.10,rust,UNKNOWN
-relative-path,1.9.3,rust,UNKNOWN
-reqwest,0.11.27,rust,UNKNOWN
-reqwest,0.12.28,rust,UNKNOWN
-rfc6979,0.3.1,rust,UNKNOWN
-rgb,0.8.53,rust,UNKNOWN
-ring,0.17.14,rust,UNKNOWN
-rmp,0.8.15,rust,UNKNOWN
-rmp-serde,1.3.1,rust,UNKNOWN
-ron,0.12.1,rust,UNKNOWN
-rstest,0.18.2,rust,UNKNOWN
-rstest,0.23.0,rust,UNKNOWN
-rstest,0.25.0,rust,UNKNOWN
-rstest,0.26.1,rust,UNKNOWN
-rstest_macros,0.18.2,rust,UNKNOWN
-rstest_macros,0.23.0,rust,UNKNOWN
-rstest_macros,0.25.0,rust,UNKNOWN
-rstest_macros,0.26.1,rust,UNKNOWN
-rstest_reuse,0.7.0,rust,UNKNOWN
-rust-embed,8.11.0,rust,UNKNOWN
-rust-embed-impl,8.11.0,rust,UNKNOWN
-rust-embed-utils,8.11.0,rust,UNKNOWN
-rust-ini,0.21.3,rust,UNKNOWN
-rustc-hash,1.1.0,rust,UNKNOWN
-rustc-hash,2.1.2,rust,UNKNOWN
-rustc_version,0.4.1,rust,UNKNOWN
-rustix,0.38.44,rust,UNKNOWN
-rustix,1.1.4,rust,UNKNOWN
-rustls,0.21.12,rust,UNKNOWN
-rustls,0.23.39,rust,UNKNOWN
-rustls-native-certs,0.7.3,rust,UNKNOWN
-rustls-native-certs,0.8.3,rust,UNKNOWN
-rustls-pemfile,2.2.0,rust,UNKNOWN
-rustls-pki-types,1.14.1,rust,UNKNOWN
-rustls-webpki,0.101.7,rust,UNKNOWN
-rustls-webpki,0.102.8,rust,UNKNOWN
-rustls-webpki,0.103.13,rust,UNKNOWN
-rustpython-ast,0.4.0,rust,UNKNOWN
-rustpython-parser,0.4.0,rust,UNKNOWN
-rustpython-parser-core,0.4.0,rust,UNKNOWN
-rustpython-parser-vendored,0.4.0,rust,UNKNOWN
-rustversion,1.0.22,rust,UNKNOWN
-rusty-fork,0.3.1,rust,UNKNOWN
-ryu,1.0.23,rust,UNKNOWN
-same-file,1.0.6,rust,UNKNOWN
-scc,2.4.0,rust,UNKNOWN
-schannel,0.1.29,rust,UNKNOWN
-schemars,0.9.0,rust,UNKNOWN
-schemars,1.2.1,rust,UNKNOWN
-schemars_derive,1.2.1,rust,UNKNOWN
-scopeguard,1.2.0,rust,UNKNOWN
-sct,0.7.1,rust,UNKNOWN
-sdd,3.0.10,rust,UNKNOWN
-sec1,0.3.0,rust,UNKNOWN
-secrecy,0.10.3,rust,UNKNOWN
-security-framework,2.11.1,rust,UNKNOWN
-security-framework,3.7.0,rust,UNKNOWN
-security-framework-sys,2.17.0,rust,UNKNOWN
-semver,1.0.28,rust,UNKNOWN
-serde,1.0.228,rust,UNKNOWN
-serde-untagged,0.1.9,rust,UNKNOWN
-serde-value,0.7.0,rust,UNKNOWN
-serde_bytes,0.11.19,rust,UNKNOWN
-serde_cbor,0.11.2,rust,UNKNOWN
-serde_core,1.0.228,rust,UNKNOWN
-serde_derive,1.0.228,rust,UNKNOWN
-serde_derive_internals,0.29.1,rust,UNKNOWN
-serde_json,1.0.149,rust,UNKNOWN
-serde_nanos,0.1.4,rust,UNKNOWN
-serde_path_to_error,0.1.20,rust,UNKNOWN
-serde_repr,0.1.20,rust,UNKNOWN
-serde_spanned,0.6.9,rust,UNKNOWN
-serde_spanned,1.1.1,rust,UNKNOWN
-serde_urlencoded,0.7.1,rust,UNKNOWN
-serde_with,3.18.0,rust,UNKNOWN
-serde_with_macros,3.18.0,rust,UNKNOWN
-serde_yaml,0.9.34+deprecated,rust,UNKNOWN
-serial_test,3.4.0,rust,UNKNOWN
-serial_test_derive,3.4.0,rust,UNKNOWN
-sha1,0.10.6,rust,UNKNOWN
-sha2,0.10.9,rust,UNKNOWN
-sharded-slab,0.1.7,rust,UNKNOWN
-shell-words,1.1.1,rust,UNKNOWN
-shlex,1.3.0,rust,UNKNOWN
-signal-hook-registry,1.4.8,rust,UNKNOWN
-signatory,0.27.1,rust,UNKNOWN
-signature,1.6.4,rust,UNKNOWN
-signature,2.2.0,rust,UNKNOWN
-simd-adler32,0.3.9,rust,UNKNOWN
-simd_helpers,0.1.0,rust,UNKNOWN
-similar,2.7.0,rust,UNKNOWN
-siphasher,1.0.2,rust,UNKNOWN
-slab,0.4.12,rust,UNKNOWN
-slotmap,1.1.1,rust,UNKNOWN
-smallvec,1.15.1,rust,UNKNOWN
-socket2,0.5.10,rust,UNKNOWN
-socket2,0.6.3,rust,UNKNOWN
-socks,0.3.4,rust,UNKNOWN
-spin,0.10.0,rust,UNKNOWN
-spin,0.9.8,rust,UNKNOWN
-spki,0.6.0,rust,UNKNOWN
-spki,0.7.3,rust,UNKNOWN
-spm_precompiled,0.1.4,rust,UNKNOWN
-stable_deref_trait,1.2.1,rust,UNKNOWN
-static_assertions,1.1.0,rust,UNKNOWN
-stdio-override,0.2.0,rust,UNKNOWN
-strsim,0.11.1,rust,UNKNOWN
-strum,0.27.2,rust,UNKNOWN
-strum_macros,0.27.2,rust,UNKNOWN
-subtle,2.6.1,rust,UNKNOWN
-syn,1.0.109,rust,UNKNOWN
-syn,2.0.117,rust,UNKNOWN
-sync_wrapper,0.1.2,rust,UNKNOWN
-sync_wrapper,1.0.2,rust,UNKNOWN
-synstructure,0.13.2,rust,UNKNOWN
-system-configuration,0.5.1,rust,UNKNOWN
-system-configuration,0.7.0,rust,UNKNOWN
-system-configuration-sys,0.5.0,rust,UNKNOWN
-system-configuration-sys,0.6.0,rust,UNKNOWN
-system-deps,6.2.2,rust,UNKNOWN
-target-lexicon,0.12.16,rust,UNKNOWN
-temp-env,0.3.6,rust,UNKNOWN
-tempfile,3.27.0,rust,UNKNOWN
-textwrap,0.11.0,rust,UNKNOWN
-thiserror,1.0.69,rust,UNKNOWN
-thiserror,2.0.18,rust,UNKNOWN
-thiserror-impl,1.0.69,rust,UNKNOWN
-thiserror-impl,2.0.18,rust,UNKNOWN
-thread_local,1.1.9,rust,UNKNOWN
-tiff,0.11.3,rust,UNKNOWN
-tiktoken-rs,0.9.1,rust,UNKNOWN
-time,0.3.47,rust,UNKNOWN
-time-core,0.1.8,rust,UNKNOWN
-time-macros,0.2.27,rust,UNKNOWN
-timerfd,1.6.0,rust,UNKNOWN
-tiny-keccak,2.0.2,rust,UNKNOWN
-tinystr,0.8.3,rust,UNKNOWN
-tinytemplate,1.2.1,rust,UNKNOWN
-tinyvec,1.11.0,rust,UNKNOWN
-tinyvec_macros,0.1.1,rust,UNKNOWN
-tmq,0.5.0,rust,UNKNOWN
-tokenizers,0.21.4,rust,UNKNOWN
-tokio,1.48.0,rust,UNKNOWN
-tokio-macros,2.6.1,rust,UNKNOWN
-tokio-rayon,2.1.0,rust,UNKNOWN
-tokio-rustls,0.24.1,rust,UNKNOWN
-tokio-rustls,0.26.4,rust,UNKNOWN
-tokio-stream,0.1.18,rust,UNKNOWN
-tokio-test,0.4.5,rust,UNKNOWN
-tokio-timerfd,0.2.0,rust,UNKNOWN
-tokio-util,0.7.18,rust,UNKNOWN
-tokio-websockets,0.10.1,rust,UNKNOWN
-toml,0.8.23,rust,UNKNOWN
-toml,1.1.2+spec-1.1.0,rust,UNKNOWN
-toml_datetime,0.6.11,rust,UNKNOWN
-toml_datetime,1.1.1+spec-1.1.0,rust,UNKNOWN
-toml_edit,0.22.27,rust,UNKNOWN
-toml_edit,0.25.11+spec-1.1.0,rust,UNKNOWN
-toml_parser,1.1.2+spec-1.1.0,rust,UNKNOWN
-toml_write,0.1.2,rust,UNKNOWN
-tonic,0.12.3,rust,UNKNOWN
-tonic,0.13.1,rust,UNKNOWN
-tonic,0.14.5,rust,UNKNOWN
-tonic-build,0.13.1,rust,UNKNOWN
-tonic-build,0.14.5,rust,UNKNOWN
-tonic-prost,0.14.5,rust,UNKNOWN
-tonic-prost-build,0.14.5,rust,UNKNOWN
-tower,0.4.13,rust,UNKNOWN
-tower,0.5.3,rust,UNKNOWN
-tower-http,0.6.8,rust,UNKNOWN
-tower-layer,0.3.3,rust,UNKNOWN
-tower-service,0.3.3,rust,UNKNOWN
-tracing,0.1.44,rust,UNKNOWN
-tracing-attributes,0.1.31,rust,UNKNOWN
-tracing-core,0.1.36,rust,UNKNOWN
-tracing-log,0.2.0,rust,UNKNOWN
-tracing-opentelemetry,0.32.1,rust,UNKNOWN
-tracing-serde,0.2.0,rust,UNKNOWN
-tracing-subscriber,0.3.23,rust,UNKNOWN
-try-lock,0.2.5,rust,UNKNOWN
-tryhard,0.5.2,rust,UNKNOWN
-typeid,1.0.3,rust,UNKNOWN
-typenum,1.20.0,rust,UNKNOWN
-ucd-trie,0.1.7,rust,UNKNOWN
-unarray,0.1.4,rust,UNKNOWN
-uncased,0.9.10,rust,UNKNOWN
-unchecked-index,0.2.2,rust,UNKNOWN
-unic-char-property,0.9.0,rust,UNKNOWN
-unic-char-range,0.9.0,rust,UNKNOWN
-unic-common,0.9.0,rust,UNKNOWN
-unic-emoji-char,0.9.0,rust,UNKNOWN
-unic-ucd-ident,0.9.0,rust,UNKNOWN
-unic-ucd-version,0.9.0,rust,UNKNOWN
-unicase,2.9.0,rust,UNKNOWN
-unicode-general-category,1.1.0,rust,UNKNOWN
-unicode-ident,1.0.24,rust,UNKNOWN
-unicode-normalization-alignments,0.1.12,rust,UNKNOWN
-unicode-segmentation,1.13.2,rust,UNKNOWN
-unicode-width,0.1.14,rust,UNKNOWN
-unicode-width,0.2.2,rust,UNKNOWN
-unicode-xid,0.2.6,rust,UNKNOWN
-unicode_categories,0.1.1,rust,UNKNOWN
-unicode_names2,1.3.0,rust,UNKNOWN
-unicode_names2_generator,1.3.0,rust,UNKNOWN
-unit-prefix,0.5.2,rust,UNKNOWN
-unsafe-libyaml,0.2.11,rust,UNKNOWN
-untrusted,0.9.0,rust,UNKNOWN
-unty,0.0.4,rust,UNKNOWN
-ureq,2.12.1,rust,UNKNOWN
-url,2.5.8,rust,UNKNOWN
-urlencoding,2.1.3,rust,UNKNOWN
-utf16_iter,1.0.5,rust,UNKNOWN
-utf8_iter,1.0.4,rust,UNKNOWN
-utf8parse,0.2.2,rust,UNKNOWN
-utoipa,5.4.0,rust,UNKNOWN
-utoipa-gen,5.4.0,rust,UNKNOWN
-utoipa-swagger-ui,9.0.2,rust,UNKNOWN
-uuid,1.23.1,rust,UNKNOWN
-v_frame,0.3.9,rust,UNKNOWN
-validator,0.20.0,rust,UNKNOWN
-validator_derive,0.20.0,rust,UNKNOWN
-valuable,0.1.1,rust,UNKNOWN
-vcpkg,0.2.15,rust,UNKNOWN
-velo,0.1.0,rust,UNKNOWN
-velo-common,0.1.0,rust,UNKNOWN
-velo-discovery,0.1.0,rust,UNKNOWN
-velo-events,0.1.0,rust,UNKNOWN
-velo-messenger,0.1.0,rust,UNKNOWN
-velo-observability,0.1.0,rust,UNKNOWN
-velo-queue,0.1.0,rust,UNKNOWN
-velo-rendezvous,0.1.0,rust,UNKNOWN
-velo-streaming,0.1.0,rust,UNKNOWN
-velo-transports,0.1.0,rust,UNKNOWN
-version-compare,0.2.1,rust,UNKNOWN
-version_check,0.9.5,rust,UNKNOWN
-video-rs,0.11.0,rust,UNKNOWN
-virtue,0.0.18,rust,UNKNOWN
-vsimd,0.8.0,rust,UNKNOWN
-wait-timeout,0.2.1,rust,UNKNOWN
-walkdir,2.5.0,rust,UNKNOWN
-want,0.3.1,rust,UNKNOWN
-wasi,0.11.1+wasi-snapshot-preview1,rust,UNKNOWN
-wasip2,1.0.3+wasi-0.2.9,rust,UNKNOWN
-wasip3,0.4.0+wasi-0.3.0-rc-2026-01-06,rust,UNKNOWN
-wasm-bindgen,0.2.118,rust,UNKNOWN
-wasm-bindgen-futures,0.4.68,rust,UNKNOWN
-wasm-bindgen-macro,0.2.118,rust,UNKNOWN
-wasm-bindgen-macro-support,0.2.118,rust,UNKNOWN
-wasm-bindgen-shared,0.2.118,rust,UNKNOWN
-wasm-encoder,0.244.0,rust,UNKNOWN
-wasm-metadata,0.244.0,rust,UNKNOWN
-wasm-streams,0.4.2,rust,UNKNOWN
-wasmparser,0.244.0,rust,UNKNOWN
-web-sys,0.3.95,rust,UNKNOWN
-web-time,1.1.0,rust,UNKNOWN
-webpki-roots,0.26.11,rust,UNKNOWN
-webpki-roots,1.0.7,rust,UNKNOWN
-weezl,0.1.12,rust,UNKNOWN
-winapi,0.3.9,rust,UNKNOWN
-winapi-i686-pc-windows-gnu,0.4.0,rust,UNKNOWN
-winapi-util,0.1.11,rust,UNKNOWN
-winapi-x86_64-pc-windows-gnu,0.4.0,rust,UNKNOWN
-windows-core,0.62.2,rust,UNKNOWN
-windows-implement,0.60.2,rust,UNKNOWN
-windows-interface,0.59.3,rust,UNKNOWN
-windows-link,0.2.1,rust,UNKNOWN
-windows-registry,0.6.1,rust,UNKNOWN
-windows-result,0.4.1,rust,UNKNOWN
-windows-strings,0.5.1,rust,UNKNOWN
-windows-sys,0.48.0,rust,UNKNOWN
-windows-sys,0.52.0,rust,UNKNOWN
-windows-sys,0.59.0,rust,UNKNOWN
-windows-sys,0.60.2,rust,UNKNOWN
-windows-sys,0.61.2,rust,UNKNOWN
-windows-targets,0.48.5,rust,UNKNOWN
-windows-targets,0.52.6,rust,UNKNOWN
-windows-targets,0.53.5,rust,UNKNOWN
-windows_aarch64_gnullvm,0.48.5,rust,UNKNOWN
-windows_aarch64_gnullvm,0.52.6,rust,UNKNOWN
-windows_aarch64_gnullvm,0.53.1,rust,UNKNOWN
-windows_aarch64_msvc,0.48.5,rust,UNKNOWN
-windows_aarch64_msvc,0.52.6,rust,UNKNOWN
-windows_aarch64_msvc,0.53.1,rust,UNKNOWN
-windows_i686_gnu,0.48.5,rust,UNKNOWN
-windows_i686_gnu,0.52.6,rust,UNKNOWN
-windows_i686_gnu,0.53.1,rust,UNKNOWN
-windows_i686_gnullvm,0.52.6,rust,UNKNOWN
-windows_i686_gnullvm,0.53.1,rust,UNKNOWN
-windows_i686_msvc,0.48.5,rust,UNKNOWN
-windows_i686_msvc,0.52.6,rust,UNKNOWN
-windows_i686_msvc,0.53.1,rust,UNKNOWN
-windows_x86_64_gnu,0.48.5,rust,UNKNOWN
-windows_x86_64_gnu,0.52.6,rust,UNKNOWN
-windows_x86_64_gnu,0.53.1,rust,UNKNOWN
-windows_x86_64_gnullvm,0.48.5,rust,UNKNOWN
-windows_x86_64_gnullvm,0.52.6,rust,UNKNOWN
-windows_x86_64_gnullvm,0.53.1,rust,UNKNOWN
-windows_x86_64_msvc,0.48.5,rust,UNKNOWN
-windows_x86_64_msvc,0.52.6,rust,UNKNOWN
-windows_x86_64_msvc,0.53.1,rust,UNKNOWN
-winnow,0.7.15,rust,UNKNOWN
-winnow,1.0.2,rust,UNKNOWN
-winreg,0.50.0,rust,UNKNOWN
-wit-bindgen,0.51.0,rust,UNKNOWN
-wit-bindgen,0.57.1,rust,UNKNOWN
-wit-bindgen-core,0.51.0,rust,UNKNOWN
-wit-bindgen-rust,0.51.0,rust,UNKNOWN
-wit-bindgen-rust-macro,0.51.0,rust,UNKNOWN
-wit-component,0.244.0,rust,UNKNOWN
-wit-parser,0.244.0,rust,UNKNOWN
-write16,1.0.0,rust,UNKNOWN
-writeable,0.6.3,rust,UNKNOWN
-xmlparser,0.13.6,rust,UNKNOWN
-xxhash-rust,0.8.15,rust,UNKNOWN
-y4m,0.8.0,rust,UNKNOWN
-yaml-rust2,0.10.4,rust,UNKNOWN
-yansi,1.0.1,rust,UNKNOWN
-yoke,0.8.2,rust,UNKNOWN
-yoke-derive,0.8.2,rust,UNKNOWN
-zerocopy,0.8.48,rust,UNKNOWN
-zerocopy-derive,0.8.48,rust,UNKNOWN
-zerofrom,0.1.7,rust,UNKNOWN
-zerofrom-derive,0.1.7,rust,UNKNOWN
-zeroize,1.8.2,rust,UNKNOWN
-zeromq-src,0.2.6+4.3.4,rust,UNKNOWN
-zerotrie,0.2.4,rust,UNKNOWN
-zerovec,0.11.6,rust,UNKNOWN
-zerovec-derive,0.11.3,rust,UNKNOWN
-zip,2.4.2,rust,UNKNOWN
-zip,3.0.0,rust,UNKNOWN
-zlib-rs,0.6.3,rust,UNKNOWN
-zmij,1.0.21,rust,UNKNOWN
-zmq,0.10.0,rust,UNKNOWN
-zmq-sys,0.12.0,rust,UNKNOWN
-zopfli,0.8.3,rust,UNKNOWN
-zune-core,0.5.1,rust,UNKNOWN
-zune-inflate,0.2.54,rust,UNKNOWN
-zune-jpeg,0.5.15,rust,UNKNOWN
+adler2,2.0.1,rust,0BSD OR MIT OR Apache-2.0
+ahash,0.8.12,rust,MIT OR Apache-2.0
+aho-corasick,1.1.4,rust,Unlicense OR MIT
+aligned,0.4.3,rust,MIT OR Apache-2.0
+aligned-vec,0.6.4,rust,MIT
+allocator-api2,0.2.21,rust,MIT OR Apache-2.0
+android_system_properties,0.1.5,rust,MIT/Apache-2.0
+anes,0.1.6,rust,MIT OR Apache-2.0
+anstream,1.0.0,rust,MIT OR Apache-2.0
+anstyle,1.0.14,rust,MIT OR Apache-2.0
+anstyle-parse,1.0.0,rust,MIT OR Apache-2.0
+anstyle-query,1.1.5,rust,MIT OR Apache-2.0
+anstyle-wincon,3.0.11,rust,MIT OR Apache-2.0
+anyhow,1.0.102,rust,MIT OR Apache-2.0
+approx,0.5.1,rust,Apache-2.0
+arbitrary,1.4.2,rust,MIT OR Apache-2.0
+arc-swap,1.9.1,rust,MIT OR Apache-2.0
+arg_enum_proc_macro,0.3.4,rust,MIT
+arraydeque,0.5.1,rust,MIT/Apache-2.0
+arrayref,0.3.9,rust,BSD-2-Clause
+arrayvec,0.7.6,rust,MIT OR Apache-2.0
+as-slice,0.2.1,rust,MIT OR Apache-2.0
+assert-json-diff,2.0.2,rust,MIT
+assert_matches,1.5.0,rust,MIT/Apache-2.0
+async-broadcast,0.7.2,rust,MIT OR Apache-2.0
+async-nats,0.45.0,rust,Apache-2.0
+async-once-cell,0.5.4,rust,MIT OR Apache-2.0
+async-openai,0.34.0,rust,MIT
+async-stream,0.3.6,rust,MIT
+async-stream-impl,0.3.6,rust,MIT
+async-trait,0.1.89,rust,MIT OR Apache-2.0
+atomic,0.6.1,rust,Apache-2.0/MIT
+atomic-waker,1.1.2,rust,Apache-2.0 OR MIT
+atty,0.2.14,rust,MIT
+autocfg,1.5.0,rust,Apache-2.0 OR MIT
+av-scenechange,0.14.1,rust,MIT
+av1-grain,0.2.5,rust,BSD-2-Clause
+avif-serialize,0.8.8,rust,BSD-3-Clause
+aws-config,1.8.14,rust,Apache-2.0
+aws-credential-types,1.2.12,rust,Apache-2.0
+aws-lc-rs,1.16.3,rust,ISC AND (Apache-2.0 OR ISC)
+aws-lc-sys,0.40.0,rust,ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)
+aws-runtime,1.7.0,rust,Apache-2.0
+aws-sdk-s3,1.123.0,rust,Apache-2.0
+aws-sdk-sso,1.94.0,rust,Apache-2.0
+aws-sdk-ssooidc,1.96.0,rust,Apache-2.0
+aws-sdk-sts,1.98.0,rust,Apache-2.0
+aws-sigv4,1.4.0,rust,Apache-2.0
+aws-smithy-async,1.2.12,rust,Apache-2.0
+aws-smithy-checksums,0.64.4,rust,Apache-2.0
+aws-smithy-eventstream,0.60.19,rust,Apache-2.0
+aws-smithy-http,0.63.4,rust,Apache-2.0
+aws-smithy-http-client,1.1.10,rust,Apache-2.0
+aws-smithy-json,0.62.4,rust,Apache-2.0
+aws-smithy-observability,0.2.5,rust,Apache-2.0
+aws-smithy-query,0.60.14,rust,Apache-2.0
+aws-smithy-runtime,1.10.1,rust,Apache-2.0
+aws-smithy-runtime-api,1.11.4,rust,Apache-2.0
+aws-smithy-types,1.4.4,rust,Apache-2.0
+aws-smithy-xml,0.60.15,rust,Apache-2.0
+aws-types,1.3.12,rust,Apache-2.0
+axum,0.7.9,rust,MIT
+axum,0.8.4,rust,MIT
+axum-core,0.4.5,rust,MIT
+axum-core,0.5.6,rust,MIT
+axum-macros,0.5.1,rust,MIT
+axum-server,0.7.3,rust,MIT
+backon,1.6.0,rust,Apache-2.0
+base16ct,0.1.1,rust,Apache-2.0 OR MIT
+base64,0.13.1,rust,MIT/Apache-2.0
+base64,0.21.7,rust,MIT OR Apache-2.0
+base64,0.22.1,rust,MIT OR Apache-2.0
+base64-simd,0.8.0,rust,MIT
+base64ct,1.8.3,rust,Apache-2.0 OR MIT
+bincode,1.3.3,rust,MIT
+bincode,2.0.1,rust,MIT
+bincode_derive,2.0.1,rust,MIT
+bindgen,0.71.1,rust,BSD-3-Clause
+bindgen,0.72.1,rust,BSD-3-Clause
+bit-set,0.5.3,rust,MIT/Apache-2.0
+bit-set,0.8.0,rust,Apache-2.0 OR MIT
+bit-vec,0.6.3,rust,MIT/Apache-2.0
+bit-vec,0.8.0,rust,Apache-2.0 OR MIT
+bit_field,0.10.3,rust,Apache-2.0/MIT
+bitflags,1.3.2,rust,MIT/Apache-2.0
+bitflags,2.11.1,rust,MIT OR Apache-2.0
+bitstream-io,4.10.0,rust,MIT/Apache-2.0
+blake3,1.8.4,rust,CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception
+block-buffer,0.10.4,rust,MIT OR Apache-2.0
+block2,0.6.2,rust,MIT
+bs58,0.5.1,rust,MIT/Apache-2.0
+bs62,0.1.4,rust,MIT
+bstr,1.12.1,rust,MIT OR Apache-2.0
+built,0.8.0,rust,MIT
+bumpalo,3.20.2,rust,MIT OR Apache-2.0
+bytecount,0.6.9,rust,Apache-2.0/MIT
+bytemuck,1.25.0,rust,Zlib OR Apache-2.0 OR MIT
+byteorder,1.5.0,rust,Unlicense OR MIT
+byteorder-lite,0.1.0,rust,Unlicense OR MIT
+bytes,1.11.1,rust,MIT
+bytes-utils,0.1.4,rust,Apache-2.0/MIT
+cast,0.3.0,rust,MIT OR Apache-2.0
+castaway,0.2.4,rust,MIT
+cbindgen,0.27.0,rust,MPL-2.0
+cc,1.2.61,rust,MIT OR Apache-2.0
+cexpr,0.6.0,rust,Apache-2.0/MIT
+cfg-expr,0.15.8,rust,MIT OR Apache-2.0
+cfg-if,1.0.4,rust,MIT OR Apache-2.0
+cfg_aliases,0.2.1,rust,MIT
+chrono,0.4.44,rust,MIT OR Apache-2.0
+ciborium,0.2.2,rust,Apache-2.0
+ciborium-io,0.2.2,rust,Apache-2.0
+ciborium-ll,0.2.2,rust,Apache-2.0
+clang-sys,1.8.1,rust,Apache-2.0
+clap,2.34.0,rust,MIT
+clap,4.6.1,rust,MIT OR Apache-2.0
+clap_builder,4.6.0,rust,MIT OR Apache-2.0
+clap_derive,4.6.1,rust,MIT OR Apache-2.0
+clap_lex,1.1.0,rust,MIT OR Apache-2.0
+cmake,0.1.58,rust,MIT OR Apache-2.0
+color_quant,1.1.0,rust,MIT
+colorchoice,1.0.5,rust,MIT OR Apache-2.0
+colored,3.1.1,rust,MPL-2.0
+compact_str,0.9.0,rust,MIT
+concurrent-queue,2.5.0,rust,Apache-2.0 OR MIT
+config,0.15.22,rust,MIT OR Apache-2.0
+console,0.15.11,rust,MIT
+console,0.16.3,rust,MIT
+console-api,0.8.1,rust,MIT
+console-subscriber,0.4.1,rust,MIT
+const-oid,0.9.6,rust,Apache-2.0 OR MIT
+const-random,0.1.18,rust,MIT OR Apache-2.0
+const-random-macro,0.1.16,rust,MIT OR Apache-2.0
+constant_time_eq,0.4.2,rust,CC0-1.0 OR MIT-0 OR Apache-2.0
+convert_case,0.6.0,rust,MIT
+core-foundation,0.10.1,rust,MIT OR Apache-2.0
+core-foundation,0.9.4,rust,MIT OR Apache-2.0
+core-foundation-sys,0.8.7,rust,MIT OR Apache-2.0
+cpufeatures,0.2.17,rust,MIT OR Apache-2.0
+cpufeatures,0.3.0,rust,MIT OR Apache-2.0
+crc,3.3.0,rust,MIT OR Apache-2.0
+crc-catalog,2.4.0,rust,MIT OR Apache-2.0
+crc-fast,1.9.0,rust,MIT OR Apache-2.0
+crc32fast,1.5.0,rust,MIT OR Apache-2.0
+criterion,0.3.6,rust,Apache-2.0/MIT
+criterion,0.5.1,rust,Apache-2.0 OR MIT
+criterion-plot,0.4.5,rust,MIT/Apache-2.0
+criterion-plot,0.5.0,rust,MIT/Apache-2.0
+crossbeam,0.8.4,rust,MIT OR Apache-2.0
+crossbeam-channel,0.5.15,rust,MIT OR Apache-2.0
+crossbeam-deque,0.8.6,rust,MIT OR Apache-2.0
+crossbeam-epoch,0.9.18,rust,MIT OR Apache-2.0
+crossbeam-queue,0.3.12,rust,MIT OR Apache-2.0
+crossbeam-utils,0.8.21,rust,MIT OR Apache-2.0
+crunchy,0.2.4,rust,MIT
+crypto-bigint,0.4.9,rust,Apache-2.0 OR MIT
+crypto-bigint,0.5.5,rust,Apache-2.0 OR MIT
+crypto-common,0.1.7,rust,MIT OR Apache-2.0
+csv,1.4.0,rust,Unlicense/MIT
+csv-core,0.1.13,rust,Unlicense/MIT
+ctor,0.1.26,rust,Apache-2.0 OR MIT
+cudarc,0.19.3,rust,MIT OR Apache-2.0
+curve25519-dalek,4.1.3,rust,BSD-3-Clause
+curve25519-dalek-derive,0.1.1,rust,MIT/Apache-2.0
+daachorse,1.0.1,rust,MIT OR Apache-2.0
+darling,0.20.11,rust,MIT
+darling,0.21.3,rust,MIT
+darling,0.23.0,rust,MIT
+darling_core,0.20.11,rust,MIT
+darling_core,0.21.3,rust,MIT
+darling_core,0.23.0,rust,MIT
+darling_macro,0.20.11,rust,MIT
+darling_macro,0.21.3,rust,MIT
+darling_macro,0.23.0,rust,MIT
+dary_heap,0.3.9,rust,MIT OR Apache-2.0
+dashmap,6.1.0,rust,MIT
+data-encoding,2.11.0,rust,MIT
+defmac,0.1.3,rust,Apache-2.0/MIT
+der,0.6.1,rust,Apache-2.0 OR MIT
+der,0.7.10,rust,Apache-2.0 OR MIT
+deranged,0.5.8,rust,MIT OR Apache-2.0
+derive-getters,0.5.0,rust,MIT
+derive_arbitrary,1.4.2,rust,MIT OR Apache-2.0
+derive_builder,0.20.2,rust,MIT OR Apache-2.0
+derive_builder_core,0.20.2,rust,MIT OR Apache-2.0
+derive_builder_macro,0.20.2,rust,MIT OR Apache-2.0
+derive_more,1.0.0,rust,MIT
+derive_more,2.1.1,rust,MIT
+derive_more-impl,1.0.0,rust,MIT
+derive_more-impl,2.1.1,rust,MIT
+dialoguer,0.11.0,rust,MIT
+digest,0.10.7,rust,MIT OR Apache-2.0
+dircpy,0.3.20,rust,MIT
+dirs,6.0.0,rust,MIT OR Apache-2.0
+dirs-sys,0.5.0,rust,MIT OR Apache-2.0
+dispatch2,0.3.1,rust,Zlib OR Apache-2.0 OR MIT
+displaydoc,0.2.5,rust,MIT OR Apache-2.0
+dlv-list,0.5.2,rust,MIT OR Apache-2.0
+dunce,1.0.5,rust,CC0-1.0 OR MIT-0 OR Apache-2.0
+dyn-clone,1.0.20,rust,MIT OR Apache-2.0
+ecdsa,0.14.8,rust,Apache-2.0 OR MIT
+ed25519,2.2.3,rust,Apache-2.0 OR MIT
+ed25519-dalek,2.2.0,rust,BSD-3-Clause
+educe,0.6.0,rust,MIT
+either,1.15.0,rust,MIT OR Apache-2.0
+elliptic-curve,0.12.3,rust,Apache-2.0 OR MIT
+encode_unicode,1.0.0,rust,Apache-2.0 OR MIT
+encoding_rs,0.8.35,rust,(Apache-2.0 OR MIT) AND BSD-3-Clause
+enum-ordinalize,4.3.2,rust,MIT
+enum-ordinalize-derive,4.3.2,rust,MIT
+equator,0.4.2,rust,MIT
+equator-macro,0.4.2,rust,MIT
+equivalent,1.0.2,rust,Apache-2.0 OR MIT
+erased-serde,0.4.10,rust,MIT OR Apache-2.0
+errno,0.3.14,rust,MIT OR Apache-2.0
+esaxx-rs,0.1.10,rust,Apache-2.0
+etcd-client,0.17.0,rust,MIT OR Apache-2.0
+event-listener,5.4.1,rust,Apache-2.0 OR MIT
+event-listener-strategy,0.5.4,rust,Apache-2.0 OR MIT
+exr,1.74.0,rust,BSD-3-Clause
+fancy-regex,0.11.0,rust,MIT
+fancy-regex,0.13.0,rust,MIT
+fancy-regex,0.17.0,rust,MIT
+fastokens,0.1.1,rust,Apache-2.0
+fastrand,2.4.1,rust,Apache-2.0 OR MIT
+fax,0.2.6,rust,MIT
+fax_derive,0.2.0,rust,MIT
+fdeflate,0.3.7,rust,MIT OR Apache-2.0
+ff,0.12.1,rust,MIT/Apache-2.0
+ffmpeg-next,8.1.0,rust,WTFPL
+ffmpeg-sys-next,8.1.0,rust,WTFPL
+fiat-crypto,0.2.9,rust,MIT OR Apache-2.0 OR BSD-1-Clause
+figment,0.10.19,rust,MIT OR Apache-2.0
+filetime,0.2.27,rust,MIT/Apache-2.0
+find-msvc-tools,0.1.9,rust,MIT OR Apache-2.0
+fixedbitset,0.5.7,rust,MIT OR Apache-2.0
+flate2,1.1.9,rust,MIT OR Apache-2.0
+flume,0.11.1,rust,Apache-2.0/MIT
+flume,0.12.0,rust,Apache-2.0/MIT
+fnv,1.0.7,rust,Apache-2.0 / MIT
+foldhash,0.1.5,rust,Zlib
+foldhash,0.2.0,rust,Zlib
+form_urlencoded,1.2.2,rust,MIT OR Apache-2.0
+fraction,0.13.1,rust,MIT/Apache-2.0
+fs-err,3.3.0,rust,MIT OR Apache-2.0
+fs4,0.13.1,rust,MIT OR Apache-2.0
+fs_extra,1.3.0,rust,MIT
+fsevent-sys,4.1.0,rust,MIT
+futures,0.3.32,rust,MIT OR Apache-2.0
+futures-channel,0.3.32,rust,MIT OR Apache-2.0
+futures-core,0.3.32,rust,MIT OR Apache-2.0
+futures-executor,0.3.32,rust,MIT OR Apache-2.0
+futures-io,0.3.32,rust,MIT OR Apache-2.0
+futures-macro,0.3.32,rust,MIT OR Apache-2.0
+futures-sink,0.3.32,rust,MIT OR Apache-2.0
+futures-task,0.3.32,rust,MIT OR Apache-2.0
+futures-timer,3.0.3,rust,MIT/Apache-2.0
+futures-util,0.3.32,rust,MIT OR Apache-2.0
+galil-seiferas,0.1.5,rust,MIT/Apache-2.0
+generic-array,0.14.7,rust,MIT
+getopts,0.2.24,rust,MIT OR Apache-2.0
+getrandom,0.2.17,rust,MIT OR Apache-2.0
+getrandom,0.3.4,rust,MIT OR Apache-2.0
+getrandom,0.4.2,rust,MIT OR Apache-2.0
+getset,0.1.6,rust,MIT
+gif,0.14.2,rust,MIT OR Apache-2.0
+glob,0.3.3,rust,MIT OR Apache-2.0
+globset,0.4.18,rust,Unlicense OR MIT
+gloo-timers,0.3.0,rust,MIT OR Apache-2.0
+group,0.12.1,rust,MIT/Apache-2.0
+h2,0.3.27,rust,MIT
+h2,0.4.13,rust,MIT
+half,1.8.3,rust,MIT OR Apache-2.0
+half,2.7.1,rust,MIT OR Apache-2.0
+hashbrown,0.12.3,rust,MIT OR Apache-2.0
+hashbrown,0.14.5,rust,MIT OR Apache-2.0
+hashbrown,0.15.5,rust,MIT OR Apache-2.0
+hashbrown,0.16.1,rust,MIT OR Apache-2.0
+hashbrown,0.17.0,rust,MIT OR Apache-2.0
+hashlink,0.10.0,rust,MIT OR Apache-2.0
+hdrhistogram,7.5.4,rust,MIT/Apache-2.0
+heck,0.4.1,rust,MIT OR Apache-2.0
+heck,0.5.0,rust,MIT OR Apache-2.0
+hermit-abi,0.1.19,rust,MIT/Apache-2.0
+hermit-abi,0.5.2,rust,MIT OR Apache-2.0
+hex,0.4.3,rust,MIT OR Apache-2.0
+hf-hub,0.4.3,rust,Apache-2.0
+hmac,0.12.1,rust,MIT OR Apache-2.0
+home,0.5.12,rust,MIT OR Apache-2.0
+hostname,0.4.2,rust,MIT
+http,0.2.12,rust,MIT OR Apache-2.0
+http,1.4.0,rust,MIT OR Apache-2.0
+http-body,0.4.6,rust,MIT
+http-body,1.0.1,rust,MIT
+http-body-util,0.1.3,rust,MIT
+httparse,1.10.1,rust,MIT OR Apache-2.0
+httpdate,1.0.3,rust,MIT OR Apache-2.0
+humantime,2.3.0,rust,MIT OR Apache-2.0
+hyper,0.14.32,rust,MIT
+hyper,1.9.0,rust,MIT
+hyper-rustls,0.24.2,rust,Apache-2.0 OR ISC OR MIT
+hyper-rustls,0.27.9,rust,Apache-2.0 OR ISC OR MIT
+hyper-timeout,0.5.2,rust,MIT OR Apache-2.0
+hyper-util,0.1.20,rust,MIT
+iana-time-zone,0.1.65,rust,MIT OR Apache-2.0
+iana-time-zone-haiku,0.1.2,rust,MIT OR Apache-2.0
+icu_collections,2.2.0,rust,Unicode-3.0
+icu_locale_core,2.2.0,rust,Unicode-3.0
+icu_normalizer,2.2.0,rust,Unicode-3.0
+icu_normalizer_data,2.2.0,rust,Unicode-3.0
+icu_properties,2.2.0,rust,Unicode-3.0
+icu_properties_data,2.2.0,rust,Unicode-3.0
+icu_provider,2.2.0,rust,Unicode-3.0
+id-arena,2.3.0,rust,MIT/Apache-2.0
+ident_case,1.0.1,rust,MIT/Apache-2.0
+idna,1.1.0,rust,MIT OR Apache-2.0
+idna_adapter,1.2.1,rust,Apache-2.0 OR MIT
+image,0.25.10,rust,MIT OR Apache-2.0
+image-webp,0.2.4,rust,MIT OR Apache-2.0
+imgref,1.12.0,rust,CC0-1.0 OR Apache-2.0
+indexmap,1.9.3,rust,Apache-2.0 OR MIT
+indexmap,2.14.0,rust,Apache-2.0 OR MIT
+indicatif,0.17.11,rust,MIT
+indicatif,0.18.4,rust,MIT
+inlinable_string,0.1.15,rust,Apache-2.0/MIT
+inotify,0.9.6,rust,ISC
+inotify-sys,0.1.5,rust,ISC
+insta,1.47.2,rust,Apache-2.0
+interpolate_name,0.2.4,rust,MIT
+ipnet,2.12.0,rust,MIT OR Apache-2.0
+iri-string,0.7.12,rust,MIT OR Apache-2.0
+is-macro,0.3.7,rust,Apache-2.0
+is-terminal,0.4.17,rust,MIT
+is_terminal_polyfill,1.70.2,rust,MIT OR Apache-2.0
+iso8601,0.6.3,rust,MIT
+itertools,0.10.5,rust,MIT/Apache-2.0
+itertools,0.11.0,rust,MIT OR Apache-2.0
+itertools,0.13.0,rust,MIT OR Apache-2.0
+itertools,0.14.0,rust,MIT OR Apache-2.0
+itoa,1.0.18,rust,MIT OR Apache-2.0
+jiff,0.2.24,rust,Unlicense OR MIT
+jiff-static,0.2.24,rust,Unlicense OR MIT
+jiff-tzdb,0.1.6,rust,Unlicense OR MIT
+jiff-tzdb-platform,0.1.3,rust,Unlicense OR MIT
+jobserver,0.1.34,rust,MIT OR Apache-2.0
+js-sys,0.3.95,rust,MIT OR Apache-2.0
+json-five,0.3.1,rust,MIT
+json-patch,4.1.0,rust,MIT/Apache-2.0
+json5,0.4.1,rust,ISC
+jsonpath-rust,0.7.5,rust,MIT
+jsonptr,0.7.1,rust,MIT OR Apache-2.0
+jsonschema,0.17.1,rust,MIT
+jwalk,0.8.1,rust,MIT
+k8s-openapi,0.26.1,rust,Apache-2.0
+kqueue,1.1.1,rust,MIT
+kqueue-sys,1.0.4,rust,MIT
+kube,2.0.1,rust,Apache-2.0
+kube-client,2.0.1,rust,Apache-2.0
+kube-core,2.0.1,rust,Apache-2.0
+kube-derive,2.0.1,rust,Apache-2.0
+kube-runtime,2.0.1,rust,Apache-2.0
+lalrpop-util,0.20.2,rust,Apache-2.0 OR MIT
+lazy_static,1.5.0,rust,MIT OR Apache-2.0
+leb128fmt,0.1.0,rust,MIT OR Apache-2.0
+lebe,0.5.3,rust,BSD-3-Clause
+libc,0.2.186,rust,MIT OR Apache-2.0
+libfuzzer-sys,0.4.12,rust,(MIT OR Apache-2.0) AND NCSA
+libloading,0.8.9,rust,ISC
+libloading,0.9.0,rust,ISC
+libm,0.2.16,rust,MIT
+libredox,0.1.16,rust,MIT
+linux-raw-sys,0.12.1,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+linux-raw-sys,0.4.15,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+litemap,0.8.2,rust,Unicode-3.0
+local-ip-address,0.6.12,rust,MIT OR Apache-2.0
+lock_api,0.4.14,rust,MIT OR Apache-2.0
+log,0.4.29,rust,MIT OR Apache-2.0
+loop9,0.1.5,rust,MIT
+lru,0.12.5,rust,MIT
+lru,0.16.4,rust,MIT
+lru-slab,0.1.2,rust,MIT OR Apache-2.0 OR Zlib
+macro_rules_attribute,0.2.2,rust,Apache-2.0 OR MIT OR Zlib
+macro_rules_attribute-proc_macro,0.2.2,rust,Apache-2.0 OR MIT OR Zlib
+malachite,0.4.22,rust,LGPL-3.0-only
+malachite-base,0.4.22,rust,LGPL-3.0-only
+malachite-bigint,0.2.3,rust,LGPL-3.0-only
+malachite-nz,0.4.22,rust,LGPL-3.0-only
+malachite-q,0.4.22,rust,LGPL-3.0-only
+matchers,0.2.0,rust,MIT
+matchit,0.7.3,rust,MIT AND BSD-3-Clause
+matchit,0.8.4,rust,MIT AND BSD-3-Clause
+matrixmultiply,0.3.10,rust,MIT/Apache-2.0
+maybe-rayon,0.1.1,rust,MIT
+md-5,0.10.6,rust,MIT OR Apache-2.0
+memchr,2.8.0,rust,Unlicense OR MIT
+memfile,0.3.2,rust,BSD-2-Clause
+memmap2,0.9.10,rust,MIT OR Apache-2.0
+memo-map,0.3.3,rust,Apache-2.0
+memoffset,0.7.1,rust,MIT
+memoffset,0.9.1,rust,MIT
+mime,0.3.17,rust,MIT OR Apache-2.0
+mime_guess,2.0.5,rust,MIT
+minijinja,2.19.0,rust,Apache-2.0
+minijinja-contrib,2.19.0,rust,Apache-2.0
+minimal-lexical,0.2.1,rust,MIT/Apache-2.0
+miniz_oxide,0.8.9,rust,MIT OR Zlib OR Apache-2.0
+minstant,0.1.7,rust,MIT
+mio,0.8.11,rust,MIT
+mio,1.1.1,rust,MIT
+mockito,1.7.2,rust,MIT
+modelexpress-client,0.3.0,rust,Apache-2.0
+modelexpress-common,0.3.0,rust,Apache-2.0
+monostate,0.1.18,rust,MIT OR Apache-2.0
+monostate-impl,0.1.18,rust,MIT OR Apache-2.0
+moxcms,0.8.1,rust,BSD-3-Clause OR Apache-2.0
+multimap,0.10.1,rust,MIT OR Apache-2.0
+nanorand,0.7.0,rust,Zlib
+ndarray,0.16.1,rust,MIT OR Apache-2.0
+ndarray,0.17.2,rust,MIT OR Apache-2.0
+ndarray-interp,0.5.0,rust,MIT
+ndarray-npy,0.9.1,rust,MIT OR Apache-2.0
+neli,0.7.4,rust,BSD-3-Clause
+neli-proc-macros,0.2.2,rust,BSD-3-Clause
+new_debug_unreachable,1.0.6,rust,MIT
+nix,0.26.4,rust,MIT
+nix,0.30.1,rust,MIT
+nixl-sys,0.10.1,rust,MIT AND Apache-2.0
+nkeys,0.4.5,rust,Apache-2.0
+no_std_io2,0.9.3,rust,Apache-2.0 OR MIT
+nom,7.1.3,rust,MIT
+nom,8.0.0,rust,MIT
+nonmax,0.5.5,rust,MIT OR Apache-2.0
+noop_proc_macro,0.3.0,rust,MIT
+notify,6.1.1,rust,CC0-1.0
+nu-ansi-term,0.50.3,rust,MIT
+nuid,0.5.0,rust,Apache-2.0
+num,0.4.3,rust,MIT OR Apache-2.0
+num-bigint,0.4.6,rust,MIT OR Apache-2.0
+num-cmp,0.1.0,rust,MIT/Apache-2.0
+num-complex,0.4.6,rust,MIT OR Apache-2.0
+num-conv,0.2.1,rust,MIT OR Apache-2.0
+num-derive,0.4.2,rust,MIT OR Apache-2.0
+num-integer,0.1.46,rust,MIT OR Apache-2.0
+num-iter,0.1.45,rust,MIT OR Apache-2.0
+num-rational,0.4.2,rust,MIT OR Apache-2.0
+num-traits,0.2.19,rust,MIT OR Apache-2.0
+num_cpus,1.17.0,rust,MIT OR Apache-2.0
+num_threads,0.1.7,rust,MIT OR Apache-2.0
+number_prefix,0.4.0,rust,MIT
+nvtx,1.3.0,rust,MIT OR Apache-2.0
+objc2,0.6.4,rust,MIT
+objc2-cloud-kit,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-core-data,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-core-foundation,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-core-graphics,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-core-image,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-core-location,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-core-text,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-encode,4.1.0,rust,MIT
+objc2-foundation,0.3.2,rust,MIT
+objc2-io-surface,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-quartz-core,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-ui-kit,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+objc2-user-notifications,0.3.2,rust,Zlib OR Apache-2.0 OR MIT
+object_store,0.12.5,rust,MIT/Apache-2.0
+offset-allocator,0.2.0,rust,MIT
+once_cell,1.21.4,rust,MIT OR Apache-2.0
+once_cell_polyfill,1.70.2,rust,MIT OR Apache-2.0
+oneshot,0.1.13,rust,MIT OR Apache-2.0
+onig,6.5.1,rust,MIT
+onig_sys,69.9.1,rust,MIT
+oorandom,11.1.5,rust,MIT
+openai-harmony,0.0.3,rust,Apache-2.0
+openssl-probe,0.1.6,rust,MIT/Apache-2.0
+openssl-probe,0.2.1,rust,MIT OR Apache-2.0
+opentelemetry,0.31.0,rust,Apache-2.0
+opentelemetry-appender-tracing,0.31.1,rust,Apache-2.0
+opentelemetry-http,0.31.0,rust,Apache-2.0
+opentelemetry-otlp,0.31.1,rust,Apache-2.0
+opentelemetry-proto,0.31.0,rust,Apache-2.0
+opentelemetry_sdk,0.31.0,rust,Apache-2.0
+option-ext,0.2.0,rust,MPL-2.0
+ordered-float,2.10.1,rust,MIT
+ordered-float,4.6.0,rust,MIT
+ordered-multimap,0.7.3,rust,MIT
+os_info,3.14.0,rust,MIT
+outref,0.5.2,rust,MIT
+p256,0.11.1,rust,Apache-2.0 OR MIT
+parking,2.2.1,rust,Apache-2.0 OR MIT
+parking_lot,0.12.5,rust,MIT OR Apache-2.0
+parking_lot_core,0.9.12,rust,MIT OR Apache-2.0
+paste,1.0.15,rust,MIT OR Apache-2.0
+pastey,0.1.1,rust,MIT OR Apache-2.0
+pathdiff,0.2.3,rust,MIT/Apache-2.0
+pcre2,0.2.11,rust,Unlicense OR MIT
+pcre2-sys,0.2.10,rust,Unlicense OR MIT
+pear,0.2.9,rust,MIT OR Apache-2.0
+pear_codegen,0.2.9,rust,MIT OR Apache-2.0
+pem,3.0.6,rust,MIT
+pem-rfc7468,0.7.0,rust,Apache-2.0 OR MIT
+percent-encoding,2.3.2,rust,MIT OR Apache-2.0
+pest,2.8.6,rust,MIT OR Apache-2.0
+pest_derive,2.8.6,rust,MIT OR Apache-2.0
+pest_generator,2.8.6,rust,MIT OR Apache-2.0
+pest_meta,2.8.6,rust,MIT OR Apache-2.0
+petgraph,0.7.1,rust,MIT OR Apache-2.0
+petgraph,0.8.3,rust,MIT OR Apache-2.0
+phf,0.11.3,rust,MIT
+phf_codegen,0.11.3,rust,MIT
+phf_generator,0.11.3,rust,MIT
+phf_shared,0.11.3,rust,MIT
+pin-project,1.1.11,rust,Apache-2.0 OR MIT
+pin-project-internal,1.1.11,rust,Apache-2.0 OR MIT
+pin-project-lite,0.2.17,rust,Apache-2.0 OR MIT
+pin-utils,0.1.0,rust,MIT OR Apache-2.0
+pkcs8,0.10.2,rust,Apache-2.0 OR MIT
+pkcs8,0.9.0,rust,Apache-2.0 OR MIT
+pkg-config,0.3.33,rust,MIT OR Apache-2.0
+plain,0.2.3,rust,MIT/Apache-2.0
+plotters,0.3.7,rust,MIT
+plotters-backend,0.3.7,rust,MIT
+plotters-svg,0.3.7,rust,MIT
+png,0.18.1,rust,MIT OR Apache-2.0
+portable-atomic,1.13.1,rust,Apache-2.0 OR MIT
+portable-atomic-util,0.2.7,rust,Apache-2.0 OR MIT
+potential_utf,0.1.5,rust,Unicode-3.0
+powerfmt,0.2.0,rust,MIT OR Apache-2.0
+ppv-lite86,0.2.21,rust,MIT OR Apache-2.0
+prettyplease,0.2.37,rust,MIT OR Apache-2.0
+proc-macro-crate,3.5.0,rust,MIT OR Apache-2.0
+proc-macro-error-attr2,2.0.0,rust,MIT OR Apache-2.0
+proc-macro-error2,2.0.1,rust,MIT OR Apache-2.0
+proc-macro2,1.0.106,rust,MIT OR Apache-2.0
+proc-macro2-diagnostics,0.10.1,rust,MIT/Apache-2.0
+profiling,1.0.17,rust,MIT OR Apache-2.0
+profiling-procmacros,1.0.17,rust,MIT OR Apache-2.0
+prometheus,0.14.0,rust,Apache-2.0
+proptest,1.11.0,rust,MIT OR Apache-2.0
+prost,0.13.5,rust,Apache-2.0
+prost,0.14.3,rust,Apache-2.0
+prost-build,0.13.5,rust,Apache-2.0
+prost-build,0.14.3,rust,Apache-2.0
+prost-derive,0.13.5,rust,Apache-2.0
+prost-derive,0.14.3,rust,Apache-2.0
+prost-types,0.13.5,rust,Apache-2.0
+prost-types,0.14.3,rust,Apache-2.0
+protobuf,3.7.2,rust,MIT
+protobuf-support,3.7.2,rust,MIT
+pulldown-cmark,0.13.3,rust,MIT
+pulldown-cmark-to-cmark,22.0.0,rust,Apache-2.0
+pxfm,0.1.29,rust,BSD-3-Clause OR Apache-2.0
+py_literal,0.4.0,rust,MIT OR Apache-2.0
+qoi,0.4.1,rust,MIT/Apache-2.0
+quick-error,1.2.3,rust,MIT/Apache-2.0
+quick-error,2.0.1,rust,MIT/Apache-2.0
+quick-xml,0.38.4,rust,MIT
+quinn,0.11.9,rust,MIT OR Apache-2.0
+quinn-proto,0.11.14,rust,MIT OR Apache-2.0
+quinn-udp,0.5.14,rust,MIT OR Apache-2.0
+quote,1.0.45,rust,MIT OR Apache-2.0
+r-efi,5.3.0,rust,MIT OR Apache-2.0 OR LGPL-2.1-or-later
+r-efi,6.0.0,rust,MIT OR Apache-2.0 OR LGPL-2.1-or-later
+rand,0.8.6,rust,MIT OR Apache-2.0
+rand,0.9.4,rust,MIT OR Apache-2.0
+rand_chacha,0.3.1,rust,MIT OR Apache-2.0
+rand_chacha,0.9.0,rust,MIT OR Apache-2.0
+rand_core,0.6.4,rust,MIT OR Apache-2.0
+rand_core,0.9.5,rust,MIT OR Apache-2.0
+rand_distr,0.5.1,rust,MIT OR Apache-2.0
+rand_xorshift,0.4.0,rust,MIT OR Apache-2.0
+rav1e,0.8.1,rust,BSD-2-Clause
+ravif,0.13.0,rust,BSD-3-Clause
+rawpointer,0.2.1,rust,MIT/Apache-2.0
+rayon,1.12.0,rust,MIT OR Apache-2.0
+rayon-cond,0.4.0,rust,Apache-2.0/MIT
+rayon-core,1.13.0,rust,MIT OR Apache-2.0
+redox_syscall,0.5.18,rust,MIT
+redox_syscall,0.7.4,rust,MIT
+redox_users,0.5.2,rust,MIT
+ref-cast,1.0.25,rust,MIT OR Apache-2.0
+ref-cast-impl,1.0.25,rust,MIT OR Apache-2.0
+regex,1.12.3,rust,MIT OR Apache-2.0
+regex-automata,0.4.14,rust,MIT OR Apache-2.0
+regex-lite,0.1.9,rust,MIT OR Apache-2.0
+regex-syntax,0.8.10,rust,MIT OR Apache-2.0
+relative-path,1.9.3,rust,MIT OR Apache-2.0
+reqwest,0.11.27,rust,MIT OR Apache-2.0
+reqwest,0.12.28,rust,MIT OR Apache-2.0
+rfc6979,0.3.1,rust,Apache-2.0 OR MIT
+rgb,0.8.53,rust,MIT
+ring,0.17.14,rust,Apache-2.0 AND ISC
+rmp,0.8.15,rust,MIT
+rmp-serde,1.3.1,rust,MIT
+ron,0.12.1,rust,MIT OR Apache-2.0
+rstest,0.18.2,rust,MIT OR Apache-2.0
+rstest,0.23.0,rust,MIT OR Apache-2.0
+rstest,0.25.0,rust,MIT OR Apache-2.0
+rstest,0.26.1,rust,MIT OR Apache-2.0
+rstest_macros,0.18.2,rust,MIT OR Apache-2.0
+rstest_macros,0.23.0,rust,MIT OR Apache-2.0
+rstest_macros,0.25.0,rust,MIT OR Apache-2.0
+rstest_macros,0.26.1,rust,MIT OR Apache-2.0
+rstest_reuse,0.7.0,rust,MIT OR Apache-2.0
+rust-embed,8.11.0,rust,MIT
+rust-embed-impl,8.11.0,rust,MIT
+rust-embed-utils,8.11.0,rust,MIT
+rust-ini,0.21.3,rust,MIT
+rustc-hash,1.1.0,rust,Apache-2.0/MIT
+rustc-hash,2.1.2,rust,Apache-2.0 OR MIT
+rustc_version,0.4.1,rust,MIT OR Apache-2.0
+rustix,0.38.44,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+rustix,1.1.4,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+rustls,0.21.12,rust,Apache-2.0 OR ISC OR MIT
+rustls,0.23.39,rust,Apache-2.0 OR ISC OR MIT
+rustls-native-certs,0.7.3,rust,Apache-2.0 OR ISC OR MIT
+rustls-native-certs,0.8.3,rust,Apache-2.0 OR ISC OR MIT
+rustls-pemfile,2.2.0,rust,Apache-2.0 OR ISC OR MIT
+rustls-pki-types,1.14.1,rust,MIT OR Apache-2.0
+rustls-webpki,0.101.7,rust,ISC
+rustls-webpki,0.102.8,rust,ISC
+rustls-webpki,0.103.13,rust,ISC
+rustpython-ast,0.4.0,rust,MIT
+rustpython-parser,0.4.0,rust,MIT
+rustpython-parser-core,0.4.0,rust,MIT
+rustpython-parser-vendored,0.4.0,rust,MIT
+rustversion,1.0.22,rust,MIT OR Apache-2.0
+rusty-fork,0.3.1,rust,MIT/Apache-2.0
+ryu,1.0.23,rust,Apache-2.0 OR BSL-1.0
+same-file,1.0.6,rust,Unlicense/MIT
+scc,2.4.0,rust,Apache-2.0
+schannel,0.1.29,rust,MIT
+schemars,0.9.0,rust,MIT
+schemars,1.2.1,rust,MIT
+schemars_derive,1.2.1,rust,MIT
+scopeguard,1.2.0,rust,MIT OR Apache-2.0
+sct,0.7.1,rust,Apache-2.0 OR ISC OR MIT
+sdd,3.0.10,rust,Apache-2.0
+sec1,0.3.0,rust,Apache-2.0 OR MIT
+secrecy,0.10.3,rust,Apache-2.0 OR MIT
+security-framework,2.11.1,rust,MIT OR Apache-2.0
+security-framework,3.7.0,rust,MIT OR Apache-2.0
+security-framework-sys,2.17.0,rust,MIT OR Apache-2.0
+semver,1.0.28,rust,MIT OR Apache-2.0
+serde,1.0.228,rust,MIT OR Apache-2.0
+serde-untagged,0.1.9,rust,MIT OR Apache-2.0
+serde-value,0.7.0,rust,MIT
+serde_bytes,0.11.19,rust,MIT OR Apache-2.0
+serde_cbor,0.11.2,rust,MIT/Apache-2.0
+serde_core,1.0.228,rust,MIT OR Apache-2.0
+serde_derive,1.0.228,rust,MIT OR Apache-2.0
+serde_derive_internals,0.29.1,rust,MIT OR Apache-2.0
+serde_json,1.0.149,rust,MIT OR Apache-2.0
+serde_nanos,0.1.4,rust,MIT OR Apache-2.0
+serde_path_to_error,0.1.20,rust,MIT OR Apache-2.0
+serde_repr,0.1.20,rust,MIT OR Apache-2.0
+serde_spanned,0.6.9,rust,MIT OR Apache-2.0
+serde_spanned,1.1.1,rust,MIT OR Apache-2.0
+serde_urlencoded,0.7.1,rust,MIT/Apache-2.0
+serde_with,3.18.0,rust,MIT OR Apache-2.0
+serde_with_macros,3.18.0,rust,MIT OR Apache-2.0
+serde_yaml,0.9.34+deprecated,rust,MIT OR Apache-2.0
+serial_test,3.4.0,rust,MIT
+serial_test_derive,3.4.0,rust,MIT
+sha1,0.10.6,rust,MIT OR Apache-2.0
+sha2,0.10.9,rust,MIT OR Apache-2.0
+sharded-slab,0.1.7,rust,MIT
+shell-words,1.1.1,rust,MIT/Apache-2.0
+shlex,1.3.0,rust,MIT OR Apache-2.0
+signal-hook-registry,1.4.8,rust,MIT OR Apache-2.0
+signatory,0.27.1,rust,Apache-2.0 OR MIT
+signature,1.6.4,rust,Apache-2.0 OR MIT
+signature,2.2.0,rust,Apache-2.0 OR MIT
+simd-adler32,0.3.9,rust,MIT
+simd_helpers,0.1.0,rust,MIT
+similar,2.7.0,rust,Apache-2.0
+siphasher,1.0.2,rust,MIT/Apache-2.0
+slab,0.4.12,rust,MIT
+slotmap,1.1.1,rust,Zlib
+smallvec,1.15.1,rust,MIT OR Apache-2.0
+socket2,0.5.10,rust,MIT OR Apache-2.0
+socket2,0.6.3,rust,MIT OR Apache-2.0
+socks,0.3.4,rust,MIT/Apache-2.0
+spin,0.10.0,rust,MIT
+spin,0.9.8,rust,MIT
+spki,0.6.0,rust,Apache-2.0 OR MIT
+spki,0.7.3,rust,Apache-2.0 OR MIT
+spm_precompiled,0.1.4,rust,Apache-2.0
+stable_deref_trait,1.2.1,rust,MIT OR Apache-2.0
+static_assertions,1.1.0,rust,MIT OR Apache-2.0
+stdio-override,0.2.0,rust,MIT/Apache-2.0
+strsim,0.11.1,rust,MIT
+strum,0.27.2,rust,MIT
+strum_macros,0.27.2,rust,MIT
+subtle,2.6.1,rust,BSD-3-Clause
+syn,1.0.109,rust,MIT OR Apache-2.0
+syn,2.0.117,rust,MIT OR Apache-2.0
+sync_wrapper,0.1.2,rust,Apache-2.0
+sync_wrapper,1.0.2,rust,Apache-2.0
+synstructure,0.13.2,rust,MIT
+system-configuration,0.5.1,rust,MIT OR Apache-2.0
+system-configuration,0.7.0,rust,MIT OR Apache-2.0
+system-configuration-sys,0.5.0,rust,MIT OR Apache-2.0
+system-configuration-sys,0.6.0,rust,MIT OR Apache-2.0
+system-deps,6.2.2,rust,MIT OR Apache-2.0
+target-lexicon,0.12.16,rust,Apache-2.0 WITH LLVM-exception
+temp-env,0.3.6,rust,MIT OR Apache-2.0
+tempfile,3.27.0,rust,MIT OR Apache-2.0
+textwrap,0.11.0,rust,MIT
+thiserror,1.0.69,rust,MIT OR Apache-2.0
+thiserror,2.0.18,rust,MIT OR Apache-2.0
+thiserror-impl,1.0.69,rust,MIT OR Apache-2.0
+thiserror-impl,2.0.18,rust,MIT OR Apache-2.0
+thread_local,1.1.9,rust,MIT OR Apache-2.0
+tiff,0.11.3,rust,MIT
+tiktoken-rs,0.9.1,rust,MIT
+time,0.3.47,rust,MIT OR Apache-2.0
+time-core,0.1.8,rust,MIT OR Apache-2.0
+time-macros,0.2.27,rust,MIT OR Apache-2.0
+timerfd,1.6.0,rust,MIT
+tiny-keccak,2.0.2,rust,CC0-1.0
+tinystr,0.8.3,rust,Unicode-3.0
+tinytemplate,1.2.1,rust,Apache-2.0 OR MIT
+tinyvec,1.11.0,rust,Zlib OR Apache-2.0 OR MIT
+tinyvec_macros,0.1.1,rust,MIT OR Apache-2.0 OR Zlib
+tmq,0.5.0,rust,MIT/Apache-2.0
+tokenizers,0.21.4,rust,Apache-2.0
+tokio,1.48.0,rust,MIT
+tokio-macros,2.6.1,rust,MIT
+tokio-rayon,2.1.0,rust,MIT
+tokio-rustls,0.24.1,rust,MIT/Apache-2.0
+tokio-rustls,0.26.4,rust,MIT OR Apache-2.0
+tokio-stream,0.1.18,rust,MIT
+tokio-test,0.4.5,rust,MIT
+tokio-timerfd,0.2.0,rust,MIT
+tokio-util,0.7.18,rust,MIT
+tokio-websockets,0.10.1,rust,MIT
+toml,0.8.23,rust,MIT OR Apache-2.0
+toml,1.1.2+spec-1.1.0,rust,MIT OR Apache-2.0
+toml_datetime,0.6.11,rust,MIT OR Apache-2.0
+toml_datetime,1.1.1+spec-1.1.0,rust,MIT OR Apache-2.0
+toml_edit,0.22.27,rust,MIT OR Apache-2.0
+toml_edit,0.25.11+spec-1.1.0,rust,MIT OR Apache-2.0
+toml_parser,1.1.2+spec-1.1.0,rust,MIT OR Apache-2.0
+toml_write,0.1.2,rust,MIT OR Apache-2.0
+tonic,0.12.3,rust,MIT
+tonic,0.13.1,rust,MIT
+tonic,0.14.5,rust,MIT
+tonic-build,0.13.1,rust,MIT
+tonic-build,0.14.5,rust,MIT
+tonic-prost,0.14.5,rust,MIT
+tonic-prost-build,0.14.5,rust,MIT
+tower,0.4.13,rust,MIT
+tower,0.5.3,rust,MIT
+tower-http,0.6.8,rust,MIT
+tower-layer,0.3.3,rust,MIT
+tower-service,0.3.3,rust,MIT
+tracing,0.1.44,rust,MIT
+tracing-attributes,0.1.31,rust,MIT
+tracing-core,0.1.36,rust,MIT
+tracing-log,0.2.0,rust,MIT
+tracing-opentelemetry,0.32.1,rust,MIT
+tracing-serde,0.2.0,rust,MIT
+tracing-subscriber,0.3.23,rust,MIT
+try-lock,0.2.5,rust,MIT
+tryhard,0.5.2,rust,MIT OR Apache-2.0
+typeid,1.0.3,rust,MIT OR Apache-2.0
+typenum,1.20.0,rust,MIT OR Apache-2.0
+ucd-trie,0.1.7,rust,MIT OR Apache-2.0
+unarray,0.1.4,rust,MIT OR Apache-2.0
+uncased,0.9.10,rust,MIT OR Apache-2.0
+unchecked-index,0.2.2,rust,MIT/Apache-2.0
+unic-char-property,0.9.0,rust,MIT/Apache-2.0
+unic-char-range,0.9.0,rust,MIT/Apache-2.0
+unic-common,0.9.0,rust,MIT/Apache-2.0
+unic-emoji-char,0.9.0,rust,MIT/Apache-2.0
+unic-ucd-ident,0.9.0,rust,MIT/Apache-2.0
+unic-ucd-version,0.9.0,rust,MIT/Apache-2.0
+unicase,2.9.0,rust,MIT OR Apache-2.0
+unicode-general-category,1.1.0,rust,Apache-2.0
+unicode-ident,1.0.24,rust,(MIT OR Apache-2.0) AND Unicode-3.0
+unicode-normalization-alignments,0.1.12,rust,MIT/Apache-2.0
+unicode-segmentation,1.13.2,rust,MIT OR Apache-2.0
+unicode-width,0.1.14,rust,MIT OR Apache-2.0
+unicode-width,0.2.2,rust,MIT OR Apache-2.0
+unicode-xid,0.2.6,rust,MIT OR Apache-2.0
+unicode_categories,0.1.1,rust,MIT OR Apache-2.0
+unicode_names2,1.3.0,rust,(MIT OR Apache-2.0) AND Unicode-DFS-2016
+unicode_names2_generator,1.3.0,rust,MIT OR Apache-2.0
+unit-prefix,0.5.2,rust,MIT
+unsafe-libyaml,0.2.11,rust,MIT
+untrusted,0.9.0,rust,ISC
+unty,0.0.4,rust,MIT OR Apache-2.0
+ureq,2.12.1,rust,MIT OR Apache-2.0
+url,2.5.8,rust,MIT OR Apache-2.0
+urlencoding,2.1.3,rust,MIT
+utf16_iter,1.0.5,rust,Apache-2.0 OR MIT
+utf8_iter,1.0.4,rust,Apache-2.0 OR MIT
+utf8parse,0.2.2,rust,Apache-2.0 OR MIT
+utoipa,5.4.0,rust,MIT OR Apache-2.0
+utoipa-gen,5.4.0,rust,MIT OR Apache-2.0
+utoipa-swagger-ui,9.0.2,rust,MIT OR Apache-2.0
+uuid,1.23.1,rust,Apache-2.0 OR MIT
+v_frame,0.3.9,rust,BSD-2-Clause
+validator,0.20.0,rust,MIT
+validator_derive,0.20.0,rust,MIT
+valuable,0.1.1,rust,MIT
+vcpkg,0.2.15,rust,MIT/Apache-2.0
+velo,0.1.0,rust,Apache-2.0
+velo-common,0.1.0,rust,Apache-2.0
+velo-discovery,0.1.0,rust,Apache-2.0
+velo-events,0.1.0,rust,Apache-2.0
+velo-messenger,0.1.0,rust,Apache-2.0
+velo-observability,0.1.0,rust,Apache-2.0
+velo-queue,0.1.0,rust,Apache-2.0
+velo-rendezvous,0.1.0,rust,Apache-2.0
+velo-streaming,0.1.0,rust,Apache-2.0
+velo-transports,0.1.0,rust,Apache-2.0
+version-compare,0.2.1,rust,MIT
+version_check,0.9.5,rust,MIT/Apache-2.0
+video-rs,0.11.0,rust,MIT OR Apache-2.0
+virtue,0.0.18,rust,MIT
+vsimd,0.8.0,rust,MIT
+wait-timeout,0.2.1,rust,MIT/Apache-2.0
+walkdir,2.5.0,rust,Unlicense/MIT
+want,0.3.1,rust,MIT
+wasi,0.11.1+wasi-snapshot-preview1,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wasip2,1.0.3+wasi-0.2.9,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wasip3,0.4.0+wasi-0.3.0-rc-2026-01-06,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wasm-bindgen,0.2.118,rust,MIT OR Apache-2.0
+wasm-bindgen-futures,0.4.68,rust,MIT OR Apache-2.0
+wasm-bindgen-macro,0.2.118,rust,MIT OR Apache-2.0
+wasm-bindgen-macro-support,0.2.118,rust,MIT OR Apache-2.0
+wasm-bindgen-shared,0.2.118,rust,MIT OR Apache-2.0
+wasm-encoder,0.244.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wasm-metadata,0.244.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wasm-streams,0.4.2,rust,MIT OR Apache-2.0
+wasmparser,0.244.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+web-sys,0.3.95,rust,MIT OR Apache-2.0
+web-time,1.1.0,rust,MIT OR Apache-2.0
+webpki-roots,0.26.11,rust,CDLA-Permissive-2.0
+webpki-roots,1.0.7,rust,CDLA-Permissive-2.0
+weezl,0.1.12,rust,MIT OR Apache-2.0
+winapi,0.3.9,rust,MIT/Apache-2.0
+winapi-i686-pc-windows-gnu,0.4.0,rust,MIT/Apache-2.0
+winapi-util,0.1.11,rust,Unlicense OR MIT
+winapi-x86_64-pc-windows-gnu,0.4.0,rust,MIT/Apache-2.0
+windows-core,0.62.2,rust,MIT OR Apache-2.0
+windows-implement,0.60.2,rust,MIT OR Apache-2.0
+windows-interface,0.59.3,rust,MIT OR Apache-2.0
+windows-link,0.2.1,rust,MIT OR Apache-2.0
+windows-registry,0.6.1,rust,MIT OR Apache-2.0
+windows-result,0.4.1,rust,MIT OR Apache-2.0
+windows-strings,0.5.1,rust,MIT OR Apache-2.0
+windows-sys,0.48.0,rust,MIT OR Apache-2.0
+windows-sys,0.52.0,rust,MIT OR Apache-2.0
+windows-sys,0.59.0,rust,MIT OR Apache-2.0
+windows-sys,0.60.2,rust,MIT OR Apache-2.0
+windows-sys,0.61.2,rust,MIT OR Apache-2.0
+windows-targets,0.48.5,rust,MIT OR Apache-2.0
+windows-targets,0.52.6,rust,MIT OR Apache-2.0
+windows-targets,0.53.5,rust,MIT OR Apache-2.0
+windows_aarch64_gnullvm,0.48.5,rust,MIT OR Apache-2.0
+windows_aarch64_gnullvm,0.52.6,rust,MIT OR Apache-2.0
+windows_aarch64_gnullvm,0.53.1,rust,MIT OR Apache-2.0
+windows_aarch64_msvc,0.48.5,rust,MIT OR Apache-2.0
+windows_aarch64_msvc,0.52.6,rust,MIT OR Apache-2.0
+windows_aarch64_msvc,0.53.1,rust,MIT OR Apache-2.0
+windows_i686_gnu,0.48.5,rust,MIT OR Apache-2.0
+windows_i686_gnu,0.52.6,rust,MIT OR Apache-2.0
+windows_i686_gnu,0.53.1,rust,MIT OR Apache-2.0
+windows_i686_gnullvm,0.52.6,rust,MIT OR Apache-2.0
+windows_i686_gnullvm,0.53.1,rust,MIT OR Apache-2.0
+windows_i686_msvc,0.48.5,rust,MIT OR Apache-2.0
+windows_i686_msvc,0.52.6,rust,MIT OR Apache-2.0
+windows_i686_msvc,0.53.1,rust,MIT OR Apache-2.0
+windows_x86_64_gnu,0.48.5,rust,MIT OR Apache-2.0
+windows_x86_64_gnu,0.52.6,rust,MIT OR Apache-2.0
+windows_x86_64_gnu,0.53.1,rust,MIT OR Apache-2.0
+windows_x86_64_gnullvm,0.48.5,rust,MIT OR Apache-2.0
+windows_x86_64_gnullvm,0.52.6,rust,MIT OR Apache-2.0
+windows_x86_64_gnullvm,0.53.1,rust,MIT OR Apache-2.0
+windows_x86_64_msvc,0.48.5,rust,MIT OR Apache-2.0
+windows_x86_64_msvc,0.52.6,rust,MIT OR Apache-2.0
+windows_x86_64_msvc,0.53.1,rust,MIT OR Apache-2.0
+winnow,0.7.15,rust,MIT
+winnow,1.0.2,rust,MIT
+winreg,0.50.0,rust,MIT
+wit-bindgen,0.51.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wit-bindgen,0.57.1,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wit-bindgen-core,0.51.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wit-bindgen-rust,0.51.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wit-bindgen-rust-macro,0.51.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wit-component,0.244.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+wit-parser,0.244.0,rust,Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+write16,1.0.0,rust,Apache-2.0 OR MIT
+writeable,0.6.3,rust,Unicode-3.0
+xmlparser,0.13.6,rust,MIT/Apache-2.0
+xxhash-rust,0.8.15,rust,BSL-1.0
+y4m,0.8.0,rust,MIT
+yaml-rust2,0.10.4,rust,MIT OR Apache-2.0
+yansi,1.0.1,rust,MIT OR Apache-2.0
+yoke,0.8.2,rust,Unicode-3.0
+yoke-derive,0.8.2,rust,Unicode-3.0
+zerocopy,0.8.48,rust,BSD-2-Clause OR Apache-2.0 OR MIT
+zerocopy-derive,0.8.48,rust,BSD-2-Clause OR Apache-2.0 OR MIT
+zerofrom,0.1.7,rust,Unicode-3.0
+zerofrom-derive,0.1.7,rust,Unicode-3.0
+zeroize,1.8.2,rust,Apache-2.0 OR MIT
+zeromq-src,0.2.6+4.3.4,rust,MIT OR Apache-2.0
+zerotrie,0.2.4,rust,Unicode-3.0
+zerovec,0.11.6,rust,Unicode-3.0
+zerovec-derive,0.11.3,rust,Unicode-3.0
+zip,2.4.2,rust,MIT
+zip,3.0.0,rust,MIT
+zlib-rs,0.6.3,rust,Zlib
+zmij,1.0.21,rust,MIT
+zmq,0.10.0,rust,MIT/Apache-2.0
+zmq-sys,0.12.0,rust,MIT/Apache-2.0
+zopfli,0.8.3,rust,Apache-2.0
+zune-core,0.5.1,rust,MIT OR Apache-2.0 OR Zlib
+zune-inflate,0.2.54,rust,MIT OR Apache-2.0 OR Zlib
+zune-jpeg,0.5.15,rust,MIT OR Apache-2.0 OR Zlib

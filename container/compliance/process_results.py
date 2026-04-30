@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import csv
+import functools
 import importlib.util
 import json
 import sys
@@ -90,6 +91,64 @@ def compute_diff(
         for pkg in target_packages
         if base_lookup.get((pkg["package_name"], pkg["type"])) != pkg["version"]
     ]
+
+
+def _resolve_python_csv_licenses(
+    packages: list[dict[str, str]], cache_path: str | None
+) -> None:
+    """Fill UNKNOWN ``spdx_license`` on python rows by querying PyPI in place.
+
+    Mutates the rows so the existing CSV writer doesn't need to know about the
+    lookup. Non-python rows and rows with an existing license are skipped, so
+    this is safe to call unconditionally when ``--lookup-licenses`` is on.
+    """
+    mod = _lockfile_module("license_lookup")
+    if mod is None or not hasattr(mod, "resolve_licenses"):
+        return
+    queries: list[dict[str, str]] = []
+    indices: list[int] = []
+    for i, pkg in enumerate(packages):
+        if pkg.get("type") != "python":
+            continue
+        if (pkg.get("spdx_license") or "UNKNOWN") != "UNKNOWN":
+            continue
+        queries.append(
+            {
+                "name": pkg.get("package_name", ""),
+                "version": pkg.get("version", ""),
+                "ecosystem": "pypi",
+            }
+        )
+        indices.append(i)
+    if not queries:
+        return
+    resolved = mod.resolve_licenses(queries, cache_path=cache_path)
+    for i, entry in zip(indices, resolved):
+        packages[i]["spdx_license"] = entry.get("license") or "UNKNOWN"
+
+
+def _dedupe_csv_rows(packages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Collapse duplicate (package_name, version, type) rows from the CSV input.
+
+    Mirrors ``license_lookup.dedupe_packages`` but keys on the CSV schema
+    (``package_name``/``type``) and includes ``type`` in the key so a package
+    name appearing as both dpkg and python stays as two rows. Prefers the row
+    with a non-UNKNOWN ``spdx_license``.
+    """
+    seen: dict[tuple[str, str, str], int] = {}
+    out: list[dict[str, str]] = []
+    for pkg in packages:
+        key = (pkg.get("package_name", ""), pkg.get("version", ""), pkg.get("type", ""))
+        if key not in seen:
+            seen[key] = len(out)
+            out.append(pkg)
+            continue
+        existing = out[seen[key]]
+        if (existing.get("spdx_license") or "UNKNOWN") == "UNKNOWN" and (
+            pkg.get("spdx_license") or "UNKNOWN"
+        ) != "UNKNOWN":
+            out[seen[key]] = pkg
+    return out
 
 
 def write_csv(packages: list[dict[str, str]], output_path: Path | None) -> None:
@@ -281,8 +340,14 @@ def _load_module_from_path(module_name: str, file_path: Path):
     return module
 
 
+@functools.lru_cache(maxsize=None)
 def _lockfile_module(name: str):
-    """Load cargo.py or gomod.py from container/compliance/lockfile/."""
+    """Load cargo.py / gomod.py / license_lookup.py from container/compliance/lockfile/.
+
+    Cached so a single CLI invocation re-uses the same module instance across
+    every writer call. This keeps license_lookup's per-host throttle state and
+    SQLite connection pool consistent when both Rust and Go writers run.
+    """
     here = Path(__file__).resolve().parent
     return _load_module_from_path(
         f"_compliance_lockfile_{name}", here / "lockfile" / f"{name}.py"
@@ -292,17 +357,56 @@ def _lockfile_module(name: str):
 # ---- Writers ------------------------------------------------------------------
 
 
-def write_attributions_apt(spdx: dict[str, Any] | None, out_path: Path) -> int:
+def _resolve_licenses(
+    entries: list[dict[str, Any]],
+    cache_path: str | None,
+) -> list[dict[str, Any]]:
+    """Annotate lockfile entries via ``license_lookup.resolve_licenses``.
+
+    Pass-through (with a stderr warning) if the lookup module fails to load,
+    so the writers always produce an output even on a broken install.
+    """
+    mod = _lockfile_module("license_lookup")
+    if mod is None or not hasattr(mod, "resolve_licenses"):
+        print(
+            "WARNING: license_lookup module not available; skipping license resolution",
+            file=sys.stderr,
+        )
+        return entries
+    return mod.resolve_licenses(entries, cache_path=cache_path)
+
+
+def _dedupe_packages(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse duplicate (name, version) rows via ``license_lookup.dedupe_packages``."""
+    mod = _lockfile_module("license_lookup")
+    if mod is None or not hasattr(mod, "dedupe_packages"):
+        return packages
+    return mod.dedupe_packages(packages)
+
+
+def write_attributions_apt(
+    spdx: dict[str, Any] | None,
+    out_path: Path,
+    *,
+    dedupe: bool = False,
+) -> int:
     if spdx is None:
         return 0
     pkgs = _iter_spdx_packages_by_purl(spdx, "deb")
+    if dedupe:
+        pkgs = _dedupe_packages(pkgs)
     out_path.write_text(
         _render_attributions_md("Apt (Debian/Ubuntu)", pkgs), encoding="utf-8"
     )
     return len(pkgs)
 
 
-def write_attributions_python(spdx: dict[str, Any] | None, out_path: Path) -> int:
+def write_attributions_python(
+    spdx: dict[str, Any] | None,
+    out_path: Path,
+    *,
+    dedupe: bool = False,
+) -> int:
     if spdx is None:
         return 0
     pkgs = [
@@ -310,13 +414,22 @@ def write_attributions_python(spdx: dict[str, Any] | None, out_path: Path) -> in
         for p in _iter_spdx_packages_by_purl(spdx, "pypi")
         if not _is_first_party_python(p["name"])
     ]
+    if dedupe:
+        pkgs = _dedupe_packages(pkgs)
     out_path.write_text(
         _render_attributions_md("Python (PyPI)", pkgs), encoding="utf-8"
     )
     return len(pkgs)
 
 
-def write_attributions_rust(cargo_lock_path: Path, out_path: Path) -> int:
+def write_attributions_rust(
+    cargo_lock_path: Path,
+    out_path: Path,
+    *,
+    lookup_licenses: bool = False,
+    license_cache_path: str | None = None,
+    dedupe: bool = False,
+) -> int:
     mod = _lockfile_module("cargo")
     if mod is None or not hasattr(mod, "parse_cargo_lock"):
         print(
@@ -334,6 +447,8 @@ def write_attributions_rust(cargo_lock_path: Path, out_path: Path) -> int:
         except Exception:
             workspace_members = None
     entries = mod.parse_cargo_lock(content, workspace_members)
+    if lookup_licenses:
+        entries = _resolve_licenses(entries, license_cache_path)
     pkgs = [
         {
             "name": e.get("name", ""),
@@ -342,11 +457,20 @@ def write_attributions_rust(cargo_lock_path: Path, out_path: Path) -> int:
         }
         for e in entries
     ]
+    if dedupe:
+        pkgs = _dedupe_packages(pkgs)
     out_path.write_text(_render_attributions_md("Rust (Cargo)", pkgs), encoding="utf-8")
     return len(pkgs)
 
 
-def write_attributions_go(go_mod_paths: list[Path], out_path: Path) -> int:
+def write_attributions_go(
+    go_mod_paths: list[Path],
+    out_path: Path,
+    *,
+    lookup_licenses: bool = False,
+    license_cache_path: str | None = None,
+    dedupe: bool = False,
+) -> int:
     mod = _lockfile_module("gomod")
     if mod is None or not hasattr(mod, "parse_go_mod"):
         print(
@@ -363,14 +487,19 @@ def write_attributions_go(go_mod_paths: list[Path], out_path: Path) -> int:
         for entry in mod.parse_go_mod(content):
             key = (entry.get("name", ""), entry.get("version", ""))
             merged.setdefault(key, entry)
+    entries = list(merged.values())
+    if lookup_licenses:
+        entries = _resolve_licenses(entries, license_cache_path)
     pkgs = [
         {
             "name": e.get("name", ""),
             "version": e.get("version", ""),
             "license": e.get("license") or "UNKNOWN",
         }
-        for e in merged.values()
+        for e in entries
     ]
+    if dedupe:
+        pkgs = _dedupe_packages(pkgs)
     out_path.write_text(_render_attributions_md("Go (go.mod)", pkgs), encoding="utf-8")
     return len(pkgs)
 
@@ -441,6 +570,30 @@ Examples:
         default=str(Path(__file__).resolve().parent / "native_packages.yaml"),
         help="Path to native_packages.yaml overlay (default: alongside this script)",
     )
+    parser.add_argument(
+        "--lookup-licenses",
+        action="store_true",
+        help=(
+            "Resolve UNKNOWN Rust/Go licenses by querying crates.io and "
+            "deps.dev. Cached in --license-cache. Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--license-cache",
+        help=(
+            "SQLite file used to cache license-lookup results "
+            "(default: ~/.cache/dynamo-compliance/license-lookup.sqlite)."
+        ),
+    )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help=(
+            "Collapse duplicate (name, version) rows that arise when syft "
+            "sees the same package installed in two paths. Preserves the "
+            "row with a non-UNKNOWN license."
+        ),
+    )
     args = parser.parse_args()
 
     target_dir = Path(args.target_dir)
@@ -448,11 +601,21 @@ Examples:
         print(f"ERROR: --target-dir does not exist: {target_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # --- CSV pipeline (byte-identical to prior behavior) ---
+    # --- CSV pipeline (byte-identical to prior behavior unless --dedupe) ---
     target_packages = read_extraction_dir(target_dir)
     if not target_packages:
         print(f"ERROR: no packages found in {target_dir}", file=sys.stderr)
         sys.exit(1)
+
+    if args.lookup_licenses:
+        _resolve_python_csv_licenses(target_packages, args.license_cache)
+
+    if args.dedupe:
+        before = len(target_packages)
+        target_packages = _dedupe_csv_rows(target_packages)
+        dropped = before - len(target_packages)
+        if dropped:
+            print(f"  dedupe: dropped {dropped} duplicate CSV rows", file=sys.stderr)
 
     output_path = Path(args.output) if args.output else None
     write_csv(target_packages, output_path)
@@ -483,9 +646,13 @@ Examples:
 
     spdx = load_spdx(target_dir / "sbom.spdx.json")
 
-    apt_count = write_attributions_apt(spdx, attributions_dir / "ATTRIBUTIONS-Apt.md")
+    apt_count = write_attributions_apt(
+        spdx, attributions_dir / "ATTRIBUTIONS-Apt.md", dedupe=args.dedupe
+    )
     py_count = write_attributions_python(
-        spdx, attributions_dir / "ATTRIBUTIONS-Python.md"
+        spdx,
+        attributions_dir / "ATTRIBUTIONS-Python.md",
+        dedupe=args.dedupe,
     )
     if spdx is None:
         print(
@@ -500,7 +667,11 @@ Examples:
 
     if args.cargo_lock:
         count = write_attributions_rust(
-            Path(args.cargo_lock), attributions_dir / "ATTRIBUTIONS-Rust.md"
+            Path(args.cargo_lock),
+            attributions_dir / "ATTRIBUTIONS-Rust.md",
+            lookup_licenses=args.lookup_licenses,
+            license_cache_path=args.license_cache,
+            dedupe=args.dedupe,
         )
         print(f"Wrote ATTRIBUTIONS-Rust.md ({count})", file=sys.stderr)
 
@@ -508,6 +679,9 @@ Examples:
         count = write_attributions_go(
             [Path(p) for p in args.go_mod],
             attributions_dir / "ATTRIBUTIONS-Go.md",
+            lookup_licenses=args.lookup_licenses,
+            license_cache_path=args.license_cache,
+            dedupe=args.dedupe,
         )
         print(f"Wrote ATTRIBUTIONS-Go.md ({count})", file=sys.stderr)
 

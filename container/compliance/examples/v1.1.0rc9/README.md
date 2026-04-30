@@ -43,19 +43,34 @@ TRT-LLM does not publish a plain `1.1.0rc9` tag - only `-cuda13` and `-efa` vari
 
 | Image | dpkg | python | rust | go | native | total |
 |-------|-----:|-------:|-----:|---:|-------:|------:|
-| `vllm-runtime` | 253 | 406 | 930 | 186 | 14 | 1789 |
-| `sglang-runtime` | 419 | 298 | 930 | 186 | 14 | 1847 |
-| `tensorrtllm-runtime` | 353 | 328 | 930 | 186 | 14 | 1811 |
-| `dynamo-frontend` | 150 | 224 | 930 | 186 | 14 | 1504 |
-| `dynamo-planner` | 32 | 131 | 930 | 186 | 14 | 1293 |
-| `kubernetes-operator` | 9 | 0 | 930 | 186 | 14 | 1139 |
-| `snapshot-agent` | 345 | 6 | 930 | 186 | 14 | 1481 |
-| **Master** | | | | | | **10864** |
+| `vllm-runtime` | 253 | 394 | 922 | 226 | 14 | 1809 |
+| `sglang-runtime` | 419 | 290 | 922 | 226 | 14 | 1871 |
+| `tensorrtllm-runtime` | 353 | 325 | 922 | 226 | 14 | 1840 |
+| `dynamo-frontend` | 150 | 222 | 922 | 226 | 14 | 1534 |
+| `dynamo-planner` | 32 | 131 | 922 | 226 | 14 | 1325 |
+| `kubernetes-operator` | 9 | 0 | 922 | 226 | 14 | 1171 |
+| `snapshot-agent` | 345 | 6 | 922 | 226 | 14 | 1513 |
+| **Master** | | | | | | **11063** |
 
 - `dpkg` and `python` come from the syft SPDX scan and reflect what is actually installed in each image.
-- `rust` (930) and `go` (186) are constant because the lockfile parsers operate on `Cargo.lock` and the three `go.mod` files in the repo, not on the image filesystem - statically linked deps are invisible to syft.
+- `rust` (922) and `go` (226) are constant because the lockfile parsers operate on `Cargo.lock` and the three `go.mod` files in the repo, not on the image filesystem - statically linked deps are invisible to syft.
 - `native` (14) is the constant overlay from `container/compliance/native_packages.yaml`.
 - The operator image is distroless plus the controller binary, so `dpkg` is tiny (9) and there are no python deps.
+
+## License resolution
+
+Generated with `--lookup-licenses --dedupe` so:
+
+- Rust crates are resolved against `crates.io`.
+- Go modules are resolved against `api.deps.dev`.
+- Python distributions are resolved against PyPI's JSON API, with a GitHub fallback (`/repos/<owner>/<repo>/license`) when PyPI's metadata is empty.
+
+Of 11,063 rows, 43 are still `UNKNOWN` (0.4%):
+
+| Type | Count | Why |
+|------|------:|-----|
+| dpkg | 17 | NVIDIA proprietary (`cuda-*`, `nsight-systems-*`, `mlnx-dpdk`) plus 3 `openssl` rows where syft could not parse the copyright. None have a public license registry. |
+| python | 26 | NVIDIA-internal pip packages (`cuda-toolkit`, `cutlass-library`, `deep-ep`, `deep-gemm`, `flash-attn`, `nvidia-cutlass-dsl`, `perf-analyzer`, `quack-kernels`, `torch-c-dlpack-ext`, `torchaudio` `+cu` builds) plus `openai-harmony` (no GitHub URL on PyPI) and `torchao` (custom license, GitHub returns `NOASSERTION`). |
 
 ## How these were generated
 
@@ -75,5 +90,8 @@ python container/compliance/process_results.py \
   --go-mod deploy/inference-gateway/epp/go.mod \
   --native-packages container/compliance/native_packages.yaml \
   --attributions-dir <out> \
-  --output <out>/attribution.csv
+  --output <out>/attribution.csv \
+  --lookup-licenses --dedupe
 ```
+
+The first `--lookup-licenses` run takes ~16 min (crates.io throttles to 1 req/sec) and populates an SQLite cache at `~/.cache/dynamo-compliance/license-lookup.sqlite`. Subsequent runs - any image, any release - are instant.

@@ -39,6 +39,27 @@ python3 container/compliance/process_results.py \
 
 `--no-cache-filter extractor` forces the extractor stage to re-run so a cache hit cannot return stale output from a previous target image. Pass `--base-dir <dir>` to `process_results.py` (and run a second extraction against a base image) to additionally produce `attribution_diff.csv`.
 
+### License lookups (optional)
+
+`Cargo.lock` and `go.mod` carry version pins but no license metadata, so by default every Rust crate and Go module in the rendered output is `UNKNOWN`. Pass `--lookup-licenses` to resolve those against the upstream registries:
+
+| Ecosystem | Source |
+|-----------|--------|
+| Rust | `https://crates.io/api/v1/crates/<name>/<version>` (SPDX expression in `version.license`) |
+| Go | `https://api.deps.dev/v3alpha/systems/go/packages/<module>/versions/<version>` (SPDX list in `licenses[]`) |
+
+Results are cached in a SQLite file (default `~/.cache/dynamo-compliance/license-lookup.sqlite`, override with `--license-cache <path>`). The cache is per-machine and intentionally not committed - it can always be rebuilt from the registries. After the first run, subsequent runs are instant and offline-safe; if the network is unreachable mid-run, unresolved entries fall back to `UNKNOWN` instead of failing the pipeline.
+
+`--dedupe` collapses duplicate `(name, version)` rows that arise when syft sees the same package installed in two paths (e.g. system site-packages plus a venv). When two duplicates disagree on license, the one with a non-`UNKNOWN` SPDX value wins.
+
+```sh
+python3 container/compliance/process_results.py \
+  --target-dir /tmp/compliance-target \
+  --cargo-lock Cargo.lock --go-mod deploy/operator/go.mod \
+  --lookup-licenses --dedupe \
+  --output /tmp/compliance-target/attribution.csv
+```
+
 ## Native packages overlay
 
 `native_packages.yaml` is a manually maintained overlay describing components that land in the image via `RUN git clone …` or `RUN wget …tar.gz && make install` inside a Dockerfile. Syft sees the resulting binaries/libraries under `/usr/local` but cannot attribute them to an upstream package because they were not installed through a package manager, so they show up as unowned. The overlay fills that gap and feeds `ATTRIBUTIONS-Native.md`.
