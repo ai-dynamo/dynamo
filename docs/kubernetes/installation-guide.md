@@ -86,9 +86,8 @@ export RELEASE_VERSION=1.0.2  # match a version from https://github.com/ai-dynam
 ```
 
 ```bash
-helm install dynamo-platform \
-  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version $RELEASE_VERSION \
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$RELEASE_VERSION.tgz
+helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
   --create-namespace
   # Note: add \ to --create-namespace above when uncommenting any optional flags below

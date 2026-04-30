@@ -118,9 +118,8 @@ Follow the [EFS setup guide](efs.md) to create an EFS file system and make it av
 
 ### Install Dynamo Platform
 ```bash
-helm install dynamo-platform \
-  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version "$DYNAMO_RELEASE_VERSION" \
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-"$DYNAMO_RELEASE_VERSION".tgz
+helm install dynamo-platform dynamo-platform-"$DYNAMO_RELEASE_VERSION".tgz \
   --namespace "$DYNAMO_NAMESPACE" \
   --create-namespace
 ```
