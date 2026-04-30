@@ -132,8 +132,10 @@ spec:
               # No DP coordinator; torch.distributed master binds MASTER_PORT (29500)
               # for cross-node TP rendezvous, satisfying the operator's
               # wait-for-leader-mp probe.
-              # pass_config.fuse_allreduce_rms=false avoids a FlashInfer trtllm
-              # allreduce-norm workspace warning at startup (no perf impact).
+              # mode:3 + pass_config.fuse_allreduce_rms:true enables FlashInfer's
+              # TRT-LLM fused allreduce + RMSNorm kernel for the cross-node TP
+              # group. If FlashInfer fails to allocate the workspace at startup
+              # vLLM logs a non-fatal warning and falls back to the non-fused path.
               exec python3 -m dynamo.vllm \
                 --model "${MODEL_PATH}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
@@ -150,4 +152,4 @@ spec:
                 --dyn-tool-call-parser deepseek_v4 \
                 --attention-config '{"use_fp4_indexer_cache":true}' \
                 --moe-backend deep_gemm_mega_moe \
-                --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":false}}'
+                --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}'
