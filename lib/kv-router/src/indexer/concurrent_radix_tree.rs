@@ -684,6 +684,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                     // Should not be reached, but respond with empty to avoid blocking.
                     let _ = _sender.send(Ok(Vec::new()));
                 }
+                WorkerTask::Flush(sender) => {
+                    let _ = sender.send(());
+                }
                 WorkerTask::Terminate => {
                     break;
                 }

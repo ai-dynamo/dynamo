@@ -1360,6 +1360,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
+                WorkerTask::Flush(sender) => {
+                    let _ = sender.send(());
+                }
                 WorkerTask::Terminate => {
                     break;
                 }
