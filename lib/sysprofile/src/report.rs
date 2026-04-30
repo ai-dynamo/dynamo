@@ -470,7 +470,7 @@ Plotly.newPlot("heatmap-b", [{{
 
 // ── Section 5: View C — Perfetto deep-link ────────────────────────────────────
 
-fn section_view_c(_result: &MergeResult, trace_url: Option<&str>) -> String {
+fn section_view_c(result: &MergeResult, trace_url: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str("<div class=\"section\"><div class=\"section-h\">View C &mdash; Full Trace in Perfetto</div><div class=\"section-body\">\n");
 
@@ -479,53 +479,86 @@ fn section_view_c(_result: &MergeResult, trace_url: Option<&str>) -> String {
         .unwrap_or(false);
 
     if has_remote_url {
-        let url = trace_url.unwrap();
-        let startup_commands = serde_json::json!([
-            {"id": "dev.perfetto.PinTracksByRegex", "regex": "dynamo\\..+"},
-        ]);
-        let commands_str = startup_commands.to_string();
-        let encoded_commands = urlencoding::encode(&commands_str);
+        let base_url = trace_url.unwrap().trim_end_matches('/');
 
-        let perfetto_url = format!(
-            "https://ui.perfetto.dev/#!/?url={}&startupCommands={}",
-            urlencoding::encode(url),
-            encoded_commands,
-        );
+        s.push_str("<div style=\"display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px\">\n");
+        s.push_str("  <p id=\"perfetto-status\" style=\"font-size:12px;color:var(--text3)\"></p>\n");
+
+        for comp in &result.components {
+            s.push_str(&format!(
+                r#"  <button onclick="openInPerfetto('{base_url}/{name}.pftrace.gz', '{name}')" class="perf-link" style="font-size:14px;padding:10px 20px;border-radius:8px;margin:4px;cursor:pointer;border:none">
+    {name} ({slices} slices)
+  </button>
+"#,
+                name = comp.name,
+                slices = comp.slice_count,
+            ));
+        }
 
         s.push_str(&format!(
-            r#"<div style="display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px">
-  <a href="{perfetto_url}" target="_blank" class="perf-link" style="font-size:14px;padding:12px 24px;border-radius:8px">
-    Open merged trace in Perfetto UI
-  </a>
-  <p style="font-size:12px;color:var(--text3);max-width:600px;text-align:center">
-    Opens <code>{url}</code> with orchestration-plane tracks pre-pinned via <code>PinTracksByRegex</code>
-    matching <code>dynamo\..+</code>. For traces over 2 GB, use <code>trace_processor --httpd</code> instead:
+            r#"  <p style="font-size:12px;color:var(--text3);max-width:600px;text-align:center;margin-top:8px">
+    Clicks fetch the trace from <code>{base_url}/</code> and send it to Perfetto via <code>postMessage</code>.
+    Serve this report from the same host as the traces (e.g. <code>kubectl port-forward svc/sysprofile-viewer 9090:80</code>).
   </p>
-  <pre class="mono" style="background:var(--bg3);padding:12px 16px;border-radius:6px;font-size:12px;color:var(--text2);overflow-x:auto;max-width:100%">trace_processor --httpd {url}</pre>
-  <p style="font-size:11px;color:var(--text3)">Then open <code>http://localhost:9001</code> in the Perfetto UI.</p>
+  <p style="font-size:11px;color:var(--text3)">For traces over 2 GB, use <code>trace_processor --httpd &lt;file&gt;</code> and open <code>http://localhost:9001</code>.</p>
 </div>
+<script>
+async function openInPerfetto(url, title) {{
+  const status = document.getElementById('perfetto-status');
+  status.textContent = 'Downloading ' + title + '...';
+  status.style.color = '#76B900';
+  try {{
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const buf = await resp.arrayBuffer();
+    status.textContent = 'Opening Perfetto UI...';
+    const perfWin = window.open('https://ui.perfetto.dev');
+    if (!perfWin) {{ status.textContent = 'Pop-up blocked. Allow pop-ups and retry.'; status.style.color = '#ff4444'; return; }}
+    const timer = setInterval(() => {{
+      perfWin.postMessage('PING', 'https://ui.perfetto.dev');
+    }}, 200);
+    const handler = (evt) => {{
+      if (evt.data !== 'PONG') return;
+      window.removeEventListener('message', handler);
+      clearInterval(timer);
+      perfWin.postMessage({{
+        perfetto: {{
+          buffer: buf,
+          title: title,
+          keepApiOpen: false
+        }}
+      }}, 'https://ui.perfetto.dev');
+      status.textContent = title + ' loaded in Perfetto.';
+    }};
+    window.addEventListener('message', handler);
+    setTimeout(() => {{ clearInterval(timer); window.removeEventListener('message', handler); }}, 30000);
+  }} catch(e) {{
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#ff4444';
+  }}
+}}
+</script>
 "#,
         ));
     } else {
-        let local_file = trace_url.unwrap_or("merged.pftrace.gz");
-        s.push_str(&format!(
+        s.push_str(
             r#"<div style="display:flex;flex-direction:column;align-items:center;gap:16px;padding:24px">
   <a href="https://ui.perfetto.dev" target="_blank" class="perf-link" style="font-size:14px;padding:12px 24px;border-radius:8px">
     Open Perfetto UI
   </a>
   <p style="font-size:12px;color:var(--text3);max-width:600px;text-align:center">
-    Drag and drop <code>{local_file}</code> (or individual <code>.pftrace.gz</code> files from the run
-    directory) into the Perfetto UI to view the full trace.
+    Drag and drop individual <code>.pftrace.gz</code> files from the run directory into the Perfetto UI.
   </p>
   <p style="font-size:12px;color:var(--text3);max-width:600px;text-align:center">
-    To generate a direct deep-link, re-run merge with <code>--trace-url</code> pointing to an HTTP-accessible
-    location for the merged trace file:
+    For clickable deep-links, serve the report and traces from the same HTTP server and
+    re-run merge with <code>--trace-url</code>:
   </p>
-  <pre class="mono" style="background:var(--bg3);padding:12px 16px;border-radius:6px;font-size:12px;color:var(--text2);overflow-x:auto;max-width:100%">dynamo-sysprofile-merge ./run-dir --trace-url https://your-host/traces/{local_file}</pre>
-  <p style="font-size:11px;color:var(--text3)">For large traces (&gt;2 GB), use <code>trace_processor --httpd {local_file}</code> and open <code>http://localhost:9001</code>.</p>
+  <pre class="mono" style="background:var(--bg3);padding:12px 16px;border-radius:6px;font-size:12px;color:var(--text2);overflow-x:auto;max-width:100%">kubectl port-forward svc/sysprofile-viewer 9090:80
+dynamo-sysprofile-merge ./run-dir --trace-url http://localhost:9090/bench-001</pre>
+  <p style="font-size:11px;color:var(--text3)">Then open <code>http://localhost:9090/bench-001/report.html</code> in your browser.</p>
 </div>
 "#,
-        ));
+        );
     }
 
     s.push_str("</div></div>\n");
@@ -762,9 +795,10 @@ fn extract_trace_id(traceparent: &str) -> String {
 }
 
 fn build_perfetto_url(base_url: &str, _req: &crate::merger::RequestCriticalPath) -> String {
+    let url = format!("{}/frontend.pftrace.gz", base_url.trim_end_matches('/'));
     format!(
         "https://ui.perfetto.dev/#!/?url={}",
-        urlencoding::encode(base_url)
+        urlencoding::encode(&url)
     )
 }
 
