@@ -305,6 +305,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - dynamoworkermetadatas
   verbs:
   - create
   - delete
@@ -332,6 +333,14 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentscalingadapters/scale
   verbs:
   - get
   - patch
