@@ -98,7 +98,7 @@ else
 fi
 
 # Start prefill worker (handles image loading internally, no --route-to-encoder)
-echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
+echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
 python -m dynamo.vllm \
@@ -112,7 +112,7 @@ python -m dynamo.vllm \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 # Start decode worker
-echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
+echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
 python -m dynamo.vllm \

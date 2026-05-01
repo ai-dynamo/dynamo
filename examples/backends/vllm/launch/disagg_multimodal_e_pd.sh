@@ -100,8 +100,9 @@ if [[ -z "$PD_GPU_MEM_ARGS" ]]; then
     PD_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PD_GPU_MEM"
 fi
 
-# Start encode worker
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+# Start encode worker. Encode has no KV cache, so the byte-cap override is N/A
+# and we keep the fraction-based knob here.
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
@@ -111,7 +112,7 @@ python -m dynamo.vllm \
   $EXTRA_ARGS &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
-echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)..."
+echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \

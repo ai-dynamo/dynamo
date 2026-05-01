@@ -198,7 +198,8 @@ jobs:
           enable_coverage: ${{ inputs.enable_coverage }}
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        # !cancelled() so a parallel-stage failure doesn't hide sequential results.
+        if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
