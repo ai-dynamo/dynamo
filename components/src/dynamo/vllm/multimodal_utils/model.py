@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import json
 import logging
 import os
@@ -82,15 +83,7 @@ def _load_model_config(model_name: str) -> Optional[Dict[str, Any]]:
 
 
 def _normalize_model_name(model_name: str) -> str:
-    """Normalize a model identifier toward `<org>/<model>` for substring matching.
-
-    Handles:
-      - Plain HF id: returned as-is.
-      - HF cache layout `.../models--ORG--MODEL/...`: parsed to `<org>/<model>`.
-      - Other paths: walks components for the first `<org>--<model>` segment.
-      - Anything else: returned verbatim, so callers can substring-match
-        against the full path (e.g. `/foo/qwen3-vl-2b-instruct/v2`).
-    """
+    """Normalize a model identifier toward `<org>/<model>` (or verbatim if no shape matches)."""
     if "/" in model_name and not model_name.startswith("/"):
         return model_name
 
@@ -115,6 +108,7 @@ def _normalize_model_name(model_name: str) -> str:
     return model_name
 
 
+@functools.lru_cache(maxsize=8)
 def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
     """Canonical answer to "which family is this model?".
 
@@ -144,9 +138,8 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
 
     normalized = _normalize_model_name(model_name).lower()
     for family, patterns in _FAMILY_NAME_PATTERNS.items():
-        for pattern in patterns:
-            if pattern in normalized:
-                return family
+        if any(pattern in normalized for pattern in patterns):
+            return family
 
     return None
 
