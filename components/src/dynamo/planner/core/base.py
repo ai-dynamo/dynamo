@@ -149,7 +149,9 @@ class NativePlannerBase:
             self.prometheus_traffic_client.warn_if_router_not_scraped()
 
         self.prometheus_port = config.metric_reporting_prometheus_port
-        self.prometheus_metrics = PlannerPrometheusMetrics()
+        self.prometheus_metrics = PlannerPrometheusMetrics(
+            model_name=config.model_name,
+        )
         if self.prometheus_port != 0:
             try:
                 start_http_server(self.prometheus_port)
