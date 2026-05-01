@@ -69,7 +69,7 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator>=0.7.0",
+    "aiconfigurator>=0.8.0",
 ]
 
 [project.entry-points.pytest11]
