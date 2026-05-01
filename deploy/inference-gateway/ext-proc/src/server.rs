@@ -108,6 +108,27 @@ impl RequestContext {
         if self.state == StreamState::RequestReceived
             && let Some(resp) = self.req_header_resp.take()
         {
+            if let Some(crate::proto::envoy::service::ext_proc::v3::processing_response::Response::RequestHeaders(ref hr)) = resp.response {
+                if let Some(ref common) = hr.response {
+                    if let Some(ref hm) = common.header_mutation {
+                        tracing::info!(
+                            set_headers_count = hm.set_headers.len(),
+                            clear_route_cache = common.clear_route_cache,
+                            has_dynamic_metadata = resp.dynamic_metadata.is_some(),
+                            "[WIRE] Sending RequestHeaders response to Envoy"
+                        );
+                        for h in &hm.set_headers {
+                            if let Some(ref hv) = h.header {
+                                tracing::info!(
+                                    key = %hv.key,
+                                    value = %String::from_utf8_lossy(&hv.raw_value),
+                                    "[WIRE] set_header"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             out.push(resp);
             self.state = StreamState::HeaderRequestResponseComplete;
         }
@@ -115,6 +136,7 @@ impl RequestContext {
         if self.state == StreamState::HeaderRequestResponseComplete
             && !self.req_body_resp.is_empty()
         {
+            tracing::info!(count = self.req_body_resp.len(), "[WIRE] Sending req_body_resp to Envoy");
             out.append(&mut self.req_body_resp);
             self.state = StreamState::BodyRequestResponsesComplete;
         }
@@ -268,25 +290,31 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
 
-        // Merge routing headers from the picker into the request headers.
-        // These are Dynamo-specific headers (worker IDs, DP ranks, routing mode)
-        // that the backend workers need.
-        for (k, v) in &result.headers {
-            ctx.request_headers.push((k.clone(), v.clone()));
-        }
-
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
+            picker_header_count = result.headers.len(),
             "Request routed"
         );
+        for (k, v) in &result.headers {
+            tracing::info!(key = %k, value = %v, "[MUTATION] Routing header going into ext_proc set_headers");
+        }
 
+        // Only send NEW headers (routing headers from the picker) in the
+        // ext_proc header mutation. Do NOT re-send original request headers —
+        // they already exist on the request and Envoy rejects mutations that
+        // try to set restricted headers (x-envoy-*, x-forwarded-*, pseudo-headers).
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
             &result.endpoint,
             Some(ctx.request_size),
-            &ctx.request_headers,
+            &result.headers,
         ));
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(raw_body);
+        tracing::info!(
+            has_header_resp = ctx.req_header_resp.is_some(),
+            body_resp_count = ctx.req_body_resp.len(),
+            "[MUTATION] Responses prepared, waiting for drain"
+        );
 
         Ok(())
     }
@@ -367,8 +395,18 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
                     ctx.request_metadata = envoy_helpers::extract_metadata_values(&req);
 
+                    if let Some(ref pc) = req.protocol_config {
+                        tracing::info!(
+                            request_body_mode = pc.request_body_mode,
+                            response_body_mode = pc.response_body_mode,
+                            send_body_without_waiting = pc.send_body_without_waiting_for_header_response,
+                            "[PROTOCOL] ProtocolConfiguration from Envoy"
+                        );
+                    }
+
                     match req.request {
                         Some(processing_request::Request::RequestHeaders(ref hdr)) => {
+                            tracing::info!(eos = hdr.end_of_stream, "[MSG-ORDER] Received RequestHeaders from Envoy");
                             ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
                             if hdr.end_of_stream {
@@ -385,6 +423,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             }
                         }
                         Some(processing_request::Request::RequestBody(ref body)) => {
+                            tracing::info!(eos = body.end_of_stream, body_len = body.body.len(), "[MSG-ORDER] Received RequestBody from Envoy");
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {

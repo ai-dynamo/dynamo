@@ -31,6 +31,8 @@ tokio-stream = { workspace = true }
 tonic = { version = "0.13.1" }
 tonic-health = { version = "0.13.1" }
 tracing = { workspace = true }
+kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs"] }
+k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 rcgen = { version = "0.13" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

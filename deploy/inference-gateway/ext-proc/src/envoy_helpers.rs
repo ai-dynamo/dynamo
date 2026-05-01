@@ -125,17 +125,20 @@ pub fn build_request_header_response(
         target_endpoint.as_bytes(),
     )];
 
-    if let Some(len) = content_length {
-        set_headers.push(header_overwrite(
-            "Content-Length",
-            len.to_string().as_bytes(),
-        ));
-    }
+    // Note: Content-Length is NOT set here. In FULL_DUPLEX_STREAMED body mode,
+    // Envoy removes Content-Length and uses chunked transfer encoding.
+    // Setting it would be rejected or ignored.
+    let _ = content_length;
 
     for (key, value) in extra_headers {
-        if is_system_owned_header(key) {
+        if key.starts_with(':')
+            || key.to_ascii_lowercase().starts_with("x-envoy")
+            || is_system_owned_header(key)
+        {
+            tracing::debug!(key = %key, "Skipping pseudo/envoy/system-owned header");
             continue;
         }
+        tracing::debug!(key = %key, value = %value, "Adding header to ext_proc mutation");
         set_headers.push(HeaderValueOption {
             header: Some(HeaderValue {
                 key: key.clone(),
@@ -144,6 +147,22 @@ pub fn build_request_header_response(
             }),
             ..Default::default()
         });
+    }
+
+    tracing::info!(
+        header_mutation_count = set_headers.len(),
+        target_endpoint = %target_endpoint,
+        "Built request header response — ONLY routing headers, no original request headers"
+    );
+    for h in &set_headers {
+        if let Some(hv) = &h.header {
+            tracing::info!(
+                key = %hv.key,
+                value = %String::from_utf8_lossy(&hv.raw_value),
+                append_action = h.append_action,
+                "[FINAL-MUTATION] Header in ext_proc set_headers"
+            );
+        }
     }
 
     let dynamic_metadata = build_endpoint_metadata(target_endpoint);

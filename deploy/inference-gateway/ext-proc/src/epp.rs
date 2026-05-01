@@ -7,7 +7,7 @@
 //! `lib/bindings/c/src/lib.rs`. Instead of crossing a C FFI boundary, the
 //! ext_proc server calls these types directly as async Rust.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +47,7 @@ pub struct Router {
     model_manager: Arc<ModelManager>,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
+    #[allow(dead_code)]
     drt: DistributedRuntime,
     target_namespace: String,
 }
@@ -156,88 +157,91 @@ impl Router {
         Ok(encoding.token_ids().to_vec())
     }
 
-    /// Resolve a worker_id to a pod endpoint address via Dynamo discovery.
-    /// Used when no external endpoint list is provided (the router picks
-    /// workers from its own discovery, and we need the pod's IP:port for
-    /// the Envoy routing header).
+    /// Resolve a worker_id to a pod endpoint address (ip:port) by querying
+    /// K8s pods with the InferencePool selector labels. Matches pods by
+    /// `hash_pod_name(pod.name) == worker_id`.
     pub async fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
-        let discovery = self.drt.discovery();
-        let instances = match discovery.list(DiscoveryQuery::AllModels).await {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!(error = %e, "Discovery list failed during endpoint resolution");
-                return None;
-            }
-        };
-
-        for instance in &instances {
-            if let DiscoveryInstance::Model { namespace, .. } = instance {
-                if !namespace.starts_with(&self.target_namespace) {
-                    continue;
-                }
-                if instance.instance_id() == worker_id {
-                    if let DiscoveryInstance::Endpoint(inst) = instance {
-                        match &inst.transport {
-                            dynamo_runtime::component::TransportType::Tcp(addr)
-                            | dynamo_runtime::component::TransportType::Http(addr) => {
-                                return Some(addr.clone());
-                            }
-                            dynamo_runtime::component::TransportType::Nats(_) => {}
-                        }
-                    }
-                }
-            }
-
-            if let DiscoveryInstance::Endpoint(inst) = instance {
-                if !inst.namespace.starts_with(&self.target_namespace) {
-                    continue;
-                }
-                if inst.instance_id == worker_id {
-                    match &inst.transport {
-                        dynamo_runtime::component::TransportType::Tcp(addr)
-                        | dynamo_runtime::component::TransportType::Http(addr) => {
-                            return Some(addr.clone());
-                        }
-                        dynamo_runtime::component::TransportType::Nats(_) => {}
-                    }
-                }
-            }
-        }
-
-        tracing::warn!(worker_id, "Could not resolve worker_id to endpoint via discovery");
-        None
+        let pod_map = self.build_worker_pod_map().await;
+        pod_map.get(&worker_id).cloned()
     }
 
-    /// Resolve any available worker to its endpoint address via discovery.
+    /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any
     /// backend to forward to.
     pub async fn resolve_any_worker_endpoint(&self) -> Option<String> {
-        let discovery = self.drt.discovery();
-        let instances = match discovery.list(DiscoveryQuery::AllModels).await {
-            Ok(i) => i,
+        let pod_map = self.build_worker_pod_map().await;
+        pod_map.values().next().cloned()
+    }
+
+    /// Build a mapping of worker_id → "ip:port" from K8s pods in the EPP's
+    /// namespace. Uses `hash_pod_name` (same as Dynamo discovery) for the
+    /// worker_id and reads pod IPs directly from the K8s API.
+    async fn build_worker_pod_map(&self) -> HashMap<u64, String> {
+        use kube::{Api, Client, api::ListParams};
+        use k8s_openapi::api::core::v1::Pod;
+
+        let client = match Client::try_default().await {
+            Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "Discovery list failed");
-                return None;
+                tracing::warn!(error = %e, "Failed to create kube client");
+                return HashMap::new();
             }
         };
 
-        for instance in &instances {
-            if let DiscoveryInstance::Endpoint(inst) = instance {
-                if !inst.namespace.starts_with(&self.target_namespace) {
-                    continue;
-                }
-                match &inst.transport {
-                    dynamo_runtime::component::TransportType::Tcp(addr)
-                    | dynamo_runtime::component::TransportType::Http(addr) => {
-                        return Some(addr.clone());
-                    }
-                    dynamo_runtime::component::TransportType::Nats(_) => {}
-                }
+        // The EPP namespace (e.g., "atchernych") contains the worker pods.
+        // target_namespace is the Dynamo namespace (e.g., "atchernych-qwen-9f792849"),
+        // the K8s namespace is the first segment before the first hyphen that starts
+        // the Dynamo suffix. Use the POD_NAMESPACE env var if available.
+        let k8s_namespace = std::env::var("POD_NAMESPACE")
+            .unwrap_or_else(|_| {
+                self.target_namespace
+                    .split('-')
+                    .next()
+                    .unwrap_or(&self.target_namespace)
+                    .to_string()
+            });
+
+        let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
+        let pod_list = match pods.list(&ListParams::default()).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, namespace = k8s_namespace, "Failed to list pods");
+                return HashMap::new();
             }
+        };
+
+        let mut map = HashMap::new();
+        for pod in &pod_list.items {
+            let pod_name = match &pod.metadata.name {
+                Some(n) => n,
+                None => continue,
+            };
+            let pod_ip = match pod
+                .status
+                .as_ref()
+                .and_then(|s| s.pod_ip.as_ref())
+            {
+                Some(ip) => ip,
+                None => continue,
+            };
+
+            let worker_id = hash_pod_name(pod_name);
+            tracing::info!(
+                pod_name = %pod_name,
+                pod_ip = %pod_ip,
+                worker_id,
+                worker_id_hex = format!("{:x}", worker_id),
+                "Pod → worker_id mapping"
+            );
+            map.insert(worker_id, format!("{pod_ip}:8000"));
         }
 
-        tracing::warn!("No worker endpoints found via discovery");
-        None
+        tracing::info!(
+            worker_count = map.len(),
+            namespace = k8s_namespace,
+            "Built worker pod map"
+        );
+        map
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -742,13 +746,13 @@ impl EndpointPicker for Router {
         // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
         // x-prefill-dp-rank, x-dynamo-routing-mode
         let mut headers = vec![
-            ("x-worker-instance-id".to_string(), format!("{:x}", decode_worker.worker_id)),
+            ("x-worker-instance-id".to_string(), format!("{}", decode_worker.worker_id)),
             ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
         ];
 
         if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
             headers.push(("x-dynamo-routing-mode".to_string(), "disaggregated".to_string()));
-            headers.push(("x-prefill-instance-id".to_string(), format!("{:x}", prefill_worker_id)));
+            headers.push(("x-prefill-instance-id".to_string(), format!("{}", prefill_worker_id)));
             if let Some(rank) = prefill_dp_rank {
                 headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
             }
@@ -758,13 +762,18 @@ impl EndpointPicker for Router {
 
         tracing::info!(
             worker_id = decode_worker.worker_id,
+            worker_id_hex = format!("{:x}", decode_worker.worker_id),
             dp_rank = decode_worker.dp_rank,
             is_disaggregated,
             endpoint = %endpoint,
             token_count = tokens.len(),
             model = %req.model,
+            header_count = headers.len(),
             "Picked endpoint"
         );
+        for (k, v) in &headers {
+            tracing::info!(key = %k, value = %v, "Routing header set in PickResult");
+        }
 
         Ok(PickResult {
             endpoint,

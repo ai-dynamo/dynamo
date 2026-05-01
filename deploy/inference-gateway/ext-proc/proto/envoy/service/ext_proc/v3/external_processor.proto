@@ -41,6 +41,14 @@ message ProcessingRequest
   config.core.v3.Metadata metadata_context = 8;
   map<string, google.protobuf.Struct> attributes = 9;
   bool observability_mode = 10;
+  ProtocolConfiguration protocol_config = 11;
+}
+
+message ProtocolConfiguration
+{
+  envoy.extensions.filters.http.ext_proc.v3.ProcessingMode.BodySendMode request_body_mode = 1;
+  envoy.extensions.filters.http.ext_proc.v3.ProcessingMode.BodySendMode response_body_mode = 2;
+  bool send_body_without_waiting_for_header_response = 3;
 }
 
 message ProcessingResponse
