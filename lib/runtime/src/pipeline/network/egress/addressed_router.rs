@@ -115,12 +115,8 @@ impl<S> Drop for InflightDecStream<S> {
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
-    /// The backend instance from the discovery plane. Carries both the
-    /// endpoint name and the instance_id so that pending response-stream
-    /// registrations can be associated with the exact (endpoint, instance)
-    /// pair and cancelled only when *that* endpoint on *that* worker
-    /// disappears — not all endpoints that share the same runtime
-    /// connection_id.
+    /// Carries endpoint name + instance_id so cancellation is scoped to the
+    /// exact (endpoint, instance) pair, not all endpoints on the same runtime.
     instance: Option<Instance>,
 }
 
@@ -169,23 +165,14 @@ impl AddressedPushRouter {
         }))
     }
 
-    /// Cancel all pending response-stream registrations for a given backend instance.
-    ///
-    /// Delegates to [`TcpStreamServer::cancel_instance_streams`]. Called by the
-    /// discovery-driven watcher when an instance is removed from the service registry.
-    ///
-    /// The full [`EndpointInstanceId`] scopes the cancellation to one concrete
-    /// service instance, even when different namespaces/components reuse the
-    /// same endpoint name and backend runtime.
+    /// Cancel all pending response-stream registrations for an instance.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         self.resp_transport
             .cancel_instance_streams(instance_id)
             .await
     }
 
-    /// Clear the tombstone for an instance that has come back in the discovery set.
-    ///
-    /// Delegates to [`TcpStreamServer::clear_instance_tombstone`].
+    /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
         self.resp_transport
             .clear_instance_tombstone(instance_id)
@@ -233,20 +220,14 @@ where
         // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
 
-        // Extract the response-plane subject before connection_info is moved into the
-        // control message. Used to cancel the rx_subjects entry on instance removal or
-        // early failure, preventing the HashMap from accumulating dead entries.
+        // Snapshot subject before connection_info is moved; used for cleanup.
         let recv_subject: Option<String> =
             serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
                 .ok()
                 .map(|ci| ci.subject);
 
-        // Associate the subject with the backend instance so the discovery-driven
-        // watcher can cancel all pending subjects when this instance is removed.
-        // If the instance is already tombstoned (removed before we got here),
-        // associate_instance returns false and the subject is already cancelled --
-        // skip the send_request round trip and fail fast with a migratable error.
-        //
+        // If the instance is already tombstoned, fail fast with a migratable
+        // error instead of writing to the request plane.
         if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
             let endpoint_instance_id = inst.endpoint_instance_id();
             if !self
@@ -364,31 +345,32 @@ where
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
 
-        // When the discovery-driven watcher calls cancel_instance_streams(),
-        // the oneshot::Sender is dropped, causing this .await to resolve
-        // with RecvError. We convert that to a migratable Disconnected error
-        // so the Migration layer can retry on another worker.
+        // RecvError → migratable Disconnected (watcher cancelled the subject
+        // or the worker died before establishing the response stream).
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // Worker connected on the response plane but `generate()` failed.
-                // The wire prologue carries only an opaque error string, so we
-                // cannot tell setup/connectivity failures apart from application
-                // errors (invalid input, model-side rejection, etc.). Migrating
-                // unconditionally could duplicate side effects from non-
-                // migratable application errors, so we keep this path non-
-                // migratable. A future change can carry a structured error type
-                // through the prologue and route migratable subtypes to
-                // `CannotConnect`.
+                // generate() failed before any response bytes; migrate via
+                // CannotConnect since the dominant cause is a worker-local
+                // setup/version issue. The wire prologue carries only an
+                // opaque string today, so app-level rejections also retry
+                // -- safe because no side effects are visible yet. Follow-up:
+                // structured prologue error type for finer routing.
                 if let Some(subject) = &recv_subject {
                     self.resp_transport.cancel_recv_stream(subject).await;
                 }
-                return Err(PipelineError::ConnectionFailed(e).into());
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Worker generate() failed before response stream: {e}"
+                        ))
+                        .build()
+                ));
             }
             Err(_recv_err) => {
-                // oneshot sender dropped: either the discovery-driven watcher cancelled
-                // this subject because the instance was removed, or the worker died
-                // mid-handshake. Return Disconnected (migratable) so Migration can retry.
+                // oneshot dropped: either the discovery watcher cancelled
+                // this subject or the worker died mid-handshake.
                 if let Some(subject) = &recv_subject {
                     self.resp_transport.cancel_recv_stream(subject).await;
                 }

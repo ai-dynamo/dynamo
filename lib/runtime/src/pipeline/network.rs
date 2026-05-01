@@ -88,9 +88,8 @@ pub struct ResponseStreamPrologue {
 
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 
-/// RAII container for the cleanup closure. Owning the `Drop` here (instead of
-/// on `RegisteredStream`) lets `into_parts()` move the public fields out by
-/// plain destructure -- no `unsafe`, no `ManuallyDrop`, no `ptr::read`.
+/// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
+/// move the public fields out by plain destructure.
 struct Cleanup(Option<Box<dyn FnOnce() + Send + 'static>>);
 
 impl Drop for Cleanup {
@@ -101,15 +100,9 @@ impl Drop for Cleanup {
     }
 }
 
-/// The [`RegisteredStream`] object is acquired from a [`StreamProvider`] and is used to provide
-/// an awaitable receiver which will the `T` which is either a stream writer for a request stream
-/// or a stream reader for a response stream.
-///
-/// RAII cleanup: if this object is dropped without calling [`into_parts()`], the
-/// optional cleanup closure (held by the inner `Cleanup` struct) fires, removing
-/// the orphaned registration from the stream server's internal maps. This
-/// prevents HashMap leaks when a registered stream is never consumed (e.g.,
-/// early error in the request path).
+/// Awaitable handle for a stream sender or receiver. Drop without calling
+/// [`into_parts()`] runs the optional cleanup closure, removing the
+/// registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
@@ -141,17 +134,15 @@ impl<T> RegisteredStream<T> {
         self
     }
 
-    /// Consume the registration, returning the connection info and stream provider.
-    ///
-    /// This **disarms** the RAII cleanup -- the caller takes responsibility for
-    /// cleaning up the registration if the stream provider is never awaited.
+    /// Consume the registration, disarming the RAII cleanup. Caller takes
+    /// responsibility for cleanup if the stream provider is never awaited.
     pub fn into_parts(self) -> (ConnectionInfo, StreamProvider<T>) {
         let Self {
             connection_info,
             stream_provider,
             mut cleanup,
         } = self;
-        cleanup.0.take(); // disarm before Cleanup's Drop fires
+        cleanup.0.take();
         (connection_info, stream_provider)
     }
 }

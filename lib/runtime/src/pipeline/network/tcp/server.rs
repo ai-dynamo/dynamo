@@ -13,19 +13,10 @@ use std::{
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-/// Time-to-live for instance tombstones.
-///
-/// The tombstone only needs to bridge the in-flight `register()` →
-/// `associate_instance()` window for a single request -- sub-millisecond in
-/// practice. 5 seconds is several orders of magnitude longer than the race
-/// window we actually protect, and short enough that even if a watcher misses
-/// an `Added` event for a same-identity re-registration (rare under monotonic
-/// etcd lease IDs, but possible across discovery restarts), valid requests
-/// aren't rejected for long. Bounding by recent activity keeps the set sized
-/// by (recent worker churn × TTL), not process lifetime, fixing the unbounded
-/// memory growth that would otherwise occur because `instance_id` is the etcd
-/// lease ID and a restarted pod always presents a *new* identity that the
-/// `Added`-event clear path cannot match against the *old* tombstone.
+/// Tombstone lifetime. Bridges the `register()` → `associate_instance()`
+/// window (sub-millisecond in practice); 5s bounds the set by recent worker
+/// churn rather than process lifetime, since etcd lease IDs are unique per
+/// restart and never get cleared by an `Added` event for the same identity.
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 
 use bytes::Bytes;
@@ -140,31 +131,20 @@ struct RequestedRecvConnection {
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
-    /// Maps subject UUID -> full EndpointInstanceId for reverse lookup during
-    /// cleanup.  The full 4-field key (namespace, component, endpoint,
-    /// instance_id) ensures two services from different namespaces/components
-    /// that share an endpoint name and pod-backed instance_id cannot cancel or
-    /// tombstone each other's streams, even though the TcpStreamServer is
-    /// shared per runtime.
+    /// subject UUID -> EndpointInstanceId. Full 4-field key isolates services
+    /// that share an endpoint name across namespaces/components.
     subject_instance: HashMap<String, EndpointInstanceId>,
-    /// Maps EndpointInstanceId -> set of subject UUIDs for batch cancellation
-    /// when the discovery plane reports the instance is gone.
+    /// EndpointInstanceId -> subject UUIDs, for batch cancellation on removal.
     instance_subjects: HashMap<EndpointInstanceId, HashSet<String>>,
-    /// Tombstone map keyed by full EndpointInstanceId, with insertion time as
-    /// the value.  Closes the race window where `cancel_instance_streams()`
-    /// fires before `associate_instance()` for the same request.  Entries
-    /// expire after [`TOMBSTONE_TTL`]; `clear_instance_tombstone()` is also
-    /// available for explicit removal when the instance reappears in
-    /// discovery (defensive: with monotonic etcd lease IDs the new identity
-    /// usually differs from the tombstoned one).
+    /// Tombstones (instance -> insertion time) close the
+    /// `cancel_instance_streams` vs `associate_instance` race; entries expire
+    /// after [`TOMBSTONE_TTL`].
     removed_instances: HashMap<EndpointInstanceId, Instant>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-/// Drop tombstone entries older than [`TOMBSTONE_TTL`] from `tombstones`.
-///
-/// Called lazily on every `associate_instance` and `cancel_instance_streams`
-/// so the set is bounded by recent activity rather than process lifetime.
+/// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
+/// `associate_instance` / `cancel_instance_streams` to bound the set size.
 fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: Instant) {
     tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
 }
@@ -240,25 +220,11 @@ impl TcpStreamServer {
         }))
     }
 
-    /// Associate a registered response-stream subject with a backend instance.
+    /// Associate a registered subject with a backend instance.
     ///
-    /// Called by the egress router after `register()` so that when the discovery
-    /// plane reports the instance as removed, we can cancel all pending subjects
-    /// for that instance in one shot.
-    ///
-    /// If the instance has already been removed (tombstoned by a prior
-    /// `cancel_instance_streams` call), the subject is immediately cancelled
-    /// instead of being tracked. This closes the race window where the
-    /// discovery watcher fires before the request path calls this method.
-    /// Returns `true` if the subject was tracked normally, `false` if the
-    /// instance was tombstoned and the subject was immediately cancelled.
-    /// When `false` is returned the caller should skip `send_request` and
-    /// return a migratable `Disconnected` error directly.
-    ///
-    /// The full `EndpointInstanceId` (namespace + component + endpoint +
-    /// instance_id) scopes the key precisely, so two services from different
-    /// namespaces or components that share an endpoint name and pod-backed
-    /// instance_id cannot cancel each other's streams.
+    /// Returns `false` if the instance is already tombstoned, in which case
+    /// the subject is cancelled immediately and the caller should skip
+    /// `send_request` and fail with a migratable `Disconnected` error.
     pub async fn associate_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
         let mut state = self.state.lock().await;
         let now = Instant::now();
@@ -287,11 +253,8 @@ impl TcpStreamServer {
         true
     }
 
-    /// Cancel a single pending response-stream registration.
-    ///
-    /// Removes the subject from `rx_subjects` (dropping the `oneshot::Sender`,
-    /// which causes the waiting `oneshot::Receiver` to resolve with
-    /// `RecvError`) and cleans up the instance-tracking maps.
+    /// Cancel one pending response-stream registration. Drops the
+    /// `oneshot::Sender` so the waiting receiver resolves with `RecvError`.
     pub async fn cancel_recv_stream(&self, subject: &str) {
         let mut state = self.state.lock().await;
         state.rx_subjects.remove(subject);
@@ -305,28 +268,13 @@ impl TcpStreamServer {
         }
     }
 
-    /// Cancel **all** pending response-stream registrations for a given instance.
-    ///
-    /// Called when the discovery plane reports the instance as removed (etcd lease
-    /// expired or explicit unregister). Dropping each `oneshot::Sender` causes
-    /// the corresponding `oneshot::Receiver.await` in `AddressedPushRouter::generate()`
-    /// to resolve with `RecvError`, which is converted to a migratable
-    /// `DynamoError(Disconnected)` so the migration layer can retry on another worker.
-    ///
-    /// The instance is also tombstoned so that any concurrent
-    /// `associate_instance()` call for the same instance (race with the
-    /// request path) will immediately cancel the late-arriving subject.
-    ///
-    /// The full `EndpointInstanceId` tombstone key ensures sibling
-    /// endpoints from the same or different namespace/component pairs are
-    /// never accidentally affected.
-    ///
+    /// Cancel all pending response streams for an instance and tombstone it
+    /// so any racing `associate_instance()` for the same id cancels too.
     /// Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let mut state = self.state.lock().await;
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
-        // Tombstone the identity so late associate_instance() calls cancel immediately.
         state.removed_instances.insert(id.clone(), now);
         let subjects = match state.instance_subjects.remove(id) {
             Some(subjects) => subjects,
@@ -340,12 +288,8 @@ impl TcpStreamServer {
         count
     }
 
-    /// Remove an `EndpointInstanceId` from the tombstone set.
-    ///
-    /// Called by the discovery watcher when an instance reappears in the
-    /// discovery set (re-registered after restart). Without this, the
-    /// tombstone would cause every future subject for that identity to be
-    /// immediately cancelled even though the instance is alive again.
+    /// Drop the tombstone for an instance that has reappeared in discovery,
+    /// so future subjects for that identity are tracked normally.
     pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
         let mut state = self.state.lock().await;
         state.removed_instances.remove(id);
@@ -425,8 +369,7 @@ impl ResponseService for TcpStreamServer {
                 pending_sender_rx,
             )
             .with_cleanup(move || {
-                // Synchronous removal -- fire-and-forget via a spawned task
-                // because Drop cannot be async.
+                // Drop is sync; fire-and-forget the lock acquisition.
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock().await;
                     state.tx_subjects.remove(&cleanup_subject);
@@ -465,8 +408,7 @@ impl ResponseService for TcpStreamServer {
                 pending_recver_rx,
             )
             .with_cleanup(move || {
-                // Synchronous removal -- fire-and-forget via a spawned task
-                // because Drop cannot be async.
+                // Drop is sync; fire-and-forget the lock acquisition.
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock().await;
                     state.rx_subjects.remove(&cleanup_subject);
@@ -630,7 +572,6 @@ async fn tcp_listener(
                 .rx_subjects
                 .remove(&subject)
                 .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
-            // Clean up instance-tracking maps on the normal (worker-connected) path.
             if let Some(key) = guard.subject_instance.remove(&subject) {
                 if let Some(subjects) = guard.instance_subjects.get_mut(&key) {
                     subjects.remove(&subject);

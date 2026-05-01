@@ -255,30 +255,16 @@ fn device_aware_candidate_group(
     }
 }
 
-/// Per-endpoint guard: ensures at most one `list_and_watch` control-plane
-/// connection is opened per endpoint, regardless of how many `PushRouter`
-/// instances are created for it.  The entry is removed when the watcher
-/// task exits (cancel_token fired or discovery stream closed) so that a
-/// subsequent router creation can re-arm the watcher.
+/// At most one `list_and_watch` per endpoint, across all `PushRouter`
+/// instances. Entry removed on watcher exit so a later router can re-arm.
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
     std::sync::OnceLock::new();
 
-/// Background task that watches the discovery plane for instance removals and
-/// cancels all pending response-stream registrations for removed instances.
-///
-/// This is the core fix for the postmortem: when a worker is killed while
-/// requests are queued (ACK'd but not yet picked up), the oneshot senders
-/// are dropped, unblocking waiting frontends with a migratable `Disconnected`
-/// error.
-///
-/// Uses the raw `list_and_watch` discovery stream (not a coalesced snapshot
-/// diff) so that a rapid remove→re-add of the same Kubernetes pod — which
-/// keeps the same hash-stable instance_id — is never silently swallowed.
-///
-/// Cancellation is keyed by the full `EndpointInstanceId` (namespace +
-/// component + endpoint + instance_id) to prevent services from different
-/// namespaces/components that happen to share an endpoint name and
-/// pod-backed instance_id from cancelling each other's pending streams.
+/// Watch discovery for instance removals and cancel pending response-stream
+/// registrations on the removed instance, unblocking queued requests with
+/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
+/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
+/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
 fn spawn_instance_removal_watcher(
     endpoint: Endpoint,
     addressed: Arc<AddressedPushRouter>,
@@ -303,9 +289,8 @@ fn spawn_instance_removal_watcher(
     let endpoint_name = endpoint.name().to_string();
 
     tokio::spawn(async move {
-        // Release the dedup guard on EVERY exit path -- normal exit, discovery
-        // stream failure, AND task panic. A leaked entry would silently disable
-        // the orphaned-pending-request fix for that endpoint until process restart.
+        // Release on every exit path (including panic); a leaked entry
+        // silently disables removal cancellation until process restart.
         struct GuardRelease(EndpointId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
@@ -319,10 +304,7 @@ fn spawn_instance_removal_watcher(
         let namespace = endpoint.component().namespace().name();
         let component = endpoint.component().name().to_string();
 
-        // Outer reconnect loop: a transient discovery-plane failure (failed
-        // initial connect or the watch stream ending) must not permanently
-        // disable orphaned-pending-request cancellation for this endpoint.
-        // Reconnect with a cancellation-aware backoff until cancel_token fires.
+        // Reconnect on transient discovery failure; cancel-aware backoff.
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
             let query = DiscoveryQuery::Endpoint {
@@ -350,9 +332,6 @@ fn spawn_instance_removal_watcher(
                     event = stream.next() => {
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
-                                // Only act on endpoint-type removals; pass the
-                                // full EndpointInstanceId so cancellation is
-                                // scoped to exactly one service identity.
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
                                     let n = addressed.cancel_instance_streams(eid).await;
                                     if n > 0 {
@@ -369,16 +348,10 @@ fn spawn_instance_removal_watcher(
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
-                                // Clear tombstone so new requests for this identity are
-                                // tracked normally after a pod restart. Also fires on
-                                // reconnect when list_and_watch replays current state,
-                                // which limits how long a stale tombstone survives.
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 addressed.clear_instance_tombstone(&eid).await;
                             }
-                            Some(Ok(_)) => {
-                                // Ignore non-endpoint events (Model, EventChannel).
-                            }
+                            Some(Ok(_)) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -386,10 +359,6 @@ fn spawn_instance_removal_watcher(
                                 );
                             }
                             None => {
-                                // Stream ended — discovery plane closed the watch.
-                                // Reconnect rather than exiting permanently, otherwise
-                                // a transient discovery restart would silently disable
-                                // orphaned-pending-request cancellation.
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
                                     "Instance removal watcher stream ended; reconnecting"
@@ -405,7 +374,6 @@ fn spawn_instance_removal_watcher(
             }
         }
 
-        // _release.drop() removes the dedup-guard entry; debug-log on the way out.
         tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
     });
 }
@@ -456,10 +424,7 @@ where
             None
         };
 
-        // Even with fault detection disabled (no report_instance_down on errors),
-        // we still need the discovery-driven watcher to cancel pending response-stream
-        // registrations when workers die. Otherwise the bare .await on the oneshot
-        // receiver hangs forever for queued-but-never-started requests.
+        // Cancel orphaned pending response streams when workers die.
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -507,11 +472,7 @@ where
             None
         };
 
-        // Spawn a background task that watches the discovery plane for instance
-        // removals and cancels pending response-stream registrations for removed
-        // instances. This is the primary mechanism for unblocking requests that
-        // were ACK'd on the request plane but never picked up by the worker pool
-        // before the worker was killed.
+        // Cancel orphaned pending response streams when workers die.
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -870,14 +831,8 @@ where
             }
         }
 
-        // Get the address based on discovered transport type.
-        // If the selected instance disappeared between selection and dispatch
-        // (e.g. deregistered during scale-down), fall back to another available
-        // instance rather than returning a spurious 500.
-        //
-        // resolve_transport returns (address, transport_kind, Instance) so that
-        // the full Instance (carrying endpoint name + instance_id) can be
-        // threaded through to AddressedRequest for endpoint-scoped cancellation.
+        // Resolve transport address; if the selected instance disappeared
+        // between selection and dispatch, fall back to another available one.
         let (address, _transport_kind, instance) = {
             use crate::component::TransportType;
 
