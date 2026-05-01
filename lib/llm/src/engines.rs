@@ -192,11 +192,11 @@ impl
             let mut id = 1;
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(dynamo_protocols::types::CompletionFinishReason::Stop), None);
+            let response = deltas.create_choice(0, None, Some(dynamo_protocols::types::CompletionFinishReason::Stop), None, None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
 
         };

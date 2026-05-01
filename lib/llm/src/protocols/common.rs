@@ -18,6 +18,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use super::TokenIdType;
+use dynamo_protocols::types::StopReason;
 
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
@@ -607,6 +608,10 @@ pub struct Delta {
     pub is_complete: bool,
 
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
 
     // new token_ids
     pub token_ids: Option<Vec<u32>>,

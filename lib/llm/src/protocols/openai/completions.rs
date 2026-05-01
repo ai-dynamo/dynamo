@@ -397,6 +397,7 @@ impl TryFrom<common::StreamingCompletionResponse> for dynamo_protocols::types::C
             index,
             logprobs,
             finish_reason,
+            stop_reason: response.delta.stop_reason,
         };
 
         Ok(choice)

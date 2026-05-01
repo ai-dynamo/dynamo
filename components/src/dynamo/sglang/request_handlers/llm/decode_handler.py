@@ -59,6 +59,25 @@ def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | 
     return urls or None
 
 
+def _extract_sglang_stop_reason(finish_reason: Dict[str, Any] | None) -> Any | None:
+    """Extract SGLang's matched stop value for Dynamo's stop_reason field."""
+
+    if not finish_reason:
+        return None
+
+    matched = finish_reason.get("matched")
+    if isinstance(matched, bool):
+        return None
+    if isinstance(matched, (str, int)):
+        return matched
+    if isinstance(matched, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in matched
+    ):
+        return matched
+
+    return None
+
+
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
@@ -444,6 +463,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
+                    stop_reason = _extract_sglang_stop_reason(finish_reason)
+                    if stop_reason is not None:
+                        out["stop_reason"] = stop_reason
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
@@ -546,6 +568,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "delta": {"role": "assistant", "content": delta},
                     "finish_reason": finish_reason_type,
                 }
+                stop_reason = _extract_sglang_stop_reason(finish_reason)
+                if stop_reason is not None:
+                    choice_data["stop_reason"] = stop_reason
 
                 response = {
                     "id": res["meta_info"]["id"],

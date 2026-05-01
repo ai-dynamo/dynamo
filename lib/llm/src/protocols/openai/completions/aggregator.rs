@@ -31,6 +31,7 @@ struct DeltaChoice {
     index: u32,
     text: String,
     finish_reason: Option<FinishReason>,
+    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<dynamo_protocols::types::Logprobs>,
 }
 
@@ -100,6 +101,7 @@ impl DeltaAggregator {
                                     index: choice.index,
                                     text: "".to_string(),
                                     finish_reason: None,
+                                    stop_reason: None,
                                     logprobs: None,
                                 });
 
@@ -120,6 +122,10 @@ impl DeltaAggregator {
                             ) => Some(FinishReason::ContentFilter),
                             None => None,
                         };
+
+                        if let Some(stop_reason) = choice.stop_reason {
+                            state_choice.stop_reason = Some(stop_reason);
+                        }
 
                         // Update logprobs
                         if let Some(logprobs) = &choice.logprobs {
@@ -187,6 +193,7 @@ impl From<DeltaChoice> for dynamo_protocols::types::Choice {
             index: delta.index,
             text: delta.text,
             finish_reason,
+            stop_reason: delta.stop_reason,
             logprobs: delta.logprobs,
         }
     }
@@ -255,6 +262,7 @@ mod tests {
                 index,
                 text: text.to_string(),
                 finish_reason,
+                stop_reason: None,
                 logprobs,
             }],
             object: "text_completion".to_string(),
@@ -334,8 +342,15 @@ mod tests {
         // One will have a MessageRole and no FinishReason,
         // the other will have a FinishReason and no MessageRole
         let annotated_delta1 = create_test_delta(0, "Hello,", None, Some(-0.1));
-        let annotated_delta2 =
+        let mut annotated_delta2 =
             create_test_delta(0, " world!", Some("stop".to_string()), Some(-0.2));
+        annotated_delta2
+            .data
+            .as_mut()
+            .expect("delta data")
+            .inner
+            .choices[0]
+            .stop_reason = Some(dynamo_protocols::types::StopReason::Int(128001));
 
         // Create a stream
         let annotated_deltas = vec![annotated_delta1, annotated_delta2];
@@ -356,6 +371,10 @@ mod tests {
         assert_eq!(
             choice.finish_reason,
             Some(dynamo_protocols::types::CompletionFinishReason::Stop)
+        );
+        assert_eq!(
+            choice.stop_reason,
+            Some(dynamo_protocols::types::StopReason::Int(128001))
         );
         assert_eq!(choice.logprobs.as_ref().unwrap().tokens.len(), 2);
         assert_eq!(
@@ -378,12 +397,14 @@ mod tests {
                     index: 0,
                     text: "Choice 0".to_string(),
                     finish_reason: Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                    stop_reason: None,
                     logprobs: None,
                 },
                 dynamo_protocols::types::Choice {
                     index: 1,
                     text: "Choice 1".to_string(),
                     finish_reason: Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                    stop_reason: None,
                     logprobs: None,
                 },
             ],

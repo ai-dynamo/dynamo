@@ -51,7 +51,6 @@ pub use async_openai::types::chat::{
     ChatCompletionRequestToolMessageContentPart,
     ChatCompletionResponseMessageAudio,
     ChatCompletionTokenLogprob,
-    Choice,
     CompletionFinishReason,
     CompletionTokensDetails,
     CompletionUsage,
@@ -281,11 +280,13 @@ pub struct ChatCompletionTool {
 /// Inference backends (vLLM, SGLang) report which stop condition triggered:
 /// - `String`: a matched user-provided stop sequence
 /// - `Int`: a matched stop token ID
+/// - `IntArray`: matched stop token IDs reported as a sequence
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum StopReason {
     String(String),
     Int(i64),
+    IntArray(Vec<i64>),
 }
 
 /// Reasoning content from a previous assistant turn.

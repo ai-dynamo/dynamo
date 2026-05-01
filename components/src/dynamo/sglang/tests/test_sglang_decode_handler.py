@@ -3,7 +3,10 @@
 
 import pytest
 
-from dynamo.sglang.request_handlers.llm.decode_handler import _extract_media_urls
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    _extract_media_urls,
+    _extract_sglang_stop_reason,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,3 +37,19 @@ def test_extract_media_urls_returns_none_for_missing_or_invalid_items():
     assert (
         _extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url") is None
     )
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [
+        ({"type": "stop", "matched": "END"}, "END"),
+        ({"type": "stop", "matched": 128001}, 128001),
+        ({"type": "stop", "matched": [128001, 128009]}, [128001, 128009]),
+        ({"type": "stop", "matched": True}, None),
+        ({"type": "stop", "matched": ["END"]}, None),
+        ({"type": "length"}, None),
+        (None, None),
+    ],
+)
+def test_extract_sglang_stop_reason(finish_reason, expected):
+    assert _extract_sglang_stop_reason(finish_reason) == expected

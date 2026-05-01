@@ -268,7 +268,7 @@ impl
                     // which we don't want to propagate to `data.finish_reason`.
                     if finish_reason.is_some() {
                         data.finish_reason = finish_reason;
-                        data.stop_reason = stop_reason;
+                        data.stop_reason = stop_reason.or(data.stop_reason);
                     }
                     data.text = text;
                     data.tokens = Some(tokens);

@@ -487,24 +487,31 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        stop_reason = engine_response.get("stop_reason")
 
         delta_text = self._incremental_decode(token_ids) if token_ids else ""
 
         if self._fast_plain_text:
             if delta_text:
-                return {
+                choice = {
                     "index": 0,
                     "delta": {"role": "assistant", "content": delta_text},
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
+                if stop_reason is not None:
+                    choice["stop_reason"] = stop_reason
+                return choice
             elif finish_reason:
-                return {
+                choice = {
                     "index": 0,
                     "delta": {},
                     "finish_reason": finish_reason,
                     "logprobs": None,
                 }
+                if stop_reason is not None:
+                    choice["stop_reason"] = stop_reason
+                return choice
             return None
 
         # -- Reasoning parsing --
@@ -699,11 +706,14 @@ class SglangStreamingPostProcessor:
             effective_finish = "tool_calls"
 
         if has_content or effective_finish:
-            return {
+            choice = {
                 "index": 0,
                 "delta": delta if has_content else {},
                 "finish_reason": effective_finish,
                 "logprobs": None,
             }
+            if stop_reason is not None:
+                choice["stop_reason"] = stop_reason
+            return choice
 
         return None

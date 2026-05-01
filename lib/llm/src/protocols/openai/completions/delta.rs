@@ -197,6 +197,7 @@ impl DeltaGenerator {
         index: u32,
         text: Option<String>,
         finish_reason: Option<dynamo_protocols::types::CompletionFinishReason>,
+        stop_reason: Option<dynamo_protocols::types::StopReason>,
         logprobs: Option<dynamo_protocols::types::Logprobs>,
     ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
@@ -214,6 +215,7 @@ impl DeltaGenerator {
                 text: text.unwrap_or_default(),
                 index,
                 finish_reason,
+                stop_reason,
                 logprobs,
             }],
             usage: if self.options.enable_usage && self.options.continuous_usage_stats {
@@ -309,7 +311,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+        let mut response = self.create_choice(
+            index,
+            delta.text.clone(),
+            finish_reason,
+            delta.stop_reason,
+            logprobs,
+        );
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -392,6 +400,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -435,6 +444,27 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_choice_from_postprocessor_preserves_stop_reason() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-stop-reason".to_string());
+        let mut output = final_backend_output();
+        output.stop_reason = Some(dynamo_protocols::types::StopReason::String(
+            "END".to_string(),
+        ));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        assert_eq!(
+            response.inner.choices[0].stop_reason,
+            Some(dynamo_protocols::types::StopReason::String(
+                "END".to_string()
+            ))
+        );
     }
 
     #[test]

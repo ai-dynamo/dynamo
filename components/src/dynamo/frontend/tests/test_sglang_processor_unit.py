@@ -1050,6 +1050,19 @@ class TestIncrementalDetokenization:
         assert choice is not None
         assert choice["finish_reason"] == "stop"
 
+    def test_stop_reason_passthrough(self, tokenizer):
+        """Backend stop_reason is included on the emitted choice."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        choice = post.process_output(
+            {"token_ids": [], "finish_reason": "stop", "stop_reason": "END"}
+        )
+
+        assert choice is not None
+        assert choice["stop_reason"] == "END"
+
     def test_lookback_trimming(self, tokenizer):
         """Verify _all_token_ids doesn't grow unbounded."""
         post = SglangStreamingPostProcessor(
