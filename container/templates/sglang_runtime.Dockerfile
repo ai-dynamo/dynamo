@@ -9,6 +9,14 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+# Strip GPL-3.0-or-later termplotlib bench helper that the upstream lmsysorg/sglang
+# runtime image installs in its docker/Dockerfile. termplotlib is only used by
+# sglang's bench_serving --plot path, which is gated by importlib.util.find_spec
+# and not exercised by Dynamo. Dropping it keeps the runtime image free of strong
+# copyleft Python packages. v1.0.0 had the same uninstall; it was removed by
+# accident when the runtime image was slimmed in #7850 and needs to stay.
+RUN pip uninstall -y --break-system-packages termplotlib || true
+
 WORKDIR /workspace
 
 # Install NATS and ETCD
