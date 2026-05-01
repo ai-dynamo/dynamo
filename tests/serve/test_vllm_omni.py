@@ -171,7 +171,6 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
-            pytest.mark.profiled_vram_gib(0.0),
             pytest.mark.skip(
                 reason="vLLM-Omni audio release/v0.19.0rc1 uses the pre-vLLM 0.20 "
                 "GPUModelRunner._bookkeeping_sync signature"

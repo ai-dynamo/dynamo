@@ -39,7 +39,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 single_gpu=True,
-                profiled_vram_gib=19.8,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
             ),
             "p_d": TopologyConfig(

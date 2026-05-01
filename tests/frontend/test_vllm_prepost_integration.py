@@ -50,7 +50,6 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.parallel,
     pytest.mark.model(TEST_MODEL),
-    pytest.mark.profiled_vram_gib(0.0),
 ]
 
 
