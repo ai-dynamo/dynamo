@@ -45,7 +45,9 @@ pytestmark = [
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
     pytest.mark.profiled_vram_gib(7.6),  # actual profiled peak with kv-bytes
-    pytest.mark.requested_vllm_kv_cache_bytes(922_354_000),  # 2x safety over min=461 MiB
+    pytest.mark.requested_vllm_kv_cache_bytes(
+        922_354_000
+    ),  # 2x safety over min=461 MiB
     pytest.mark.model(VLLM_MM_MODEL),
 ]
 
