@@ -14,16 +14,25 @@ use crate::protocols::TokenIdType;
 
 use super::AgentReplayMetrics;
 
-pub(crate) fn request_replay_metrics(token_ids: &[TokenIdType]) -> Option<AgentReplayMetrics> {
+pub(crate) fn request_replay_metrics(
+    token_ids: &[TokenIdType],
+    trace_block_size: usize,
+) -> Option<AgentReplayMetrics> {
     let policy = super::policy();
     if !policy.enabled || !policy.replay_hashes_enabled {
         return None;
     }
+    if trace_block_size == 0 {
+        tracing::warn!(
+            "agent trace replay hashes requested but model KV cache block size is unavailable"
+        );
+        return None;
+    }
 
     Some(AgentReplayMetrics {
-        trace_block_size: policy.replay_block_size,
+        trace_block_size,
         input_length: token_ids.len(),
-        input_sequence_hashes: input_sequence_hashes(token_ids, policy.replay_block_size),
+        input_sequence_hashes: input_sequence_hashes(token_ids, trace_block_size),
     })
 }
 

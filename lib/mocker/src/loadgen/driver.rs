@@ -323,8 +323,11 @@ fn infer_generated_hashes(turns: &mut [TurnRuntime], engine_block_size: usize) {
         let after_decode_tokens = input_tokens.saturating_add(turns[idx].max_output_tokens);
         // Output token ids are not recorded in the Mooncake row. For ordered agent
         // sessions, the next turn's prompt already contains the previous turn's
-        // model output, so full KV blocks materialized by decode can be recovered
-        // as the next prompt's block hashes in the range [ISL, ISL + OSL).
+        // model output, so KV blocks completed during or after decode can be
+        // recovered from the next prompt's block hashes in the range
+        // [floor(ISL/B), floor((ISL+OSL)/B)). The generated_start_block may
+        // straddle the input/output boundary: it is partially written by prefill
+        // and completed by the first decode token, then becomes reusable.
         let generated_start_block = input_tokens / engine_block_size;
         let generated_end_block = after_decode_tokens / engine_block_size;
         if generated_end_block <= generated_start_block {
@@ -346,6 +349,9 @@ fn infer_generated_hashes(turns: &mut [TurnRuntime], engine_block_size: usize) {
             continue;
         }
 
+        // next_hashes is immutably borrowed only while building this owned Vec.
+        // Rust 2021 NLL ends that borrow before the LHS mutable assignment to
+        // turns[idx].replay_hashes.generated_blocks.
         turns[idx].replay_hashes.generated_blocks = next_hashes.local_block_hashes
             [generated_start_block..generated_end_block]
             .iter()
@@ -552,6 +558,74 @@ mod tests {
         assert_eq!(
             first_turn.replay_hashes.generated_blocks[0].sequence_hash,
             second_turn.replay_hashes.sequence_hashes[1]
+        );
+    }
+
+    #[test]
+    fn skips_generated_blocks_when_decode_does_not_complete_block() {
+        let trace = Trace {
+            block_size: 2,
+            sessions: vec![SessionTrace {
+                session_id: "session".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 5,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2, 3],
+                        delay_after_previous_ms: 0.0,
+                    },
+                ],
+            }],
+        };
+
+        let driver = WorkloadDriver::new_trace(trace, 2).unwrap();
+
+        assert!(
+            driver.sessions[0].turns[0]
+                .replay_hashes
+                .generated_blocks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn skips_generated_blocks_when_next_turn_prefix_mismatches() {
+        let trace = Trace {
+            block_size: 2,
+            sessions: vec![SessionTrace {
+                session_id: "session".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 3,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![9, 3],
+                        delay_after_previous_ms: 0.0,
+                    },
+                ],
+            }],
+        };
+
+        let driver = WorkloadDriver::new_trace(trace, 2).unwrap();
+
+        assert!(
+            driver.sessions[0].turns[0]
+                .replay_hashes
+                .generated_blocks
+                .is_empty()
         );
     }
 }

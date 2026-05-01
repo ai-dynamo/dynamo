@@ -35,8 +35,8 @@ independent metric rounding. Raw timing fields remain available in event args.
 
 ## Convert to Mooncake Replay
 
-Agent traces with request replay hashes can be converted to Mooncake JSONL for
-the Dynamo replay/mocker path:
+Agent traces captured with `DYN_AGENT_TRACE_REPLAY_HASHES=1` can be converted
+to Mooncake JSONL for the Dynamo replay/mocker path:
 
 ```bash
 cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
@@ -57,13 +57,14 @@ next turn's `hash_ids` to infer any full KV blocks materialized by decode. This
 models same-session prefix reuse across agent turns without storing output token
 IDs or prompt/response text.
 
-Replay the output with the same block size recorded in the converter output:
+Replay the output with the same block size used when the trace was captured.
+The converter prints this value after writing the Mooncake JSONL.
 
 ```bash
 python -m dynamo.replay \
   --trace-file /tmp/dynamo-agent-trace.mooncake.jsonl \
   --trace-format mooncake \
-  --trace-block-size 64
+  --trace-block-size <trace_block_size>
 ```
 
 ## Validate Converter

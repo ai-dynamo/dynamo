@@ -1087,7 +1087,10 @@ mod tests {
 
         assert_eq!(report.request_counts.total_input_tokens, 7);
         assert_eq!(report.request_counts.total_output_tokens, 2);
-        assert_eq!(report.prefix_cache_reused_ratio, 4.0 / 7.0);
+        assert_eq!(
+            report.request_counts.total_reused_input_tokens, 4,
+            "second turn should fully reuse its input prefix"
+        );
     }
 
     #[test]

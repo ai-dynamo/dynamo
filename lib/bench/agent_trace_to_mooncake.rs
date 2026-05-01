@@ -190,7 +190,10 @@ fn request_times(event_time_unix_ms: u64, request: &AgentRequestMetrics) -> (i64
     let total_ms = request
         .total_time_ms
         .map(|value| value.max(0.0).round() as u64)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            event_time_unix_ms
+                .saturating_sub(request.request_received_ms.unwrap_or(event_time_unix_ms))
+        });
     let end_ms = request
         .request_received_ms
         .map(|start| start.saturating_add(total_ms))
@@ -328,5 +331,18 @@ mod tests {
         assert_eq!(entries[1].timestamp, None);
         assert_eq!(entries[1].delay, Some(400));
         assert_eq!(entries[0].hash_ids[0], entries[1].hash_ids[0]);
+    }
+
+    #[test]
+    fn request_times_uses_event_time_when_total_duration_is_missing() {
+        let request = AgentRequestMetrics {
+            request_id: "req".to_string(),
+            output_tokens: Some(1),
+            request_received_ms: Some(1_000),
+            total_time_ms: None,
+            replay: None,
+        };
+
+        assert_eq!(request_times(1_250, &request), (1_000, 1_250));
     }
 }

@@ -19,6 +19,7 @@ pub struct TraceRequestCounts {
     pub num_requests: usize,
     pub completed_requests: usize,
     pub total_input_tokens: usize,
+    pub total_reused_input_tokens: usize,
     pub total_output_tokens: usize,
 }
 
@@ -73,7 +74,7 @@ impl Serialize for TraceSimulationReport {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(59))?;
+        let mut map = serializer.serialize_map(Some(60))?;
         map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
         map.serialize_entry(
             "completed_requests",
@@ -82,6 +83,10 @@ impl Serialize for TraceSimulationReport {
         map.serialize_entry(
             "total_input_tokens",
             &self.request_counts.total_input_tokens,
+        )?;
+        map.serialize_entry(
+            "total_reused_input_tokens",
+            &self.request_counts.total_reused_input_tokens,
         )?;
         map.serialize_entry(
             "total_output_tokens",
@@ -330,6 +335,7 @@ impl TraceCollector {
                 num_requests: request_count,
                 completed_requests,
                 total_input_tokens,
+                total_reused_input_tokens: total_reused_tokens,
                 total_output_tokens,
             },
             throughput: TraceThroughputStats {

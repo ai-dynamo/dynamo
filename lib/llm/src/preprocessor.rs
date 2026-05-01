@@ -153,6 +153,8 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// KV cache block size published in the model deployment card.
+    kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
@@ -190,6 +192,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -205,6 +208,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            kv_cache_block_size,
             tool_call_parser,
             media_loader,
             context_length,
@@ -1467,8 +1471,10 @@ impl
             common_request.agent_context.clone().map(|agent_context| {
                 let request_model = common_request.model.clone();
                 let request_tracker = tracker.clone();
-                let replay_metrics =
-                    crate::agents::trace::request_replay_metrics(&common_request.token_ids);
+                let replay_metrics = crate::agents::trace::request_replay_metrics(
+                    &common_request.token_ids,
+                    self.kv_cache_block_size,
+                );
                 let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
                     .and_then(|context| context.x_request_id)
                     .or_else(|| {
