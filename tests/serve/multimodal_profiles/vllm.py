@@ -29,20 +29,20 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=9.6,
             ),
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=340,
                 single_gpu=True,
                 profiled_vram_gib=15.0,
                 requested_vllm_kv_cache_bytes=4_096_361_000,
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
             ),
             "p_d": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
                 profiled_vram_gib=15.7,
@@ -63,7 +63,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
