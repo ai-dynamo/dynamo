@@ -10,7 +10,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
 #[cfg(feature = "bench")]
@@ -21,8 +21,8 @@ use dashmap::{DashMap, DashSet};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 use super::{
-    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    ThreadPoolIndexer,
+    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot,
+    ShardedIndexerMetrics, SyncIndexer, ThreadPoolIndexer,
 };
 use crate::protocols::*;
 
@@ -89,60 +89,6 @@ struct StoreRouteDecision {
     skip_backend: bool,
 }
 
-struct BranchShardedCounters {
-    shallow_returns: AtomicU64,
-    shard_dispatches: AtomicU64,
-    anchor_installs: AtomicU64,
-    anchor_reuses: AtomicU64,
-    remove_broadcasts: AtomicU64,
-}
-
-impl BranchShardedCounters {
-    fn new() -> Self {
-        Self {
-            shallow_returns: AtomicU64::new(0),
-            shard_dispatches: AtomicU64::new(0),
-            anchor_installs: AtomicU64::new(0),
-            anchor_reuses: AtomicU64::new(0),
-            remove_broadcasts: AtomicU64::new(0),
-        }
-    }
-}
-
-#[cfg(feature = "bench")]
-struct BranchShardedTiming {
-    calls: AtomicU64,
-    routing_ns: AtomicU64,
-    shard_ns: AtomicU64,
-}
-
-#[cfg(feature = "bench")]
-impl BranchShardedTiming {
-    fn new() -> Self {
-        Self {
-            calls: AtomicU64::new(0),
-            routing_ns: AtomicU64::new(0),
-            shard_ns: AtomicU64::new(0),
-        }
-    }
-}
-
-struct BranchShardedMetrics {
-    counters: BranchShardedCounters,
-    #[cfg(feature = "bench")]
-    timing: BranchShardedTiming,
-}
-
-impl BranchShardedMetrics {
-    fn new() -> Self {
-        Self {
-            counters: BranchShardedCounters::new(),
-            #[cfg(feature = "bench")]
-            timing: BranchShardedTiming::new(),
-        }
-    }
-}
-
 /// Anchor-aware branch-sharded wrapper over N [`ThreadPoolIndexer<T>`] instances.
 pub struct AnchorAwareBranchShardedIndexer<T: SyncIndexer> {
     shards: Vec<Arc<ThreadPoolIndexer<T>>>,
@@ -150,11 +96,9 @@ pub struct AnchorAwareBranchShardedIndexer<T: SyncIndexer> {
     max_routing_depth: usize,
     kv_block_size: u32,
     root: Arc<RoutingNode>,
-    shard_write_counts: Vec<AtomicUsize>,
-    shard_prefix_node_counts: Vec<AtomicUsize>,
     worker_block_index: DashMap<WorkerWithDpRank, WorkerRoutingLookup, FxBuildHasher>,
     installed_worker_anchors: DashSet<(usize, WorkerWithDpRank, u64), FxBuildHasher>,
-    metrics: BranchShardedMetrics,
+    metrics: ShardedIndexerMetrics,
 }
 
 impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
@@ -170,11 +114,9 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             max_routing_depth: prefix_depth.max(1),
             kv_block_size,
             root: Arc::new(RoutingNode::root()),
-            shard_write_counts: (0..num_shards).map(|_| AtomicUsize::new(0)).collect(),
-            shard_prefix_node_counts: (0..num_shards).map(|_| AtomicUsize::new(0)).collect(),
             worker_block_index: DashMap::with_hasher(FxBuildHasher),
             installed_worker_anchors: DashSet::with_hasher(FxBuildHasher),
-            metrics: BranchShardedMetrics::new(),
+            metrics: ShardedIndexerMetrics::new(),
         }
     }
 
@@ -187,20 +129,23 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         Self::new(shards, prefix_depth, kv_block_size)
     }
 
-    fn least_loaded_shard(&self) -> usize {
-        // TODO: This static monotonic load heuristic can leave shards badly
-        // imbalanced when a low-entropy routing prefix owns most future traffic.
-        // Consider adaptive/deeper hot-branch splitting or a load signal tied
-        // to dispatched backend work before treating this variant as a
-        // throughput competitor to base CRTC.
-        (0..self.num_shards)
-            .min_by_key(|&shard| {
-                (
-                    self.shard_write_counts[shard].load(Ordering::Relaxed),
-                    self.shard_prefix_node_counts[shard].load(Ordering::Relaxed),
-                )
-            })
-            .unwrap()
+    fn static_divergent_shard(
+        &self,
+        parent_shard: usize,
+        parent: &RoutingNode,
+        block: &KvCacheStoredBlockData,
+    ) -> usize {
+        if self.num_shards == 1 {
+            return 0;
+        }
+
+        // TODO: Static hashing still cannot split one very hot branch after it
+        // lands on a shard. If real traces remain imbalanced, add adaptive or
+        // deeper hot-branch splitting on top of this deterministic baseline.
+        let parent_seq_hash = parent.external_hash.map(|hash| hash.0).unwrap_or(0);
+        let hash = compute_next_seq_hash(parent_seq_hash, block.tokens_hash);
+        let slot = (hash as usize) % (self.num_shards - 1);
+        if slot >= parent_shard { slot + 1 } else { slot }
     }
 
     fn anchor_for_parent(&self, parent: &RoutingNode) -> Option<AnchorRef> {
@@ -234,7 +179,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         let shard = if parent.children.is_empty() {
             parent_shard
         } else {
-            self.least_loaded_shard()
+            self.static_divergent_shard(parent_shard, parent, block)
         };
 
         let child = Arc::new(RoutingNode::new(
@@ -244,7 +189,6 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             shard,
         ));
         parent.children.insert(block.tokens_hash, child.clone());
-        self.shard_prefix_node_counts[shard].fetch_add(1, Ordering::Relaxed);
         child
     }
 
@@ -300,8 +244,6 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         drop(lookup);
 
         let shard_idx = node.shard();
-        self.shard_write_counts[shard_idx].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
-
         let router_owned_blocks = self
             .max_routing_depth
             .saturating_sub(start_depth)
@@ -381,7 +323,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         let shard_idx = node.shard();
         self.metrics
             .counters
-            .shard_dispatches
+            .find_match_dispatches
             .fetch_add(1, Ordering::Relaxed);
         let Some(anchor) = self.anchor_for_parent(&node) else {
             return Ok(scores);
@@ -628,7 +570,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                     if active.is_empty() {
                         self.metrics
                             .counters
-                            .shallow_returns
+                            .find_match_early_returns
                             .fetch_add(1, Ordering::Relaxed);
                         return Ok(router_scores);
                     }
@@ -636,7 +578,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                 None => {
                     self.metrics
                         .counters
-                        .shallow_returns
+                        .find_match_early_returns
                         .fetch_add(1, Ordering::Relaxed);
                     Self::add_active_scores(&mut router_scores, &active, depth);
                     return Ok(router_scores);
@@ -646,7 +588,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
 
         self.metrics
             .counters
-            .shallow_returns
+            .find_match_early_returns
             .fetch_add(1, Ordering::Relaxed);
         Self::add_active_scores(&mut router_scores, &active, depth);
         Ok(router_scores)
@@ -768,29 +710,17 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
         let dispatched = self
             .metrics
             .counters
-            .shard_dispatches
+            .find_match_dispatches
             .load(Ordering::Relaxed);
         let shallow = self
             .metrics
             .counters
-            .shallow_returns
+            .find_match_early_returns
             .load(Ordering::Relaxed);
         let total_calls = dispatched + shallow;
         if total_calls == 0 {
             return String::new();
         }
-        let write_counts: Vec<String> = self
-            .shard_write_counts
-            .iter()
-            .enumerate()
-            .map(|(idx, count)| format!("shard[{idx}]={}", count.load(Ordering::Relaxed)))
-            .collect();
-        let prefix_counts: Vec<String> = self
-            .shard_prefix_node_counts
-            .iter()
-            .enumerate()
-            .map(|(idx, count)| format!("shard[{idx}]={}", count.load(Ordering::Relaxed)))
-            .collect();
         let broadcasts = self
             .metrics
             .counters
@@ -824,12 +754,8 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
         format!(
             "AnchorAwareBranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
              {shallow} shallow):{timing}\n  \
-             routed write blocks = {}\n  \
-             routing nodes = {}\n  \
              remove broadcasts = {broadcasts}\n  \
-             anchors = {anchor_installs} installs / {anchor_reuses} reuses",
-            write_counts.join(", "),
-            prefix_counts.join(", ")
+             anchors = {anchor_installs} installs / {anchor_reuses} reuses"
         )
     }
 }
@@ -957,8 +883,6 @@ mod tests {
         assert_eq!(c.shard(), 0);
         assert_eq!(d.shard(), 0);
         assert!(d.children.get(&LocalBlockHash(5)).is_none());
-        assert_eq!(index.shard_write_counts[0].load(Ordering::Relaxed), 6);
-        assert_eq!(index.shard_prefix_node_counts[0].load(Ordering::Relaxed), 4);
 
         let lookup = index.worker_block_index.get(&worker(0)).unwrap();
         let seq_hashes = compute_seq_hash_for_block(&local_hashes(&[1, 2, 3, 4, 5, 6]));
@@ -996,13 +920,27 @@ mod tests {
         assert_eq!(b.children.len(), 3);
     }
 
+    #[tokio::test]
+    async fn static_divergent_assignment_excludes_parent_shard() {
+        let index = make_indexer(4, 4);
+        index.apply_event(store_event(0, &[1, 2, 3])).await;
+
+        let b = child(&child(&index.root, 1), 2);
+        let block = stored_blocks(&[1, 2, 5]).remove(2);
+        let expected = index.static_divergent_shard(b.shard(), &b, &block);
+        assert_ne!(expected, b.shard());
+
+        index.apply_event(store_event(1, &[1, 2, 5])).await;
+        let e = child(&b, 5);
+        assert_eq!(e.shard(), expected);
+    }
+
     #[test]
     fn concurrent_sibling_creation_under_hot_prefix_has_one_first_child() {
         let index = Arc::new(make_indexer(2, 4));
         let ab_blocks = stored_blocks(&[1, 2]);
         let a = index.get_or_create_child(&index.root, &ab_blocks[0]);
         let b = index.get_or_create_child(&a, &ab_blocks[1]);
-        index.shard_write_counts[b.shard()].store(10_000, Ordering::Relaxed);
 
         let sibling_count = 4;
         let barrier = Arc::new(Barrier::new(sibling_count));
@@ -1049,7 +987,7 @@ mod tests {
             index
                 .metrics
                 .counters
-                .shard_dispatches
+                .find_match_dispatches
                 .load(Ordering::Relaxed),
             0
         );
@@ -1111,7 +1049,7 @@ mod tests {
             index
                 .metrics
                 .counters
-                .shard_dispatches
+                .find_match_dispatches
                 .load(Ordering::Relaxed),
             1
         );
@@ -1261,7 +1199,7 @@ mod tests {
             index
                 .metrics
                 .counters
-                .shallow_returns
+                .find_match_early_returns
                 .load(Ordering::Relaxed),
             1
         );
@@ -1269,7 +1207,7 @@ mod tests {
             index
                 .metrics
                 .counters
-                .shard_dispatches
+                .find_match_dispatches
                 .load(Ordering::Relaxed),
             0
         );
@@ -1346,20 +1284,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_store_keeps_monotonic_write_load() {
+    async fn duplicate_store_keeps_one_live_worker_entry() {
         let index = make_indexer(2, 4);
         index.apply_event(store_event(0, &[1, 2, 3])).await;
         index.apply_event(store_event(0, &[1, 2, 3])).await;
-
-        assert_eq!(index.shard_write_counts[0].load(Ordering::Relaxed), 6);
-        assert_eq!(index.shard_prefix_node_counts[0].load(Ordering::Relaxed), 3);
 
         let c = child(&child(&child(&index.root, 1), 2), 3);
         assert_eq!(c.live_workers.len(), 1);
     }
 
     #[tokio::test]
-    async fn cleanup_updates_router_state_without_changing_load_counters() {
+    async fn cleanup_updates_router_state() {
         let index = make_indexer(2, 4);
         index
             .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3]))
@@ -1368,17 +1303,6 @@ mod tests {
             .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 4]))
             .await;
 
-        let write_counts_before: Vec<_> = index
-            .shard_write_counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect();
-        let prefix_counts_before: Vec<_> = index
-            .shard_prefix_node_counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect();
-
         index.remove_worker_dp_rank(0, 0).await;
         let after_dp_remove = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
         assert_eq!(score(&after_dp_remove, WorkerWithDpRank::new(0, 0)), None);
@@ -1386,19 +1310,5 @@ mod tests {
         index.apply_event(clear_event(0)).await;
         let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
         assert!(after_clear.scores.is_empty());
-
-        let write_counts_after: Vec<_> = index
-            .shard_write_counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect();
-        let prefix_counts_after: Vec<_> = index
-            .shard_prefix_node_counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect();
-
-        assert_eq!(write_counts_after, write_counts_before);
-        assert_eq!(prefix_counts_after, prefix_counts_before);
     }
 }
