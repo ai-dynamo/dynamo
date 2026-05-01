@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG DYNAMO_SRC_IMAGE=210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo:33068cc8b2c5500622b5376ef9865144dcded9ef-sglang-runtime-cuda13
-ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-grace-blackwell@sha256:53af22f485af0f8d07f8ad9cf0c390921961a2631d87a0630c05aa8e0f392015
+ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime
+ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-grace-blackwell@sha256:7fee20a945cbb6ae26e8544a9e3dc2d50a2adbed851d8c2b02bac9e9e5c734a0
 
 FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
 
@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir --force-reinstall --no-deps \
     python3 -c "from dynamo._core import get_tool_parser_names; assert 'deepseek_v4' in get_tool_parser_names(), 'V4 parser missing!'; print('V4 parser verified')"
 
 COPY --from=dynamo_src /workspace/components/src/dynamo /workspace/components/src/dynamo
+COPY --from=dynamo_src /workspace/ATTRIBUTIONS-Python.md /workspace/ATTRIBUTIONS-Rust.md /workspace/ATTRIBUTIONS.md /workspace/
 
 # Avoid /workspace/sglang shadowing the dynamo Python package.
 ENV PYTHONPATH=/workspace/sglang/python:/workspace/components/src
