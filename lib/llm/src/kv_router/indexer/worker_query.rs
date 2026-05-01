@@ -928,6 +928,7 @@ mod tests {
             Indexer::KvIndexer {
                 primary: kv_indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
+                approx: None,
             },
         )
     }

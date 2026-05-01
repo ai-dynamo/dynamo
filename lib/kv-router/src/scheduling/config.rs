@@ -271,6 +271,29 @@ pub struct KvRouterConfig {
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
     pub shared_cache_type: SharedCacheType,
+
+    /// When `use_kv_events=true`, run a secondary approximate indexer alongside
+    /// the event-driven one. The side indexer is populated by routing decisions
+    /// with a short TTL (`router_predicted_ttl_secs`); `find_matches` queries
+    /// both indexers and returns the per-worker maximum overlap. This closes
+    /// the window between a routing decision and the engine's first "block
+    /// stored" event so sibling requests in a burst can still co-locate.
+    #[serde(default)]
+    pub router_predict_on_route: bool,
+
+    /// TTL in seconds applied to entries in the predict-on-route side indexer.
+    /// Default `5.0`. Deliberately decoupled from `router_ttl_secs` (which
+    /// covers the primary indexer's pure-approximate mode) — predictions
+    /// here only need to live long enough to bridge the window before the
+    /// engine's first KV event, and entries the engine never confirms
+    /// (cancelled requests, prefill failures) should age out quickly.
+    #[serde(default = "default_predicted_ttl_secs")]
+    #[validate(range(min = 0.0))]
+    pub router_predicted_ttl_secs: f64,
+}
+
+const fn default_predicted_ttl_secs() -> f64 {
+    5.0
 }
 
 impl Default for KvRouterConfig {
@@ -299,6 +322,8 @@ impl Default for KvRouterConfig {
             serve_indexer: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
+            router_predict_on_route: false,
+            router_predicted_ttl_secs: default_predicted_ttl_secs(),
         }
     }
 }

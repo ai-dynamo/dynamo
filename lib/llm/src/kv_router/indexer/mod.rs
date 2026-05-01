@@ -188,15 +188,25 @@ pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_ind
 pub(crate) use subscriber::start_subscriber;
 pub(crate) use worker_query::start_worker_kv_query_endpoint;
 
+/// `approx` is the optional predict-on-route side indexer. Populated by
+/// routing decisions with a short TTL; the engine's KV events go to the
+/// primary only. `find_match_details` queries both and returns the
+/// per-worker max overlap. Keeping this separate from the primary avoids
+/// the sequence-hash mismatch problem: vLLM/SGLang salt their hashes with
+/// cryptographic digests the router can't reproduce, so writing
+/// router-computed hashes into the primary would key the same block under
+/// two hashes and pollute the tree.
 #[derive(Clone)]
 pub enum Indexer {
     KvIndexer {
         primary: KvIndexer,
         lower_tier: LowerTierIndexers,
+        approx: Option<KvIndexer>,
     },
     Concurrent {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
+        approx: Option<KvIndexer>,
     },
     Remote(Arc<RemoteIndexer>),
     None,
@@ -236,6 +246,9 @@ impl Indexer {
             let prune_config = Some(PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
             });
+            // The side indexer only makes sense when the primary is event-driven.
+            // In pure-approximate mode the primary already inserts on routing
+            // decisions, so a second indexer would double-count.
             return Ok(Self::KvIndexer {
                 primary: KvIndexer::new_with_frequency(
                     cancellation_token,
@@ -245,8 +258,11 @@ impl Indexer {
                     prune_config,
                 ),
                 lower_tier: LowerTierIndexers::new(1, block_size),
+                approx: None,
             });
         }
+
+        let approx = build_approx_indexer(component, kv_router_config, block_size);
 
         if kv_router_config.router_event_threads > 1 {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
@@ -261,6 +277,7 @@ impl Indexer {
                     kv_router_config.router_event_threads as usize,
                     block_size,
                 ),
+                approx,
             });
         }
 
@@ -276,6 +293,7 @@ impl Indexer {
                 None,
             ),
             lower_tier: LowerTierIndexers::new(1, block_size),
+            approx,
         })
     }
 
@@ -293,24 +311,48 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<MatchDetails, KvRouterError> {
-        match self {
-            Self::KvIndexer { primary, .. } => primary.find_match_details(sequence).await,
-            Self::Concurrent { primary, .. } => {
-                Ok(primary.backend().find_match_details_impl(&sequence, false))
-            }
+        let (primary_details, approx) = match self {
+            Self::KvIndexer {
+                primary, approx, ..
+            } => (
+                primary.find_match_details(sequence.clone()).await?,
+                approx.as_ref(),
+            ),
+            Self::Concurrent {
+                primary, approx, ..
+            } => (
+                primary.backend().find_match_details_impl(&sequence, false),
+                approx.as_ref(),
+            ),
             // Device-only queries on the remote path go through the same tiered
             // RPC and project out the device result. The `device_only` request
             // flag tells the server to skip the lower-tier walk so we don't
             // pay tier-walk CPU/bandwidth for results we'd discard.
-            Self::Remote(remote) => remote
-                .find_matches_by_tier(sequence, true)
-                .await
-                .map(|tiered| tiered.device)
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "Remote indexer query failed");
-                    KvRouterError::IndexerOffline
-                }),
-            Self::None => Ok(MatchDetails::new()),
+            Self::Remote(remote) => {
+                return remote
+                    .find_matches_by_tier(sequence, true)
+                    .await
+                    .map(|tiered| tiered.device)
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "Remote indexer query failed");
+                        KvRouterError::IndexerOffline
+                    });
+            }
+            Self::None => return Ok(MatchDetails::new()),
+        };
+
+        let Some(approx) = approx else {
+            return Ok(primary_details);
+        };
+        match approx.find_matches(sequence).await {
+            Ok(side) => Ok(merge_overlap_scores(primary_details, side)),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "predict-on-route side indexer query failed; using primary only"
+                );
+                Ok(primary_details)
+            }
         }
     }
 
@@ -346,6 +388,19 @@ impl Indexer {
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
+        // predict-on-route: when the side indexer is enabled, write the
+        // router's prediction there instead of the primary. The primary
+        // stays event-driven so its sequence hashes match what the engine
+        // produces.
+        if let Some(approx) = match self {
+            Self::KvIndexer { approx, .. } | Self::Concurrent { approx, .. } => approx.as_ref(),
+            _ => None,
+        } {
+            return approx
+                .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                .await;
+        }
+
         match self {
             Self::KvIndexer { primary, .. } => {
                 primary
@@ -387,16 +442,26 @@ impl Indexer {
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
+        // The Concurrent primary doesn't accept hashed writes, so when there's
+        // no side indexer we hand the request to its native (non-hashed) path.
+        // Every other case routes through `record_hashed_routing_decision`,
+        // which dispatches to the side indexer when enabled and otherwise to
+        // the appropriate primary.
+        if let Self::Concurrent {
+            primary,
+            approx: None,
+            ..
+        } = self
+        {
+            return primary
+                .process_routing_decision_for_request(tokens_with_hashes, worker)
+                .await;
+        }
         match self {
-            Self::KvIndexer { .. } | Self::Remote(_) => {
+            Self::KvIndexer { .. } | Self::Concurrent { .. } | Self::Remote(_) => {
                 let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
                 let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
                 self.record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
-                    .await
-            }
-            Self::Concurrent { primary, .. } => {
-                primary
-                    .process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
             Self::None => Ok(()),
@@ -408,6 +473,7 @@ impl Indexer {
             Self::KvIndexer {
                 primary,
                 lower_tier,
+                ..
             } => match &event.event.data {
                 dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
                     if let Err(e) = primary.event_sender().send(event.clone()).await {
@@ -433,6 +499,7 @@ impl Indexer {
             Self::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => match &event.event.data {
                 dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
                     primary.apply_event(event.clone()).await;
@@ -460,6 +527,7 @@ impl Indexer {
             Self::KvIndexer {
                 primary,
                 lower_tier,
+                approx,
             } => {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
@@ -467,15 +535,30 @@ impl Indexer {
                 if let Err(e) = primary.remove_worker_sender().send(worker_id).await {
                     tracing::warn!("Failed to send worker removal for {worker_id}: {e}");
                 }
+                if let Some(approx) = approx
+                    && let Err(e) = approx.remove_worker_sender().send(worker_id).await
+                {
+                    tracing::warn!(
+                        "Failed to send worker removal for {worker_id} to predict-on-route side indexer: {e}"
+                    );
+                }
             }
             Self::Concurrent {
                 primary,
                 lower_tier,
+                approx,
             } => {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
                 }
                 KvIndexerInterface::remove_worker(primary.as_ref(), worker_id).await;
+                if let Some(approx) = approx
+                    && let Err(e) = approx.remove_worker_sender().send(worker_id).await
+                {
+                    tracing::warn!(
+                        "Failed to send worker removal for {worker_id} to predict-on-route side indexer: {e}"
+                    );
+                }
             }
             Self::Remote(_) | Self::None => {}
         }
@@ -486,21 +569,29 @@ impl Indexer {
             Self::KvIndexer {
                 primary,
                 lower_tier,
+                approx,
             } => {
                 for indexer in lower_tier.all() {
                     KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker_id, dp_rank).await;
                 }
                 KvIndexerInterface::remove_worker_dp_rank(primary, worker_id, dp_rank).await;
+                if let Some(approx) = approx {
+                    KvIndexerInterface::remove_worker_dp_rank(approx, worker_id, dp_rank).await;
+                }
             }
             Self::Concurrent {
                 primary,
                 lower_tier,
+                approx,
             } => {
                 for indexer in lower_tier.all() {
                     KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker_id, dp_rank).await;
                 }
                 KvIndexerInterface::remove_worker_dp_rank(primary.as_ref(), worker_id, dp_rank)
                     .await;
+                if let Some(approx) = approx {
+                    KvIndexerInterface::remove_worker_dp_rank(approx, worker_id, dp_rank).await;
+                }
             }
             Self::Remote(_) | Self::None => {}
         }
@@ -521,6 +612,64 @@ impl Indexer {
             Self::Remote(_) | Self::None => Vec::new(),
         }
     }
+}
+
+/// Build the optional predict-on-route side indexer. Returns `None` for any
+/// configuration where the side indexer would be redundant, ineffective, or
+/// not yet supported.
+fn build_approx_indexer(
+    component: &Component,
+    kv_router_config: &KvRouterConfig,
+    block_size: u32,
+) -> Option<KvIndexer> {
+    if !kv_router_config.router_predict_on_route {
+        return None;
+    }
+    if kv_router_config.use_remote_indexer {
+        tracing::warn!(
+            "--router-predict-on-route is not yet supported with --use-remote-indexer; ignoring"
+        );
+        return None;
+    }
+    let ttl_secs = kv_router_config.router_predicted_ttl_secs;
+    let prune_config = Some(PruneConfig {
+        ttl: Duration::from_secs_f64(ttl_secs),
+    });
+    let metrics = KvIndexerMetrics::from_component(component);
+    let cancellation_token = component.drt().primary_token();
+    tracing::info!(
+        ttl_secs,
+        "Starting predict-on-route side indexer (short-TTL approximate)"
+    );
+    Some(KvIndexer::new_with_frequency(
+        cancellation_token,
+        None,
+        block_size,
+        metrics,
+        prune_config,
+    ))
+}
+
+/// Merge a side-indexer's `OverlapScores` into the primary's `MatchDetails`
+/// by taking the per-worker max overlap. The side indexer covers the window
+/// before the engine's first KV event arrives; for workers it knows about,
+/// we use whichever indexer saw the longer prefix. `last_matched_hashes`,
+/// `frequencies`, and `tree_sizes` come from the primary — the side
+/// indexer's short-TTL view isn't meaningful for those signals.
+fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> MatchDetails {
+    for (worker, side_score) in side.scores {
+        primary
+            .overlap_scores
+            .scores
+            .entry(worker)
+            .and_modify(|s| {
+                if side_score > *s {
+                    *s = side_score;
+                }
+            })
+            .or_insert(side_score);
+    }
+    primary
 }
 
 #[cfg(test)]
@@ -602,6 +751,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
         }
     }
 
@@ -613,6 +763,7 @@ mod tests {
                 4,
             )),
             lower_tier: LowerTierIndexers::new(2, 4),
+            approx: None,
         }
     }
 
@@ -621,6 +772,7 @@ mod tests {
             Indexer::KvIndexer {
                 primary,
                 lower_tier,
+                ..
             } => {
                 let _ = primary.flush().await;
                 for indexer in lower_tier.all() {
@@ -630,6 +782,7 @@ mod tests {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => {
                 primary.flush().await;
                 for indexer in lower_tier.all() {
