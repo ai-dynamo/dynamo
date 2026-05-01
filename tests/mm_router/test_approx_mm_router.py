@@ -23,8 +23,7 @@ Backends covered:
 from __future__ import annotations
 
 import os
-import shutil
-import time
+import tempfile
 from typing import Any
 
 import pytest
@@ -113,9 +112,20 @@ def _assert_distinct_payloads_no_false_overlap(
 
 
 def _prepare_log_dir(request, suffix: str) -> str:
-    log_dir = f"{request.node.name}_{suffix}"
-    shutil.rmtree(log_dir, ignore_errors=True)
-    return log_dir
+    """Per-call fresh tempdir under the system tempfile root, isolated from the repo tree."""
+    return tempfile.mkdtemp(prefix=f"{request.node.name}_{suffix}_")
+
+
+def _maybe_model_mark(model):
+    """Apply ``@pytest.mark.model(model)`` only when ``model`` is not None.
+
+    Lets us skip the predownload marker cleanly when an optional backend
+    (e.g. TRT-LLM) isn't installed, instead of forcing a fake model name into
+    the predownload fixture and breaking collection.
+    """
+    if model is None:
+        return lambda fn: fn
+    return pytest.mark.model(model)
 
 
 # --------------------------------------------------------------------------
@@ -131,7 +141,6 @@ class ApproxFrontendProcess(ManagedProcess):
         request,
         *,
         frontend_port: int,
-        chat_processor: str = "vllm",  # kept for API compat; approx doesn't need a chat processor
     ):
         # Approx mode mirrors launch_approx_routing.sh: KV router with
         # synthetic events (--no-router-kv-events). We deliberately do NOT
@@ -165,12 +174,15 @@ class ApproxFrontendProcess(ManagedProcess):
 
 @pytest.fixture(scope="module")
 def approx_runtime_services(request):
+    # Use MonkeyPatch so env vars are restored even if teardown is skipped.
+    mp = pytest.MonkeyPatch()
     with NatsServer(request, port=0) as nats, EtcdServer(request, port=0) as etcd:
-        os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
-        os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
-        yield
-        os.environ.pop("NATS_SERVER", None)
-        os.environ.pop("ETCD_ENDPOINTS", None)
+        mp.setenv("NATS_SERVER", f"nats://localhost:{nats.port}")
+        mp.setenv("ETCD_ENDPOINTS", f"http://localhost:{etcd.port}")
+        try:
+            yield
+        finally:
+            mp.undo()
 
 
 pytestmark = [
@@ -211,7 +223,13 @@ class ApproxVLLMWorkerProcess(ManagedProcess):
                     f'"enable_kv_cache_events":true}}'
                 ),
             ],
-            env=_make_process_env(log_level="info"),
+            env=_make_process_env(log_level="info", DYN_SYSTEM_PORT=str(system_port)),
+            health_check_urls=[
+                (
+                    f"http://localhost:{system_port}/health",
+                    lambda r: r.status_code == 200,
+                )
+            ],
             timeout=600,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_prepare_log_dir(request, "approx-vllm-worker"),
@@ -225,9 +243,8 @@ def approx_vllm_services(request, approx_runtime_services):
     with ApproxVLLMWorkerProcess(
         request, system_port=vllm_port, kv_event_port=kv_event_port
     ):
-        time.sleep(2)  # ZMQ publisher warm-up
         with ApproxFrontendProcess(
-            request, frontend_port=frontend_port, chat_processor="vllm"
+            request, frontend_port=frontend_port
         ) as frontend_proc:
             yield frontend_port, frontend_proc
 
@@ -314,15 +331,15 @@ def approx_trtllm_services(request, approx_runtime_services):
         pytest.skip("TRTLLM test fixtures not available")
     frontend_port, trtllm_port = allocate_ports(count=2, start_port=10100)
     with ApproxTRTLLMWorkerProcess(request, system_port=trtllm_port):
-        time.sleep(2)
         with ApproxFrontendProcess(
-            request, frontend_port=frontend_port, chat_processor="trtllm"
+            request, frontend_port=frontend_port
         ) as frontend_proc:
             yield frontend_port, frontend_proc
 
 
 @pytest.mark.timeout(240)
 @pytest.mark.trtllm
+@_maybe_model_mark(TRTLLM_MM_MODEL)
 def test_approx_trtllm_mm_single_image_overlap(approx_trtllm_services):
     """Same image repeated should produce routing overlap > 0 on the 2nd request."""
     frontend_port, router_proc = approx_trtllm_services
@@ -334,6 +351,7 @@ def test_approx_trtllm_mm_single_image_overlap(approx_trtllm_services):
 
 @pytest.mark.timeout(240)
 @pytest.mark.trtllm
+@_maybe_model_mark(TRTLLM_MM_MODEL)
 def test_approx_trtllm_mm_different_images_no_false_overlap(approx_trtllm_services):
     """Different images should NOT create spurious overlap at the MM block."""
     frontend_port, router_proc = approx_trtllm_services
@@ -346,6 +364,7 @@ def test_approx_trtllm_mm_different_images_no_false_overlap(approx_trtllm_servic
 
 @pytest.mark.timeout(240)
 @pytest.mark.trtllm
+@_maybe_model_mark(TRTLLM_MM_MODEL)
 def test_approx_trtllm_mm_multi_image_overlap(approx_trtllm_services):
     """Repeated multi-image request should produce overlap on the 2nd request."""
     frontend_port, router_proc = approx_trtllm_services
@@ -415,9 +434,8 @@ def approx_sglang_services(request, approx_runtime_services):
 
     frontend_port, sglang_port = allocate_ports(count=2, start_port=10200)
     with ApproxSGLangMMWorkerProcess(request, system_port=sglang_port):
-        time.sleep(3)
         with ApproxFrontendProcess(
-            request, frontend_port=frontend_port, chat_processor="sglang"
+            request, frontend_port=frontend_port
         ) as frontend_proc:
             yield frontend_port, frontend_proc
 

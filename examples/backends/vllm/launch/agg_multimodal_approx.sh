@@ -1,6 +1,9 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Native approximate MM-aware routing: Rust frontend does the URL hashing
-# directly via DYN_ROUTER_MM_APPROX=1. No Python middle worker.
+# directly. No Python middle worker.
 #
 # Architecture:
 #   HTTP client -> Rust Frontend (mm_routing_info + KvRouter, use_kv_events=false)
@@ -10,6 +13,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DYNAMO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 cd "${DYNAMO_ROOT}"
+# shellcheck source=../../../common/gpu_utils.sh
+source "${SCRIPT_DIR}/../../../common/gpu_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-VL-2B-Instruct}"
 NAMESPACE="${NAMESPACE:-dynamo}"
@@ -24,18 +29,9 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 
-# Frontend image decode + NIXL hand-off. Default ON: the Rust frontend
-# decodes the image and ships pre-decoded bytes via NIXL/SHM instead of
-# forwarding the full chat-completion JSON (1 MB+ for datauri) over TCP.
-# Disables itself with FRONTEND_DECODING=false if NIXL isn't available.
-FRONTEND_DECODING="${FRONTEND_DECODING:-true}"
-
 # Pass-through extra args for `python -m dynamo.vllm` (word-split intentionally).
 # `--model X` is intercepted below; everything else is forwarded as-is.
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
-if [[ "${FRONTEND_DECODING}" == "true" ]]; then
-    VLLM_EXTRA_ARGS="--frontend-decoding ${VLLM_EXTRA_ARGS}"
-fi
 
 # Minimal CLI parsing (mirrors agg_multimodal.sh) so the serve test harness can
 # drive this script with `--model X` like it does the other launch scripts.
@@ -83,6 +79,11 @@ COMMON_ENV=(
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 )
 
+# Profiler-driven KV-cache override (build_vllm_gpu_mem_args returns empty when
+# _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES is unset, so the explicit
+# --gpu-memory-utilization fallback below stays in force for normal runs).
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
@@ -97,7 +98,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --enforce-eager \
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
         --max-model-len "${MAX_MODEL_LEN}" \
-        ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+        ${GPU_MEM_ARGS} ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 

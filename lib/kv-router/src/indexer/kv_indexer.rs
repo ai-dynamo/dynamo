@@ -257,17 +257,18 @@ impl KvIndexer {
 
                             event_id_counter += 1;
 
-                            // Pad mm_infos with `None` so a shorter vector can't
-                            // truncate the synthetic `Stored` event. This preserves
-                            // every block in `local_hashes` even if the sender
-                            // supplied only partial MM info.
-                            let mm_infos_iter: Box<dyn Iterator<Item = Option<BlockExtraInfo>>> =
-                                match routing_req.block_mm_infos {
-                                    Some(infos) => {
-                                        Box::new(infos.into_iter().chain(std::iter::repeat(None)))
-                                    }
-                                    None => Box::new(std::iter::repeat(None)),
-                                };
+                            // Pad mm_infos with `None` so a shorter vector
+                            // can't truncate the synthetic `Stored` event;
+                            // every block in `local_hashes` survives even if
+                            // the sender supplied only partial MM info. The
+                            // outer `zip` stops at the shorter side, so any
+                            // trailing entries past `local_hashes.len()` are
+                            // dropped — also intentional.
+                            let mm_infos_iter = routing_req
+                                .block_mm_infos
+                                .unwrap_or_default()
+                                .into_iter()
+                                .chain(std::iter::repeat(None));
                             let hashes = routing_req
                                 .local_hashes
                                 .iter()

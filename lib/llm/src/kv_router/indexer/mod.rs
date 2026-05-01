@@ -18,8 +18,7 @@ use dynamo_kv_router::{
     },
     protocols::{
         BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, StorageTier,
-        TokensWithHashes,
-        WorkerId, WorkerWithDpRank,
+        TokensWithHashes, WorkerId, WorkerWithDpRank,
     },
 };
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};

@@ -230,17 +230,6 @@ impl PreprocessedRequest {
     pub fn builder() -> PreprocessedRequestBuilder {
         PreprocessedRequestBuilder::default()
     }
-}
-
-impl PreprocessedRequestBuilder {
-    /// Read-only peek at the token_ids currently staged on the builder,
-    /// so callers can reuse them instead of re-tokenizing the same prompt.
-    pub fn peek_token_ids(&self) -> Option<&Vec<TokenIdType>> {
-        self.token_ids.as_ref()
-    }
-}
-
-impl PreprocessedRequest {
 
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
@@ -258,6 +247,14 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+}
+
+impl PreprocessedRequestBuilder {
+    /// Read-only peek at the token_ids currently staged on the builder,
+    /// so callers can reuse them instead of re-tokenizing the same prompt.
+    pub fn peek_token_ids(&self) -> Option<&[TokenIdType]> {
+        self.token_ids.as_deref()
     }
 }
 

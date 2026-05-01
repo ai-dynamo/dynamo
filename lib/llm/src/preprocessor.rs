@@ -569,12 +569,14 @@ impl OpenAIPreprocessor {
     /// Hash a single image reference to a stable u64. Data URIs are hashed
     /// as content; http(s) URLs are hashed after stripping common
     /// cache-buster query parameters so the same image with different
-    /// signed-URL query strings still clusters.
+    /// signed-URL query strings still clusters. All other schemes
+    /// (s3://, gs://, file://, ...) are hashed as-is — query strings on
+    /// those are object-identifying, not cache-busting.
     fn hash_image_url(url: &str) -> u64 {
-        if url.starts_with("data:") {
-            xxhash_rust::xxh3::xxh3_64(url.as_bytes())
-        } else {
+        if url.starts_with("http://") || url.starts_with("https://") {
             Self::hash_normalized_url(url)
+        } else {
+            xxhash_rust::xxh3::xxh3_64(url.as_bytes())
         }
     }
 
@@ -625,7 +627,7 @@ impl OpenAIPreprocessor {
         // sync encode of the same prompt. Fall back to tokenizing the
         // formatted prompt only if the builder doesn't already have them.
         let routing_token_ids: Vec<u32> = if let Some(tokens) = builder.peek_token_ids() {
-            tokens.clone()
+            tokens.to_vec()
         } else {
             let Some(prompt) = formatted_prompt else {
                 tracing::debug!(
@@ -708,10 +710,14 @@ impl OpenAIPreprocessor {
         let request_info = dynamo_kv_router::protocols::RequestExtraInfo { mm_objects };
         let block_mm_infos = request_info.to_block_level(block_size, total_tokens);
 
-        // Trim routing_token_ids to full blocks so the router's block-hash
-        // computation and ours agree on block count.
+        // Make routing_token_ids exactly `total_tokens` long so the
+        // router's block-hash computation and ours agree on block count.
+        // Truncates if the prompt is longer than the full-block budget;
+        // pads with 0 (a benign filler — the router only consumes whole
+        // blocks via compute_block_hash_for_seq) when shorter, so the
+        // mm-affinity blocks always exist.
         let mut routing_token_ids = routing_token_ids;
-        routing_token_ids.truncate(total_tokens);
+        routing_token_ids.resize(total_tokens, 0);
 
         tracing::debug!(
             n_images,
