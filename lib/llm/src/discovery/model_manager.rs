@@ -760,8 +760,10 @@ impl ModelManager {
                 // PrefillRouter::generate falls back to aggregated mode, sending
                 // bare requests to decode workers that reject them with
                 // "Disaggregated params required for decode mode".
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
+                self.prefill_router_activators.insert(
+                    key,
+                    PrefillActivationState::PrefillReady(Box::new(endpoint)),
+                );
 
                 Ok(())
             }
@@ -783,8 +785,10 @@ impl ModelManager {
                     false
                 };
 
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
+                self.prefill_router_activators.insert(
+                    key,
+                    PrefillActivationState::PrefillReady(Box::new(endpoint)),
+                );
 
                 if reactivated {
                     tracing::info!(
@@ -815,8 +819,10 @@ impl ModelManager {
                     // (removed and re-added), a subsequent register_prefill_router
                     // call finds PrefillReady instead of falling back to
                     // DecodeWaiting and stalling.
-                    self.prefill_router_activators
-                        .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
+                    self.prefill_router_activators.insert(
+                        key,
+                        PrefillActivationState::PrefillReady(Box::new(endpoint)),
+                    );
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
@@ -827,8 +833,10 @@ impl ModelManager {
 
                 // No existing deactivated router -- cache endpoint for a future
                 // decode registration.
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
+                self.prefill_router_activators.insert(
+                    key,
+                    PrefillActivationState::PrefillReady(Box::new(endpoint)),
+                );
                 tracing::info!(
                     model_name = %model_name,
                     namespace = %namespace,
