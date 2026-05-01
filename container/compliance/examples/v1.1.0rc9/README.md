@@ -59,18 +59,15 @@ TRT-LLM does not publish a plain `1.1.0rc9` tag - only `-cuda13` and `-efa` vari
 
 ## License resolution
 
-Generated with `--lookup-licenses --dedupe` so:
+Generated with `--lookup-licenses --dedupe` plus the curated overrides in [`container/compliance/license_overrides.yaml`](../../license_overrides.yaml). Resolution order per row:
 
-- Rust crates are resolved against `crates.io`.
-- Go modules are resolved against `api.deps.dev`.
-- Python distributions are resolved against PyPI's JSON API, with a GitHub fallback (`/repos/<owner>/<repo>/license`) when PyPI's metadata is empty.
+1. Syft's SPDX scan (Apt/Python from the image filesystem).
+2. Lockfile resolvers - `crates.io` for Rust, `api.deps.dev` for Go, PyPI JSON for Python.
+3. PyPI retry against the PEP 440 base version (drops `+cu129`, `+nv26.x`, etc.) so NVIDIA-rebuilt wheels resolve against the upstream release.
+4. GitHub `/repos/<owner>/<repo>/license` fallback when PyPI metadata is empty but a `github.com` URL is linked.
+5. Hand-curated `license_overrides.yaml` entries for NVIDIA proprietary packages (CUDA toolkit, Nsight, mlnx-dpdk) and a small set of repackaged PyPI wheels whose metadata is empty (DeepSeek MoE kernels, openai-harmony, torchao, etc).
 
-Of 11,063 rows, 43 are still `UNKNOWN` (0.4%):
-
-| Type | Count | Why |
-|------|------:|-----|
-| dpkg | 17 | NVIDIA proprietary (`cuda-*`, `nsight-systems-*`, `mlnx-dpdk`) plus 3 `openssl` rows where syft could not parse the copyright. None have a public license registry. |
-| python | 26 | NVIDIA-internal pip packages (`cuda-toolkit`, `cutlass-library`, `deep-ep`, `deep-gemm`, `flash-attn`, `nvidia-cutlass-dsl`, `perf-analyzer`, `quack-kernels`, `torch-c-dlpack-ext`, `torchaudio` `+cu` builds) plus `openai-harmony` (no GitHub URL on PyPI) and `torchao` (custom license, GitHub returns `NOASSERTION`). |
+All 11,063 rows resolve to a SPDX or `LicenseRef-*` license - **0 `UNKNOWN`**.
 
 ## How these were generated
 
@@ -89,6 +86,7 @@ python container/compliance/process_results.py \
   --go-mod deploy/snapshot/go.mod \
   --go-mod deploy/inference-gateway/epp/go.mod \
   --native-packages container/compliance/native_packages.yaml \
+  --license-overrides container/compliance/license_overrides.yaml \
   --attributions-dir <out> \
   --output <out>/attribution.csv \
   --lookup-licenses --dedupe

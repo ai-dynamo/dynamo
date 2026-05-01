@@ -216,6 +216,18 @@ def fetch_go_license(module: str, version: str) -> str:
     return " AND ".join(cleaned)
 
 
+def _strip_pep440_local(version: str) -> str:
+    """Drop the PEP 440 local-version segment (``+something``).
+
+    PyPI never publishes builds whose version contains a local segment, so
+    looking up ``flash-attn==2.7.4.post1+nv26.2.44259020`` always 404s even
+    though the upstream release ``2.7.4.post1`` is on PyPI with full license
+    metadata. Stripping after the ``+`` lets the upstream lookup succeed.
+    """
+    base, _, _local = version.partition("+")
+    return base
+
+
 def fetch_pypi_license(name: str, version: str) -> str:
     """Look up an SPDX license for a PyPI distribution.
 
@@ -227,6 +239,10 @@ def fetch_pypi_license(name: str, version: str) -> str:
          and SPDX-shaped (no spaces, all printable ASCII), since maintainers
          frequently dump the entire LICENSE file in here.
 
+    If the exact version is not on PyPI (404, common for ``+cu129``-style
+    local builds republished by NVIDIA), a single retry is made against the
+    PEP 440 base version before giving up.
+
     Returns ``"UNKNOWN"`` for any failure or unrecognized value.
     """
     if not name or not version:
@@ -237,7 +253,15 @@ def fetch_pypi_license(name: str, version: str) -> str:
     url = f"https://pypi.org/pypi/{safe_name}/{safe_version}/json"
     payload = _http_json(url)
     if not payload:
-        return "UNKNOWN"
+        base_version = _strip_pep440_local(version)
+        if base_version != version:
+            _throttle("pypi.org", _PYPI_THROTTLE_SECS)
+            safe_base = urllib.parse.quote(base_version, safe="")
+            payload = _http_json(
+                f"https://pypi.org/pypi/{safe_name}/{safe_base}/json"
+            )
+        if not payload:
+            return "UNKNOWN"
     info = payload.get("info") or {}
     expr = info.get("license_expression")
     if isinstance(expr, str) and expr.strip():

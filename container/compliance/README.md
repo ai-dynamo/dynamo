@@ -47,6 +47,7 @@ python3 container/compliance/process_results.py \
 |-----------|--------|
 | Rust | `https://crates.io/api/v1/crates/<name>/<version>` (SPDX expression in `version.license`) |
 | Go | `https://api.deps.dev/v3alpha/systems/go/packages/<module>/versions/<version>` (SPDX list in `licenses[]`) |
+| Python | `https://pypi.org/pypi/<name>/<version>/json` then `<name>/<base-version>/json` (drops PEP 440 `+local`), with a final `https://api.github.com/repos/<owner>/<repo>/license` fallback when PyPI metadata is empty. |
 
 Results are cached in a SQLite file (default `~/.cache/dynamo-compliance/license-lookup.sqlite`, override with `--license-cache <path>`). The cache is per-machine and intentionally not committed - it can always be rebuilt from the registries. After the first run, subsequent runs are instant and offline-safe; if the network is unreachable mid-run, unresolved entries fall back to `UNKNOWN` instead of failing the pipeline.
 
@@ -59,6 +60,24 @@ python3 container/compliance/process_results.py \
   --lookup-licenses --dedupe \
   --output /tmp/compliance-target/attribution.csv
 ```
+
+### Hand-curated license overrides
+
+`license_overrides.yaml` fills the residual gap: NVIDIA-proprietary packages (CUDA toolkit, Nsight, mlnx-dpdk) that have no public registry, OpenSSL where syft cannot parse the DEP-5 copyright file, and a small set of repackaged PyPI wheels (DeepSeek MoE kernels, openai-harmony, torchao, etc) whose PyPI metadata is empty and that do not link a license-bearing GitHub repo. Each entry maps `(ecosystem, name)` to a SPDX or `LicenseRef-*` identifier and cites the upstream LICENSE URL it was derived from.
+
+The overrides file is loaded by default. Disable with `--license-overrides ''`. When a row already has a non-`UNKNOWN` license from syft or `--lookup-licenses`, the override is skipped - so this only ever fills gaps, it never overrides upstream metadata.
+
+Adding a new entry:
+
+```yaml
+overrides:
+  - ecosystem: dpkg          # or python
+    name: cuda-libraries-12-9
+    license: LicenseRef-NVIDIA-Software-License-Agreement
+    source: "NVIDIA CUDA Toolkit EULA"
+```
+
+Match is by `(ecosystem, name)`, not version. Add the `source:` field as an audit trail - reviewers should be able to verify the license without re-deriving it.
 
 ## Native packages overlay
 

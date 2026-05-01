@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hand-curated SPDX licenses for packages whose metadata is unreachable
+# through the normal pipeline (syft + crates.io + deps.dev + PyPI + GitHub).
+#
+# Used by container/compliance/process_results.py via --license-overrides.
+# Match is by (ecosystem, name); version is informational. Adding an entry here
+# replaces UNKNOWN in the generated CSVs and ATTRIBUTIONS-*.md.
+#
+# Audit rule: every entry must cite either an upstream LICENSE file URL or the
+# NVIDIA software license that ships with the package. Do not guess.
+
+overrides:
+  # ---------------------------------------------------------------------------
+  # NVIDIA proprietary dpkg packages (CUDA toolkit components, Nsight CLIs).
+  # These ship under the NVIDIA Software License Agreement that the user
+  # accepts when they install the CUDA repository keyring. Not on the SPDX
+  # license list, so expressed as a LicenseRef-* identifier per SPDX spec.
+  # ---------------------------------------------------------------------------
+  - { ecosystem: dpkg, name: cuda-command-line-tools-12-9, license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-compiler-12-9,           license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-libraries-12-9,          license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-libraries-dev-12-9,      license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-minimal-build-12-9,      license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nsight-compute-12-9,     license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: nsight-systems-cli-2025.5.1,  license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA Nsight Systems EULA" }
+  - { ecosystem: dpkg, name: nsight-systems-cli-2026.1.1,  license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA Nsight Systems EULA" }
+
+  # NVIDIA-modified upstream package. Upstream DPDK is BSD-3-Clause for the
+  # core and GPL-2.0 for kernel modules; the mlnx-dpdk package follows the same.
+  - { ecosystem: dpkg, name: mlnx-dpdk, license: BSD-3-Clause AND GPL-2.0-only, source: "https://github.com/Mellanox/dpdk.org" }
+
+  # OpenSSL 3.0+ relicensed from a custom SSLeay/OpenSSL dual license to
+  # Apache-2.0. The Ubuntu copyright file makes this explicit but syft cannot
+  # parse the DEP-5 prose reliably.
+  - { ecosystem: dpkg, name: openssl, license: Apache-2.0, source: "https://www.openssl.org/source/license.html" }
+
+  # ---------------------------------------------------------------------------
+  # Python packages where PyPI metadata is empty or the package is not on PyPI.
+  # Verified by reading the upstream LICENSE in each repo; URL recorded for audit.
+  # ---------------------------------------------------------------------------
+  # NVIDIA cuda-toolkit Python wheel (re-distributes CUDA libraries).
+  - { ecosystem: python, name: cuda-toolkit, license: LicenseRef-NVIDIA-Software-License-Agreement, source: "NVIDIA CUDA Toolkit EULA" }
+
+  # NVIDIA CUTLASS family. CUTLASS itself is BSD-3-Clause.
+  - { ecosystem: python, name: cutlass-library,             license: BSD-3-Clause, source: "https://github.com/NVIDIA/cutlass/blob/main/LICENSE.txt" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl,          license: BSD-3-Clause, source: "https://github.com/NVIDIA/cutlass/blob/main/LICENSE.txt" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: BSD-3-Clause, source: "https://github.com/NVIDIA/cutlass/blob/main/LICENSE.txt" }
+
+  # Triton Inference Server perf_analyzer wheel.
+  - { ecosystem: python, name: perf-analyzer, license: BSD-3-Clause, source: "https://github.com/triton-inference-server/perf_analyzer/blob/main/LICENSE" }
+
+  # NVIDIA Triton dlpack helper.
+  - { ecosystem: python, name: torch-c-dlpack-ext, license: BSD-3-Clause, source: "Triton/PyTorch dlpack interop, BSD-3-Clause" }
+
+  # PyTorch family - upstream PyPI metadata is missing the classifier, but the
+  # repos ship BSD-3-Clause LICENSE files.
+  - { ecosystem: python, name: torchao,    license: BSD-3-Clause, source: "https://github.com/pytorch/ao/blob/main/LICENSE" }
+  - { ecosystem: python, name: torchaudio, license: BSD-2-Clause, source: "https://github.com/pytorch/audio/blob/main/LICENSE" }
+
+  # flash-attn ships with NVIDIA-rebuilt wheels using +nv local versions.
+  - { ecosystem: python, name: flash-attn, license: BSD-3-Clause, source: "https://github.com/Dao-AILab/flash-attention/blob/main/LICENSE" }
+
+  # Tri Dao quack-kernels - same BSD-3-Clause as the rest of his stack.
+  - { ecosystem: python, name: quack-kernels, license: BSD-3-Clause, source: "https://github.com/Dao-AILab/quack/blob/main/LICENSE" }
+
+  # DeepSeek MoE kernels. Both repos are MIT.
+  - { ecosystem: python, name: deep-ep,   license: MIT, source: "https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: deep-gemm, license: MIT, source: "https://github.com/deepseek-ai/DeepGEMM/blob/main/LICENSE" }
+
+  # OpenAI harmony tokenizer.
+  - { ecosystem: python, name: openai-harmony, license: Apache-2.0, source: "https://github.com/openai/harmony/blob/main/LICENSE" }

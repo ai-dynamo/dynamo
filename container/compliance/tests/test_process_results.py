@@ -263,6 +263,72 @@ def test_dedupe_flag_drops_duplicate_rows_in_csv(tmp_path: Path):
     assert b"pyyaml,6.0.1,python,MIT" in body
 
 
+def test_apply_overrides_to_csv_rewrites_unknown_rows(tmp_path: Path):
+    overrides = tmp_path / "license_overrides.yaml"
+    overrides.write_text(
+        "overrides:\n"
+        "  - {ecosystem: dpkg, name: openssl, license: Apache-2.0}\n"
+        "  - {ecosystem: python, name: torchao, license: BSD-3-Clause}\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {"package_name": "openssl", "version": "3.0.13", "type": "dpkg", "spdx_license": "UNKNOWN"},
+        {"package_name": "torchao", "version": "0.15.0", "type": "python", "spdx_license": "UNKNOWN"},
+        {"package_name": "torchao", "version": "0.16.0", "type": "python", "spdx_license": "MIT"},
+        {"package_name": "requests", "version": "2.31.0", "type": "python", "spdx_license": "UNKNOWN"},
+    ]
+    rewritten = pr._apply_overrides_to_csv(rows, str(overrides))
+    assert rewritten == 2
+    by_name = {(r["package_name"], r["version"]): r for r in rows}
+    assert by_name[("openssl", "3.0.13")]["spdx_license"] == "Apache-2.0"
+    assert by_name[("torchao", "0.15.0")]["spdx_license"] == "BSD-3-Clause"
+    assert by_name[("torchao", "0.16.0")]["spdx_license"] == "MIT"  # not overridden
+    assert by_name[("requests", "2.31.0")]["spdx_license"] == "UNKNOWN"  # no entry
+
+
+def test_apply_overrides_to_csv_handles_missing_yaml(tmp_path: Path):
+    rows = [{"package_name": "foo", "version": "1", "type": "dpkg", "spdx_license": "UNKNOWN"}]
+    assert pr._apply_overrides_to_csv(rows, str(tmp_path / "missing.yaml")) == 0
+    assert rows[0]["spdx_license"] == "UNKNOWN"
+
+
+def test_apply_overrides_to_csv_disabled_when_path_blank():
+    rows = [{"package_name": "foo", "version": "1", "type": "dpkg", "spdx_license": "UNKNOWN"}]
+    assert pr._apply_overrides_to_csv(rows, "") == 0
+
+
+def test_apply_overrides_to_pkgs_rewrites_markdown_schema(tmp_path: Path):
+    overrides = tmp_path / "license_overrides.yaml"
+    overrides.write_text(
+        "overrides:\n"
+        "  - {ecosystem: dpkg, name: cuda-libraries-12-9, license: LicenseRef-NVIDIA-Software-License-Agreement}\n",
+        encoding="utf-8",
+    )
+    pkgs = [
+        {"name": "cuda-libraries-12-9", "version": "12.9.1-1", "license": "UNKNOWN"},
+        {"name": "libfoo", "version": "1.0", "license": "Apache-2.0"},
+    ]
+    rewritten = pr._apply_overrides_to_pkgs(pkgs, "dpkg", str(overrides))
+    assert rewritten == 1
+    assert pkgs[0]["license"] == "LicenseRef-NVIDIA-Software-License-Agreement"
+    assert pkgs[1]["license"] == "Apache-2.0"
+
+
+def test_load_overrides_skips_blank_or_partial_rows(tmp_path: Path):
+    overrides = tmp_path / "license_overrides.yaml"
+    overrides.write_text(
+        "overrides:\n"
+        "  - {ecosystem: dpkg, name: openssl, license: Apache-2.0}\n"
+        "  - {ecosystem: dpkg, name: incomplete}\n"
+        "  - {name: missing-eco, license: MIT}\n"
+        "  - {ecosystem: python, name: '', license: GPL-2.0-only}\n",
+        encoding="utf-8",
+    )
+    pr._load_overrides.cache_clear()
+    overrides_map = pr._load_overrides(str(overrides))
+    assert overrides_map == {("dpkg", "openssl"): "Apache-2.0"}
+
+
 def test_attributions_dir_override(tmp_path: Path):
     src = tmp_path / "src"
     src.mkdir()

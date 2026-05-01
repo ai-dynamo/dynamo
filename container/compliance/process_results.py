@@ -127,6 +127,91 @@ def _resolve_python_csv_licenses(
         packages[i]["spdx_license"] = entry.get("license") or "UNKNOWN"
 
 
+@functools.lru_cache(maxsize=None)
+def _load_overrides(yaml_path: str) -> dict[tuple[str, str], str]:
+    """Load (ecosystem, name) -> SPDX license map from a hand-curated YAML.
+
+    Used to fill in licenses for packages that public registries cannot
+    resolve (NVIDIA-internal CUDA components, repackaged wheels with empty
+    PyPI metadata, OpenSSL's DEP-5 copyright file, etc). Missing or unreadable
+    YAML returns an empty map - the rest of the pipeline degrades to UNKNOWN
+    just as it did before.
+    """
+    if yaml is None or not yaml_path:
+        return {}
+    path = Path(yaml_path)
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:  # pragma: no cover - defensive
+        print(f"WARNING: failed to parse {yaml_path}: {exc}", file=sys.stderr)
+        return {}
+    out: dict[tuple[str, str], str] = {}
+    for entry in data.get("overrides", []) or []:
+        ecosystem = (entry.get("ecosystem") or "").strip().lower()
+        name = (entry.get("name") or "").strip()
+        license_id = (entry.get("license") or "").strip()
+        if ecosystem and name and license_id:
+            out[(ecosystem, name)] = license_id
+    return out
+
+
+def _apply_overrides_to_csv(
+    packages: list[dict[str, str]], overrides_path: str | None
+) -> int:
+    """Replace UNKNOWN ``spdx_license`` rows whose (type, name) is in the overrides.
+
+    Returns the count of rows that were rewritten so the caller can log it.
+    No-ops when the overrides YAML is missing or empty.
+    """
+    if not overrides_path:
+        return 0
+    overrides = _load_overrides(overrides_path)
+    if not overrides:
+        return 0
+    rewritten = 0
+    for pkg in packages:
+        if (pkg.get("spdx_license") or "UNKNOWN") != "UNKNOWN":
+            continue
+        key = (
+            (pkg.get("type") or "").strip().lower(),
+            (pkg.get("package_name") or "").strip(),
+        )
+        license_id = overrides.get(key)
+        if license_id:
+            pkg["spdx_license"] = license_id
+            rewritten += 1
+    return rewritten
+
+
+def _apply_overrides_to_pkgs(
+    pkgs: list[dict[str, Any]],
+    ecosystem: str,
+    overrides_path: str | None,
+) -> int:
+    """Replace UNKNOWN ``license`` entries in the markdown-writer schema.
+
+    Mirrors ``_apply_overrides_to_csv`` but for the ``{name, version, license}``
+    shape used by the ATTRIBUTIONS-*.md renderers.
+    """
+    if not overrides_path:
+        return 0
+    overrides = _load_overrides(overrides_path)
+    if not overrides:
+        return 0
+    rewritten = 0
+    for pkg in pkgs:
+        if (pkg.get("license") or "UNKNOWN") != "UNKNOWN":
+            continue
+        key = (ecosystem, (pkg.get("name") or "").strip())
+        license_id = overrides.get(key)
+        if license_id:
+            pkg["license"] = license_id
+            rewritten += 1
+    return rewritten
+
+
 def _dedupe_csv_rows(packages: list[dict[str, str]]) -> list[dict[str, str]]:
     """Collapse duplicate (package_name, version, type) rows from the CSV input.
 
@@ -389,12 +474,14 @@ def write_attributions_apt(
     out_path: Path,
     *,
     dedupe: bool = False,
+    overrides_path: str | None = None,
 ) -> int:
     if spdx is None:
         return 0
     pkgs = _iter_spdx_packages_by_purl(spdx, "deb")
     if dedupe:
         pkgs = _dedupe_packages(pkgs)
+    _apply_overrides_to_pkgs(pkgs, "dpkg", overrides_path)
     out_path.write_text(
         _render_attributions_md("Apt (Debian/Ubuntu)", pkgs), encoding="utf-8"
     )
@@ -406,6 +493,7 @@ def write_attributions_python(
     out_path: Path,
     *,
     dedupe: bool = False,
+    overrides_path: str | None = None,
 ) -> int:
     if spdx is None:
         return 0
@@ -416,6 +504,7 @@ def write_attributions_python(
     ]
     if dedupe:
         pkgs = _dedupe_packages(pkgs)
+    _apply_overrides_to_pkgs(pkgs, "python", overrides_path)
     out_path.write_text(
         _render_attributions_md("Python (PyPI)", pkgs), encoding="utf-8"
     )
@@ -594,7 +683,17 @@ Examples:
             "row with a non-UNKNOWN license."
         ),
     )
+    parser.add_argument(
+        "--license-overrides",
+        default=str(Path(__file__).resolve().parent / "license_overrides.yaml"),
+        help=(
+            "Path to a hand-curated YAML mapping (ecosystem, name) -> SPDX "
+            "license, applied to UNKNOWN rows after lookups. Use --license-overrides "
+            "'' to disable. Default: license_overrides.yaml alongside this script."
+        ),
+    )
     args = parser.parse_args()
+    overrides_path = args.license_overrides or None
 
     target_dir = Path(args.target_dir)
     if not target_dir.is_dir():
@@ -616,6 +715,14 @@ Examples:
         dropped = before - len(target_packages)
         if dropped:
             print(f"  dedupe: dropped {dropped} duplicate CSV rows", file=sys.stderr)
+
+    overrides_count = _apply_overrides_to_csv(target_packages, overrides_path)
+    if overrides_count:
+        print(
+            f"  overrides: rewrote {overrides_count} UNKNOWN rows from "
+            f"{overrides_path}",
+            file=sys.stderr,
+        )
 
     output_path = Path(args.output) if args.output else None
     write_csv(target_packages, output_path)
@@ -647,12 +754,16 @@ Examples:
     spdx = load_spdx(target_dir / "sbom.spdx.json")
 
     apt_count = write_attributions_apt(
-        spdx, attributions_dir / "ATTRIBUTIONS-Apt.md", dedupe=args.dedupe
+        spdx,
+        attributions_dir / "ATTRIBUTIONS-Apt.md",
+        dedupe=args.dedupe,
+        overrides_path=overrides_path,
     )
     py_count = write_attributions_python(
         spdx,
         attributions_dir / "ATTRIBUTIONS-Python.md",
         dedupe=args.dedupe,
+        overrides_path=overrides_path,
     )
     if spdx is None:
         print(

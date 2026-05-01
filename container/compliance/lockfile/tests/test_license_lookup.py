@@ -250,6 +250,40 @@ def test_fetch_pypi_license_strips_dot_git_suffix(
     assert not any("repo.git" in c for c in calls)
 
 
+def test_strip_pep440_local_drops_plus_segment() -> None:
+    assert license_lookup._strip_pep440_local("2.7.4.post1+nv26.2") == "2.7.4.post1"
+    assert license_lookup._strip_pep440_local("2.9.1+cu129") == "2.9.1"
+    assert license_lookup._strip_pep440_local("1.0.0") == "1.0.0"
+
+
+def test_fetch_pypi_license_retries_with_pep440_base_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 on a `+local` version must trigger a retry against the base."""
+    calls = _patch_http(
+        monkeypatch,
+        {
+            "/pypi/torchaudio/2.9.1/json": {
+                "info": {
+                    "classifiers": ["License :: OSI Approved :: BSD License"],
+                },
+            },
+        },
+    )
+    assert license_lookup.fetch_pypi_license("torchaudio", "2.9.1+cu129") == "BSD-3-Clause"
+    assert any("/pypi/torchaudio/2.9.1%2Bcu129/json" in c for c in calls)
+    assert any("/pypi/torchaudio/2.9.1/json" in c for c in calls)
+
+
+def test_fetch_pypi_license_does_not_retry_when_no_local_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain versions must only hit PyPI once even on a 404."""
+    calls = _patch_http(monkeypatch, {})
+    assert license_lookup.fetch_pypi_license("missing", "1.2.3") == "UNKNOWN"
+    assert sum(1 for c in calls if "/pypi/missing/" in c) == 1
+
+
 # ---------- resolve_licenses + cache ----------
 
 

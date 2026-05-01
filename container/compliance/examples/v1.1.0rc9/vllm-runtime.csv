@@ -16,14 +16,14 @@ cpp,4:13.2.0-7ubuntu1,dpkg,GPL-2.0-only
 cpp-13,13.3.0-6ubuntu2~24.04.1,dpkg,LicenseRef-Artistic AND GFDL-1.2-only AND LicenseRef-GPL AND GPL-2.0-only AND GPL-3.0-only AND LicenseRef-LGPL
 cpp-13-x86-64-linux-gnu,13.3.0-6ubuntu2~24.04.1,dpkg,LicenseRef-Artistic AND GFDL-1.2-only AND LicenseRef-GPL AND GPL-2.0-only AND GPL-3.0-only AND LicenseRef-LGPL
 cpp-x86-64-linux-gnu,4:13.2.0-7ubuntu1,dpkg,GPL-2.0-only
-cuda-command-line-tools-12-9,12.9.1-1,dpkg,UNKNOWN
+cuda-command-line-tools-12-9,12.9.1-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement
 cuda-compat-12-9,575.57.08-0ubuntu1,dpkg,GPL-2.0-only AND GPL-2.0-or-later AND MIT AND LicenseRef-NVIDIA-graphics-drivers AND Zlib
 cuda-cudart-12-9,12.9.79-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
 cuda-cuobjdump-12-9,12.9.82-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
 cuda-cupti-12-9,12.9.79-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
 cuda-cupti-dev-12-9,12.9.79-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
 cuda-gdb-12-9,12.9.79-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
-cuda-libraries-12-9,12.9.1-1,dpkg,UNKNOWN
+cuda-libraries-12-9,12.9.1-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement
 cuda-nvdisasm-12-9,12.9.88-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
 cuda-nvprof-12-9,12.9.79-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
 cuda-nvrtc-12-9,12.9.86-1,dpkg,LicenseRef-NVIDIA-Software-License-Agreement-and-CUDA-Supplement-to-Software-License-Agreement
@@ -224,7 +224,7 @@ ncurses-base,6.4+20240113-1ubuntu2,dpkg,BSD-3-Clause AND LicenseRef-MIT-X11 AND 
 ncurses-bin,6.4+20240113-1ubuntu2,dpkg,BSD-3-Clause AND LicenseRef-MIT-X11 AND X11
 netbase,6.4,dpkg,GPL-2.0-only
 ninja-build,1.11.1-2,dpkg,Apache-2.0 AND LicenseRef-other
-openssl,3.0.13-0ubuntu3.5,dpkg,UNKNOWN
+openssl,3.0.13-0ubuntu3.5,dpkg,Apache-2.0
 passwd,1:4.13+dfsg1-4ubuntu3.2,dpkg,BSD-3-Clause AND GPL-1.0-only AND GPL-2.0-only AND GPL-2.0-or-later AND LicenseRef-public-domain
 patch,2.7.6-7build3,dpkg,LicenseRef-GPL
 perl,5.38.2-3.2ubuntu0.2,dpkg,LicenseRef-Artistic AND Artistic-2.0 AND Artistic-dist AND BSD-3-Clause AND LicenseRef-BSD-3-clause-GENERIC AND LicenseRef-BSD-3-clause-with-weird-numbering AND LicenseRef-BSD-4-clause-POWERDOG AND LicenseRef-BZIP AND LicenseRef-DONT-CHANGE-THE-GPL AND LicenseRef-Expat AND FSFAP AND GPL-1.0-only AND GPL-1.0-or-later AND GPL-2.0-only AND GPL-2.0-or-later AND LicenseRef-GPL-3--WITH-BISON-EXCEPTION AND LGPL-2.1-only AND LicenseRef-REGCOMP AND LicenseRef-REGCOMP- AND LicenseRef-SDBM-PUBLIC-DOMAIN AND LicenseRef-TEXT-TABS AND LicenseRef-Unicode AND Zlib
@@ -548,7 +548,7 @@ cryptography,47.0.0,python,(Apache-2.0 OR BSD-3-Clause)
 cuda-bindings,12.9.4,python,LicenseRef-NVIDIA-SOFTWARE-LICENSE
 cuda-pathfinder,1.5.4,python,Apache-2.0
 cuda-python,12.9.4,python,LicenseRef-NVIDIA-SOFTWARE-LICENSE
-cuda-toolkit,13.0.2,python,UNKNOWN
+cuda-toolkit,13.0.2,python,LicenseRef-NVIDIA-Software-License-Agreement
 cufile-python,0.2.0,python,MIT
 cupy-cuda12x,14.0.1,python,MIT
 cycler,0.12.1,python,BSD-3-Clause
@@ -558,8 +558,8 @@ dash-bootstrap-components,2.0.4,python,Apache-2.0
 data-generator,0.1.0,python,Apache-2.0
 datasets,4.8.5,python,LicenseRef-Apache-2.0
 decorator,5.2.1,python,BSD-2-Clause
-deep-ep,1.2.1+73b6ea4,python,UNKNOWN
-deep-gemm,2.3.0+477618c,python,UNKNOWN
+deep-ep,1.2.1+73b6ea4,python,MIT
+deep-gemm,2.3.0+477618c,python,MIT
 depyf,0.20.0,python,MIT
 diffusers,0.37.1,python,LicenseRef-Apache-2.0-License
 dill,0.4.1,python,BSD-3-Clause
@@ -706,8 +706,8 @@ nvidia-cusparse,12.6.3.3,python,LicenseRef-NVIDIA-Proprietary
 nvidia-cusparse-cu12,12.5.10.65,python,LicenseRef-NVIDIA-Proprietary
 nvidia-cusparselt-cu12,0.7.1,python,LicenseRef-NVIDIA-Proprietary-Software
 nvidia-cusparselt-cu13,0.8.0,python,LicenseRef-NVIDIA-Proprietary-Software
-nvidia-cutlass-dsl,4.4.2,python,UNKNOWN
-nvidia-cutlass-dsl-libs-base,4.4.2,python,UNKNOWN
+nvidia-cutlass-dsl,4.4.2,python,BSD-3-Clause
+nvidia-cutlass-dsl-libs-base,4.4.2,python,BSD-3-Clause
 nvidia-ml-py,13.580.65,python,LicenseRef-BSD
 nvidia-nccl-cu12,2.27.5,python,BSD-3-Clause
 nvidia-nccl-cu13,2.28.9,python,LicenseRef-NVIDIA-Proprietary
@@ -722,7 +722,7 @@ oauthlib,3.3.1,python,BSD-3-Clause
 omegaconf,2.3.0,python,BSD-3-Clause
 onnxruntime,1.25.1,python,LicenseRef-MIT-License
 openai,2.33.0,python,Apache-2.0
-openai-harmony,0.0.8,python,UNKNOWN
+openai-harmony,0.0.8,python,Apache-2.0
 openai-whisper,20250625,python,MIT
 opencv-python-headless,4.13.0.92,python,LicenseRef-Apache-2.0
 opentelemetry-api,1.38.0,python,Apache-2.0
@@ -742,7 +742,7 @@ packaging,26.2,python,(Apache-2.0 OR BSD-2-Clause)
 pandas,2.3.3,python,LicenseRef-1efd6de77e03a0dc2652da8c425085e0284cc0e6eb17e64589643ed21ab0054f
 partial-json-parser,0.2.1.1.post7,python,MIT
 patsy,1.0.2,python,LicenseRef-2-clause-BSD
-perf-analyzer,2.60.0,python,UNKNOWN
+perf-analyzer,2.60.0,python,BSD-3-Clause
 pillow,12.1.1,python,MIT-CMU
 pip,26.1,python,MIT
 platformdirs,4.4.0,python,MIT
@@ -787,7 +787,7 @@ pytz,2026.1.post1,python,MIT
 pyyaml,6.0.1,python,MIT
 pyyaml,6.0.3,python,MIT
 pyzmq,26.4.0,python,BSD-3-Clause
-quack-kernels,0.4.0,python,UNKNOWN
+quack-kernels,0.4.0,python,BSD-3-Clause
 ray,2.55.0,python,LicenseRef-Apache-2.0
 redis,7.4.0,python,MIT
 referencing,0.37.0,python,MIT
@@ -850,7 +850,7 @@ tomlkit,0.13.3,python,MIT
 torch,2.10.0+cu129,python,BSD-3-Clause
 torch-c-dlpack-ext,0.1.5,python,Apache-2.0
 torch-einops-utils,0.0.30,python,MIT
-torchaudio,2.10.0+cu129,python,UNKNOWN
+torchaudio,2.10.0+cu129,python,BSD-2-Clause
 torchsde,0.2.6,python,Apache-2.0
 torchvision,0.25.0+cu129,python,LicenseRef-BSD
 tornado,6.5.5,python,Apache-2.0
