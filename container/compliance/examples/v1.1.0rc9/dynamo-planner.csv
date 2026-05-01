@@ -3,11 +3,11 @@ base-files,13.8+deb13u4,dpkg,LicenseRef-GPL AND GPL-2.0-or-later AND LicenseRef-
 gcc-14-base,14.2.0-19,dpkg,LicenseRef-Artistic AND GFDL-1.2-only AND LicenseRef-GPL AND GPL-3.0-only AND LicenseRef-LGPL
 libbz2-1.0,1.0.8-6,dpkg,LicenseRef-BSD-variant AND GPL-2.0-only
 libc6,2.41-12+deb13u2,dpkg,BSD-2-Clause AND LicenseRef-BSD-3-clause-Berkeley AND LicenseRef-BSD-3-clause-Carnegie AND LicenseRef-BSD-3-clause-Oracle AND LicenseRef-BSD-3-clause-WIDE AND LicenseRef-BSD-like-Spencer AND BSL-1.0 AND LicenseRef-CORE-MATH AND LicenseRef-Carnegie AND LicenseRef-DEC AND FSFAP AND GPL-2.0-only AND GPL-2.0-or-later AND LicenseRef-GPL-2--with-link-exception AND GPL-3.0-only AND GPL-3.0-or-later AND LicenseRef-IBM AND ISC AND LicenseRef-Inner-Net AND LGPL-2.0-only AND LGPL-2.0-or-later AND LGPL-2.1-only AND LGPL-2.1-or-later AND LicenseRef-LGPL-2.1--with-link-exception AND LGPL-3.0-only AND LGPL-3.0-or-later AND LicenseRef-MIT-like-Lord AND LicenseRef-PCRE AND SunPro AND Unicode-DFS-2016 AND LicenseRef-Univ-Coimbra AND LicenseRef-public-domain
-libcom-err2,1.47.2-3+b10,dpkg,0BSD AND Apache-2.0 AND Apache-2.0 AND BSD-3-Clause AND LicenseRef-BSD-3-Clause-Variant AND LicenseRef-BSD-4-Clause-CMU AND LicenseRef-Expat AND LicenseRef-GPL AND GPL-2.0-only AND GPL-2.0-or-later AND ISC AND Kazlib AND LGPL-2.0-only AND Latex2e
+libcom-err2,1.47.2-3+b10,dpkg,0BSD AND Apache-2.0 AND Apache-2.0 AND BSD-3-Clause AND LicenseRef-BSD-3-Clause-Variant AND LicenseRef-BSD-4-Clause-CMU AND MIT AND LicenseRef-GPL AND GPL-2.0-only AND GPL-2.0-or-later AND ISC AND Kazlib AND LGPL-2.0-only AND Latex2e
 libcrypt1,1:4.4.38-1,dpkg,LicenseRef-5a5e7ca0e9f3f9679977e3a3e9ede45ad92885a3297ea78e766979f9866c5a16
 libdb5.3t64,5.3.28+dfsg2-9,dpkg,LicenseRef-Artistic AND BSD-3-Clause AND LicenseRef-BSD-3-clause-fjord AND LicenseRef-GPL AND GPL-3.0-only AND LicenseRef-MIT-old AND MS-PL AND Sleepycat AND LicenseRef-TCL-like AND X11 AND Zlib
 libexpat1,2.7.1-2,dpkg,MIT
-libffi8,3.4.8-2,dpkg,LicenseRef-Expat AND LicenseRef-GPL AND GPL-2.0-or-later AND GPL-3.0-or-later AND MPL-1.1 AND X11 AND LicenseRef-public-domain
+libffi8,3.4.8-2,dpkg,MIT AND LicenseRef-GPL AND GPL-2.0-or-later AND GPL-3.0-or-later AND MPL-1.1 AND X11 AND LicenseRef-public-domain
 libgcc-s1,14.2.0-19,dpkg,LicenseRef-Artistic AND GFDL-1.2-only AND LicenseRef-GPL AND GPL-3.0-only AND LicenseRef-LGPL
 libgomp1,14.2.0-19,dpkg,LicenseRef-Artistic AND GFDL-1.2-only AND LicenseRef-GPL AND GPL-3.0-only AND LicenseRef-LGPL
 libgssapi-krb5-2,1.21.3-5,dpkg,GPL-2.0-only
@@ -24,8 +24,8 @@ libssl3t64,3.5.5-1~deb13u1,dpkg,Apache-2.0 AND LicenseRef-Artistic AND GPL-1.0-o
 libstdc++6,14.2.0-19,dpkg,LicenseRef-Artistic AND GFDL-1.2-only AND LicenseRef-GPL AND GPL-3.0-only AND LicenseRef-LGPL
 libtinfo6,6.5+20250216-2,dpkg,BSD-3-Clause AND LicenseRef-MIT-X11 AND X11
 libtirpc3t64,1.3.6+ds-1,dpkg,BSD-3-Clause AND GPL-2.0-only AND LGPL-2.1-only
-libuuid1,2.41-5,dpkg,BSD-2-Clause AND BSD-3-Clause AND BSD-4-Clause AND LicenseRef-BSLA AND LicenseRef-Expat AND GPL-2.0-only AND GPL-2.0-or-later AND GPL-3.0-only AND GPL-3.0-or-later AND ISC AND LicenseRef-LGPL AND LGPL-2.0-only AND LGPL-2.0-or-later AND LGPL-2.1-only AND LGPL-2.1-or-later AND LGPL-3.0-only AND LGPL-3.0-or-later AND LicenseRef-public-domain
-libzstd1,1.5.7+dfsg-1,dpkg,BSD-3-Clause AND LicenseRef-Expat AND GPL-2.0-only AND Zlib
+libuuid1,2.41-5,dpkg,BSD-2-Clause AND BSD-3-Clause AND BSD-4-Clause AND LicenseRef-BSLA AND MIT AND GPL-2.0-only AND GPL-2.0-or-later AND GPL-3.0-only AND GPL-3.0-or-later AND ISC AND LicenseRef-LGPL AND LGPL-2.0-only AND LGPL-2.0-or-later AND LGPL-2.1-only AND LGPL-2.1-or-later AND LGPL-3.0-only AND LGPL-3.0-or-later AND LicenseRef-public-domain
+libzstd1,1.5.7+dfsg-1,dpkg,BSD-3-Clause AND MIT AND GPL-2.0-only AND Zlib
 media-types,13.0.0,dpkg,LicenseRef-ad-hoc
 netbase,6.5,dpkg,GPL-2.0-only
 openssl-provider-fips,3.5.5-1~deb13u1,dpkg,Apache-2.0 AND LicenseRef-Artistic AND GPL-1.0-only AND GPL-1.0-or-later
@@ -35,6 +35,9 @@ cel.dev/expr,v0.25.1,go,Apache-2.0
 emperror.dev/errors,v0.8.1,go,MIT
 github.com/AdaLogics/go-fuzz-headers,v0.0.0-20230811130428-ced1acdcaa24,go,Apache-2.0
 github.com/AdamKorcz/go-118-fuzz-build,v0.0.0-20230306123547-8075edf89bb0,go,Apache-2.0
+github.com/Masterminds/semver/v3,v3.4.0,go,MIT
+github.com/Microsoft/go-winio,v0.6.2,go,MIT
+github.com/Microsoft/hcsshim,v0.11.7,go,MIT AND Apache-2.0
 github.com/ai-dynamo/grove/operator/api,v0.1.0-alpha.8,go,Apache-2.0
 github.com/antlr4-go/antlr/v4,v4.13.0,go,BSD-3-Clause
 github.com/antlr4-go/antlr/v4,v4.13.1,go,BSD-3-Clause
@@ -118,9 +121,6 @@ github.com/json-iterator/go,v1.1.12,go,MIT
 github.com/klauspost/compress,v1.18.0,go,BSD-3-Clause AND Apache-2.0 AND MIT
 github.com/mailru/easyjson,v0.7.7,go,MIT
 github.com/mailru/easyjson,v0.9.0,go,MIT
-github.com/Masterminds/semver/v3,v3.4.0,go,MIT
-github.com/Microsoft/go-winio,v0.6.2,go,MIT
-github.com/Microsoft/hcsshim,v0.11.7,go,MIT AND Apache-2.0
 github.com/moby/locker,v1.0.1,go,Apache-2.0
 github.com/moby/sys/mountinfo,v0.7.1,go,Apache-2.0
 github.com/moby/sys/sequential,v0.5.0,go,Apache-2.0
@@ -257,6 +257,7 @@ sigs.k8s.io/structured-merge-diff/v6,v6.3.1,go,Apache-2.0
 sigs.k8s.io/structured-merge-diff/v6,v6.3.2,go,Apache-2.0
 sigs.k8s.io/yaml,v1.6.0,go,MIT AND BSD-3-Clause AND Apache-2.0
 volcano.sh/apis,v1.12.2,go,Apache-2.0
+LMCache,,native,Apache-2.0
 aws-sdk-cpp,,native,Apache-2.0
 criu,,native,GPL-2.0-only
 cuda-checkpoint,,native,NVIDIA-Software-License
@@ -266,18 +267,15 @@ gdrcopy,,native,MIT
 intel-oneCCL,,native,Apache-2.0
 libcriu,,native,LGPL-2.1-only
 libfabric,,native,BSD-2-Clause OR GPL-2.0-only
-LMCache,,native,Apache-2.0
 nixl,,native,Apache-2.0
 ucx,,native,BSD-3-Clause
 vllm,,native,Apache-2.0
 vllm-omni,,native,Apache-2.0
-ai-dynamo,1.1.0,python,Apache-2.0
-ai-dynamo-runtime,1.1.0,python,Apache-2.0
 aiconfigurator,0.8.0,python,Apache-2.0
 aiofiles,24.1.0,python,Apache-2.0
 aiohappyeyeballs,2.6.1,python,PSF-2.0
 aiohttp,3.13.5,python,(Apache-2.0 AND MIT)
-aiosignal,1.4.0,python,LicenseRef-Apache-2.0
+aiosignal,1.4.0,python,Apache-2.0
 annotated-doc,0.0.4,python,MIT
 annotated-types,0.7.0,python,MIT
 anyio,4.13.0,python,MIT
@@ -304,7 +302,7 @@ filterpy,1.4.5,python,MIT
 fonttools,4.62.1,python,MIT
 frozenlist,1.8.0,python,Apache-2.0
 fsspec,2026.4.0,python,BSD-3-Clause
-google-auth,2.49.2,python,LicenseRef-Apache-2.0
+google-auth,2.49.2,python,Apache-2.0
 gradio,6.8.0,python,Apache-2.0
 gradio-client,2.2.0,python,Apache-2.0
 groovy,0.1.2,python,MIT
@@ -324,8 +322,8 @@ jaraco-text,4.0.0,python,MIT
 jinja2,3.1.6,python,BSD-3-Clause
 joblib,1.5.3,python,BSD-3-Clause
 kiwisolver,1.5.0,python,LicenseRef-4e89b2eeb82ea10ec61119c814f2ca0bbccdc22b72d0eb4f5542ef08f6a73ed2
-kubernetes,32.0.1,python,LicenseRef-Apache-License-Version-2.0
-kubernetes-asyncio,32.0.0,python,LicenseRef-Apache-License-Version-2.0
+kubernetes,32.0.1,python,Apache-2.0
+kubernetes-asyncio,32.0.0,python,Apache-2.0
 markdown-it-py,4.0.0,python,MIT
 markupsafe,3.0.3,python,BSD-3-Clause
 matplotlib,3.10.9,python,LicenseRef-3cb2c7aa8ec1f91fe59071d47f0d875cd1381b51d1cbf3ec8e225168c552597a
@@ -333,7 +331,7 @@ mdurl,0.1.2,python,MIT
 more-itertools,10.8.0,python,MIT
 msgpack,1.1.2,python,Apache-2.0
 msgspec,0.21.1,python,BSD-3-Clause
-multidict,6.7.1,python,LicenseRef-Apache-License-2.0
+multidict,6.7.1,python,Apache-2.0
 munch,4.0.0,python,MIT
 narwhals,2.20.0,python,MIT
 numpy,1.26.4,python,BSD-3-Clause
@@ -388,14 +386,14 @@ tomli,2.4.0,python,MIT
 tomlkit,0.13.3,python,MIT
 tornado,6.5.5,python,Apache-2.0
 tqdm,4.67.3,python,(MPL-2.0 AND MIT)
-transformers,5.7.0,python,LicenseRef-Apache-2.0-License
+transformers,5.7.0,python,Apache-2.0
 typer,0.25.0,python,MIT
 typing-extensions,4.15.0,python,PSF-2.0
 typing-inspection,0.4.2,python,MIT
 tzlocal,5.3.1,python,MIT
 urllib3,2.6.3,python,MIT
 uvicorn,0.46.0,python,BSD-3-Clause
-uvloop,0.22.1,python,LicenseRef-MIT-License
+uvloop,0.22.1,python,MIT
 wcwidth,0.6.0,python,MIT
 websocket-client,1.9.0,python,Apache-2.0
 wheel,0.46.3,python,MIT

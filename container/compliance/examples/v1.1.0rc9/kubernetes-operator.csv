@@ -2,7 +2,7 @@ package_name,version,type,spdx_license
 base-files,13.8+deb13u4,dpkg,LicenseRef-GPL AND GPL-2.0-or-later AND LicenseRef-verbatim
 libc6,2.41-12+deb13u2,dpkg,BSD-2-Clause AND LicenseRef-BSD-3-clause-Berkeley AND LicenseRef-BSD-3-clause-Carnegie AND LicenseRef-BSD-3-clause-Oracle AND LicenseRef-BSD-3-clause-WIDE AND LicenseRef-BSD-like-Spencer AND BSL-1.0 AND LicenseRef-CORE-MATH AND LicenseRef-Carnegie AND LicenseRef-DEC AND FSFAP AND GPL-2.0-only AND GPL-2.0-or-later AND LicenseRef-GPL-2--with-link-exception AND GPL-3.0-only AND GPL-3.0-or-later AND LicenseRef-IBM AND ISC AND LicenseRef-Inner-Net AND LGPL-2.0-only AND LGPL-2.0-or-later AND LGPL-2.1-only AND LGPL-2.1-or-later AND LicenseRef-LGPL-2.1--with-link-exception AND LGPL-3.0-only AND LGPL-3.0-or-later AND LicenseRef-MIT-like-Lord AND LicenseRef-PCRE AND SunPro AND Unicode-DFS-2016 AND LicenseRef-Univ-Coimbra AND LicenseRef-public-domain
 libssl3t64,3.5.5-1~deb13u1,dpkg,Apache-2.0 AND LicenseRef-Artistic AND GPL-1.0-only AND GPL-1.0-or-later
-libzstd1,1.5.7+dfsg-1,dpkg,BSD-3-Clause AND LicenseRef-Expat AND GPL-2.0-only AND Zlib
+libzstd1,1.5.7+dfsg-1,dpkg,BSD-3-Clause AND MIT AND GPL-2.0-only AND Zlib
 media-types,13.0.0,dpkg,LicenseRef-ad-hoc
 netbase,6.5,dpkg,GPL-2.0-only
 openssl-provider-fips,3.5.5-1~deb13u1,dpkg,Apache-2.0 AND LicenseRef-Artistic AND GPL-1.0-only AND GPL-1.0-or-later
@@ -12,6 +12,9 @@ cel.dev/expr,v0.25.1,go,Apache-2.0
 emperror.dev/errors,v0.8.1,go,MIT
 github.com/AdaLogics/go-fuzz-headers,v0.0.0-20230811130428-ced1acdcaa24,go,Apache-2.0
 github.com/AdamKorcz/go-118-fuzz-build,v0.0.0-20230306123547-8075edf89bb0,go,Apache-2.0
+github.com/Masterminds/semver/v3,v3.4.0,go,MIT
+github.com/Microsoft/go-winio,v0.6.2,go,MIT
+github.com/Microsoft/hcsshim,v0.11.7,go,MIT AND Apache-2.0
 github.com/ai-dynamo/grove/operator/api,v0.1.0-alpha.8,go,Apache-2.0
 github.com/antlr4-go/antlr/v4,v4.13.0,go,BSD-3-Clause
 github.com/antlr4-go/antlr/v4,v4.13.1,go,BSD-3-Clause
@@ -95,9 +98,6 @@ github.com/json-iterator/go,v1.1.12,go,MIT
 github.com/klauspost/compress,v1.18.0,go,BSD-3-Clause AND Apache-2.0 AND MIT
 github.com/mailru/easyjson,v0.7.7,go,MIT
 github.com/mailru/easyjson,v0.9.0,go,MIT
-github.com/Masterminds/semver/v3,v3.4.0,go,MIT
-github.com/Microsoft/go-winio,v0.6.2,go,MIT
-github.com/Microsoft/hcsshim,v0.11.7,go,MIT AND Apache-2.0
 github.com/moby/locker,v1.0.1,go,Apache-2.0
 github.com/moby/sys/mountinfo,v0.7.1,go,Apache-2.0
 github.com/moby/sys/sequential,v0.5.0,go,Apache-2.0
@@ -234,6 +234,7 @@ sigs.k8s.io/structured-merge-diff/v6,v6.3.1,go,Apache-2.0
 sigs.k8s.io/structured-merge-diff/v6,v6.3.2,go,Apache-2.0
 sigs.k8s.io/yaml,v1.6.0,go,MIT AND BSD-3-Clause AND Apache-2.0
 volcano.sh/apis,v1.12.2,go,Apache-2.0
+LMCache,,native,Apache-2.0
 aws-sdk-cpp,,native,Apache-2.0
 criu,,native,GPL-2.0-only
 cuda-checkpoint,,native,NVIDIA-Software-License
@@ -243,7 +244,6 @@ gdrcopy,,native,MIT
 intel-oneCCL,,native,Apache-2.0
 libcriu,,native,LGPL-2.1-only
 libfabric,,native,BSD-2-Clause OR GPL-2.0-only
-LMCache,,native,Apache-2.0
 nixl,,native,Apache-2.0
 ucx,,native,BSD-3-Clause
 vllm,,native,Apache-2.0
