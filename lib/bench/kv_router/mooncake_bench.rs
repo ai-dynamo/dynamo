@@ -68,6 +68,23 @@ enum IndexerArgs {
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
     },
+
+    /// Anchor-aware branch-sharded CRTC: bounded routing trie with structural
+    /// anchors for depth-boundary suffixes. Exact KV-event replay only;
+    /// approximate pruning is unsupported.
+    AnchorAwareBranchShardedCrtc {
+        /// Number of independent CRTC shards.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of OS event-worker threads per shard.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Maximum routing-trie depth before dispatching to one shard.
+        #[clap(long, default_value = "2")]
+        prefix_depth: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -93,6 +110,15 @@ impl IndexerArgs {
                 *num_event_workers_per_shard,
                 *prefix_depth,
             ),
+            IndexerArgs::AnchorAwareBranchShardedCrtc {
+                num_shards,
+                num_event_workers_per_shard,
+                prefix_depth,
+            } => MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(
+                *num_shards,
+                *num_event_workers_per_shard,
+                *prefix_depth,
+            ),
         }
     }
 }
@@ -110,13 +136,15 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed.
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
+    /// anchor-aware-branch-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
     /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed).
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
+    /// anchor-aware-branch-sharded-crtc).
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,

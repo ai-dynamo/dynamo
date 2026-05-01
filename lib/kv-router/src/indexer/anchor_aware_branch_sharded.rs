@@ -6,7 +6,7 @@
 //! This is an opt-in alternative to [`super::BranchShardedIndexer`]. The
 //! existing branch-sharded indexer keeps its flat branch-key routing semantics;
 //! this type owns a bounded routing prefix tree that can answer shallow drained
-//! reads and route divergent suffixes through explicit backend anchors.
+//! reads and route depth-boundary suffixes through explicit backend anchors.
 
 use std::sync::{
     Arc, Mutex,
@@ -36,7 +36,6 @@ struct RoutingNode {
     children: DashMap<LocalBlockHash, Arc<RoutingNode>, FxBuildHasher>,
     create_lock: Mutex<()>,
     live_workers: DashSet<WorkerWithDpRank, FxBuildHasher>,
-    anchor: Option<AnchorRef>,
 }
 
 impl RoutingNode {
@@ -49,7 +48,6 @@ impl RoutingNode {
             children: DashMap::with_hasher(FxBuildHasher),
             create_lock: Mutex::new(()),
             live_workers: DashSet::with_hasher(FxBuildHasher),
-            anchor: None,
         }
     }
 
@@ -58,7 +56,6 @@ impl RoutingNode {
         external_hash: ExternalSequenceBlockHash,
         depth: usize,
         shard: usize,
-        anchor: Option<AnchorRef>,
     ) -> Self {
         Self {
             key: Some(key),
@@ -68,7 +65,6 @@ impl RoutingNode {
             children: DashMap::with_hasher(FxBuildHasher),
             create_lock: Mutex::new(()),
             live_workers: DashSet::with_hasher(FxBuildHasher),
-            anchor,
         }
     }
 
@@ -81,6 +77,7 @@ impl RoutingNode {
 struct BlockRoutingEntry {
     shard_idx: usize,
     routing_node: Arc<RoutingNode>,
+    sequence_depth: usize,
     affects_router_node: bool,
 }
 
@@ -89,6 +86,7 @@ struct StoreRouteDecision {
     anchor: Option<AnchorRef>,
     anchor_block_offset: usize,
     rewrite_for_anchor: bool,
+    skip_backend: bool,
 }
 
 struct BranchShardedCounters {
@@ -233,18 +231,12 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         } else {
             self.least_loaded_shard()
         };
-        let anchor = if shard != parent_shard {
-            self.anchor_for_parent(parent)
-        } else {
-            parent.anchor
-        };
 
         let child = Arc::new(RoutingNode::new(
             block.tokens_hash,
             block.block_hash,
             parent.depth + 1,
             shard,
-            anchor,
         ));
         parent.children.insert(block.tokens_hash, child.clone());
         self.shard_prefix_node_counts[shard].fetch_add(1, Ordering::Relaxed);
@@ -266,7 +258,6 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         store_data: &KvCacheStoreData,
     ) -> StoreRouteDecision {
         let mut start_depth = 0usize;
-        let mut parent_entry_shard = None;
         let mut node = self.root.clone();
 
         let parent_entry = store_data.parent_hash.and_then(|parent_hash| {
@@ -276,27 +267,27 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         });
         if let Some(entry) = parent_entry {
             node = entry.routing_node.clone();
-            start_depth = node.depth;
-            parent_entry_shard = Some(entry.shard_idx);
+            start_depth = entry.sequence_depth;
         }
 
         let lookup = self.worker_lookup(worker);
-        let mut last_prefix_node = node.clone();
 
-        for block in &store_data.blocks {
+        for (offset, block) in store_data.blocks.iter().enumerate() {
+            let sequence_depth = start_depth + offset + 1;
             if node.depth < self.max_routing_depth {
                 node = self.get_or_create_child(&node, block);
                 node.live_workers.insert(worker);
                 lookup.entry(block.block_hash).or_insert(BlockRoutingEntry {
                     shard_idx: node.shard(),
                     routing_node: node.clone(),
+                    sequence_depth,
                     affects_router_node: true,
                 });
-                last_prefix_node = node.clone();
             } else {
                 lookup.entry(block.block_hash).or_insert(BlockRoutingEntry {
                     shard_idx: node.shard(),
                     routing_node: node.clone(),
+                    sequence_depth,
                     affects_router_node: false,
                 });
             }
@@ -306,64 +297,76 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         let shard_idx = node.shard();
         self.shard_write_counts[shard_idx].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
 
-        let anchor = last_prefix_node.anchor;
-        let rewrite_for_anchor = anchor.is_some()
-            && match parent_entry_shard {
-                Some(parent_shard) => parent_shard != shard_idx,
-                None => true,
-            };
-        let anchor_block_offset = anchor
-            .map(|a| a.anchor_depth.saturating_sub(start_depth))
-            .unwrap_or(0);
+        let router_owned_blocks = self
+            .max_routing_depth
+            .saturating_sub(start_depth)
+            .min(store_data.blocks.len());
+        let needs_boundary_anchor =
+            start_depth <= self.max_routing_depth && router_owned_blocks < store_data.blocks.len();
+        let anchor = needs_boundary_anchor
+            .then(|| self.anchor_for_parent(&node))
+            .flatten();
+        let (anchor_block_offset, rewrite_for_anchor) = if anchor.is_some() {
+            (router_owned_blocks, true)
+        } else {
+            (0, false)
+        };
+        let skip_backend =
+            start_depth <= self.max_routing_depth && router_owned_blocks >= store_data.blocks.len();
 
         StoreRouteDecision {
             shard_idx,
             anchor,
             anchor_block_offset,
             rewrite_for_anchor,
+            skip_backend,
         }
     }
 
-    fn scores_from_router_node(&self, node: &RoutingNode, depth: usize) -> OverlapScores {
-        let mut scores = OverlapScores::new();
+    fn add_router_node_scores(&self, scores: &mut OverlapScores, node: &RoutingNode, depth: usize) {
         let score = depth as u32;
         for worker in node.live_workers.iter() {
-            scores.scores.insert(*worker, score);
+            let entry = scores.scores.entry(*worker).or_insert(0);
+            *entry = (*entry).max(score);
         }
-        scores
     }
 
     async fn dispatch_read(
         &self,
         node: Arc<RoutingNode>,
         sequence: Vec<LocalBlockHash>,
+        mut scores: OverlapScores,
     ) -> Result<OverlapScores, KvRouterError> {
         if node.live_workers.is_empty() {
-            return Ok(OverlapScores::new());
+            return Ok(scores);
         }
         let shard_idx = node.shard();
         self.metrics
             .counters
             .shard_dispatches
             .fetch_add(1, Ordering::Relaxed);
-        let mut scores = if let Some(anchor) = node.anchor {
-            let suffix = if anchor.anchor_depth <= sequence.len() {
-                &sequence[anchor.anchor_depth..]
-            } else {
-                &[]
-            };
-            self.shards[shard_idx]
-                .backend()
-                .find_matches_from_anchor(anchor, suffix)?
-        } else {
-            self.shards[shard_idx].find_matches(sequence).await?
+        let Some(anchor) = self.anchor_for_parent(&node) else {
+            return Ok(scores);
         };
-        scores
-            .scores
-            .retain(|worker, _| node.live_workers.contains(worker));
-        scores
+        let suffix = if anchor.anchor_depth <= sequence.len() {
+            &sequence[anchor.anchor_depth..]
+        } else {
+            &[]
+        };
+        let mut shard_scores = self.shards[shard_idx]
+            .backend()
+            .find_matches_from_anchor(anchor, suffix)?;
+        for (worker, shard_score) in shard_scores.scores.drain() {
+            if !node.live_workers.contains(&worker) {
+                continue;
+            }
+            let entry = scores.scores.entry(worker).or_insert(0);
+            *entry = (*entry).max(shard_score);
+        }
+        shard_scores
             .tree_sizes
             .retain(|worker, _| node.live_workers.contains(worker));
+        scores.tree_sizes.extend(shard_scores.tree_sizes);
         Ok(scores)
     }
 
@@ -485,6 +488,10 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let decision = self.route_stored(worker, store_data);
 
+        if decision.skip_backend {
+            return;
+        }
+
         if decision.rewrite_for_anchor
             && let Some(anchor) = decision.anchor
         {
@@ -591,6 +598,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
 
         let mut node = self.root.clone();
         let mut depth = 0usize;
+        let mut router_scores = OverlapScores::new();
 
         for hash in &sequence {
             if depth == self.max_routing_depth {
@@ -598,7 +606,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                 let routing_ns = t_routing.elapsed().as_nanos() as u64;
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
-                let result = self.dispatch_read(node, sequence).await;
+                let result = self.dispatch_read(node, sequence, router_scores).await;
                 #[cfg(feature = "bench")]
                 {
                     self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
@@ -619,13 +627,21 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                 Some(child) => {
                     node = child;
                     depth += 1;
+                    self.add_router_node_scores(&mut router_scores, &node, depth);
+                    if node.live_workers.is_empty() {
+                        self.metrics
+                            .counters
+                            .shallow_returns
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(router_scores);
+                    }
                 }
                 None => {
                     self.metrics
                         .counters
                         .shallow_returns
                         .fetch_add(1, Ordering::Relaxed);
-                    return Ok(self.scores_from_router_node(&node, depth));
+                    return Ok(router_scores);
                 }
             }
         }
@@ -634,7 +650,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
             .counters
             .shallow_returns
             .fetch_add(1, Ordering::Relaxed);
-        Ok(self.scores_from_router_node(&node, depth))
+        Ok(router_scores)
     }
 
     async fn find_matches_for_request(
@@ -865,6 +881,32 @@ mod tests {
         )
     }
 
+    fn store_event_with_parent(
+        worker_id: u64,
+        parent_values: &[u64],
+        suffix_values: &[u64],
+    ) -> RouterEvent {
+        let parent_hashes = compute_seq_hash_for_block(&local_hashes(parent_values));
+        let parent_hash = parent_hashes.last().copied().map(ExternalSequenceBlockHash);
+        let mut full_values = parent_values.to_vec();
+        full_values.extend_from_slice(suffix_values);
+        let full_hashes = local_hashes(&full_values);
+        let seq_hashes = compute_seq_hash_for_block(&full_hashes);
+        let suffix_hashes = local_hashes(suffix_values);
+        let suffix_seq_hashes = &seq_hashes[parent_values.len()..];
+
+        router_event(
+            worker_id,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash,
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(&suffix_hashes, suffix_seq_hashes),
+            }),
+        )
+    }
+
     fn remove_hash_event(
         worker_id: u64,
         dp_rank: u32,
@@ -1015,7 +1057,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn depth_dispatch_uses_anchor_for_divergent_suffix() {
+    async fn prefix_only_parent_continuations_stay_router_only() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1])).await;
+        index
+            .apply_event(store_event_with_parent(0, &[1], &[2]))
+            .await;
+        index
+            .apply_event(store_event_with_parent(0, &[1, 2], &[3]))
+            .await;
+        index.flush().await;
+
+        let scores = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
+        let backend_blocks: usize = index
+            .shards
+            .iter()
+            .map(|shard| shard.backend().block_count())
+            .sum();
+
+        assert_eq!(score(&scores, worker(0)), Some(3));
+        assert_eq!(
+            index
+                .metrics
+                .counters
+                .anchor_installs
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(backend_blocks, 0);
+    }
+
+    #[tokio::test]
+    async fn depth_dispatch_uses_boundary_anchor_for_divergent_suffix() {
         let index = make_indexer(2, 3);
         index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
         index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
@@ -1033,7 +1106,7 @@ mod tests {
                 .counters
                 .anchor_installs
                 .load(Ordering::Relaxed),
-            1
+            2
         );
         assert_eq!(
             index
@@ -1053,7 +1126,8 @@ mod tests {
             .find_matches(local_hashes(&[1, 2, 5, 6]))
             .await
             .unwrap();
-        assert!(scores_after_remove.scores.is_empty());
+        assert_eq!(score(&scores_after_remove, worker(0)), Some(2));
+        assert_eq!(score(&scores_after_remove, worker(1)), Some(2));
     }
 
     #[tokio::test]
@@ -1065,12 +1139,14 @@ mod tests {
 
         let b = child(&child(&index.root, 1), 2);
         let e = child(&b, 5);
-        let anchor = e.anchor.expect("divergent child should have an anchor");
+        let anchor = index
+            .anchor_for_parent(&e)
+            .expect("expected boundary anchor");
         let shard_idx = e.shard();
 
         let full = local_hashes(&[1, 2, 5, 7]);
         let seq_hashes = compute_seq_hash_for_block(&full);
-        let suffix_blocks = stored_blocks_with_sequence_hashes(&full[2..], &seq_hashes[2..]);
+        let suffix_blocks = stored_blocks_with_sequence_hashes(&full[3..], &seq_hashes[3..]);
         let direct_worker_event = router_event(
             2,
             0,
@@ -1089,7 +1165,7 @@ mod tests {
 
         let scores = index.shards[shard_idx]
             .backend()
-            .find_matches_from_anchor(anchor, &local_hashes(&[5, 7]))
+            .find_matches_from_anchor(anchor, &local_hashes(&[7]))
             .unwrap();
         assert_eq!(score(&scores, worker(2)), Some(4));
     }
@@ -1124,14 +1200,14 @@ mod tests {
         assert_eq!(b.children.len(), 2);
         assert_eq!(e.shard(), 1);
         assert_eq!(e.live_workers.len(), worker_count);
-        assert_eq!(index.installed_worker_anchors.len(), worker_count);
+        assert_eq!(index.installed_worker_anchors.len(), worker_count + 1);
         assert_eq!(
             index
                 .metrics
                 .counters
                 .anchor_installs
                 .load(Ordering::Relaxed),
-            worker_count as u64
+            worker_count as u64 + 1
         );
 
         let scores = index
@@ -1159,11 +1235,45 @@ mod tests {
             .find_matches(local_hashes(&[1, 2, 5, 6]))
             .await
             .unwrap();
-        assert_eq!(score(&full, worker(1)), None);
+        assert_eq!(score(&full, worker(0)), Some(2));
+        assert_eq!(score(&full, worker(1)), Some(1));
 
         let drained = index.find_matches(local_hashes(&[1, 2, 9])).await.unwrap();
         assert_eq!(score(&drained, worker(0)), Some(2));
-        assert_eq!(score(&drained, worker(1)), None);
+        assert_eq!(score(&drained, worker(1)), Some(1));
+    }
+
+    #[tokio::test]
+    async fn read_stops_at_dead_router_node_before_walking_zombie_descendants() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index
+            .apply_event(remove_hash_event(0, 0, &[1, 2, 3, 4], 2))
+            .await;
+        index.flush().await;
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 3, 4, 5]))
+            .await
+            .unwrap();
+
+        assert_eq!(score(&scores, worker(0)), Some(2));
+        assert_eq!(
+            index
+                .metrics
+                .counters
+                .shallow_returns
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            index
+                .metrics
+                .counters
+                .shard_dispatches
+                .load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1201,6 +1311,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parent_hash_continuation_past_depth_cap_matches_from_prefix_anchor() {
+        let index = make_indexer(2, 2);
+        index.apply_event(store_event(0, &[1, 2])).await;
+        index
+            .apply_event(store_event_with_parent(0, &[1, 2], &[3, 4, 5]))
+            .await;
+        index.flush().await;
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 3, 4, 5]))
+            .await
+            .unwrap();
+
+        assert_eq!(score(&scores, worker(0)), Some(5));
+    }
+
+    #[tokio::test]
     async fn per_worker_reverse_index_removes_only_one_owner_of_shared_hash() {
         let index = make_indexer(2, 4);
         index.apply_event(store_event(0, &[7, 8, 9])).await;
@@ -1211,7 +1338,7 @@ mod tests {
             .await;
 
         let full = index.find_matches(local_hashes(&[7, 8, 9])).await.unwrap();
-        assert_eq!(score(&full, worker(0)), None);
+        assert_eq!(score(&full, worker(0)), Some(2));
         assert_eq!(score(&full, worker(1)), Some(3));
 
         let prefix = index.find_matches(local_hashes(&[7, 8])).await.unwrap();
