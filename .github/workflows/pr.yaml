@@ -488,6 +488,60 @@ jobs:
       platform: '["amd64", "arm64"]'
     secrets: inherit
 
+  # operator and snapshot-agent are built with build-deploy-component (not
+  # shared-build-image), so they invoke the compliance-scan composite action
+  # directly with the explicit image URI rather than going through
+  # shared-compliance.yml.
+  operator-compliance:
+    name: Operator # groups under Operator alongside the build job
+    needs: [changed-files, operator]
+    if: needs.changed-files.outputs.operator == 'true'
+    runs-on: prod-builder-v3
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Compliance scan
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.operator.outputs.operator_default_tag }}
+          artifact_name: compliance-operator-${{ matrix.platform }}
+          arch: ${{ matrix.platform }}
+
+  snapshot-agent-compliance:
+    name: Snapshot Agent # groups under Snapshot Agent alongside the build job
+    needs: [changed-files, snapshot-agent]
+    if: needs.changed-files.outputs.deploy == 'true'
+    runs-on: prod-builder-v3
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Compliance scan
+        uses: ./.github/actions/compliance-scan
+        with:
+          image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          artifact_name: compliance-snapshot-agent-amd64
+          arch: linux/amd64
+
   # ============================================================================
   # IMAGE COPY PIPELINES
   # ============================================================================

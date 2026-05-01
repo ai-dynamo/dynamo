@@ -232,3 +232,15 @@ jobs:
       gpu_test_markers: ${{ inputs.gpu_test_markers }}
       gpu_test_timeout_minutes: 30
     secrets: inherit
+
+  compliance:
+    name: dynamo-runtime # groups under dynamo-runtime in the UI alongside the build job
+    needs: image
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: runtime
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
