@@ -29,20 +29,6 @@ Status: **Experimental** (Day-0). Modality: text only.
    - **B200 variants** (`vllm-agg-b200`, `sglang-agg`): 8 B200 GPUs available on a single node (x86_64). TP=8 fills the box.
    - **GB200 variants** (`vllm-agg-gb200`, `vllm-disagg-gb200`): **2 GB200 nodes**, each with 4 GPUs (single NVL4 tray each), connected to the **same NVLink72 clique**. Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule`. The cluster must have the **DRA / ComputeDomain controller** installed (verify with `kubectl get crd | grep computedomain`); each manifest's `ComputeDomain` CR + `resourceClaims` are how the operator co-locates the worker pod set on the same NVLink72 fabric (the agg variant places 2 pods, the disagg variant places 4).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Pro`.
-4. **Container image.** Pick the path that matches your variant:
-
-   - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
-
-   - **vLLM** (`vllm-agg-b200` or `vllm-disagg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different vllm base), see the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
-
-     ```bash
-     container/render.py --framework vllm --target runtime --output-short-filename
-     docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
-     ```
-
-     For the GB200 variant, build with `--platform linux/arm64`. Then set the `image:` fields in your chosen `vllm/.../deploy.yaml` (Frontend + both worker pods on disagg) to your pushed image tag.
-
-   > The Pro and Flash recipes share the same image on each backend and architecture. If you've already built the vLLM or SGLang runtime for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
 
 ## Quick Start
 
@@ -300,7 +286,6 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### vLLM-specific
 
-- **Image tag.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) ship with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2`. You can replace the image with your custom built Dynamo vLLM runtime tag — see Prerequisite 4. Both GB200 manifests expect an arm64 build.
 - **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe budget (`failureThreshold: 540` at `periodSeconds: 10`).
 - **GB200: agg vs. disagg.** Both spread V4-Pro across two GB200 NVL4 trays via MNNVL/ComputeDomain. The agg variant runs one TP=8 group across both nodes (lower-latency, simpler topology, 2 pods); the disagg variant runs separate prefill and decode DP=8 workers (higher steady-state throughput at high concurrency, 4 pods). Use the agg variant for general-purpose serving and the disagg variant when prefill/decode separation pays off for the workload.
 
