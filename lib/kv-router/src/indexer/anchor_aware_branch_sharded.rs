@@ -323,12 +323,44 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         }
     }
 
-    fn add_router_node_scores(&self, scores: &mut OverlapScores, node: &RoutingNode, depth: usize) {
+    fn add_active_scores(
+        scores: &mut OverlapScores,
+        active: &FxHashSet<WorkerWithDpRank>,
+        depth: usize,
+    ) {
         let score = depth as u32;
-        for worker in node.live_workers.iter() {
-            let entry = scores.scores.entry(*worker).or_insert(0);
+        for &worker in active {
+            let entry = scores.scores.entry(worker).or_insert(0);
             *entry = (*entry).max(score);
         }
+    }
+
+    fn collect_live_workers(node: &RoutingNode) -> FxHashSet<WorkerWithDpRank> {
+        node.live_workers.iter().map(|worker| *worker).collect()
+    }
+
+    fn reconcile_active_workers(
+        scores: &mut OverlapScores,
+        active: &mut FxHashSet<WorkerWithDpRank>,
+        node: &RoutingNode,
+        drop_depth: usize,
+    ) {
+        if active
+            .iter()
+            .all(|worker| node.live_workers.contains(worker))
+        {
+            return;
+        }
+        let score = drop_depth as u32;
+        active.retain(|worker| {
+            if node.live_workers.contains(worker) {
+                true
+            } else {
+                let entry = scores.scores.entry(*worker).or_insert(0);
+                *entry = (*entry).max(score);
+                false
+            }
+        });
     }
 
     async fn dispatch_read(
@@ -336,8 +368,9 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         node: Arc<RoutingNode>,
         sequence: Vec<LocalBlockHash>,
         mut scores: OverlapScores,
+        active: FxHashSet<WorkerWithDpRank>,
     ) -> Result<OverlapScores, KvRouterError> {
-        if node.live_workers.is_empty() {
+        if active.is_empty() {
             return Ok(scores);
         }
         let shard_idx = node.shard();
@@ -357,7 +390,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             .backend()
             .find_matches_from_anchor(anchor, suffix)?;
         for (worker, shard_score) in shard_scores.scores.drain() {
-            if !node.live_workers.contains(&worker) {
+            if !active.contains(&worker) {
                 continue;
             }
             let entry = scores.scores.entry(worker).or_insert(0);
@@ -365,7 +398,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         }
         shard_scores
             .tree_sizes
-            .retain(|worker, _| node.live_workers.contains(worker));
+            .retain(|worker, _| active.contains(worker));
         scores.tree_sizes.extend(shard_scores.tree_sizes);
         Ok(scores)
     }
@@ -402,34 +435,23 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
 
     fn rewritten_store_event(
         &self,
-        event: &RouterEvent,
+        mut event: RouterEvent,
         decision: &StoreRouteDecision,
     ) -> Option<RouterEvent> {
         let anchor = decision.anchor?;
-        let KvCacheEventData::Stored(store_data) = &event.event.data else {
+        let KvCacheEventData::Stored(store_data) = &mut event.event.data else {
             return None;
         };
-        let blocks = store_data
-            .blocks
-            .get(decision.anchor_block_offset..)
-            .unwrap_or(&[])
-            .to_vec();
+        if decision.anchor_block_offset > store_data.blocks.len() {
+            return None;
+        }
+        let blocks = store_data.blocks.split_off(decision.anchor_block_offset);
         if blocks.is_empty() {
             return None;
         }
-        Some(RouterEvent {
-            worker_id: event.worker_id,
-            storage_tier: event.storage_tier,
-            event: KvCacheEvent {
-                event_id: event.event.event_id,
-                dp_rank: event.event.dp_rank,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: Some(anchor.anchor_id),
-                    start_position: store_data.start_position,
-                    blocks,
-                }),
-            },
-        })
+        store_data.parent_hash = Some(anchor.anchor_id);
+        store_data.blocks = blocks;
+        Some(event)
     }
 
     fn remove_worker_entries(&self, worker: WorkerWithDpRank) {
@@ -447,40 +469,6 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         }
     }
 
-    fn clear_subtree_for_worker(
-        &self,
-        lookup: &WorkerRoutingLookup,
-        worker: WorkerWithDpRank,
-        node: Arc<RoutingNode>,
-    ) -> Vec<ExternalSequenceBlockHash> {
-        let mut stack = vec![node];
-        let mut node_ptrs = FxHashSet::default();
-        while let Some(current) = stack.pop() {
-            node_ptrs.insert(Arc::as_ptr(&current) as usize);
-            stack.extend(current.children.iter().map(|entry| entry.value().clone()));
-        }
-
-        for entry in lookup.iter() {
-            if node_ptrs.contains(&(Arc::as_ptr(&entry.value().routing_node) as usize))
-                && entry.value().affects_router_node
-            {
-                entry.value().routing_node.live_workers.remove(&worker);
-            }
-        }
-
-        let keys: Vec<ExternalSequenceBlockHash> = lookup
-            .iter()
-            .filter(|entry| {
-                node_ptrs.contains(&(Arc::as_ptr(&entry.value().routing_node) as usize))
-            })
-            .map(|entry| *entry.key())
-            .collect();
-        for key in &keys {
-            lookup.remove(key);
-        }
-        keys
-    }
-
     async fn apply_stored(&self, event: RouterEvent) {
         let KvCacheEventData::Stored(store_data) = &event.event.data else {
             return;
@@ -496,7 +484,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             && let Some(anchor) = decision.anchor
         {
             self.ensure_worker_anchor(decision.shard_idx, worker, anchor);
-            if let Some(rewritten) = self.rewritten_store_event(&event, &decision) {
+            if let Some(rewritten) = self.rewritten_store_event(event, &decision) {
                 self.shards[decision.shard_idx].apply_event(rewritten).await;
             }
             return;
@@ -513,13 +501,9 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
 
         let mut shard_blocks = vec![Vec::new(); self.num_shards];
         let mut broadcast_blocks = Vec::new();
-        let mut cleared_by_subtree = FxHashSet::default();
 
         if let Some(lookup) = self.worker_block_index.get(&worker) {
             for &block_hash in &remove_data.block_hashes {
-                if cleared_by_subtree.contains(&block_hash) {
-                    continue;
-                }
                 let Some(entry) = lookup.get(&block_hash).map(|entry| entry.clone()) else {
                     self.metrics
                         .counters
@@ -529,14 +513,11 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
                     continue;
                 };
 
-                shard_blocks[entry.shard_idx].push(block_hash);
                 if entry.affects_router_node {
-                    cleared_by_subtree.extend(self.clear_subtree_for_worker(
-                        &lookup,
-                        worker,
-                        entry.routing_node.clone(),
-                    ));
+                    entry.routing_node.live_workers.remove(&worker);
+                    lookup.remove(&block_hash);
                 } else {
+                    shard_blocks[entry.shard_idx].push(block_hash);
                     lookup.remove(&block_hash);
                 }
             }
@@ -599,14 +580,18 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
         let mut node = self.root.clone();
         let mut depth = 0usize;
         let mut router_scores = OverlapScores::new();
+        let mut active = FxHashSet::default();
 
         for hash in &sequence {
             if depth == self.max_routing_depth {
+                Self::add_active_scores(&mut router_scores, &active, depth);
                 #[cfg(feature = "bench")]
                 let routing_ns = t_routing.elapsed().as_nanos() as u64;
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
-                let result = self.dispatch_read(node, sequence, router_scores).await;
+                let result = self
+                    .dispatch_read(node, sequence, router_scores, active)
+                    .await;
                 #[cfg(feature = "bench")]
                 {
                     self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
@@ -627,8 +612,17 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                 Some(child) => {
                     node = child;
                     depth += 1;
-                    self.add_router_node_scores(&mut router_scores, &node, depth);
-                    if node.live_workers.is_empty() {
+                    if depth == 1 {
+                        active = Self::collect_live_workers(&node);
+                    } else {
+                        Self::reconcile_active_workers(
+                            &mut router_scores,
+                            &mut active,
+                            &node,
+                            depth - 1,
+                        );
+                    }
+                    if active.is_empty() {
                         self.metrics
                             .counters
                             .shallow_returns
@@ -641,6 +635,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                         .counters
                         .shallow_returns
                         .fetch_add(1, Ordering::Relaxed);
+                    Self::add_active_scores(&mut router_scores, &active, depth);
                     return Ok(router_scores);
                 }
             }
@@ -650,6 +645,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
             .counters
             .shallow_returns
             .fetch_add(1, Ordering::Relaxed);
+        Self::add_active_scores(&mut router_scores, &active, depth);
         Ok(router_scores)
     }
 
