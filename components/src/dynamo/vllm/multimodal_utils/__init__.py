@@ -10,9 +10,11 @@ from dynamo.vllm.multimodal_utils.encode_utils import (
     get_encoder_components,
 )
 from dynamo.vllm.multimodal_utils.model import (
+    ModelFamily,
     SupportedModels,
     construct_mm_data,
     load_vision_model,
+    resolve_model_family,
 )
 from dynamo.vllm.multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from dynamo.vllm.multimodal_utils.protocol import (
@@ -30,9 +32,11 @@ __all__ = [
     "get_encoder_components",
     "get_http_client",
     "ImageLoader",
+    "ModelFamily",
     "SupportedModels",
     "construct_mm_data",
     "load_vision_model",
+    "resolve_model_family",
     "MultiModalInput",
     "MultiModalGroup",
     "PatchedTokensPrompt",
