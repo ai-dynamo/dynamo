@@ -103,8 +103,9 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 done
 
 echo "=== Starting frontend (KV router, approximate mode, MM approx auto-on) ==="
+# The preprocessor reads the worker's KV block size from the ModelDeploymentCard,
+# so we only need to pass --kv-cache-block-size here.
 env "${COMMON_ENV[@]}" \
-    "DYN_ROUTER_MM_APPROX_BLOCK_SIZE=${BLOCK_SIZE}" \
     "DYN_LOG=debug" \
 python -m dynamo.frontend \
     --http-port "${HTTP_PORT}" \
@@ -140,7 +141,7 @@ done
 echo
 echo "Architecture: Rust Frontend (mm_routing_info + KvRouter, approx mode) -> ${NUM_WORKERS}x vLLM backend"
 echo "  - No separate MM Router Worker, no Python preprocessor"
-echo "  - Frontend hashes the image URL/bytes directly via DYN_ROUTER_MM_APPROX"
+echo "  - Frontend hashes the image URL/bytes inline in the preprocessor"
 echo
 echo "Test routing: send the same image request 3 times."
 echo "  - Request 1: routed to any worker (no cache yet)"

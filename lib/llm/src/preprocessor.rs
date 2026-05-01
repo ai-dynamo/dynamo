@@ -41,11 +41,11 @@ use tracing;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
+use crate::protocols::TokenIdType;
 use crate::protocols::common::preprocessor::{
     MmRoutingInfo, MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::TokenIdType;
 use crate::tokenizers::Encoding;
 
 use dynamo_parsers::{ReasoningParser, ReasoningParserType};
@@ -159,6 +159,11 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// KV-cache block size advertised by the worker via `ModelDeploymentCard`.
+    /// Reused for approx MM routing so the synthetic block-hash layout matches
+    /// what the router queries; 0 means the worker didn't set one and approx
+    /// MM routing falls back to a no-op.
+    kv_cache_block_size: u32,
     /// Image-placeholder token ID for approx MM routing. Resolved at
     /// startup by trying a list of known special-token strings against
     /// the tokenizer; the first one present in the vocab wins. `None`
@@ -205,6 +210,7 @@ impl OpenAIPreprocessor {
         };
 
         let context_length = mdc.context_length;
+        let kv_cache_block_size = mdc.kv_cache_block_size;
 
         // Resolve the model's image-placeholder token ID for approx MM
         // routing. With the `image-token-pyo3` feature on, we ask HF
@@ -229,6 +235,7 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            kv_cache_block_size,
             image_token_id,
         }))
     }
@@ -297,8 +304,12 @@ impl OpenAIPreprocessor {
         // No-op for text-only requests.
         {
             let _nvtx = dynamo_nvtx_range!("preprocess.mm_approx_gather");
-            self.gather_mm_approx_routing_info(&mut builder, formatted_prompt.as_deref(), &mm_hashes)
-                .with_context(|| "Failed to gather MM approx routing info")?;
+            self.gather_mm_approx_routing_info(
+                &mut builder,
+                formatted_prompt.as_deref(),
+                &mm_hashes,
+            )
+            .with_context(|| "Failed to gather MM approx routing info")?;
         }
 
         STAGE_DURATION_SECONDS
@@ -540,6 +551,12 @@ impl OpenAIPreprocessor {
             // messages. For backends that pass URLs/data URIs through (e.g.,
             // vLLM in approx mode), multi_modal_data already carries the URL,
             // so duplicating it in extra_args["messages"] is wasted work.
+            //
+            // Safety check for non-FD consumers: TRT-LLM's
+            // `_request_has_multimodal` (handler_base.py) is the only known
+            // reader; it short-circuits on `multi_modal_data` (always set
+            // here) before falling back to the messages array, and otherwise
+            // gracefully reads `request.messages` when extra_args lacks it.
             let mut extra_args = serde_json::json!({});
             if self.media_loader.is_some() {
                 let mut messages_json = serde_json::to_value(request.messages())?;
@@ -556,14 +573,13 @@ impl OpenAIPreprocessor {
         Ok(mm_hashes)
     }
 
-    /// Read the KV block size that we lay `block_mm_infos` out for.
-    /// Must match the router's block size so the synthetic event hashes
-    /// line up with what the router queries. Default 16.
-    fn mm_approx_block_size() -> usize {
-        std::env::var("DYN_ROUTER_MM_APPROX_BLOCK_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(16)
+    /// KV block size we lay `block_mm_infos` out for. Reuses the value the
+    /// worker advertised via `ModelDeploymentCard.kv_cache_block_size` so the
+    /// synthetic event hashes line up with what the router queries; returns 0
+    /// (which `gather_mm_approx_routing_info` treats as a no-op) when the
+    /// worker didn't populate one.
+    fn mm_approx_block_size(&self) -> usize {
+        self.kv_cache_block_size as usize
     }
 
     /// Hash a single image reference to a stable u64. Data URIs are hashed
@@ -606,13 +622,48 @@ impl OpenAIPreprocessor {
     /// Build `MmRoutingInfo` for approximate MM-aware KV routing.
     ///
     /// Skips the HF image processor entirely: image URLs are hashed and each
-    /// hash is pinned to a distinct block (images spread evenly across the
-    /// token range). Same-set-same-order requests produce identical block
-    /// hashes; swapped-order or different-image requests diverge.
+    /// hash is pinned to the block where its placeholder token actually lands
+    /// in the tokenized prompt. Same-set-same-order requests produce identical
+    /// block hashes; swapped-order or different-image requests diverge.
     ///
     /// This is approximate-routing-only: the resulting hashes do not
     /// correspond to backend KV blocks. They serve as a routing-affinity
     /// signal so repeat multimodal requests cluster on the same worker.
+    ///
+    /// # Example: one image, block_size = 16
+    ///
+    /// ```text
+    /// tokenized prompt (24 tokens):
+    ///   [t0..t13, IMG_PAD, t15..t23]
+    ///                ^ idx 14
+    ///
+    /// num_full_blocks = max(24 / 16, 1) = 1
+    /// total_tokens    = 1 * 16 = 16  (routing_token_ids resized/padded to 16)
+    /// image at idx 14 → block 0 → mm_object range [0, 1)
+    /// block_mm_infos  = [Some(BlockExtraInfo { mm_hash = H_image })]
+    ///
+    /// Re-issuing the same request with the same image hits the cached
+    /// (text-prefix-block-0, mm-hash) tuple → router sticks it on the same
+    /// worker. Re-issuing with a *different* image keeps block-0 text identical
+    /// but flips the mm_hash → router sees no overlap on that block.
+    /// ```
+    ///
+    /// # Example: two images, block_size = 16
+    ///
+    /// ```text
+    /// tokenized prompt (32 tokens):
+    ///   [t0..t14, IMG_PAD, t16..t30, IMG_PAD]
+    ///                ^ idx 15            ^ idx 31
+    ///
+    /// num_full_blocks = max(32 / 16, 1) = 2
+    /// total_tokens    = 2 * 16 = 32
+    /// images at idx [15, 31] → blocks [0, 1]
+    /// block_mm_infos  = [Some(H_img1), Some(H_img2)]
+    ///
+    /// Swapping image1 ↔ image2 swaps block_mm_infos, so a (img2, img1) request
+    /// diverges at block 0 even though the tokenized text is unchanged — the
+    /// router treats the two orderings as distinct prefixes.
+    /// ```
     pub fn gather_mm_approx_routing_info(
         &self,
         builder: &mut PreprocessedRequestBuilder,
@@ -630,9 +681,7 @@ impl OpenAIPreprocessor {
             tokens.to_vec()
         } else {
             let Some(prompt) = formatted_prompt else {
-                tracing::debug!(
-                    "[mm-approx] no formatted_prompt; skipping MM approx routing info"
-                );
+                tracing::debug!("[mm-approx] no formatted_prompt; skipping MM approx routing info");
                 return Ok(());
             };
             let encoding = self
@@ -642,7 +691,7 @@ impl OpenAIPreprocessor {
             encoding.token_ids().to_vec()
         };
 
-        let block_size = Self::mm_approx_block_size();
+        let block_size = self.mm_approx_block_size();
         if block_size == 0 || routing_token_ids.is_empty() {
             return Ok(());
         }
