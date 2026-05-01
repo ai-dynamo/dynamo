@@ -36,12 +36,23 @@ use crate::{
     },
 };
 
-/// State for prefill router activation rendezvous
+/// State for prefill router activation rendezvous.
+///
+/// Once a prefill endpoint has been observed for a (model, namespace) pair,
+/// `PrefillReady(Endpoint)` is left in the activator map indefinitely (until
+/// prefill workers all disappear). This survives `register_prefill_router`
+/// consuming the entry — that consumer hands out a fresh `oneshot::Receiver`
+/// synthesized from the cached endpoint, then re-inserts `PrefillReady` so
+/// future decode WorkerSet rebuilds (e.g., decode pod restarts) can find it
+/// and activate immediately without waiting for prefill workers to
+/// re-register.
 enum PrefillActivationState {
     /// Decode model registered, waiting for prefill endpoint
     DecodeWaiting(oneshot::Sender<Endpoint>),
-    /// Prefill endpoint arrived, waiting for decode model to register
-    PrefillReady(oneshot::Receiver<Endpoint>),
+    /// Prefill endpoint observed and cached for this (model, namespace).
+    /// Anyone calling `register_prefill_router` synthesizes a fresh
+    /// `oneshot::Receiver` from this and re-inserts the cached endpoint.
+    PrefillReady(Endpoint),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -670,12 +681,19 @@ impl ModelManager {
     ) -> Option<oneshot::Receiver<Endpoint>> {
         let key = Self::model_namespace_key(model_name, namespace);
         match self.prefill_router_activators.remove(&key) {
-            Some((_, PrefillActivationState::PrefillReady(rx))) => {
-                // Prefill endpoint already arrived - rx will immediately resolve
+            Some((cache_key, PrefillActivationState::PrefillReady(endpoint))) => {
+                // Prefill endpoint already cached. Hand out a fresh receiver
+                // primed with the endpoint AND re-insert PrefillReady so a
+                // subsequent decode WorkerSet rebuild (e.g., decode pod
+                // restart) finds it and activates immediately.
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(endpoint.clone());
+                self.prefill_router_activators
+                    .insert(cache_key, PrefillActivationState::PrefillReady(endpoint));
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
-                    "Prefill endpoint already available for namespace, returning receiver"
+                    "Prefill endpoint cached; returning fresh receiver and re-caching"
                 );
                 Some(rx)
             }
@@ -731,19 +749,17 @@ impl ModelManager {
                     "Activated prefill router for decode WorkerSet"
                 );
 
-                // Persist the prefill endpoint as PrefillReady so a future decode
+                // Cache the prefill endpoint as PrefillReady so a future decode
                 // WorkerSet rebuild (e.g., all decode pods restart →
-                // remove_worker_set + remove_prefill_activator → new decode comes
-                // back → register_prefill_router) finds PrefillReady and
-                // immediately activates instead of stalling forever in
-                // DecodeWaiting. Without this, post-rebuild PrefillRouters never
-                // activate and PrefillRouter::generate falls back to aggregated
-                // mode, sending bare requests to decode workers that reject them
-                // with "Disaggregated params required for decode mode".
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(endpoint);
+                // remove_worker_set → new decode comes back →
+                // register_prefill_router) finds the cache and immediately
+                // activates instead of stalling forever in DecodeWaiting.
+                // Without this, post-rebuild PrefillRouters never activate and
+                // PrefillRouter::generate falls back to aggregated mode, sending
+                // bare requests to decode workers that reject them with
+                // "Disaggregated params required for decode mode".
                 self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(rx));
+                    .insert(key, PrefillActivationState::PrefillReady(endpoint));
 
                 Ok(())
             }
@@ -751,9 +767,8 @@ impl ModelManager {
                 // Stale PrefillReady from a prior handshake. Two cases land here:
                 //   (a) Duplicate activate_prefill_router call (e.g., the same
                 //       prefill instance re-publishes its endpoint) — refresh.
-                //   (b) Prefill rejoin after a transient absence where this
-                //       function previously persisted PrefillReady (the
-                //       DecodeWaiting branch above) — refresh + reactivate any
+                //   (b) Prefill rejoin after a transient absence where the
+                //       cached endpoint is now stale — refresh + reactivate any
                 //       deactivated decode-side router.
                 let reactivated = if let Some(model) = self.get_model(model_name)
                     && let Some(ws) = model.get_worker_set(namespace)
@@ -766,10 +781,8 @@ impl ModelManager {
                     false
                 };
 
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(endpoint);
                 self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(rx));
+                    .insert(key, PrefillActivationState::PrefillReady(endpoint));
 
                 if reactivated {
                     tracing::info!(
@@ -796,20 +809,12 @@ impl ModelManager {
                     && pr.is_deactivated()
                 {
                     pr.reactivate();
-                    // Store the endpoint so that if the decode WorkerSet is rebuilt
-                    // (removed and re-added), a subsequent register_prefill_router call
-                    // finds PrefillReady instead of falling back to DecodeWaiting and
-                    // stalling.
-                    let (tx, rx) = oneshot::channel();
-                    tx.send(endpoint).map_err(|_| {
-                        anyhow::anyhow!(
-                            "Failed to send endpoint for prefill model {}:{}",
-                            model_name,
-                            namespace
-                        )
-                    })?;
+                    // Cache the endpoint so that if the decode WorkerSet is rebuilt
+                    // (removed and re-added), a subsequent register_prefill_router
+                    // call finds PrefillReady instead of falling back to
+                    // DecodeWaiting and stalling.
                     self.prefill_router_activators
-                        .insert(key, PrefillActivationState::PrefillReady(rx));
+                        .insert(key, PrefillActivationState::PrefillReady(endpoint));
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
@@ -818,18 +823,10 @@ impl ModelManager {
                     return Ok(());
                 }
 
-                // No existing deactivated router -- store endpoint for a future decode
-                // registration.
-                let (tx, rx) = oneshot::channel();
-                tx.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint for prefill model {}:{}",
-                        model_name,
-                        namespace
-                    )
-                })?;
+                // No existing deactivated router -- cache endpoint for a future
+                // decode registration.
                 self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(rx));
+                    .insert(key, PrefillActivationState::PrefillReady(endpoint));
                 tracing::info!(
                     model_name = %model_name,
                     namespace = %namespace,
