@@ -13,7 +13,7 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["block-manager", "image-token-pyo3"]
+default = ["block-manager"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
@@ -30,13 +30,12 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 # Resolve the multimodal image-placeholder token at startup by loading the HF
-# processor via Python (transformers). On by default so the resolver works for
-# any VLM the installed `transformers` can load. Falls back transparently to a
-# small hardcoded vocab-probe list when the Python import or AutoProcessor call
-# fails (no error to the caller). Requires `transformers` on the Python
-# interpreter at runtime when enabled. Disable to drop the pyo3 dep entirely
-# (text-only deploys, slim containers without Python, or stricter
-# supply-chain policies that don't want `trust_remote_code` execution).
+# processor via Python (transformers). Off by default because pyo3's
+# `auto-initialize` requires a Python distribution that ships libpython.so,
+# which the multi-arch container build images don't include. Enable for VLM
+# deployments that have a full Python install (the bench / dev launch scripts
+# do this); the resolver still works without the feature via a vocab-probe
+# fallback over a small hardcoded list of well-known placeholder strings.
 image-token-pyo3 = ["dep:pyo3"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
