@@ -221,7 +221,11 @@ fn process_event(
             }
         }
 
-        RawKvEvent::BlockRemoved { block_hashes, medium } => {
+        RawKvEvent::BlockRemoved {
+            block_hashes,
+            medium,
+            ..
+        } => {
             let storage_tier = medium
                 .as_ref()
                 .and_then(|m| StorageTier::from_vllm_medium(m))
@@ -246,5 +250,7 @@ fn process_event(
             tracing::debug!("Processing AllBlocksCleared");
             tracker.handle_clear_all();
         }
+
+        RawKvEvent::Ignored => {}
     }
 }

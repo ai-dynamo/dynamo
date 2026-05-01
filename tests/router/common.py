@@ -19,6 +19,7 @@ from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
     get_runtime,
+    poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
     send_request_with_retry,
@@ -142,6 +143,118 @@ def _test_router_basic(
         )
 
         logger.info(f"Successfully completed {num_requests} requests")
+
+
+def _test_router_override_router_config(
+    endpoint: str,
+    engine_workers,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    num_requests: int,
+    cpu_count_file: str,
+    gpu_count_file: str,
+    block_size: int = BLOCK_SIZE,
+    frontend_timeout: int = 120,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Test that router config overrides are honoured by the frontend by starting frontend
+    with different router config and expect getting results aligning with the router config
+    set by the workers, note that a specific mock worker is used for this test.
+
+    The frontend is started with --router-mode round-robin.
+
+    Workers must already be started with CUDA_VISIBLE_DEVICES="" (CPU) and "0" (GPU)
+    and must call register_model(..., router_config=RouterConfig(RouterMode.DeviceAwareWeighted)),
+    this configures the router to use device-aware-weighted routing.
+
+    With the default cuda-to-cpu ratio of 8, sequential requests all go to the GPU worker because
+    allowed_cpu_inflight = gpu_inflight / 8 = 0, so the CPU worker receives nothing.
+
+    Args:
+        endpoint: Dotted endpoint path (e.g. "namespace.component.generate") used to
+            poll discovery for worker instance registration before starting the frontend.
+        engine_workers: Backend worker instance already initialized with __enter__().
+            Must expose .namespace and .num_workers.
+        request: Pytest request fixture for managing resources.
+        frontend_port: Port to start the HTTP frontend on.
+        test_payload: Payload sent to /v1/chat/completions.
+        num_requests: Number of sequential requests to send.
+        cpu_count_file: Path to the file where the CPU worker writes its request count.
+        gpu_count_file: Path to the file where the GPU worker writes its request count.
+        block_size: KV-cache block size (ignored for device-aware-weighted, kept for
+            interface consistency).
+        frontend_timeout: Seconds to wait for the frontend to become ready.
+        store_backend: "etcd" or "file".
+        request_plane: "nats" or "tcp".
+
+    Raises:
+        AssertionError: If routing distribution does not match expectations.
+    """
+
+    def _read_count(path: str) -> int:
+        try:
+            text = open(path).read().strip()
+            return int(text) if text else 0
+        except (OSError, ValueError):
+            return 0
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+        router_mode="round-robin",
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+
+        # Use endpoint polling to make sure all workers are ready before proceeding,
+        # the helper functions will send requests for liveness check which may
+        # affect counting if workers are partially ready.
+        runtime = get_runtime(store_backend, request_plane)
+        endpoint_obj = runtime.endpoint(endpoint)
+        asyncio.run(
+            poll_for_worker_instances(
+                endpoint_obj, engine_workers.num_workers, frontend_timeout
+            )
+        )
+
+        logger.info("Waiting for workers to register with frontend...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=frontend_timeout,
+            )
+        )
+
+        logger.info(
+            f"Sending {num_requests} requests via device-aware-weighted routing..."
+        )
+        asyncio.run(
+            send_inflight_requests(
+                [f"{frontend_url}/v1/chat/completions"],
+                test_payload,
+                num_requests,
+            )
+        )
+
+    cpu_count = _read_count(cpu_count_file)
+    gpu_count = _read_count(gpu_count_file)
+
+    # There is request sent to indicate liveness, so received request count is
+    # larger than the number of requests.
+    # This test should actually to confirm that no requests are sent to the CPU worker.
+    assert (
+        gpu_count >= num_requests
+    ), f"GPU worker should receive at least {num_requests} requests, got {gpu_count}"
+    assert cpu_count == 0, f"CPU worker should receive 0 requests, got {cpu_count}"
+    logger.info(
+        f"device-aware-weighted routing verified: GPU={gpu_count}, CPU={cpu_count}"
+    )
 
 
 def _test_router_two_routers(

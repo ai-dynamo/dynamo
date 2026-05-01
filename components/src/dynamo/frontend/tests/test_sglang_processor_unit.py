@@ -11,16 +11,20 @@ Parallels test_vllm_unit.py for the vLLM backend.
 
 
 import json
+import sys
+import types
 
 import pytest
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
+    _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _parse_json_array_buffer,
     build_tool_call_guided_decoding,
@@ -58,7 +62,7 @@ def tokenizer():
 # ---------------------------------------------------------------------------
 
 
-class TestBuildDynamoPreproc:
+class TestBuildDynamoPreproc:  # FE.7 — worker subprocess preproc construction
     """Test sampling parameter projection from request to Dynamo format."""
 
     def test_defaults(self):
@@ -254,7 +258,7 @@ class TestBuildDynamoPreproc:
 # ---------------------------------------------------------------------------
 
 
-class TestMapFinishReason:
+class TestMapFinishReason:  # FE.5 — finish_reason remap (frontend layer)
     """Test Dynamo-to-OpenAI finish reason mapping."""
 
     def test_none_passthrough(self):
@@ -299,7 +303,7 @@ class TestMapFinishReason:
 # ---------------------------------------------------------------------------
 
 
-class TestConvertTools:
+class TestConvertTools:  # FE.3 — OpenAI tool schema → SGLang Tool/Function
     """Test OpenAI tool dict to SGLang Tool conversion."""
 
     def test_none_returns_none(self):
@@ -369,7 +373,7 @@ class TestConvertTools:
 # ---------------------------------------------------------------------------
 
 
-class TestCreateParsers:
+class TestCreateParsers:  # FE.2 — tool/reasoning parser dispatch
     """Test parser creation logic."""
 
     def test_no_parsers(self):
@@ -387,7 +391,7 @@ class TestCreateParsers:
         assert rp is not None
 
 
-class TestBuildToolCallGuidedDecoding:
+class TestBuildToolCallGuidedDecoding:  # FE.3 — guided-decoding setup for tool_choice
     def test_none_when_no_tools(self):
         assert (
             build_tool_call_guided_decoding(
@@ -444,6 +448,85 @@ class TestBuildToolCallGuidedDecoding:
 
         assert isinstance(guided, dict)
         assert "json" in guided
+
+    def test_required_tool_choice_supports_older_sglang_constraint_signature(
+        self, monkeypatch
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        def old_get_json_schema_constraint(sglang_tools, tool_choice):
+            assert sglang_tools == tools
+            assert tool_choice == "required"
+            return {"type": "array", "items": {"type": "object"}}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "get_json_schema_constraint",
+            old_get_json_schema_constraint,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "parallel_tool_calls": False},
+            tool_call_parser_name=None,
+            sglang_tools=tools,
+        )
+
+        assert guided == {"json": {"type": "array", "items": {"type": "object"}}}
+
+    def test_auto_tool_choice_supports_older_structure_constraint_signature(
+        self, monkeypatch
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+        )
+
+        class OldFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                self.tools = tools
+                self.tool_call_parser = tool_call_parser
+
+            def get_structure_constraint(self, tool_choice):
+                assert tool_choice == "auto"
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            OldFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "parallel_tool_calls": False},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=tools,
+        )
+
+        assert guided == {"structural_tag": {"type": "object"}}
 
     def test_auto_strict_tools_can_build_structural_tag_guidance(self):
         tools = convert_tools(
@@ -630,7 +713,7 @@ class TestBuildToolCallGuidedDecoding:
 # ---------------------------------------------------------------------------
 
 
-class TestParseJsonArrayBuffer:
+class TestParseJsonArrayBuffer:  # FE.6 — incremental JSON-array buffer parsing
     """Test JSON array fallback parser for constrained decoding output."""
 
     def test_single_tool_call(self):
@@ -706,7 +789,7 @@ class TestParseJsonArrayBuffer:
         assert calls[0].name == "g"
 
 
-class TestNormalizePromptTokenIds:
+class TestNormalizePromptTokenIds:  # FE.6 — prompt-token-id normalization
     def test_batch_encoding_like_object_uses_input_ids(self):
         class FakeBatchEncoding:
             def __init__(self):
@@ -723,7 +806,7 @@ class TestNormalizePromptTokenIds:
         ) == [1, 2, 3]
 
 
-class TestRuntimeConfigParserName:
+class TestRuntimeConfigParserName:  # FE.2 — parser name resolution from runtime config
     def test_missing_runtime_config_returns_none(self):
         class FakeMdc:
             def runtime_config(self):
@@ -751,7 +834,7 @@ class TestRuntimeConfigParserName:
 # ---------------------------------------------------------------------------
 
 
-class TestPreprocessChatRequest:
+class TestPreprocessChatRequest:  # FE.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
     """Test end-to-end preprocessing with a real tokenizer."""
 
     def test_basic_chat(self, tokenizer):
@@ -832,6 +915,104 @@ class TestPreprocessChatRequest:
         )
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
+
+    def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
+        """Multi-turn with prior assistant tool_calls renders without raising.
+
+        Regression: the qwen3-coder Jinja template calls ``arguments | items``
+        on assistant tool_calls and required ``arguments`` to be a mapping.
+        Dynamo carries arguments as a JSON string per the OpenAI wire
+        contract; the prepost must parse them to dict before templating.
+        """
+        request = {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": "Weather in Tokyo?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_001",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"city": "Tokyo"}),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_001",
+                    "content": json.dumps({"temperature": 22}),
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+        }
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+        assert len(result.prompt_token_ids) > 0
+        # Original request dict must not be mutated by the normaliser
+        # (callers reuse it for downstream processing).
+        original_args = request["messages"][1]["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(original_args, str)
+
+    def test_normalize_assistant_tool_call_arguments_helper(self):
+        """The string→dict normaliser parses valid JSON and skips bad input."""
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "f",
+                            "arguments": json.dumps({"a": 1}),
+                        }
+                    },
+                    {
+                        "function": {
+                            "name": "g",
+                            "arguments": "not-json",
+                        }
+                    },
+                    {
+                        "function": {
+                            "name": "h",
+                            "arguments": {"already": "dict"},
+                        }
+                    },
+                ],
+            },
+            # Tool messages are not assistant; arguments key shouldn't exist
+            # but if it did we wouldn't touch it.
+            {"role": "tool", "tool_call_id": "x", "content": "ok"},
+        ]
+        _normalize_assistant_tool_call_arguments(messages)
+        tcs = messages[1]["tool_calls"]
+        assert tcs[0]["function"]["arguments"] == {"a": 1}
+        # Malformed JSON left as-is so the template error stays visible.
+        assert tcs[1]["function"]["arguments"] == "not-json"
+        # Already-dict values pass through untouched.
+        assert tcs[2]["function"]["arguments"] == {"already": "dict"}
 
     def test_tool_choice_none_strips_tools_from_template(self, tokenizer):
         """When exclude flag is on and tool_choice=none, tools are excluded from template."""
@@ -990,13 +1171,247 @@ class TestPreprocessChatRequest:
         )
         assert len(with_system.prompt_token_ids) > len(without_system.prompt_token_ids)
 
+    def test_deepseek_v4_uses_sglang_encoder_when_chat_template_missing(
+        self, monkeypatch
+    ):
+        """DeepSeek-V4 uses SGLang's encoder instead of HF chat_template."""
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            captured["thinking_mode"] = thinking_mode
+            captured["reasoning_effort"] = reasoning_effort
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                assert prompt == "<dsv4-prompt>"
+                return [1, 2, 3]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {
+                "thinking": True,
+                "reasoning_effort": "max",
+            },
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek_v4",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["thinking_mode"] == "thinking"
+        assert captured["reasoning_effort"] == "max"
+        assert captured["messages"][0]["role"] == "system"
+        assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
+        assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [1]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather", "parameters": {}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "get_time", "parameters": {}},
+                },
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_time"},
+            },
+        }
+
+        preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek_v4",
+        )
+
+        tools = captured["messages"][0]["tools"]
+        assert [tool["function"]["name"] for tool in tools] == ["get_time"]
+
+    def test_deepseek_v4_respects_existing_chat_template(self, monkeypatch):
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            raise AssertionError("encoding_dsv4 should not be called")
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class TemplateTokenizer:
+            chat_template = (
+                "{% for message in messages %}{{ message.content }}{% endfor %}"
+            )
+
+            def apply_chat_template(self, messages, **kwargs):
+                assert kwargs["add_generation_prompt"] is True
+                assert kwargs["tokenize"] is True
+                return [4, 5, 6]
+
+            def encode(self, prompt):
+                raise AssertionError("encode should not be called")
+
+        result = preprocess_chat_request(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            tokenizer=TemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [4, 5, 6]
+
+    def test_deepseek_v4_normalizes_none_content_without_mutating_request(
+        self, monkeypatch
+    ):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [7]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "assistant", "content": None}],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [7]
+        assert captured["messages"] == [{"role": "assistant", "content": ""}]
+        assert request["messages"] == [{"role": "assistant", "content": None}]
+
+    def test_deepseek_v4_tool_choice_none_strips_encoder_tools(self, monkeypatch):
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                return [8]
+
+        preprocess_chat_request(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "system", "content": "Stay terse."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "parameters": {}},
+                    }
+                ],
+                "tool_choice": "none",
+            },
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            exclude_tools_when_tool_choice_none=True,
+        )
+
+        assert "tools" not in captured["messages"][0]
+
 
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: incremental detokenization
 # ---------------------------------------------------------------------------
 
 
-class TestIncrementalDetokenization:
+class TestIncrementalDetokenization:  # FE.6 — token-id stream → text
     """Test the sliding-window incremental detokenizer."""
 
     def test_basic_decode(self, tokenizer):
@@ -1067,7 +1482,7 @@ class TestIncrementalDetokenization:
 # ---------------------------------------------------------------------------
 
 
-class TestFastPlainTextPath:
+class TestFastPlainTextPath:  # FE.6 — fast path that skips parser when no markers
     """Test the fast path when no parsers are active."""
 
     def test_fast_path_active(self, tokenizer):
@@ -1106,7 +1521,7 @@ class TestFastPlainTextPath:
 # ---------------------------------------------------------------------------
 
 
-class TestReasoningParsing:
+class TestReasoningParsing:  # FE.9 — reasoning ↔ tool-call orchestration
     """Test reasoning content extraction via post-processor."""
 
     def test_reasoning_separated(self, tokenizer):
@@ -1142,30 +1557,29 @@ class TestReasoningParsing:
 # ---------------------------------------------------------------------------
 
 
-class TestUtilities:
+class TestUtilities:  # (mixed — see per-test annotations)
     """Test shared utility functions."""
 
-    def test_random_uuid_format(self):
+    def test_random_uuid_format(self):  # FE.4
         """random_uuid produces 16-char hex string."""
         uid = random_uuid()
         assert len(uid) == 16
         int(uid, 16)  # Should not raise
 
-    def test_random_uuid_unique(self):
+    def test_random_uuid_unique(self):  # FE.4
         """Two calls produce different UUIDs."""
         assert random_uuid() != random_uuid()
 
-    def test_random_call_id_format(self):
+    def test_random_call_id_format(self):  # FE.4
         """random_call_id produces call_<16hex> format."""
         cid = random_call_id()
         assert cid.startswith("call_")
         assert len(cid) == 21  # "call_" + 16 hex chars
         int(cid[5:], 16)  # Should not raise
 
-    def test_preprocess_error(self):
-        """PreprocessError stores error_dict and stringifies."""
-        err = PreprocessError({"error": {"message": "n=2 unsupported"}})
-        assert err.error_dict == {"error": {"message": "n=2 unsupported"}}
+    def test_preprocess_error(self):  # FE.8
+        """PreprocessError stores message and stringifies."""
+        err = PreprocessError("n=2 unsupported")
         assert "n=2" in str(err)
 
 
@@ -1174,7 +1588,7 @@ class TestUtilities:
 # ---------------------------------------------------------------------------
 
 
-class TestWorkerResultPicklability:
+class TestWorkerResultPicklability:  # FE.7 — worker subprocess boundary picklability
     """Test that worker results survive ProcessPoolExecutor round-trip."""
 
     def test_full_result(self):
@@ -1228,7 +1642,7 @@ class TestWorkerResultPicklability:
 # ---------------------------------------------------------------------------
 
 
-class TestDeprecationWarning:
+class TestDeprecationWarning:  # FE.8 — legacy/deprecated field warnings
     """Test that --use-sglang-tokenizer deprecation warning is in place."""
 
     def test_deprecation_warning_in_source(self):
