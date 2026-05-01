@@ -6,7 +6,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: download-dsv4-pro
-  namespace: kprashanth
+  namespace: <your-namespace>
 spec:
   backoffLimit: 2
   template:
