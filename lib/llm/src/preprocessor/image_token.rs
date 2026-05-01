@@ -198,8 +198,7 @@ fn resolve_via_pyo3(model_name_or_path: &str) -> anyhow::Result<Option<Resolved>
 #[cfg(test)]
 mod tests {
     // The vocab-probe path is exercised by the existing integration suite via
-    // OpenAIPreprocessor::new_with_parts. The PyO3 path is verified by the
-    // `image_token_check` example in `examples/` (live transformers install
-    // required), and at e2e by the approx-routing benches when the feature
-    // is enabled.
+    // OpenAIPreprocessor::new_with_parts. The PyO3 path is verified end-to-end
+    // by tests/serve/test_vllm.py::test_multimodal_b64_approx_routing, which
+    // drives the actual launch script and looks for the resolver log line.
 }
