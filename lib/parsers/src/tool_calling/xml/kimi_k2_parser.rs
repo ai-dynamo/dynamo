@@ -477,7 +477,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.5, CASE.16 (PR #8208)
+    #[test] // CASE.5 (PR #8208)
     fn test_parse_malformed_no_section_end() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;
@@ -781,5 +781,131 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, name);
         assert_eq!(calls[0].id, id);
+    }
+
+    /// `CASE.4` — call missing its `<|tool_call_end|>` while the outer
+    /// `<|tool_calls_section_end|>` IS present. Per-call delimiter is the
+    /// regex anchor; without it the call cannot be matched even though
+    /// the block fences are intact. Pin the silent-drop.
+    ///
+    /// TODO(CASE.4) — BUG, NEEDS FIX: a real call is silently dropped when
+    /// `<|tool_call_end|>` is missing and section fences are complete. Fix:
+    /// anchor on the next `<|tool_call_begin|>` or `<|tool_calls_section_end|>`
+    /// to terminate the args region. Flip this test once fixed.
+    #[test] // CASE.4
+    fn test_parse_missing_call_end_inside_complete_section_silent_drop() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_calls_section_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Missing per-call <|tool_call_end|> drops the call even when \
+             section fences are complete"
+        );
+    }
+
+    /// `CASE.4` — middle-call truncation. Three calls A, B, C inside a
+    /// complete section; B is missing its `<|tool_call_end|>`. Does B's
+    /// body bleed into C, or are both lost? Pin whichever today does.
+    ///
+    /// TODO(CASE.4) — BUG, NEEDS FIX: B's args swallow all of C's raw
+    /// markup, and C is dropped — caller gets garbage args for B and
+    /// never sees C. Fix: same anchor on `<|tool_call_begin|>` as the
+    /// silent-drop case above. Flip this test once fixed.
+    #[test] // CASE.2, CASE.4
+    fn test_parse_middle_call_missing_end_corrupts_next() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.a:0<|tool_call_argument_begin|>{"x":"1"}<|tool_call_end|><|tool_call_begin|>functions.b:1<|tool_call_argument_begin|>{"y":"2"}<|tool_call_begin|>functions.c:2<|tool_call_argument_begin|>{"z":"3"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        // Today: A parses cleanly. B's args regex is non-greedy `\{.*?\}` and
+        // tries to match `{...}` followed by `<|tool_call_end|>`; since B has
+        // no end token, the regex extends until it finds C's closing `}` AND
+        // C's `<|tool_call_end|>`. Result: B keeps its name but its args
+        // string contains all of C's raw markup; C is consumed and dropped.
+        assert_eq!(calls.len(), 2, "A and corrupted-B; C is consumed by B");
+        assert_eq!(calls[0].function.name, "a");
+        assert_eq!(calls[0].function.arguments, r#"{"x":"1"}"#);
+        assert_eq!(calls[1].function.name, "b");
+        assert!(
+            calls[1].function.arguments.contains("functions.c:2"),
+            "BUG: B's args swallowed C's markup verbatim; got {}",
+            calls[1].function.arguments
+        );
+    }
+
+    /// Parser-level invariant: the kimi_k2 parser does NOT filter by
+    /// `tool_choice` — it returns every well-formed call it sees, and the
+    /// jail / response builder above this layer is responsible for filtering
+    /// per `tool_choice=named`/`required`/`none`. This test exists to
+    /// catch accidental in-parser filtering. Real CASE.11 coverage lives at
+    /// the integration layer (`lib/llm/tests/tool_choice.rs`).
+    #[test]
+    fn test_parser_does_not_filter_by_tool_choice() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        // Parser returns BOTH calls; tool_choice="get_weather" filtering would
+        // happen above this layer. Pin the parser-level invariant.
+        assert_eq!(calls.len(), 2);
+    }
+
+    /// Parser-level invariant: the kimi_k2 parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output for any upstream
+    /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
+    /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
+    /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
+    #[test]
+    fn test_parser_output_independent_of_upstream_finish() {
+        let config = default_config();
+        // Same payload, two "logical" finish_reasons (stop vs length truncation):
+        // the parser sees only the bytes, so behavior must be identical.
+        let stop_input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls_stop, _) = try_tool_call_parse_kimi_k2(stop_input, &config, None).unwrap();
+        assert_eq!(calls_stop.len(), 1);
+    }
+
+    /// `CASE.14` — empty / null content variants. Empty section already
+    /// covered by `test_parse_empty_tool_section`; this pins the
+    /// truly-empty (zero bytes) and null-ish ("\n", whitespace-only) inputs.
+    #[test] // CASE.14
+    fn test_parse_empty_and_whitespace_inputs() {
+        let config = default_config();
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            // Whitespace is trimmed; normal_text is the empty string.
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text"
+            );
+        }
+    }
+
+    /// `CASE.15` — duplicate calls (same function name twice in one section).
+    /// Universal gap noted in the test taxonomy; first parser to land coverage.
+    #[test] // CASE.15
+    fn test_parse_duplicate_calls_same_name() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"LA"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2, "Both duplicate-name calls must be returned");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let args0: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: serde_json::Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0["location"], "NYC");
+        assert_eq!(args1["location"], "LA");
     }
 }

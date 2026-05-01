@@ -513,7 +513,7 @@ impl PositionalIndexer {
         bytes[..8].copy_from_slice(&prev_seq_hash.to_le_bytes());
         bytes[8..].copy_from_slice(&current_local_hash.to_le_bytes());
 
-        crate::protocols::compute_hash(&bytes)
+        dynamo_tokens::compute_hash_v2(&bytes, crate::protocols::XXH3_SEED)
     }
 
     /// Ensure seq_hashes is computed up to and including target_pos.
