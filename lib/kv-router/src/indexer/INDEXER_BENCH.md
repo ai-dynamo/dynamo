@@ -169,39 +169,41 @@ done
 
 ## Results
 
-Trace: `conversation_trace.jsonl` (Mooncake FAST25). Config: 2 shards × 4 workers for branch-sharded, 8 workers for CRTC baseline, `-d 7`.
+Trace: `conversation_trace.jsonl` (Mooncake FAST25). Config: 2 shards × 4 workers for
+branch-sharded, 8 workers for CRTC baseline, `-d 7`.
 
 ### Steady-state — p99 at real-world request rate (~11,860 ops/s offered)
 
-| Indexer | Achieved ops/s | p99 | Early-exit | Avg routing | Avg shard |
-|---------|---------------|-----|------------|-------------|-----------|
-| CRTC baseline (8w) | 11,540 | 5,768 µs | — | — | — |
-| Branch-sharded depth=2 (2×4w) | 11,706 | **1,387 µs** | 85.4% | 433 ns | 521 µs |
-| Branch-sharded depth=4 (2×4w) | 11,775 | **727 µs** | 87.0% | 299 ns | 397 µs |
+| Indexer | Achieved ops/s | p99 | Shallow-fallback % | Early-exit % | Avg routing | Avg shard |
+|---------|---------------|-----|--------------------|-------------|-------------|-----------|
+| CRTC baseline (8w) | 11,043 | 11,810 µs | — | — | — | — |
+| Branch-sharded depth=1 (2×4w) | 11,558 | 6,825 µs | 0.0% | 0.0% | 325 ns | 843 µs |
+| Branch-sharded depth=2 (2×4w) | 11,715 | **6,067 µs** | 85.4% | 0.0% | 866 ns | 589 µs |
 
-Branch-sharded depth=2 p99 is **4.2× lower** than CRTC; depth=4 is **7.9× lower**. The deeper key resolves more unique branches (1,038 vs 831), raising the early-exit rate slightly and reducing average shard traversal time.
+Branch-sharded depth=2 p99 is **~2× lower** than CRTC at steady state.
 
-Shard block distribution:
+depth=1 concentrates all `conversation_trace` traffic on one shard (all requests share
+block 0, so `hash(b0)` maps to a single branch key).  It beats unsharded CRTC but is
+worse than depth=2 which distributes load across both shards via the shallow fallback.
+
+Shard block distribution (depth=2):
 ```text
-depth=2:  shard 0: 1,061,550 blocks (91.1%), 3,556 workers  shard 1: 104,300 blocks  (8.9%), 3,444 workers
-          branches: shard[0]=415, shard[1]=416  ← balanced branch count, 10:1 block skew
-
-depth=4:  shard 0: 1,010,142 blocks (90.7%), 3,367 workers  shard 1: 103,222 blocks  (9.3%), 3,633 workers
-          branches: shard[0]=416, shard[1]=622  ← unbalanced branch count, similar 10:1 block skew
+shard 0: 1,055,292 blocks (91.0%), 3,535 workers  |  shard 1: 103,838 blocks (9.0%), 3,465 workers
+branches: shard[0]=422, shard[1]=409
 ```
 
-The block skew (~10:1) persists at both depths despite different branch count distributions — confirming this is a lifetime skew problem (some branches inherently accumulate far more blocks), not an artifact of the assignment criterion. See Known Issues below.
+The ~10:1 block skew is a lifetime skew problem, not an artifact of the
+assignment criterion. See Known Issues.
 
-### Peak throughput sweep — `conversation_trace.jsonl`
+### Peak throughput sweep — `conversation_trace.jsonl` (depth=2)
 
-Peak is defined as the highest achieved ops/s before the bench warns it cannot keep up with the offered rate.
-
-| Indexer | Peak achieved ops/s | p99 at peak | vs CRTC |
-|---------|--------------------:|-------------|---------|
+| Indexer | Peak achieved ops/s | p99 at peak | vs CRTC peak |
+|---------|--------------------:|-------------|-------------|
 | CRTC baseline (8w) | 18,046 | 13,362 µs | — |
-| Branch-sharded depth=2 (2×4w) | **122,585** | **583 µs** | **+579%, 23× lower p99** |
+| Branch-sharded depth=2 (2×4w) | **30,411** | **3,204 µs** | **+69%, ~4× lower p99** |
 
-CRTC saturates at ~18k ops/s with p99 exceeding 10,000 µs at all higher offered rates. Branch-sharded sustains 122k+ ops/s with p99 under 600 µs — the 85% early-exit rate means most queries never touch a shard at all, so it scales far better under load.
+Branch-sharded depth=2 peaks at ~30k ops/s — 1.7× higher than unsharded CRTC —
+with ~4× lower p99 at saturation.
 
 Full sweep data:
 
@@ -218,28 +220,27 @@ Full sweep data:
 | 1,626 ms ⚠ | 218,834 | 27,543 | 11,143 µs |
 | 1,000 ms ⚠ | 355,824 | 25,249 | 12,388 µs |
 
-**Branch-sharded depth=2:**
+**Branch-sharded depth=2 sweep:**
 
 | Benchmark window | Offered ops/s | Achieved ops/s | p99 |
 |-----------------|--------------|----------------|-----|
-| 30,000 ms | 11,861 | 11,770 | 885 µs |
-| 18,455 ms | 19,281 | 19,052 | 794 µs |
-| 11,352 ms | 31,345 | 30,561 | 799 µs |
-| 6,983 ms | 50,956 | 49,033 | 746 µs |
-| 4,296 ms | 82,827 | 76,323 | 598 µs |
-| 2,643 ms | 134,629 | 122,585 | 583 µs |
-| 1,626 ms ⚠ | 218,834 | 182,005 | 569 µs |
-| 1,000 ms ⚠ | 355,824 | 255,190 | 573 µs |
+| 30,000 ms | 11,861 | 11,754 | 2,153 µs |
+| 18,455 ms | 19,281 | 18,874 | 6,289 µs |
+| 11,352 ms | 31,345 | **30,411** | **3,204 µs** |
+| 6,983 ms ⚠ | 50,956 | 41,830 | 9,925 µs |
+| 4,296 ms ⚠ | 82,827 | 59,474 | 7,525 µs |
+| 2,643 ms ⚠ | 134,629 | 56,804 | 8,714 µs |
+| 1,626 ms ⚠ | 218,834 | 61,884 | 7,251 µs |
+| 1,000 ms ⚠ | 355,824 | 58,626 | 8,035 µs |
 
 ⚠ = bench warned it could not keep up with the offered rate.
 
 ### Worker scaling — branch-sharded depth=2
 
-Tests how p99 and shard balance change as the number of inference workers grows.
 Config: 2 shards × 4 workers per shard, `--num-unique-inference-workers 1000`, `-d 7` (7 replicas × 1,000 workers = 7,000 concurrent workers), `--benchmark-duration-ms 30000`.
 
-| Duplication factor | Effective workers | Branches | Offered ops/s | Early-exit | Avg routing | Avg shard | p99 | Block split |
-|-------------------|-----------------|----------|--------------|------------|-------------|-----------|-----|-------------|
+| Duplication factor | Effective workers | Branches | Offered ops/s | Shallow-fallback % | Avg routing | Avg shard | p99 | Block split |
+|-------------------|-----------------|----------|--------------|-------------------|-------------|-----------|-----|-------------|
 | 1× | 7,000 | 831 | 11,860 | 85.4% | 287 ns | 347 µs | 587 µs | 90.8% / 9.2% |
 | 2× | 14,000 | 1,650 | 23,721 | 86.3% | 282 ns | 289 µs | **458 µs** | 48.7% / 51.3% |
 | 4× | 28,000 | 3,330 | 47,443 | 86.4% | 249 ns | 293 µs | **446 µs** | 49.7% / 50.3% |
@@ -247,13 +248,11 @@ Config: 2 shards × 4 workers per shard, `--num-unique-inference-workers 1000`, 
 | 16× | 112,000 | 13,296 | 189,772 | 86.8% | 278 ns | 402 µs | 709 µs | 56.2% / 43.8% |
 | 32× | 224,000 | 26,617 | 379,543 | 86.5% | 344 ns | 364 µs | 713 µs | 49.3% / 50.7% |
 
-**1× is the only problematic case.** The 90.8%/9.2% block split at 7k workers is the lifetime skew issue — a few heavy branches landed on one shard and dominated it. At 2× the shards snap to balanced (48.7%/51.3%) due to the different hashes. and p99 drops to 458 µs.
+**1× is the only problematic case.** The 90.8%/9.2% block split at 7k workers is the lifetime skew issue — a few heavy branches landed on one shard and dominated it. At 2× the shards snap to balanced (48.7%/51.3%) and p99 drops to 458 µs.
 
-**Sweet spot around 4×.** p99 is lowest at 4× (446 µs) where shards are balanced and per-shard tree depth is still moderate. Beyond that, p99 rises as each shard holds more blocks, but plateaus at ~700–750 µs between 16× and 32× even as workers double. This is sub-linear: block count grows 8× from 4× to 32×, but p99 grows only ~60%.
+**Sweet spot around 4×.** p99 is lowest at 4× (446 µs) where shards are balanced and per-shard tree depth is still moderate. Beyond that, p99 rises but plateaus at ~700–750 µs between 16× and 32×. This is sub-linear: block count grows 8× from 4× to 32×, but p99 grows only ~60%.
 
-**No worker-count or lookup ceiling.** Throughput scales linearly (11,860 → 379,543 ops/s, doubling each factor step) with no saturation up to 224,000 effective workers. There is no cliff. Similarly, avg routing ranges from 249–344 ns across 831 to 26,617 branches — DashMap lookup is not a bottleneck in this range.
-
-**Practical implication:** If minimizing single-query latency matters, 14k–28k workers is the sweet spot for a 2-shard config; if maximizing throughput matters, the indexer keeps scaling.
+**No lookup ceiling.** Avg routing ranges from 249–344 ns across 831 to 26,617 branches — DashMap lookup is not a bottleneck.
 
 ---
 

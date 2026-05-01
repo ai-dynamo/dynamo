@@ -210,6 +210,13 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     timing_sum_shard_ns: AtomicU64,
     /// `find_matches` calls that returned early (unknown branch key).
     find_matches_miss_count: AtomicU64,
+    /// `find_matches` calls that resolved via a shallow prefix fallback.
+    ///
+    /// Incremented when the exact branch key (`hash(seq[0..prefix_depth])`) misses
+    /// but a shorter registered prefix key (`hash(seq[0..k])` for k < prefix_depth)
+    /// is found.  The query is routed to that shard; the underlying CRTC returns
+    /// the correct shallow overlap score instead of an empty miss.
+    shallow_fallback_count: AtomicU64,
     /// Individual `Removed` block hashes that fell back to broadcast.
     remove_broadcast_count: AtomicU64,
 }
@@ -248,6 +255,7 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             timing_sum_routing_ns: AtomicU64::new(0),
             timing_sum_shard_ns: AtomicU64::new(0),
             find_matches_miss_count: AtomicU64::new(0),
+            shallow_fallback_count: AtomicU64::new(0),
             remove_broadcast_count: AtomicU64::new(0),
         }
     }
@@ -339,6 +347,50 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         }
     }
 
+    /// Shallow-overlap fallback: find a shard by trying shorter prefix keys when
+    /// the full-depth branch key misses.
+    ///
+    /// When a query has `len >= prefix_depth` but diverges from all stored branches
+    /// before `prefix_depth` (e.g. cached `[0,1,…]` vs. query `[0,14,…]` with
+    /// `prefix_depth=2`), the exact branch key `hash(seq[0..prefix_depth])` misses.
+    /// `register_prefix_keys` ensures that each stored branch also records all
+    /// shorter prefix keys (depth 1 … prefix_depth) in `branch_to_shard`.
+    /// Querying with the longest matching shorter key routes to a shard that has at
+    /// least the shared leading blocks, so the CRTC returns the correct shallow
+    /// overlap score instead of an empty result.
+    ///
+    /// Tradeoff: `or_insert` semantics mean only the first branch to claim a given
+    /// shallow prefix key "owns" it.  When multiple branches share the same k-block
+    /// prefix but live on different shards, we always route to the first-claimant
+    /// shard.  That shard has the correct shallow overlap but may not carry the
+    /// globally deepest match.  Scatter-gather is avoided.
+    ///
+    /// Returns `None` if no shorter prefix key is registered or if `prefix_depth`
+    /// is 1 (no shorter key is meaningful).
+    fn shallow_fallback_shard(&self, sequence: &[LocalBlockHash]) -> Option<usize> {
+        let k_max = self.prefix_depth.min(sequence.len());
+        if k_max <= 1 {
+            return None;
+        }
+        // Build prefix FNV states: prefix_states[i] = FNV(seq[0..i+1]).
+        let mut state = FNV_OFFSET_BASIS;
+        let prefix_states: Vec<u64> = sequence[..k_max]
+            .iter()
+            .map(|block| {
+                state = fnv_fold(state, block.0);
+                state
+            })
+            .collect();
+        // Try from depth k_max-1 down to 1 (deepest shorter prefix first).
+        // prefix_states[k-1] = FNV(seq[0..k]).
+        for k in (1..k_max).rev() {
+            if let Some(shard) = self.lookup_shard(prefix_states[k - 1]) {
+                return Some(shard);
+            }
+        }
+        None
+    }
+
     /// Compute cumulative FNV prefix keys for the first `limit` stored blocks,
     /// starting from `initial_state`.
     fn prefix_keys_for_stored_blocks_from_state(
@@ -406,9 +458,11 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                 let fnv = prefix_keys.last().copied().unwrap_or(parent_fnv);
                 let new_depth = parent_depth + to_process;
                 let shard = self.assign_shard(fnv);
-                if new_depth >= self.prefix_depth {
-                    self.register_prefix_keys(shard, prefix_keys);
-                }
+                // Register all intermediate prefix keys regardless of whether we
+                // have crossed prefix_depth yet.  A future query with depth <
+                // prefix_depth can then find the key via direct lookup instead of
+                // needing the progressive fallback search.
+                self.register_prefix_keys(shard, prefix_keys);
                 let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth));
                 (shard, state)
             } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
@@ -549,9 +603,11 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
 impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     /// Route to a single shard determined by the first `prefix_depth` block hashes.
     ///
-    /// If the branch key is not in the routing table, no worker has ever stored
-    /// that prefix, so the result would be empty regardless of which shard is
-    /// queried.  We return `OverlapScores::new()` immediately without dispatching.
+    /// If the exact branch key is not in the routing table, falls back to
+    /// progressively shorter registered prefix keys (see `shallow_fallback_shard`).
+    /// This catches queries that share a prefix shallower than `prefix_depth` with a
+    /// stored branch, avoiding false misses relative to baseline CRTC semantics.
+    /// If no prefix key is registered at all, returns empty scores immediately.
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -560,10 +616,16 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         let branch_key = self.branch_key_for_local_hashes(&sequence);
         let shard_idx = match self.lookup_shard(branch_key) {
             Some(idx) => idx,
-            None => {
-                self.find_matches_miss_count.fetch_add(1, Ordering::Relaxed);
-                return Ok(OverlapScores::new());
-            }
+            None => match self.shallow_fallback_shard(&sequence) {
+                Some(idx) => {
+                    self.shallow_fallback_count.fetch_add(1, Ordering::Relaxed);
+                    idx
+                }
+                None => {
+                    self.find_matches_miss_count.fetch_add(1, Ordering::Relaxed);
+                    return Ok(OverlapScores::new());
+                }
+            },
         };
         let routing_ns = t_routing.elapsed().as_nanos() as u64;
 
@@ -596,10 +658,22 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
             },
         );
         let branch_key = self.branch_key_for_local_hashes(&sequence);
-        match self.lookup_shard(branch_key) {
-            Some(idx) => self.shards[idx].find_matches(sequence).await,
-            None => Ok(OverlapScores::new()),
-        }
+        let shard_idx = match self.lookup_shard(branch_key) {
+            Some(idx) => idx,
+            None => match self.shallow_fallback_shard(&sequence) {
+                Some(idx) => {
+                    self.shallow_fallback_count.fetch_add(1, Ordering::Relaxed);
+                    idx
+                }
+                None => {
+                    self.find_matches_miss_count.fetch_add(1, Ordering::Relaxed);
+                    return Ok(OverlapScores::new());
+                }
+            },
+        };
+        let result = self.shards[shard_idx].find_matches(sequence).await;
+        self.timing_calls.fetch_add(1, Ordering::Relaxed);
+        result
     }
 
     async fn apply_event(&self, event: RouterEvent) {
@@ -683,21 +757,26 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     }
 
     fn timing_report(&self) -> String {
-        let dispatched = self.timing_calls.load(Ordering::Relaxed);
+        // timing_calls counts all shard dispatches: exact hits + shallow fallbacks.
+        // Compute mutually exclusive buckets: exact | shallow-fallback | early-exit.
+        let all_dispatched = self.timing_calls.load(Ordering::Relaxed);
+        let shallow_fallbacks = self.shallow_fallback_count.load(Ordering::Relaxed);
         let misses = self.find_matches_miss_count.load(Ordering::Relaxed);
-        let total_calls = dispatched + misses;
+        let exact_dispatched = all_dispatched.saturating_sub(shallow_fallbacks);
+        let total_calls = all_dispatched + misses;
         let broadcasts = self.remove_broadcast_count.load(Ordering::Relaxed);
         if total_calls == 0 {
             return String::new();
         }
         let miss_pct = 100.0 * misses as f64 / total_calls as f64;
-        let avg_routing_ns = if dispatched > 0 {
-            self.timing_sum_routing_ns.load(Ordering::Relaxed) / dispatched
+        let fallback_pct = 100.0 * shallow_fallbacks as f64 / total_calls as f64;
+        let avg_routing_ns = if all_dispatched > 0 {
+            self.timing_sum_routing_ns.load(Ordering::Relaxed) / all_dispatched
         } else {
             0
         };
-        let avg_shard_us = if dispatched > 0 {
-            self.timing_sum_shard_ns.load(Ordering::Relaxed) / dispatched / 1000
+        let avg_shard_us = if all_dispatched > 0 {
+            self.timing_sum_shard_ns.load(Ordering::Relaxed) / all_dispatched / 1000
         } else {
             0
         };
@@ -710,7 +789,8 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
             .collect();
         drop(branch_counts);
         format!(
-            "BranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
+            "BranchShardedIndexer find_matches ({total_calls} total: {exact_dispatched} dispatched, \
+             {shallow_fallbacks} shallow-fallback / {fallback_pct:.1}%, \
              {misses} early-exit / {miss_pct:.1}% miss):\n  \
              avg routing    = {avg_routing_ns}ns  (routing table lookup)\n  \
              avg shard      = {avg_shard_us}µs  (CRTC traversal, inline on caller thread)\n  \
@@ -786,6 +866,79 @@ mod tests {
         );
     }
 
+    /// Query diverges before prefix_depth but shares a shallow prefix.
+    ///
+    /// Cached [0,1,...] with prefix_depth=2: branch key = fnv(0,1), shallow key
+    /// fnv(0) also registered.  Query [0,14,...]: exact key fnv(0,14) misses, but
+    /// shallow fallback finds fnv(0) → shard, CRTC returns overlap ≥ 1.
+    #[tokio::test]
+    async fn shallow_overlap_fallback_avoids_false_miss_for_diverging_query() {
+        let indexer = make_indexer(2, 2);
+
+        // Store [0,1,rest] — this registers fnv(0,1) as branch key and fnv(0) as
+        // a shallow prefix key on the same shard.
+        indexer
+            .apply_event(stored_event(
+                1,
+                None,
+                vec![block(101, 11), block(102, 22), block(103, 33)],
+            ))
+            .await;
+        indexer.flush().await;
+
+        // Query [0,14,...] — exact key fnv(0,14) has never been stored.
+        // Shallow fallback via fnv(0) should route to the shard that holds block 0.
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(99)])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 1,
+            "query diverging before prefix_depth should get shallow overlap=1 via fallback, not 0"
+        );
+        assert_eq!(
+            indexer.shallow_fallback_count.load(Ordering::Relaxed),
+            1,
+            "shallow fallback counter should be incremented"
+        );
+        assert_eq!(
+            indexer.find_matches_miss_count.load(Ordering::Relaxed),
+            0,
+            "true miss counter should not be incremented"
+        );
+    }
+
+    /// Deeper shared prefix — query diverges at depth k < prefix_depth.
+    ///
+    /// With prefix_depth=3, cached [0,1,2,...] registers fnv(0), fnv(0,1),
+    /// fnv(0,1,2).  Query [0,1,99,...] misses on fnv(0,1,99), falls back to
+    /// fnv(0,1), and CRTC returns overlap 2.
+    #[tokio::test]
+    async fn shallow_overlap_fallback_uses_deepest_matching_prefix() {
+        let indexer = make_indexer(2, 3);
+
+        indexer
+            .apply_event(stored_event(
+                1,
+                None,
+                vec![block(101, 11), block(102, 22), block(103, 33), block(104, 44)],
+            ))
+            .await;
+        indexer.flush().await;
+
+        // Query shares blocks 0 and 1 but diverges at depth 2.
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(99)])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 2,
+            "fallback should route via deepest matching prefix key, giving overlap=2"
+        );
+    }
+
     #[tokio::test]
     async fn short_query_hits_after_shallow_root_crosses_prefix_depth() {
         let indexer = make_indexer(1, 4);
@@ -816,4 +969,49 @@ mod tests {
             "prefix keys added during depth crossing should route short queries correctly"
         );
     }
+
+    /// Case A always registers intermediate prefix keys even when the chain has
+    /// not yet reached `prefix_depth` (new_depth < prefix_depth).  A query
+    /// whose length equals the in-progress chain depth then hits the routing
+    /// table directly rather than falling through to the progressive fallback.
+    ///
+    /// Single shard is used so root and continuation are always co-located on
+    /// the same CRTC (the shallow-chain-replay limitation does not apply here).
+    #[tokio::test]
+    async fn case_a_intermediate_keys_registered_before_crossing_prefix_depth() {
+        // prefix_depth=4; root stores 1 block (depth=1), continuation adds 2
+        // more (depth=3, still shallow).  fnv(b0,b1) must land in branch_to_shard
+        // after the continuation so that query [b0,b1] is a direct table hit.
+        let indexer = make_indexer(1, 4);
+        indexer
+            .apply_event(stored_event(1, None, vec![block(100, 10)]))
+            .await;
+        indexer
+            .apply_event(stored_event(
+                1,
+                Some(100),
+                vec![block(101, 11), block(102, 22)],
+            ))
+            .await;
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(10), LocalBlockHash(11)])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 2,
+            "query matching the in-progress chain depth should get overlap=2"
+        );
+        // Crucial: the intermediate key fnv(b0,b1) must be in branch_to_shard so
+        // the query routes via direct lookup.  Without unconditional case-A
+        // registration the key is absent and shallow_fallback fires instead.
+        assert_eq!(
+            indexer.shallow_fallback_count.load(Ordering::Relaxed),
+            0,
+            "intermediate key fnv(b0,b1) must be found via direct lookup, not fallback"
+        );
+    }
+
 }
