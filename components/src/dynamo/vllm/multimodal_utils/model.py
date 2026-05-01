@@ -19,7 +19,7 @@ import logging
 import os
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoModel
@@ -46,7 +46,7 @@ class ModelFamily(StrEnum):
 # entries here must correspond to extractor logic in `encode_utils.py`.
 #
 # Architectures are matched verbatim against `config.json` `architectures`.
-_FAMILY_ARCHITECTURES: Dict[ModelFamily, FrozenSet[str]] = {
+_FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
     ModelFamily.QWEN_VL: frozenset(
         {
             "Qwen2VLForConditionalGeneration",
@@ -62,7 +62,7 @@ _FAMILY_ARCHITECTURES: Dict[ModelFamily, FrozenSet[str]] = {
 # MoE variant of an existing family doesn't require a registry change as
 # long as it shares the family-level prefix; only a genuinely new family
 # (e.g. Qwen4-VL) needs a pattern added.
-_FAMILY_NAME_PATTERNS: Dict[ModelFamily, FrozenSet[str]] = {
+_FAMILY_NAME_PATTERNS: Dict[ModelFamily, frozenset[str]] = {
     ModelFamily.QWEN_VL: frozenset({"qwen2-vl", "qwen2.5-vl", "qwen3-vl"}),
     ModelFamily.LLAVA: frozenset({"llava-1.5-7b-hf"}),
 }
@@ -82,52 +82,44 @@ def _load_model_config(model_name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _normalize_model_name(model_name: str) -> str:
-    """Normalize a model identifier toward `<org>/<model>` (or verbatim if no shape matches)."""
-    if "/" in model_name and not model_name.startswith("/"):
-        return model_name
-
-    # HuggingFace cache layout (".../models--ORG--MODEL/...")
-    if "models--" in model_name:
-        parts_after_models = model_name.split("models--", 1)
-        if len(parts_after_models) > 1:
-            segments = parts_after_models[1].split("--")
-            if len(segments) >= 2:
-                org_segments = segments[:-1]
-                model_segment = segments[-1].split("/")[0]
-                org = "--".join(org_segments)
-                return f"{org}/{model_segment}"
-    else:
-        # Walk path components for the first `<head>--<tail>` segment
-        for component in Path(model_name).parts:
-            if "--" in component:
-                head, _, tail = component.partition("--")
-                if head and tail:
-                    return f"{head}/{tail}"
-
-    return model_name
-
-
 @functools.lru_cache(maxsize=8)
 def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
-    """Canonical answer to "which family is this model?".
+    """Return the multimodal model family for the given identifier, or `None`
+    if no registered family matches.
 
-    Used at every dynamo callsite that dispatches by model family
-    (encoder loading, encoding pipeline, decoder mm-data construction,
-    handler-side mRoPE handling). Returns `None` for models we don't
-    know how to extract a vision encoder from — callers should raise
-    `NotImplementedError` rather than dispatch into broken code.
+    Resolution proceeds in two stages: a `config.json` `architectures`
+    lookup when `model_name` is a local directory with config (authoritative
+    when present), falling through to a lowercased substring scan against
+    per-family name patterns (`qwen2-vl`, `qwen3-vl`, `llava-1.5-7b-hf`).
+    Patterns are family-level prefixes, so HF ids, HF cache layouts, and
+    hand-rolled local paths are all handled by the same scan, and new
+    sizes / quantizations of an existing family resolve without a registry
+    change.
 
-    Resolution stages:
-      1. **Metadata.** When `model_name` is a local directory with
-         `config.json`, map its `architectures` to a registered family.
-         Authoritative when present; falls through silently on
-         missing/malformed config or unrecognized arch.
-      2. **Name.** Normalize the input and substring-match against each
-         family's name patterns (e.g. `qwen2-vl`, `qwen3-vl`,
-         `llava-1.5-7b-hf`). Patterns are family-level prefixes, so new
-         sizes / quantizations of an existing family resolve without a
-         registry change.
+    Args:
+        model_name: A model identifier. Accepts an HF id, an HF cache
+            snapshot path, or a local directory path (with or without
+            `config.json`, with or without an HF-cache-style parent
+            segment).
+
+    Returns:
+        The matching `ModelFamily`, or `None` if no registered family
+        matches the input.
+
+    Examples:
+        All of the following resolve to `ModelFamily.QWEN_VL`:
+
+        >>> resolve_model_family("Qwen/Qwen2-VL-2B-Instruct")
+        >>> resolve_model_family(
+        ...     "/root/.cache/huggingface/hub/"
+        ...     "models--Qwen--Qwen2-VL-2B-Instruct/snapshots/abc123"
+        ... )
+        >>> resolve_model_family("/local_store/Qwen--Qwen2-VL-2B-Instruct/v2")
+        >>> resolve_model_family("/runs/qwen2.5-vl-7b-instruct/v3")
+
+        A local directory containing `config.json` with
+        `{"architectures": ["Qwen2VLForConditionalGeneration"]}` resolves
+        via the metadata stage regardless of the directory's name.
     """
     config = _load_model_config(model_name)
     if config is not None:
@@ -136,9 +128,9 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
                 if arch in arch_set:
                     return family
 
-    normalized = _normalize_model_name(model_name).lower()
+    lowered = model_name.lower()
     for family, patterns in _FAMILY_NAME_PATTERNS.items():
-        if any(pattern in normalized for pattern in patterns):
+        if any(pattern in lowered for pattern in patterns):
             return family
 
     return None
