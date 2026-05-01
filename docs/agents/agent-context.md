@@ -174,7 +174,11 @@ child process tools / subagents
   -> process queue or event bus -> root queued publisher -> ZMQ PUB -> Dynamo relay
 ```
 
-A compact publisher looks like this:
+A compact publisher implementation is included below for harness authors that
+need a reference.
+
+<details>
+<summary>Compact Python publisher</summary>
 
 ```python
 import atexit
@@ -217,6 +221,8 @@ class ZmqToolEventPublisher:
         self.thread.join(timeout=1.0)
         self.socket.close(linger=0)
 ```
+
+</details>
 
 The record must include `agent_context`. Tool events should use the same
 `workflow_type_id`, `workflow_id`, and `program_id` as the surrounding LLM calls;
@@ -266,7 +272,7 @@ Each line is a recorder envelope:
 Convert traces to Chrome Trace JSON for Perfetto UI:
 
 ```bash
-python3 benchmarks/agent_trace/convert_to_perfetto.py \
+uv run --no-project python benchmarks/agent_trace/convert_to_perfetto.py \
   "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
   --output "${DYN_AGENT_TRACE_OUTPUT_PATH}.perfetto.json"
 ```
@@ -399,7 +405,7 @@ the fork root:
 > repositories and configs.
 
 ```bash
-PYTHONPATH=. python ms_agent/cli/cli.py run \
+PYTHONPATH=. uv run --active --no-sync python ms_agent/cli/cli.py run \
   --config projects/deep_research/v2/researcher.yaml \
   --query "Write your research question here" \
   --trust_remote_code true \
