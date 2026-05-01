@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 TRTLLM_BLOCK_SIZE = 32  # fixed internally to 32
 
+# Per-mode extra-engine-args YAMLs for disaggregated TRT-LLM. Both files
+# set cache_transceiver_config (required by TRT-LLM 1.3+ whenever
+# --disaggregation-mode is set). The prefill variant additionally sets
+# disable_overlap_scheduler=true, because pytorch-backend prefill workers
+# cannot run with the overlap scheduler enabled while KV block reuse is on.
+_DISAGG_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs")
+DISAGG_EXTRA_ENGINE_ARGS = {
+    "prefill": os.path.join(_DISAGG_CONFIG_DIR, "trtllm_disagg_prefill.yaml"),
+    "decode": os.path.join(_DISAGG_CONFIG_DIR, "trtllm_disagg_decode.yaml"),
+}
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.router,
@@ -151,6 +162,12 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
+                command.extend(
+                    [
+                        "--extra-engine-args",
+                        DISAGG_EXTRA_ENGINE_ARGS[disaggregation_mode],
+                    ]
+                )
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if free_gpu_memory_fraction is not None:
@@ -302,7 +319,6 @@ def test_router_decisions_trtllm_multiple_workers(
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2609")
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)

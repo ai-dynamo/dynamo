@@ -66,6 +66,7 @@ velo = { version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
+lru = { version = "0.12" }
 async-nats = { version = "0.45.0", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }

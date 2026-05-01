@@ -1,6 +1,17 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Note: --free-gpu-memory-fraction below is overridden by TRT-LLM's
+# KvCacheConfig semantics — when max_tokens is set (e.g. via
+# _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS in CI), max_tokens takes
+# precedence over the fraction.
+#
+# TODO: replace --free-gpu-memory-fraction with build_trtllm_override_args_with_mem
+# (see other trtllm launch scripts) before adding this script to a gpu_1 test
+# in the parallel pass. Fractions are not portable across GPU sizes and
+# would break the VRAM-aware scheduler. No urgency today since gpt_oss is
+# 8-GPU only and not in the parallel pass.
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT

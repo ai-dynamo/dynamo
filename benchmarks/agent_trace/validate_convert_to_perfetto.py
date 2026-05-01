@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
+import sys
+from pathlib import Path
 
-from benchmarks.agent_trace.convert_to_perfetto import convert_records
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+from benchmarks.agent_trace.convert_to_perfetto import convert_records  # noqa: E402
 
 
-def test_convert_records_emits_request_stages_and_metadata():
+def check_convert_records_emits_request_stages_and_metadata():
     trace, converted = convert_records(
         [
             {
@@ -77,7 +80,7 @@ def test_convert_records_emits_request_stages_and_metadata():
     assert markers[0]["ts"] == 1_012_000
 
 
-def test_convert_records_can_emit_stages_on_separate_tracks():
+def check_convert_records_can_emit_stages_on_separate_tracks():
     trace, _ = convert_records(
         [
             {
@@ -127,7 +130,7 @@ def test_convert_records_can_emit_stages_on_separate_tracks():
     ]
 
 
-def test_convert_records_clamps_stage_rounding_overlap():
+def check_convert_records_clamps_stage_rounding_overlap():
     trace, _ = convert_records(
         [
             {
@@ -174,7 +177,7 @@ def test_convert_records_clamps_stage_rounding_overlap():
     assert stages[1]["ts"] + stages[1]["dur"] == stages[2]["ts"]
 
 
-def test_convert_records_splits_overlapping_program_requests_into_lanes():
+def check_convert_records_splits_overlapping_program_requests_into_lanes():
     def record(request_id: str, start_ms: int, total_ms: int):
         return {
             "event": {
@@ -225,3 +228,194 @@ def test_convert_records_splits_overlapping_program_requests_into_lanes():
         if event.get("cat") == "dynamo.llm"
     }
     assert request_tids["req-1"] != request_tids["req-2"]
+
+
+def check_convert_records_emits_tool_duration_slices():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1250,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_type_id": "ms_agent",
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "web_search",
+                        "status": "succeeded",
+                        "duration_ms": 250,
+                        "output_bytes": 2048,
+                    },
+                },
+            }
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    tool_events = [
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    ]
+    assert len(tool_events) == 1
+    tool_event = tool_events[0]
+    assert tool_event["name"] == "Tool: web_search"
+    assert tool_event["ts"] == 1_000_000
+    assert tool_event["dur"] == 250_000
+    assert tool_event["args"]["tool_call_id"] == "call-1"
+    assert tool_event["args"]["output_bytes"] == 2048
+
+    thread_names = [
+        event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event.get("name") == "thread_name"
+    ]
+    assert thread_names == ["workflow-1:searcher tools"]
+
+
+def check_convert_records_pairs_tool_start_and_end_without_duration():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_start",
+                    "event_time_unix_ms": 1000,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "web_search",
+                        "status": "running",
+                    },
+                },
+            },
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1250,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "web_search",
+                        "status": "succeeded",
+                    },
+                },
+            },
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    assert not [
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool.marker"
+    ]
+    tool_event = next(
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    )
+    assert tool_event["ts"] == 1_000_000
+    assert tool_event["dur"] == 250_000
+
+
+def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
+    trace, converted = convert_records(
+        [
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_start",
+                    "event_time_unix_ms": 1000,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "file_system",
+                        "status": "running",
+                    },
+                },
+            },
+            {
+                "event": {
+                    "schema": "dynamo.agent.trace.v1",
+                    "event_type": "tool_end",
+                    "event_time_unix_ms": 1000,
+                    "event_source": "harness",
+                    "agent_context": {
+                        "workflow_id": "workflow-1",
+                        "program_id": "workflow-1:searcher",
+                    },
+                    "tool": {
+                        "tool_call_id": "call-1",
+                        "tool_class": "file_system",
+                        "status": "succeeded",
+                        "duration_ms": 0.0,
+                    },
+                },
+            },
+        ],
+        include_stages=True,
+        include_markers=False,
+    )
+
+    assert converted == 1
+    assert not [
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool.marker"
+    ]
+    tool_event = next(
+        event
+        for event in trace["traceEvents"]
+        if event.get("cat") == "dynamo.agent.tool"
+    )
+    assert tool_event["name"] == "Tool: file_system"
+    assert tool_event["ts"] == 1_000_000
+    assert tool_event["dur"] == 1_000
+    assert tool_event["args"]["duration_ms"] == 0.0
+    assert tool_event["args"]["synthetic_duration"] is True
+    assert tool_event["args"]["visual_duration_ms"] == 1.0
+
+
+CHECKS = [
+    check_convert_records_emits_request_stages_and_metadata,
+    check_convert_records_can_emit_stages_on_separate_tracks,
+    check_convert_records_clamps_stage_rounding_overlap,
+    check_convert_records_splits_overlapping_program_requests_into_lanes,
+    check_convert_records_emits_tool_duration_slices,
+    check_convert_records_pairs_tool_start_and_end_without_duration,
+    check_convert_records_renders_zero_duration_tool_as_synthetic_span,
+]
+
+
+def main() -> int:
+    for check in CHECKS:
+        check()
+        print(f"PASS {check.__name__}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

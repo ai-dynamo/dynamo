@@ -197,7 +197,7 @@ runs:
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
-        HF_HOME: /runner/_work/_temp
+        HF_HOME: /models
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         # Run pytest with detailed output and JUnit XML
@@ -260,6 +260,7 @@ runs:
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
         DOCKER_ENV_FLAGS+=(--env "HF_XET_HIGH_PERFORMANCE=1")
+        DOCKER_ENV_FLAGS+=(--env "HF_HOME=${HF_HOME}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
@@ -270,6 +271,7 @@ runs:
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          -v "/models:${HF_HOME}" \
           ${{ inputs.image_tag }} \
           sh -c "umask 0022 && ${PYTEST_CMD}"
 
