@@ -73,7 +73,7 @@ Then start any Dynamo OpenAI-compatible backend.
 | `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member. |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES` | No | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes. |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES` | No | unset | Optional `jsonl_gz` segment roll threshold in records. |
-| `DYN_AGENT_TRACE_REPLAY_HASHES` | No | disabled | Set to a truthy value such as `1` or `true` to emit replay-oriented prompt block hashes in request records. Hashes use the model deployment card's KV cache block size. |
+| `DYN_AGENT_TRACE_REPLAY_HASHES` | No | enabled when tracing is enabled | Replay-oriented prompt block hashes are emitted by default in request records. Set to a falsey value such as `0`, `false`, `off`, or `no` to disable them. Hashes use the model deployment card's KV cache block size. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | No | unset | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | No | unset | Optional ZMQ topic filter for harness tool events. |
 
@@ -348,7 +348,7 @@ Request records capture Dynamo-owned serving metrics:
 | `kv_transfer_estimated_latency_ms` | Upper-bound estimated disaggregated KV transfer latency. |
 | `queue_depth` | Router queue depth observed when routing the request. |
 | `worker` | Prefill/decode worker IDs and DP ranks when recorded. |
-| `replay` | Text-free replay metadata for Mooncake/mocker conversion when `DYN_AGENT_TRACE_REPLAY_HASHES` is enabled. Strict trace consumers must accept this optional object before enabling replay hashes. |
+| `replay` | Text-free replay metadata for Mooncake/mocker conversion. Emitted by default when agent tracing is enabled unless `DYN_AGENT_TRACE_REPLAY_HASHES` is falsey. Strict trace consumers must accept this optional object before enabling tracing. |
 | `replay.trace_block_size` | KV cache block size from the model deployment card, used to derive replay hashes. |
 | `replay.input_length` | Prompt/input token count represented by the replay hashes. |
 | `replay.input_sequence_hashes` | Stable sequence-aware prompt block hashes. These are replay labels, not raw tokens and not compact Mooncake `hash_ids`. |

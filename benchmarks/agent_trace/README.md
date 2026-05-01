@@ -35,8 +35,9 @@ independent metric rounding. Raw timing fields remain available in event args.
 
 ## Convert to Mooncake Replay
 
-Agent traces captured with `DYN_AGENT_TRACE_REPLAY_HASHES=1` can be converted
-to Mooncake JSONL for the Dynamo replay/mocker path:
+Agent traces captured with Dynamo agent tracing include replay hashes by default
+and can be converted to Mooncake JSONL for the Dynamo replay/mocker path. Set
+`DYN_AGENT_TRACE_REPLAY_HASHES=0` only when you need to suppress replay metadata:
 
 ```bash
 cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
