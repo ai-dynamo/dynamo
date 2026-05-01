@@ -410,10 +410,8 @@ impl ModelWatcher {
 
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
-            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
-                // remove_prefill_activator uses deployment namespace (not ws_key)
-                self.manager
-                    .remove_prefill_activator(&model_name, worker_namespace);
+            let removed = self.manager.remove_worker_set(&model_name, &ws_key);
+            if removed.is_some() {
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -421,11 +419,25 @@ impl ModelWatcher {
                 );
             }
 
-            // If the removed component was a prefill worker, deactivate the decode-side
-            // prefill router so requests fall back to aggregated mode (or fail cleanly
-            // with enforce_disagg). The decode WorkerSet's namespace matches the
-            // deployment namespace, not the ws_key.
+            // Clear the activator state ONLY when the PREFILL component is gone.
+            // Decode-component removal must NOT invalidate the cached prefill
+            // endpoint: if all decode pods restart (e.g., canary livenessProbe
+            // kills two replicas in quick succession), the new decode WorkerSet
+            // built by the next handle_add must find PrefillReady (set by the
+            // prior activate_prefill_router persist step) so it can activate
+            // immediately. Clearing the activator here strands the new decode
+            // WorkerSet in DecodeWaiting forever, since prefill workers are
+            // still alive and never re-call activate_prefill_router.
+            //
+            // When the removed component IS prefill: the cached endpoint is
+            // stale (prefill workers all gone) and must be cleared, plus we
+            // deactivate the decode-side router so requests fall back to
+            // aggregated mode (or fail cleanly with enforce_disagg).
             if card.model_type.supports_prefill() {
+                if removed.is_some() {
+                    self.manager
+                        .remove_prefill_activator(&model_name, worker_namespace);
+                }
                 self.manager
                     .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
             }
