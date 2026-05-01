@@ -12,6 +12,7 @@ use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
+    try_tool_call_parse_aggregate_finalize,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -250,6 +251,7 @@ impl ChoiceJailState {
                                 jailed_part,
                                 choice,
                                 self.emitted_tool_calls_count,
+                                false, // streaming early-exit, no EOF recovery
                             )
                             .await;
 
@@ -382,6 +384,7 @@ impl ChoiceJailState {
                         &jailed_owned,
                         choice,
                         self.emitted_tool_calls_count,
+                        false, // streaming unjail, no EOF recovery
                     )
                     .await;
                 unjailed_choice.logprobs = jail_logprobs;
@@ -445,6 +448,7 @@ impl ChoiceJailState {
                     &self.accumulated_content,
                     &dummy_choice,
                     self.emitted_tool_calls_count,
+                    true, // finalize: enable EOF recovery for missing-end-token / truncated-JSON
                 )
                 .await;
             // Attach the full accumulated logprobs to the final choice
@@ -914,24 +918,38 @@ impl JailedStream {
         }
     }
 
-    /// Parse tool calls from accumulated content and create choice
+    /// Parse tool calls from accumulated content and create choice.
+    ///
+    /// `is_finalize` selects the recovery-enabled aggregator (missing
+    /// outer end-token / truncated JSON). Streaming early-exit callers pass
+    /// `false`; the stream-end finalize path passes `true`.
     async fn create_tool_call_choice(
         &self,
         choice_index: u32,
         accumulated_content: &str,
         base_choice: &ChatChoiceStream,
         tool_call_offset: usize,
+        is_finalize: bool,
     ) -> ChatChoiceStream {
         match &self.jail_mode {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
-                let parse_result = try_tool_call_parse_aggregate(
-                    accumulated_content,
-                    self.tool_call_parser.as_deref(),
-                    tools_slice,
-                )
-                .await;
+                let parse_result = if is_finalize {
+                    try_tool_call_parse_aggregate_finalize(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        tools_slice,
+                    )
+                    .await
+                } else {
+                    try_tool_call_parse_aggregate(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        tools_slice,
+                    )
+                    .await
+                };
                 match parse_result {
                     Ok((tool_calls, normal_text)) if !tool_calls.is_empty() => {
                         // If a named tool filter is set (tool_choice=named + parser path), reject

@@ -514,6 +514,14 @@ impl SyncIndexer for LowerTierIndexer {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
                 }
+                WorkerTask::EventWithAck { event, resp } => {
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    let applied = result.is_ok();
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    let _ = resp.send(applied);
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_worker(&mut worker_blocks, worker_id);
                 }
@@ -522,6 +530,9 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
+                }
+                WorkerTask::Flush(sender) => {
+                    let _ = sender.send(());
                 }
                 WorkerTask::CleanupStaleChildren => {}
                 WorkerTask::Terminate => {
