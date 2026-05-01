@@ -33,7 +33,7 @@ Status: **Experimental** (Day-0). Modality: text only.
 
    - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 
-   - **vLLM** (`vllm-agg-b200` or `vllm-disagg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
+   - **vLLM** (`vllm-agg-b200` or `vllm-disagg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different vllm base), see the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
 
      ```bash
      container/render.py --framework vllm --target runtime --output-short-filename

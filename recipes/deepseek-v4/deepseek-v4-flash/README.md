@@ -31,7 +31,7 @@ Status: **Experimental** (Day-0). Modality: text only.
 
    - **SGLang GB200** (`sglang-agg-gb200`): the manifest pulls the prebuilt arm64 NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — same story, **no build step required.**
 
-   - **vLLM** (`vllm-agg-b200` or `vllm-agg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
+   - **vLLM** (`vllm-agg-b200` or `vllm-agg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — same story, **no build step required.**
 
      ```bash
      container/render.py --framework vllm --target runtime --output-short-filename
@@ -187,7 +187,7 @@ Recipe-level (per-variant) settings:
 
 | | vLLM B200 (`vllm-agg-b200`) | vLLM GB200 (`vllm-agg-gb200`) | SGLang B200 (`sglang-agg`) | SGLang GB200 (`sglang-agg-gb200`) |
 |---|---|---|---|---|
-| **Backend image** | Standard Dynamo vLLM runtime | Standard Dynamo vLLM runtime (arm64) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-gb200-dev.1` |
+| **Backend image** | Standard Dynamo vLLM runtime | Standard Dynamo vLLM runtime (arm64) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2` |
 | **Parallelism** | DP=4 + Expert Parallel, TP=1 | TP=4 + Expert Parallel | TP=4 | TP=4 |
 | **MoE backend** | vLLM's V4 expert kernel (FP4) | DeepGEMM mega MoE | FlashInfer MXFP4 | FlashInfer MXFP4 |
 | **KV cache** | FP8, block size 256 | FP8, block size 256 | engine default | engine default |
@@ -263,7 +263,7 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### vLLM-specific
 
-- **Image tag.** Both `vllm/agg_b200/deploy.yaml` and `vllm/agg_gb200/deploy.yaml` ship with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2"`. You can replace with your built Dynamo vLLM runtime tag — see Prerequisite 4. The GB200 manifest expects an arm64 build that includes FlashInfer with the TRT-LLM allreduce kernels.
+- **Image tag.** Both `vllm/agg_b200/deploy.yaml` and `vllm/agg_gb200/deploy.yaml` ship with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2`. You can replace with your built Dynamo vLLM runtime tag — see Prerequisite 4. The GB200 manifest expects an arm64 build that includes FlashInfer with the TRT-LLM allreduce kernels.
 - **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=3600` matches the startup probe budget on both variants.
 - **DP stability (B200 only).** `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` and `VLLM_SKIP_P2P_CHECK=1` mirror the DeepSeek-R1 vLLM recipe and stabilize DP dummy inputs. The GB200 variant uses TP (no DP), so `VLLM_RANDOMIZE_DP_DUMMY_INPUTS` is not set.
 - **FlashInfer TRT-LLM allreduce on GB200.** You may see a non-fatal startup warning `Failed to initialize FlashInfer Allreduce norm fusion workspace ... Flashinfer allreduce-norm fusion will be disabled`. vLLM falls back to a non-fused allreduce + RMSNorm; correctness is unaffected. To enable the fused kernel, set the compilation pass: `--compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}'`.
