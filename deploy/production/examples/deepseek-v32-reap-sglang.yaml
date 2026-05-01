@@ -5,11 +5,10 @@
 #
 # This A4 deployment uses disaggregated SGLang serving with one 4-GPU prefill
 # role and one 4-GPU decode role on a single 8-GPU B200 node. The deployment
-# keeps DP attention, event-backed KV-aware routing, and decode-side HiSparse.
-# HiSparse is intentionally preferred over HiCache, IndexCache, and dense
-# TurboQuant in this production profile because current SGLang treats those
-# features as separate KV-cache paths. The checkpoint remains W4A4KV4 NVFP4;
-# target KV uses BF16 storage because HiSparse currently requires it.
+# keeps DP attention, event-backed KV-aware routing, IndexCache, dense
+# TurboQuant, and decode-side HiSparse. HiCache is intentionally omitted because
+# HiSparse requires the no-radix decode path. The checkpoint remains W4A4KV4
+# NVFP4; target KV uses BF16 source dtype with dense TurboQuant 2.5-bit storage.
 # Speculation is decode-only through SMC-SD.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -132,7 +131,7 @@ spec:
             - 0.0.0.0
             - --trust-remote-code
             - --quantization
-            - modelopt_fp4
+            - compressed-tensors
             - --fp4-gemm-backend
             - auto
             - --fp8-gemm-backend
@@ -164,6 +163,15 @@ spec:
             - flashmla_sparse
             - --nsa-decode-backend
             - flashmla_sparse
+            - --nsa-indexer-mode
+            - indexcache
+            - --nsa-indexcache-pattern
+            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+            - --enable-turboquant-dense-kv-cache
+            - --turboquant-dense-kv-preset
+            - latent_2p5bit_nc
+            - --turboquant-execution-mode
+            - fused_decode
             - --disaggregation-mode
             - prefill
             - --disaggregation-transfer-backend
@@ -237,7 +245,7 @@ spec:
             - 0.0.0.0
             - --trust-remote-code
             - --quantization
-            - modelopt_fp4
+            - compressed-tensors
             - --fp4-gemm-backend
             - auto
             - --fp8-gemm-backend
@@ -270,6 +278,15 @@ spec:
             - flashmla_sparse
             - --nsa-decode-backend
             - flashmla_sparse
+            - --nsa-indexer-mode
+            - indexcache
+            - --nsa-indexcache-pattern
+            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+            - --enable-turboquant-dense-kv-cache
+            - --turboquant-dense-kv-preset
+            - latent_2p5bit_nc
+            - --turboquant-execution-mode
+            - fused_decode
             - --enable-hisparse
             - --hisparse-config
             - '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}'

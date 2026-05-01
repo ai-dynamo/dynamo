@@ -7,13 +7,15 @@ SPDX-License-Identifier: Apache-2.0
 
 This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
-The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The production profile is HiSparse-first because current SGLang treats HiSparse, HiCache, IndexCache, and dense TurboQuant as separate KV-cache paths:
+The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The production profile uses the combined HiSparse, IndexCache, and dense TurboQuant path from `ai-blaise/optimization-playground`:
 
-- target checkpoint: W4A4KV4 NVFP4 via `--quantization modelopt_fp4`
-- target KV exception: BF16 target KV storage for HiSparse
+- target checkpoint: W4A4KV4 NVFP4 through the checkpoint's `compressed-tensors` quantization metadata
+- target KV source dtype: BF16, with dense TurboQuant 2.5-bit compressed MLA storage
 - decode-side HiSparse via `--enable-hisparse`
+- IndexCache via `--nsa-indexer-mode indexcache`
+- dense TurboQuant via `--enable-turboquant-dense-kv-cache --turboquant-dense-kv-preset latent_2p5bit_nc`
 - DSA sparse attention backends via `--nsa-prefill-backend flashmla_sparse` and `--nsa-decode-backend flashmla_sparse`
-- no SGLang HiCache, IndexCache, or dense TurboQuant in this profile unless a combined implementation is deliberately added and revalidated
+- no SGLang HiCache in this profile because HiSparse requires the decode no-radix path
 - Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
 - prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
 - decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled, radix cache disabled as required by HiSparse
@@ -21,10 +23,17 @@ The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200
 
 Compatibility note: SGLang documents HiSparse as a decode-side DSA/PD feature
 that keeps a hot GPU KV buffer and complete CPU pinned-memory KV, while HiCache
-is documented as a RadixAttention/HiRadixTree prefix-KV reuse system. Current
-SGLang validation mirrors that split, so this production profile chooses
-HiSparse when these paths conflict. See the SGLang HiSparse guide and HiCache
-design docs before reintroducing HiCache or dense KV compression here.
+is documented as a RadixAttention/HiRadixTree prefix-KV reuse system. This
+profile chooses HiSparse when HiSparse and HiCache conflict, but keeps
+IndexCache and dense TurboQuant through the combined NSA KV-pool implementation.
+
+Activation artifact note: the current target checkpoint stores packed NVFP4
+weights and weight scales, but the observed `compressed-tensors` metadata has
+`input_activations: null` and no serialized input activation scale tensors. Do
+not treat the W4A4 manifest as fully launchable until the activation
+quantization metadata is attached or generated offline. The deployment scripts
+preserve the intended W4A4KV4 contract; they do not synthesize activation scales
+at runtime.
 
 ## Production Profile
 
@@ -35,6 +44,10 @@ scripts/dynamo-reap/deploy-a4-production.sh
 ```
 
 The script applies the full `deploy/production` GitOps stack, including baseline add-ons and optional production integrations, then renders and applies the REAP `DynamoGraphDeployment`.
+The infrastructure wrapper treats `opentelemetry-operator` as deployable when it
+is Healthy but OutOfSync, because the chart's webhook certificates and CRDs can
+be controller-mutated after sync. Other production applications still need to
+satisfy the Synced/Healthy gate.
 
 Manual bootstrap is:
 
@@ -102,6 +115,15 @@ ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
 
 Override this image from the infrastructure script with `DYNAMO_REAP_IMAGE` when testing a candidate image.
 
+The production path should use a registry image and let Kubernetes pull it. The
+A4 k3s deployment wrapper also supports a validation fallback: if the registry
+tag is unavailable, it can build a local overlay image from the
+`ai-blaise/optimization-playground` checkout and import that image into k3s
+containerd. That fallback is tracked by Docker image ID so unchanged repeat
+launches do not pay the `docker save | k3s ctr images import` cost. The fallback
+overlay must keep the engine's required `sglang-kernel` version and should not
+downgrade `apache-tvm-ffi` below FlashInfer's supported range.
+
 ## Deploy
 
 ```bash
@@ -116,7 +138,7 @@ The worker launches SGLang through Dynamo with the core stack enabled:
 python3 -m dynamo.sglang \
   --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
   --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
-  --quantization modelopt_fp4 \
+  --quantization compressed-tensors \
   --kv-cache-dtype bfloat16 \
   --tp 4 \
   --dp 4 \
@@ -124,6 +146,11 @@ python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --nsa-prefill-backend flashmla_sparse \
   --nsa-decode-backend flashmla_sparse \
+  --nsa-indexer-mode indexcache \
+  --nsa-indexcache-pattern FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF \
+  --enable-turboquant-dense-kv-cache \
+  --turboquant-dense-kv-preset latent_2p5bit_nc \
+  --turboquant-execution-mode fused_decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 12345 \
   --disaggregation-mode prefill|decode
@@ -143,14 +170,10 @@ SMC-SD draft KV is decode-local in this topology. The prefill/decode transfer
 registers target-model KV; it does not register the decode-side draft KV pool
 because the prefill worker does not instantiate the draft model.
 
-The `bfloat16` KV dtype is intentional: the checkpoint is W4A4KV4 NVFP4, but
-HiSparse currently requires BF16 target KV storage and `flashmla_sparse` NSA
-backends.
-
-Do not add `--enable-hierarchical-cache`, `--enable-turboquant-dense-kv-cache`,
-or `--nsa-indexer-mode indexcache` to this production profile without first
-implementing and validating a combined HiSparse KV path in
-`ai-blaise/optimization-playground`.
+The `bfloat16` KV dtype is intentional: dense TurboQuant quantizes BF16 MLA KV
+rows into 2.5-bit compressed storage, while HiSparse keeps the decode hot set and
+host pool in that compressed row format. Do not add `--enable-hierarchical-cache`
+to this production profile without revalidating the HiSparse no-radix contract.
 
 ## Smoke Test
 

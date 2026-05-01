@@ -33,7 +33,7 @@ def test_deepseek_reap_frontend_uses_event_backed_kv_routing():
     assert "--no-router-kv-events" not in args
 
 
-def test_deepseek_reap_workers_keep_hisparse_first_pd_contract():
+def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_contract():
     for service_name, mode in (("prefill", "prefill"), ("decode", "decode")):
         args = _args_for(service_name)
 
@@ -42,14 +42,20 @@ def test_deepseek_reap_workers_keep_hisparse_first_pd_contract():
         assert _arg_value(args, "--tp") == "4"
         assert _arg_value(args, "--dp") == "4"
         assert "--enable-dp-attention" in args
+        assert _arg_value(args, "--quantization") == "compressed-tensors"
         assert "--kv-events-config" in args
         assert _arg_value(args, "--kv-cache-dtype") == "bfloat16"
         assert _arg_value(args, "--nsa-prefill-backend") == "flashmla_sparse"
         assert _arg_value(args, "--nsa-decode-backend") == "flashmla_sparse"
 
         assert "--enable-hierarchical-cache" not in args
-        assert "--enable-turboquant-dense-kv-cache" not in args
-        assert "--nsa-indexer-mode" not in args
+        assert _arg_value(args, "--nsa-indexer-mode") == "indexcache"
+        assert _arg_value(args, "--nsa-indexcache-pattern") == (
+            "FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF"
+        )
+        assert "--enable-turboquant-dense-kv-cache" in args
+        assert _arg_value(args, "--turboquant-dense-kv-preset") == "latent_2p5bit_nc"
+        assert _arg_value(args, "--turboquant-execution-mode") == "fused_decode"
 
     prefill_args = _args_for("prefill")
     decode_args = _args_for("decode")

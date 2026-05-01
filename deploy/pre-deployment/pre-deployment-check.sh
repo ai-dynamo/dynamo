@@ -287,8 +287,24 @@ check_argocd_apps() {
         return 1
     fi
 
+    local allow_healthy_out_of_sync
+    allow_healthy_out_of_sync=",${WAIT_HEALTHY_OUT_OF_SYNC_APPS:-opentelemetry-operator},"
+    allow_healthy_out_of_sync=${allow_healthy_out_of_sync//[[:space:]]/}
+
     local drifted
-    drifted=$(printf '%s\n' "$apps" | awk 'NF && ($2 != "Synced" || $3 != "Healthy") {print $1 "(" $2 "/" $3 ")"}')
+    drifted=$(printf '%s\n' "$apps" | awk -v allow="$allow_healthy_out_of_sync" '
+        NF {
+            if ($2 == "Synced" && $3 == "Healthy") {
+                next
+            }
+            app_name = $1
+            sub(/^.*\//, "", app_name)
+            if ($3 == "Healthy" && (index(allow, "," $1 ",") > 0 || index(allow, "," app_name ",") > 0)) {
+                next
+            }
+            print $1 "(" $2 "/" $3 ")"
+        }
+    ')
 
     if [[ -n "$drifted" ]]; then
         DETAIL="applications not Synced/Healthy: $(echo "$drifted" | tr '\n' ' ' | sed 's/[[:space:]]$//')"
@@ -298,7 +314,7 @@ check_argocd_apps() {
 
     local app_count
     app_count=$(printf '%s\n' "$apps" | grep -c . || true)
-    DETAIL="all ${app_count} Argo CD application(s) are Synced and Healthy"
+    DETAIL="all ${app_count} Argo CD application(s) satisfy the production readiness gate"
     print_status "$GREEN" "PASS: $DETAIL"
     return 0
 }
