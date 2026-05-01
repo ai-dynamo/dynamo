@@ -328,7 +328,7 @@ class HandlerBase(BaseGenerativeHandler):
         # abort() or raise EngineShutdown. At high concurrency that is one
         # idle asyncio task per in-flight request on rank 0's event loop;
         # skipping the spawn cuts scheduler overhead in half on the hot path.
-        if self.disable_request_abort and self.shutdown_event is None:
+        if self.disable_request_abort:
             yield None
             return
 
