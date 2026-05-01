@@ -101,9 +101,9 @@ This mirrors conversion-gen's parameter discipline, not its generated function
 names. Because these conversions are handwritten, context should be typed
 instead of `any`. Avoid one global context type; prefer small family-specific
 contexts such as `dgdConversionContext`, `dcdConversionContext`,
-`dgdrConversionContext`, and `sharedSpecConversionContext`. Context should
-carry only cross-cutting information that leaves cannot derive from their local
-`src/restored/save` arguments.
+and `sharedSpecConversionContext`. Context should carry only cross-cutting
+information that leaves cannot derive from their local `src/restored/save`
+arguments.
 
 ## Helper Naming
 
@@ -122,7 +122,7 @@ Conversion helper names should be consistent and reveal the helper's role:
   key.
 
 Use the same `Scope` words that appear in the converted type or shared helper
-family, such as `DGD`, `DCD`, `DGDR`, and `Shared`. Avoid ambiguous verbs such
+family, such as `DGD`, `DCD`, `DGDSA`, and `Shared`. Avoid ambiguous verbs such
 as `preserve` for conversion policy: use `restore` when reading `restored`, and
 `save` when writing `save`.
 
@@ -276,8 +276,6 @@ Good candidates:
 Bad candidates:
 
 - Deciding which fields are representable.
-- DGDR profiling blob merge/prune logic.
-- DGDR status phase/fingerprint behavior.
 - PodTemplate/main-container semantic origin logic.
 
 Generic helpers should reduce repeated mechanics without obscuring conversion
@@ -347,8 +345,11 @@ The conversion helpers use these names:
 - `ctx`: extra typed context passed to nested helpers.
 
 `TestV1Beta1ConversionFieldSetIsAcknowledged` is a schema-change tripwire. It
-reflects over the v1beta1 spec/status structs that participate in conversion
-and compares their JSON field paths to a checked-in field-set snapshot.
+reflects over the v1beta1 spec/status structs covered by this conversion
+cleanup and compares their JSON field paths to a checked-in field-set snapshot.
+It currently covers DGD, DCD, and DGDSA. DGDR already shipped with conversion
+annotations, so changes to its annotation/storage contract should be handled in
+a separate compatibility-focused PR.
 
 When a v1beta1 field is added, this test should fail before the field can be
 silently dropped by conversion. Treat that failure as a prompt to make an

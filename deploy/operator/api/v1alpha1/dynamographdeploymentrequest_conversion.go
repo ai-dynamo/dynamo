@@ -41,7 +41,6 @@
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	sla.ttft                                   Spec.SLA.TTFT             (*float64)
 //	sla.itl                                    Spec.SLA.ITL              (*float64)
-//	sla.optimizationType                       Spec.SLA.OptimizationType (*OptimizationType)
 //	sla.isl                                    Spec.Workload.ISL           (*int32)
 //	sla.osl                                    Spec.Workload.OSL           (*int32)
 //	deployment.modelCache.pvcName              Spec.ModelCache.PVCName       (string)
@@ -61,8 +60,6 @@
 //	  (*corev1.ResourceRequirements)             Spec.Containers[0].Resources
 //	ProfilingConfig.Tolerations                Overrides.ProfilingJob.Template.
 //	  ([]corev1.Toleration)                      Spec.Tolerations
-//	ProfilingConfig.NodeSelector               Overrides.ProfilingJob.Template.
-//	  (map[string]string)                        Spec.NodeSelector
 //
 // Annotation-only (no v1beta1 equivalent; round-tripped via ObjectMeta annotations):
 //
@@ -81,14 +78,10 @@
 //	──────────────────────────────────────────  ──────────────────────────────────────
 //	Features.Planner (*runtime.RawExtension)   planner.*  (JSON fields written directly)
 //
-// v1beta1-only fields with no v1alpha1 equivalent (sparse annotation-preserved):
+// v1beta1-only fields with no v1alpha1 equivalent (omitted / TODO):
 //
 //	Hardware.*, Workload.{Concurrency,RequestRate}, SLA.{E2ELatency},
-//	Overrides.*, SearchStrategy
-//
-// Not yet implemented / omitted:
-//
-//	Features.KVRouter
+//	Features.{KVRouter}, SearchStrategy
 //
 // # Status field mapping
 //
@@ -143,8 +136,7 @@
 // overlaps. The rest of DeploymentStatus is round-tripped via annotation;
 // DeploymentInfoStatus has no v1alpha1 source and is left empty.
 //
-// v1beta1-only status fields with no v1alpha1 equivalent
-// (sparse annotation-preserved):
+// v1beta1-only status fields with no v1alpha1 equivalent (omitted / TODO):
 //
 //	Status.DeploymentInfo.{Replicas,AvailableReplicas},
 //	Status.ProfilingPhase, Status.ProfilingJobName,
@@ -155,16 +147,11 @@ package v1alpha1
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
-	"reflect"
-	"slices"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
@@ -180,29 +167,7 @@ const (
 	annDGDRProfilingResults = "nvidia.com/dgdr-profiling-results"
 	annDGDRDeploymentStatus = "nvidia.com/dgdr-deployment-status"
 	annDGDRProfilingJobName = "nvidia.com/dgdr-profiling-job-name"
-	annDGDRHubSpec          = "nvidia.com/dgdr-hub-spec"
-	annDGDRHubStatus        = "nvidia.com/dgdr-hub-status"
-	annDGDRSpokeSpec        = "nvidia.com/dgdr-spoke-spec"
-	annDGDRSpokeStatus      = "nvidia.com/dgdr-spoke-status"
-	annDGDRSpokeHubStatus   = "nvidia.com/dgdr-spoke-hub-status"
-	annDGDRProfilingEmpty   = "nvidia.com/dgdr-profiling-config-empty"
-
-	dgdrProfilingBlobSLAKey              = "sla"
-	dgdrProfilingBlobTTFTKey             = "ttft"
-	dgdrProfilingBlobITLKey              = "itl"
-	dgdrProfilingBlobOptimizationTypeKey = "optimizationType"
-	dgdrProfilingBlobISLKey              = "isl"
-	dgdrProfilingBlobOSLKey              = "osl"
 )
-
-type dgdrConversionContext struct {
-	hubObject                      *v1beta1.DynamoGraphDeploymentRequest
-	profilingJobName               string
-	preservedSpecUnmodified        bool
-	preservedStatusUnmodified      bool
-	preservedStatusPhaseUnmodified bool
-	preservedImageUnmodified       bool
-}
 
 // ConvertTo converts this DynamoGraphDeploymentRequest (v1alpha1) to the Hub version (v1beta1).
 func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error {
@@ -211,48 +176,13 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", dstRaw)
 	}
 
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	dst.Annotations = maps.Clone(src.Annotations)
+	dst.ObjectMeta = src.ObjectMeta
 
-	preservedHubSpec, preservedHubStatus := decodeDGDRHubPreserved(src)
-	profilingJobName := src.Annotations[annDGDRProfilingJobName]
-	projectedPreservedHub := projectDGDRHubPreservedToAlpha(preservedHubSpec, preservedHubStatus)
-	preservedHubSpecUnmodified := preservedHubSpec != nil &&
-		reflect.DeepEqual(src.Spec, projectedPreservedHub.Spec)
-	preservedHubStatusPhaseUnmodified := preservedHubStatus != nil &&
-		dgdrAlphaPhaseEqual(&src.Status, &projectedPreservedHub.Status)
-	hubOrigin := preservedHubSpec != nil || preservedHubStatus != nil
-	scrubDGDRInternalAnnotations(dst.Annotations)
-	if len(dst.Annotations) == 0 {
-		dst.Annotations = nil
-	}
-
-	ctx := dgdrConversionContext{
-		hubObject:                      dst,
-		profilingJobName:               profilingJobName,
-		preservedSpecUnmodified:        preservedHubSpecUnmodified,
-		preservedStatusPhaseUnmodified: preservedHubStatusPhaseUnmodified,
-	}
-	var spokeSpecSave DynamoGraphDeploymentRequestSpec
-	if err := convertDGDRSpecToHub(&src.Spec, &dst.Spec, preservedHubSpec, &spokeSpecSave, ctx); err != nil {
+	if err := convertDGDRSpecTo(&src.Spec, &dst.Spec, dst); err != nil {
 		return err
 	}
 
-	var spokeStatusSave DynamoGraphDeploymentRequestStatus
-	convertDGDRStatusToHub(&src.Status, &dst.Status, preservedHubStatus, &spokeStatusSave, ctx)
-	if !hubOrigin {
-		preserveDGDRSpoke(&spokeSpecSave, &spokeStatusSave, dst)
-	} else {
-		if (!dgdrAlphaSpecSaveIsZero(&spokeSpecSave) || !dgdrAlphaStatusSaveIsZero(&spokeStatusSave)) &&
-			dgdrAlphaDiffersFromPreservedHub(src, &projectedPreservedHub.Spec, &projectedPreservedHub.Status) {
-			preserveDGDRSpoke(&spokeSpecSave, &spokeStatusSave, dst)
-		} else {
-			scrubDGDRInternalAnnotations(dst.Annotations)
-		}
-		if len(dst.Annotations) == 0 {
-			dst.Annotations = nil
-		}
-	}
+	convertDGDRStatusTo(&src.Status, &dst.Status, dst)
 
 	return nil
 }
@@ -264,26 +194,10 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", srcRaw)
 	}
 
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	dst.Annotations = maps.Clone(src.Annotations)
+	dst.ObjectMeta = src.ObjectMeta
 
-	preservedSpokeSpec, preservedSpokeStatus := decodeDGDRSpokePreserved(src)
-	spokeHubStatusUnmodified := dgdrSpokeHubStatusUnmodified(src)
-	spokeHubImageUnmodified := dgdrSpokeHubImageUnmodified(src, preservedSpokeSpec)
-	scrubDGDRInternalAnnotations(dst.Annotations)
-	if len(dst.Annotations) == 0 {
-		dst.Annotations = nil
-	}
-
-	ctx := dgdrConversionContext{
-		hubObject:                 src,
-		preservedStatusUnmodified: spokeHubStatusUnmodified,
-		preservedImageUnmodified:  spokeHubImageUnmodified,
-	}
-	var hubSpecSave v1beta1.DynamoGraphDeploymentRequestSpec
-	convertDGDRSpecFromHub(&src.Spec, &dst.Spec, preservedSpokeSpec, &hubSpecSave, ctx)
-	var hubStatusSave v1beta1.DynamoGraphDeploymentRequestStatus
-	convertDGDRStatusFromHub(&src.Status, &dst.Status, preservedSpokeStatus, &hubStatusSave, ctx)
+	convertDGDRSpecFrom(&src.Spec, &dst.Spec, src)
+	convertDGDRStatusFrom(&src.Status, &dst.Status, src)
 
 	// ProfilingJobName — no v1alpha1 status field; store as annotation for round-trip
 	if src.Status.ProfilingJobName != "" {
@@ -292,576 +206,22 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		}
 		dst.Annotations[annDGDRProfilingJobName] = src.Status.ProfilingJobName
 	}
-	if dgdrNeedsHubPreservation(&hubSpecSave, &hubStatusSave) {
-		preserveDGDRHub(&hubSpecSave, &hubStatusSave, dst)
-	}
 
 	return nil
 }
 
-type dgdrSpokeSpecPreservation struct {
-	Spec               DynamoGraphDeploymentRequestSpec `json:"spec"`
-	ProfilingConfigSet bool                             `json:"profilingConfigSet,omitempty"`
-	ProfilingConfigRaw []byte                           `json:"profilingConfigRaw,omitempty"`
+// setAnnotation initialises the annotation map if needed and sets a key.
+func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string) {
+	if obj.Annotations == nil {
+		obj.Annotations = make(map[string]string)
+	}
+	obj.Annotations[key] = value
 }
 
-func preserveDGDRSpoke(specSave *DynamoGraphDeploymentRequestSpec, statusSave *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequest) {
-	specPreserved := false
-	if !dgdrAlphaSpecSaveIsZero(specSave) {
-		envelope := dgdrSpokeSpecPreservation{Spec: *specSave.DeepCopy()}
-		if specSave.ProfilingConfig.Config != nil {
-			envelope.ProfilingConfigSet = true
-			envelope.ProfilingConfigRaw = slices.Clone(specSave.ProfilingConfig.Config.Raw)
-			envelope.Spec.ProfilingConfig.Config = nil
-		}
-		if setJSONAnnOnObj(dst, annDGDRSpokeSpec, envelope) {
-			specPreserved = true
-		}
-	}
-	if !dgdrAlphaStatusSaveIsZero(statusSave) {
-		setJSONAnnOnObj(dst, annDGDRSpokeStatus, statusSave)
-	}
-	preserveDGDRSpokeHubStatus(dst)
-	if specPreserved && specSave != nil && specSave.ProfilingConfig.Config != nil && len(specSave.ProfilingConfig.Config.Raw) == 0 {
-		setAnnOnObj(dst, annDGDRProfilingEmpty, annotationTrue)
-	}
-}
-
-// dgdrHubStatusFingerprint records the hub status leaves that are representable
-// on the v1alpha1 side. ConvertFrom uses it to tell whether stale preserved
-// alpha-only status can be restored or the live hub status has changed.
-type dgdrHubStatusFingerprint struct {
-	Phase              v1beta1.DGDRPhase             `json:"phase,omitempty"`
-	ProfilingPhase     v1beta1.ProfilingPhase        `json:"profilingPhase,omitempty"`
-	DGDName            string                        `json:"dgdName,omitempty"`
-	ProfilingJobName   string                        `json:"profilingJobName,omitempty"`
-	ObservedGeneration int64                         `json:"observedGeneration,omitempty"`
-	Conditions         []metav1.Condition            `json:"conditions,omitempty"`
-	DeploymentInfo     *v1beta1.DeploymentInfoStatus `json:"deploymentInfo,omitempty"`
-	SelectedConfig     *runtime.RawExtension         `json:"selectedConfig,omitempty"`
-}
-
-func preserveDGDRSpokeHubStatus(dst *v1beta1.DynamoGraphDeploymentRequest) {
-	setJSONAnnOnObj(dst, annDGDRSpokeHubStatus, fingerprintDGDRHubStatus(&dst.Status))
-}
-
-func fingerprintDGDRHubStatus(status *v1beta1.DynamoGraphDeploymentRequestStatus) dgdrHubStatusFingerprint {
-	out := dgdrHubStatusFingerprint{
-		Phase:              status.Phase,
-		ProfilingPhase:     status.ProfilingPhase,
-		DGDName:            status.DGDName,
-		ProfilingJobName:   status.ProfilingJobName,
-		ObservedGeneration: status.ObservedGeneration,
-		Conditions:         status.Conditions,
-		DeploymentInfo:     status.DeploymentInfo,
-	}
-	if status.ProfilingResults != nil {
-		out.SelectedConfig = status.ProfilingResults.SelectedConfig
-	}
-	return out
-}
-
-func preserveDGDRHub(specSave *v1beta1.DynamoGraphDeploymentRequestSpec, statusSave *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequest) {
-	if !dgdrHubSpecSaveIsZero(specSave) {
-		setJSONAnnOnObj(dst, annDGDRHubSpec, specSave)
-	}
-	if !dgdrHubStatusSaveIsZero(statusSave) {
-		setJSONAnnOnObj(dst, annDGDRHubStatus, statusSave)
-	}
-}
-
-func saveDGDRAlphaOnlySpec(src, save *DynamoGraphDeploymentRequestSpec) {
-	if src == nil || save == nil {
-		return
-	}
-	if src.EnableGPUDiscovery != nil {
-		enabled := *src.EnableGPUDiscovery
-		save.EnableGPUDiscovery = &enabled
-	}
-	if profilingConfigNeedsAlphaSave(src.ProfilingConfig.Config) {
-		save.ProfilingConfig.Config = &apiextensionsv1.JSON{
-			Raw: slices.Clone(src.ProfilingConfig.Config.Raw),
-		}
-	}
-	if src.ProfilingConfig.ConfigMapRef != nil {
-		ref := *src.ProfilingConfig.ConfigMapRef
-		save.ProfilingConfig.ConfigMapRef = &ref
-	}
-	if src.ProfilingConfig.OutputPVC != "" {
-		save.ProfilingConfig.OutputPVC = src.ProfilingConfig.OutputPVC
-	}
-	if src.DeploymentOverrides == nil {
-		return
-	}
-	save.DeploymentOverrides = &DeploymentOverridesSpec{
-		Name:         src.DeploymentOverrides.Name,
-		Namespace:    src.DeploymentOverrides.Namespace,
-		Labels:       maps.Clone(src.DeploymentOverrides.Labels),
-		Annotations:  maps.Clone(src.DeploymentOverrides.Annotations),
-		WorkersImage: src.DeploymentOverrides.WorkersImage,
-	}
-	if src.DeploymentOverrides.WorkersImage != "" {
-		save.ProfilingConfig.ProfilerImage = src.ProfilingConfig.ProfilerImage
-	}
-	if dgdrDeploymentOverridesSaveIsZero(save.DeploymentOverrides) {
-		save.DeploymentOverrides = nil
-	}
-}
-
-func dgdrAlphaSpecSaveIsZero(save *DynamoGraphDeploymentRequestSpec) bool {
-	return save == nil ||
-		save.EnableGPUDiscovery == nil &&
-			save.ProfilingConfig.Config == nil &&
-			save.ProfilingConfig.ConfigMapRef == nil &&
-			save.ProfilingConfig.ProfilerImage == "" &&
-			save.ProfilingConfig.OutputPVC == "" &&
-			dgdrDeploymentOverridesSaveIsZero(save.DeploymentOverrides)
-}
-
-func dgdrDeploymentOverridesSaveIsZero(save *DeploymentOverridesSpec) bool {
-	return save == nil ||
-		save.Name == "" &&
-			save.Namespace == "" &&
-			len(save.Labels) == 0 &&
-			len(save.Annotations) == 0 &&
-			save.WorkersImage == ""
-}
-
-func profilingConfigNeedsAlphaSave(config *apiextensionsv1.JSON) bool {
-	if config == nil {
-		return false
-	}
-	if len(config.Raw) == 0 {
-		return true
-	}
-	var blob map[string]interface{}
-	if err := json.Unmarshal(config.Raw, &blob); err != nil || blob == nil {
-		return true
-	}
-	pruneDGDRKnownAlphaBlobFields(blob)
-	return len(blob) > 0
-}
-
-func pruneDGDRKnownAlphaBlobFields(blob map[string]interface{}) {
-	if slaMap, ok := blob[dgdrProfilingBlobSLAKey].(map[string]interface{}); ok {
-		for _, key := range []string{
-			dgdrProfilingBlobTTFTKey,
-			dgdrProfilingBlobITLKey,
-			dgdrProfilingBlobOptimizationTypeKey,
-			dgdrProfilingBlobISLKey,
-			dgdrProfilingBlobOSLKey,
-		} {
-			delete(slaMap, key)
-		}
-		if len(slaMap) == 0 {
-			delete(blob, dgdrProfilingBlobSLAKey)
-		}
-	}
-	if deployMap, ok := blob["deployment"].(map[string]interface{}); ok {
-		if mcMap, ok := deployMap["modelCache"].(map[string]interface{}); ok {
-			hasModelCacheProjection := false
-			for _, key := range []string{"pvcName", "modelPathInPvc", "pvcMountPath"} {
-				if _, ok := mcMap[key]; ok {
-					hasModelCacheProjection = true
-					break
-				}
-			}
-			if hasModelCacheProjection {
-				delete(deployMap, "modelCache")
-			} else if len(mcMap) == 0 {
-				delete(deployMap, "modelCache")
-			}
-		}
-		if len(deployMap) == 0 {
-			delete(blob, "deployment")
-		}
-	}
-	if plannerMap, ok := blob["planner"].(map[string]interface{}); ok && len(plannerMap) > 0 {
-		delete(blob, "planner")
-	}
-}
-
-func saveDGDRAlphaOnlyStatus(src, save *DynamoGraphDeploymentRequestStatus) {
-	if src == nil || save == nil {
-		return
-	}
-	if !dgdrAlphaStateRoundTripsThroughHub(src) {
-		save.State = src.State
-	}
-	if src.Backend != "" {
-		save.Backend = src.Backend
-	}
-	if src.ProfilingResults != "" {
-		save.ProfilingResults = src.ProfilingResults
-	}
-	if src.Deployment != nil {
-		save.Deployment = &DeploymentStatus{
-			Namespace: src.Deployment.Namespace,
-			State:     src.Deployment.State,
-		}
-		if src.Deployment.Created && dgdrStateToPhase(string(src.State), src.Deployment) != v1beta1.DGDRPhaseDeployed {
-			save.Deployment.Created = true
-		}
-		if save.Deployment.Namespace == "" && save.Deployment.State == "" && !save.Deployment.Created {
-			save.Deployment = nil
-		}
-	}
-}
-
-func dgdrAlphaStatusSaveIsZero(save *DynamoGraphDeploymentRequestStatus) bool {
-	return save == nil ||
-		save.State == "" &&
-			save.Backend == "" &&
-			save.ProfilingResults == "" &&
-			save.Deployment == nil
-}
-
-func dgdrAlphaStateRoundTripsThroughHub(src *DynamoGraphDeploymentRequestStatus) bool {
-	if src == nil {
-		return true
-	}
-	phase := dgdrStateToPhase(string(src.State), src.Deployment)
-	return DGDRState(dgdrPhaseToState(phase)) == src.State
-}
-
-func saveDGDRHubOnlySpec(src, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if src == nil || save == nil {
-		return
-	}
-	if src.AutoApply == nil {
-		markDGDRHubSpecSaveNeeded(save)
-	}
-	if src.SLA == nil && src.Workload != nil {
-		// v1alpha1 stores SLA and Workload together under profilingConfig.sla.
-		// Preserve the hub-only "Workload without SLA" shape without copying
-		// the representable Workload leaves into the save payload.
-		save.Workload = &v1beta1.WorkloadSpec{}
-	}
-	if src.Hardware != nil {
-		save.Hardware = src.Hardware
-	}
-	if src.SearchStrategy != "" {
-		save.SearchStrategy = src.SearchStrategy
-	}
-	if src.SLA != nil && src.SLA.E2ELatency != nil {
-		if save.SLA == nil {
-			save.SLA = &v1beta1.SLASpec{}
-		}
-		e2e := *src.SLA.E2ELatency
-		save.SLA.E2ELatency = &e2e
-	}
-	if src.Workload != nil && (src.Workload.Concurrency != nil || src.Workload.RequestRate != nil) {
-		if save.Workload == nil {
-			save.Workload = &v1beta1.WorkloadSpec{}
-		}
-		if src.Workload.Concurrency != nil {
-			concurrency := *src.Workload.Concurrency
-			save.Workload.Concurrency = &concurrency
-		}
-		if src.Workload.RequestRate != nil {
-			requestRate := *src.Workload.RequestRate
-			save.Workload.RequestRate = &requestRate
-		}
-	}
-	if src.Workload != nil &&
-		src.Workload.ISL == nil &&
-		src.Workload.OSL == nil &&
-		src.Workload.Concurrency == nil &&
-		src.Workload.RequestRate == nil {
-		save.Workload = &v1beta1.WorkloadSpec{}
-	}
-	if src.ModelCache != nil && src.ModelCache.PVCName == "" && src.ModelCache.PVCModelPath == "" && src.ModelCache.PVCMountPath == "" {
-		save.ModelCache = &v1beta1.ModelCacheSpec{}
-	}
-	saveDGDRHubOnlyFeatures(src, save)
-	saveDGDRHubOnlyOverrides(src, save)
-	saveDGDRHubContextFields(src, save)
-}
-
-func saveDGDRHubOnlyFeatures(src, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if src.Features == nil {
-		return
-	}
-	if src.Features.Mocker != nil && !src.Features.Mocker.Enabled {
-		if save.Features == nil {
-			save.Features = &v1beta1.FeaturesSpec{}
-		}
-		save.Features.Mocker = &v1beta1.MockerSpec{}
-	}
-	if src.Features.Planner != nil && len(src.Features.Planner.Raw) == 0 {
-		if save.Features == nil {
-			save.Features = &v1beta1.FeaturesSpec{}
-		}
-		save.Features.Planner = src.Features.Planner
-	}
-}
-
-func saveDGDRHubOnlyOverrides(src, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if src.Overrides == nil {
-		return
-	}
-	if src.Overrides.DGD == nil && !profilingJobHasHubOnlyFields(src.Overrides.ProfilingJob) {
-		return
-	}
-	save.Overrides = &v1beta1.OverridesSpec{}
-	if src.Overrides.DGD != nil {
-		save.Overrides.DGD = src.Overrides.DGD
-	}
-	if profilingJobHasHubOnlyFields(src.Overrides.ProfilingJob) {
-		save.Overrides.ProfilingJob = saveProfilingJobHubOnlyFields(src.Overrides.ProfilingJob)
-	}
-}
-
-func saveDGDRHubContextFields(src, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if dgdrHubSpecSaveIsZero(save) {
-		return
-	}
-	if src.AutoApply != nil {
-		autoApply := *src.AutoApply
-		save.AutoApply = &autoApply
-	}
-	if src.SLA != nil && save.SLA == nil {
-		save.SLA = &v1beta1.SLASpec{}
-	}
-	if src.Workload != nil && save.Workload == nil {
-		save.Workload = &v1beta1.WorkloadSpec{}
-	}
-	if src.ModelCache != nil && save.ModelCache == nil {
-		save.ModelCache = src.ModelCache
-	}
-}
-
-func dgdrHubSpecSaveIsZero(save *v1beta1.DynamoGraphDeploymentRequestSpec) bool {
-	return save == nil || apiequality.Semantic.DeepEqual(save, &v1beta1.DynamoGraphDeploymentRequestSpec{})
-}
-
-func markDGDRHubSpecSaveNeeded(save *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	// Some hub-only shape differences are represented by absence, such as
-	// nil AutoApply. Keep the save payload sparse by using an otherwise
-	// ignored empty Features object as the non-zero marker instead of copying
-	// the full hub spec.
-	if save.Features == nil {
-		save.Features = &v1beta1.FeaturesSpec{}
-	}
-}
-
-func saveDGDRHubOnlyStatus(src, save *v1beta1.DynamoGraphDeploymentRequestStatus) {
-	if src == nil || save == nil {
-		return
-	}
-	if !dgdrPhaseRoundTripsThroughAlpha(src) {
-		save.Phase = src.Phase
-	}
-	if src.ProfilingPhase != "" {
-		save.ProfilingPhase = src.ProfilingPhase
-	}
-	if src.ProfilingJobName != "" {
-		save.ProfilingJobName = src.ProfilingJobName
-	}
-	if src.DeploymentInfo != nil {
-		save.DeploymentInfo = src.DeploymentInfo
-	}
-	if src.ProfilingResults != nil && len(src.ProfilingResults.Pareto) > 0 {
-		save.ProfilingResults = &v1beta1.ProfilingResultsStatus{
-			Pareto: slices.Clone(src.ProfilingResults.Pareto),
-		}
-	}
-}
-
-func dgdrHubStatusSaveIsZero(save *v1beta1.DynamoGraphDeploymentRequestStatus) bool {
-	return save == nil || apiequality.Semantic.DeepEqual(save, &v1beta1.DynamoGraphDeploymentRequestStatus{})
-}
-
-func decodeDGDRHubPreserved(src *DynamoGraphDeploymentRequest) (*v1beta1.DynamoGraphDeploymentRequestSpec, *v1beta1.DynamoGraphDeploymentRequestStatus) {
-	if src.Annotations == nil {
-		return nil, nil
-	}
-	var spec *v1beta1.DynamoGraphDeploymentRequestSpec
-	if decoded, ok := getJSONAnnFromObj[v1beta1.DynamoGraphDeploymentRequestSpec](src, annDGDRHubSpec); ok {
-		spec = &decoded
-	}
-	var status *v1beta1.DynamoGraphDeploymentRequestStatus
-	if decoded, ok := getJSONAnnFromObj[v1beta1.DynamoGraphDeploymentRequestStatus](src, annDGDRHubStatus); ok {
-		status = &decoded
-	}
-	return spec, status
-}
-
-func decodeDGDRSpokePreserved(src *v1beta1.DynamoGraphDeploymentRequest) (*DynamoGraphDeploymentRequestSpec, *DynamoGraphDeploymentRequestStatus) {
-	if src.Annotations == nil {
-		return nil, nil
-	}
-	var spec *DynamoGraphDeploymentRequestSpec
-	if raw, ok := src.Annotations[annDGDRSpokeSpec]; ok && raw != "" {
-		var envelope dgdrSpokeSpecPreservation
-		if err := json.Unmarshal([]byte(raw), &envelope); err == nil {
-			decoded := envelope.Spec
-			if envelope.ProfilingConfigSet {
-				decoded.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: slices.Clone(envelope.ProfilingConfigRaw)}
-			}
-			spec = &decoded
-		} else {
-			var decoded DynamoGraphDeploymentRequestSpec
-			if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
-				spec = &decoded
-			}
-		}
-	}
-	var status *DynamoGraphDeploymentRequestStatus
-	if decoded, ok := getJSONAnnFromObj[DynamoGraphDeploymentRequestStatus](src, annDGDRSpokeStatus); ok {
-		status = &decoded
-	}
-	if src.Annotations[annDGDRProfilingEmpty] == annotationTrue {
-		if spec == nil {
-			spec = &DynamoGraphDeploymentRequestSpec{}
-		}
-		spec.ProfilingConfig.Config = &apiextensionsv1.JSON{}
-	}
-	return spec, status
-}
-
-func dgdrSpokeHubImageUnmodified(src *v1beta1.DynamoGraphDeploymentRequest, preservedSpec *DynamoGraphDeploymentRequestSpec) bool {
-	if preservedSpec == nil {
-		return false
-	}
-	semantic := &v1beta1.DynamoGraphDeploymentRequest{ObjectMeta: *src.ObjectMeta.DeepCopy()}
-	scrubDGDRInternalAnnotations(semantic.Annotations)
-	if len(semantic.Annotations) == 0 {
-		semantic.Annotations = nil
-	}
-	ctx := dgdrConversionContext{hubObject: semantic}
-	if err := convertDGDRSpecToHub(preservedSpec, &semantic.Spec, nil, nil, ctx); err != nil {
-		return false
-	}
-	return src.Spec.Image == semantic.Spec.Image
-}
-
-func projectDGDRHubPreservedToAlpha(preservedSpec *v1beta1.DynamoGraphDeploymentRequestSpec, preservedStatus *v1beta1.DynamoGraphDeploymentRequestStatus) DynamoGraphDeploymentRequest {
-	projected := DynamoGraphDeploymentRequest{}
-	if preservedSpec != nil {
-		hub := &v1beta1.DynamoGraphDeploymentRequest{Spec: *preservedSpec.DeepCopy()}
-		ctx := dgdrConversionContext{hubObject: hub}
-		convertDGDRSpecFromHub(&hub.Spec, &projected.Spec, nil, nil, ctx)
-	}
-	if preservedStatus != nil {
-		hub := &v1beta1.DynamoGraphDeploymentRequest{Status: *preservedStatus.DeepCopy()}
-		ctx := dgdrConversionContext{hubObject: hub}
-		convertDGDRStatusFromHub(&hub.Status, &projected.Status, nil, nil, ctx)
-	}
-	return projected
-}
-
-func dgdrAlphaDiffersFromPreservedHub(src *DynamoGraphDeploymentRequest, projectedSpec *DynamoGraphDeploymentRequestSpec, projectedStatus *DynamoGraphDeploymentRequestStatus) bool {
-	return !dgdrAlphaOnlySpecMatchesProjectedHub(src, projectedSpec) ||
-		!dgdrAlphaOnlyStatusMatchesProjectedHub(src, projectedStatus)
-}
-
-func dgdrAlphaOnlySpecMatchesProjectedHub(src *DynamoGraphDeploymentRequest, projected *DynamoGraphDeploymentRequestSpec) bool {
-	if projected == nil {
-		projected = &DynamoGraphDeploymentRequestSpec{}
-	}
-	return reflect.DeepEqual(src.Spec.EnableGPUDiscovery, projected.EnableGPUDiscovery) &&
-		reflect.DeepEqual(src.Spec.ProfilingConfig.Config, projected.ProfilingConfig.Config) &&
-		reflect.DeepEqual(src.Spec.ProfilingConfig.ConfigMapRef, projected.ProfilingConfig.ConfigMapRef) &&
-		src.Spec.ProfilingConfig.OutputPVC == projected.ProfilingConfig.OutputPVC &&
-		reflect.DeepEqual(src.Spec.ProfilingConfig.NodeSelector, projected.ProfilingConfig.NodeSelector) &&
-		dgdrDeploymentOverrideWorkersImage(src.Spec.DeploymentOverrides) == dgdrDeploymentOverrideWorkersImage(projected.DeploymentOverrides) &&
-		dgdrDeploymentOverrideMetadataEqual(src.Spec.DeploymentOverrides, projected.DeploymentOverrides)
-}
-
-func dgdrDeploymentOverrideWorkersImage(src *DeploymentOverridesSpec) string {
-	if src == nil {
-		return ""
-	}
-	return src.WorkersImage
-}
-
-func dgdrDeploymentOverrideMetadataEqual(a, b *DeploymentOverridesSpec) bool {
-	var aName, aNamespace, bName, bNamespace string
-	var aLabels, bLabels map[string]string
-	var aAnnotations, bAnnotations map[string]string
-	if a != nil {
-		aName = a.Name
-		aNamespace = a.Namespace
-		aLabels = a.Labels
-		aAnnotations = a.Annotations
-	}
-	if b != nil {
-		bName = b.Name
-		bNamespace = b.Namespace
-		bLabels = b.Labels
-		bAnnotations = b.Annotations
-	}
-	return aName == bName &&
-		aNamespace == bNamespace &&
-		reflect.DeepEqual(aLabels, bLabels) &&
-		reflect.DeepEqual(aAnnotations, bAnnotations)
-}
-
-func dgdrAlphaOnlyStatusMatchesProjectedHub(src *DynamoGraphDeploymentRequest, projected *DynamoGraphDeploymentRequestStatus) bool {
-	if projected == nil {
-		projected = &DynamoGraphDeploymentRequestStatus{}
-	}
-	return src.Status.Backend == projected.Backend &&
-		src.Status.ProfilingResults == projected.ProfilingResults &&
-		dgdrDeploymentStatusAlphaOnlyEqual(src.Status.Deployment, projected.Deployment)
-}
-
-func dgdrDeploymentStatusAlphaOnlyEqual(a, b *DeploymentStatus) bool {
-	var aNamespace, aState, bNamespace, bState string
-	if a != nil {
-		aNamespace = a.Namespace
-		aState = string(a.State)
-	}
-	if b != nil {
-		bNamespace = b.Namespace
-		bState = string(b.State)
-	}
-	return aNamespace == bNamespace && aState == bState
-}
-
-func dgdrAlphaPhaseEqual(a, b *DynamoGraphDeploymentRequestStatus) bool {
-	return dgdrStateToPhase(string(a.State), a.Deployment) ==
-		dgdrStateToPhase(string(b.State), b.Deployment)
-}
-
-func dgdrSpokeHubStatusUnmodified(src *v1beta1.DynamoGraphDeploymentRequest) bool {
-	return jsonAnnMatches(src, annDGDRSpokeHubStatus, fingerprintDGDRHubStatus(&src.Status))
-}
-
-func scrubDGDRInternalAnnotations(annotations map[string]string) {
-	for _, key := range []string{
-		annDGDRConfigMapRef,
-		annDGDROutputPVC,
-		annDGDREnableGPUDisc,
-		annDGDRDeployOverrides,
-		annDGDRProfilingConfig,
-		annDGDRStatusBackend,
-		annDGDRProfilingResults,
-		annDGDRDeploymentStatus,
-		annDGDRProfilingJobName,
-		annDGDRHubSpec,
-		annDGDRHubStatus,
-		annDGDRSpokeSpec,
-		annDGDRSpokeStatus,
-		annDGDRSpokeHubStatus,
-		annDGDRProfilingEmpty,
-	} {
-		delete(annotations, key)
-	}
-}
-
-// convertDGDRSpecToHub converts representable v1alpha1 fields from the live
-// source, restores hub-only fields from the preserved target, and saves the
-// source-only fields that the hub cannot represent.
-func convertDGDRSpecToHub(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, restored *v1beta1.DynamoGraphDeploymentRequestSpec, save *DynamoGraphDeploymentRequestSpec, ctx dgdrConversionContext) error {
-	if src == nil || dst == nil {
-		return nil
-	}
-
+// convertDGDRSpecTo converts the v1alpha1 Spec into the v1beta1 Spec.
+func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) error {
 	dst.Model = src.Model
-	autoApply := src.AutoApply
-	dst.AutoApply = &autoApply
+	dst.AutoApply = &src.AutoApply
 
 	if src.Backend != "" {
 		dst.Backend = v1beta1.BackendType(src.Backend)
@@ -876,26 +236,18 @@ func convertDGDRSpecToHub(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dy
 		dst.Features.Mocker = &v1beta1.MockerSpec{Enabled: true}
 	}
 	if src.EnableGPUDiscovery != nil && *src.EnableGPUDiscovery {
-		setAnnOnObj(ctx.hubObject, annDGDREnableGPUDisc, annotationTrue)
+		setAnnotation(dstObj, annDGDREnableGPUDisc, "true")
 	}
 
-	if src.ProfilingConfig.Config != nil && len(src.ProfilingConfig.Config.Raw) > 0 {
-		setAnnOnObj(ctx.hubObject, annDGDRProfilingConfig, string(src.ProfilingConfig.Config.Raw))
-
+	if src.ProfilingConfig.Config != nil && src.ProfilingConfig.Config.Raw != nil {
 		var blob map[string]interface{}
 		if err := json.Unmarshal(src.ProfilingConfig.Config.Raw, &blob); err != nil {
-			// ProfilingConfig.Config is an opaque JSON extension point on the
-			// v1alpha1 side. Generic fuzzers may populate it with arbitrary
-			// RawExtension bytes; preserve those bytes via the annotation but
-			// only project typed v1beta1 fields when it is a JSON object in the
-			// legacy shape we understand.
-			blob = nil
+			return fmt.Errorf("failed to parse ProfilingConfig.Config: %w", err)
 		}
-		if blob != nil {
-			applySLAAndWorkloadFromBlob(blob, dst)
-			applyModelCacheFromBlob(blob, dst)
-			applyPlannerFromBlob(blob, dst)
-		}
+		applySLAAndWorkloadFromBlob(blob, dst)
+		applyModelCacheFromBlob(blob, dst)
+		applyPlannerFromBlob(blob, dst)
+		setAnnotation(dstObj, annDGDRProfilingConfig, string(src.ProfilingConfig.Config.Raw))
 	}
 
 	// ProfilerImage → Image (the profiler runs in the frontend image)
@@ -904,18 +256,16 @@ func convertDGDRSpecToHub(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dy
 		dst.Image = src.ProfilingConfig.ProfilerImage
 	}
 	if src.ProfilingConfig.ConfigMapRef != nil {
-		setJSONAnnOnObj(ctx.hubObject, annDGDRConfigMapRef, src.ProfilingConfig.ConfigMapRef)
+		if data, err := json.Marshal(src.ProfilingConfig.ConfigMapRef); err == nil {
+			setAnnotation(dstObj, annDGDRConfigMapRef, string(data))
+		}
 	}
 	if src.ProfilingConfig.OutputPVC != "" {
-		setAnnOnObj(ctx.hubObject, annDGDROutputPVC, src.ProfilingConfig.OutputPVC)
+		setAnnotation(dstObj, annDGDROutputPVC, src.ProfilingConfig.OutputPVC)
 	}
 
 	convertProfilingResourcesToOverrides(&src.ProfilingConfig, dst)
-	convertDeploymentOverridesToAnnotation(src.DeploymentOverrides, ctx.hubObject)
-	fillDGDRHubSpecFromPreserved(dst, restored, ctx.preservedSpecUnmodified)
-	if save != nil {
-		saveDGDRAlphaOnlySpec(src, save)
-	}
+	convertDeploymentOverridesToAnnotation(src.DeploymentOverrides, dstObj)
 
 	return nil
 }
@@ -923,7 +273,7 @@ func convertDGDRSpecToHub(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dy
 // applySLAAndWorkloadFromBlob extracts SLA and Workload fields from the v1alpha1 JSON blob.
 // Both are nested under blob["sla"] in the v1alpha1 schema.
 func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	slaRaw, ok := blob[dgdrProfilingBlobSLAKey]
+	slaRaw, ok := blob["sla"]
 	if !ok {
 		return
 	}
@@ -935,27 +285,27 @@ func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.Dynam
 	if dst.SLA == nil {
 		dst.SLA = &v1beta1.SLASpec{}
 	}
-	if v, ok := slaMap[dgdrProfilingBlobTTFTKey].(float64); ok {
+	if v, ok := slaMap["ttft"].(float64); ok {
 		dst.SLA.TTFT = &v
 	}
-	if v, ok := slaMap[dgdrProfilingBlobITLKey].(float64); ok {
+	if v, ok := slaMap["itl"].(float64); ok {
 		dst.SLA.ITL = &v
 	}
-	if v, ok := slaMap[dgdrProfilingBlobOptimizationTypeKey].(string); ok {
+	if v, ok := slaMap["optimizationType"].(string); ok {
 		ot := v1beta1.OptimizationType(v)
 		if ot == v1beta1.OptimizationTypeLatency || ot == v1beta1.OptimizationTypeThroughput {
 			dst.SLA.OptimizationType = &ot
 		}
 	}
 
-	if v, ok := slaMap[dgdrProfilingBlobISLKey].(float64); ok {
+	if v, ok := slaMap["isl"].(float64); ok {
 		if dst.Workload == nil {
 			dst.Workload = &v1beta1.WorkloadSpec{}
 		}
 		isl := int32(v)
 		dst.Workload.ISL = &isl
 	}
-	if v, ok := slaMap[dgdrProfilingBlobOSLKey].(float64); ok {
+	if v, ok := slaMap["osl"].(float64); ok {
 		if dst.Workload == nil {
 			dst.Workload = &v1beta1.WorkloadSpec{}
 		}
@@ -996,10 +346,10 @@ func applyModelCacheFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGra
 	dst.ModelCache = mc
 }
 
-// convertProfilingResourcesToOverrides maps ProfilingConfig pod fields into
-// the v1beta1 Overrides.ProfilingJob pod spec.
+// convertProfilingResourcesToOverrides maps ProfilingConfig Resources and Tolerations
+// into the v1beta1 Overrides.ProfilingJob pod spec.
 func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if src.Resources == nil && len(src.Tolerations) == 0 && len(src.NodeSelector) == 0 {
+	if src.Resources == nil && len(src.Tolerations) == 0 {
 		return
 	}
 	if dst.Overrides == nil {
@@ -1022,9 +372,6 @@ func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1
 	}
 	if len(src.Tolerations) > 0 {
 		podSpec.Tolerations = src.Tolerations
-	}
-	if len(src.NodeSelector) > 0 {
-		podSpec.NodeSelector = maps.Clone(src.NodeSelector)
 	}
 }
 
@@ -1049,255 +396,13 @@ func convertDeploymentOverridesToAnnotation(src *DeploymentOverridesSpec, dstObj
 	if overrides.Name == "" && overrides.Namespace == "" && len(overrides.Labels) == 0 && len(overrides.Annotations) == 0 {
 		return
 	}
-	setJSONAnnOnObj(dstObj, annDGDRDeployOverrides, overrides)
-}
-
-func fillDGDRHubSpecFromPreserved(dst *v1beta1.DynamoGraphDeploymentRequestSpec, preserved *v1beta1.DynamoGraphDeploymentRequestSpec, preservedSourceUnmodified bool) {
-	if preserved == nil {
-		return
-	}
-	restoreDGDRHubNilDefaultShapes(dst, preserved)
-	restoreDGDRHubFeatureFields(dst, preserved)
-	restoreDGDRHubSpecScalarFields(dst, preserved)
-	restoreDGDRHubModelCacheAndSLAFields(dst, preserved, preservedSourceUnmodified)
-	restoreDGDRHubOverrides(dst, preserved)
-}
-
-func restoreDGDRHubNilDefaultShapes(dst, preserved *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if preserved.SLA == nil && dst.SLA != nil &&
-		dst.SLA.TTFT == nil && dst.SLA.ITL == nil && dst.SLA.E2ELatency == nil &&
-		dst.SLA.OptimizationType == nil {
-		dst.SLA = nil
-	}
-	if preserved.AutoApply == nil && dst.AutoApply != nil && *dst.AutoApply {
-		dst.AutoApply = nil
+	if data, err := json.Marshal(overrides); err == nil {
+		setAnnotation(dstObj, annDGDRDeployOverrides, string(data))
 	}
 }
 
-func restoreDGDRHubFeatureFields(dst, preserved *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if preserved.Features == nil {
-		return
-	}
-	restoreDGDRHubMockerField(dst, preserved.Features)
-	restoreDGDRHubPlannerField(dst, preserved.Features)
-}
-
-func restoreDGDRHubMockerField(dst *v1beta1.DynamoGraphDeploymentRequestSpec, preserved *v1beta1.FeaturesSpec) {
-	if preserved.Mocker == nil || preserved.Mocker.Enabled {
-		return
-	}
-	if dst.Features == nil {
-		dst.Features = &v1beta1.FeaturesSpec{}
-	}
-	if dst.Features.Mocker == nil {
-		dst.Features.Mocker = preserved.Mocker
-	}
-}
-
-func restoreDGDRHubPlannerField(dst *v1beta1.DynamoGraphDeploymentRequestSpec, preserved *v1beta1.FeaturesSpec) {
-	if preserved.Planner == nil || len(preserved.Planner.Raw) != 0 {
-		return
-	}
-	if dst.Features == nil {
-		dst.Features = &v1beta1.FeaturesSpec{}
-	}
-	if dst.Features.Planner == nil {
-		dst.Features.Planner = preserved.Planner
-	}
-}
-
-func restoreDGDRHubSpecScalarFields(dst, preserved *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if preserved.Hardware != nil {
-		dst.Hardware = preserved.Hardware
-	}
-	if preserved.SearchStrategy != "" {
-		dst.SearchStrategy = preserved.SearchStrategy
-	}
-}
-
-func restoreDGDRHubModelCacheAndSLAFields(dst, preserved *v1beta1.DynamoGraphDeploymentRequestSpec, preservedSourceUnmodified bool) {
-	if preservedSourceUnmodified && dst.ModelCache == nil && preserved.ModelCache != nil {
-		dst.ModelCache = preserved.ModelCache
-	}
-	if preserved.SLA != nil && preserved.SLA.E2ELatency != nil {
-		if dst.SLA == nil {
-			dst.SLA = &v1beta1.SLASpec{}
-		}
-		dst.SLA.E2ELatency = preserved.SLA.E2ELatency
-	}
-	if preserved.Workload != nil {
-		if dst.Workload == nil {
-			dst.Workload = &v1beta1.WorkloadSpec{}
-		}
-		dst.Workload.Concurrency = preserved.Workload.Concurrency
-		dst.Workload.RequestRate = preserved.Workload.RequestRate
-	}
-}
-
-func restoreDGDRHubOverrides(dst, preserved *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	if preserved.Overrides == nil {
-		return
-	}
-	if dst.Overrides == nil {
-		dst.Overrides = &v1beta1.OverridesSpec{}
-	}
-	if preserved.Overrides.DGD != nil {
-		dst.Overrides.DGD = preserved.Overrides.DGD
-	}
-	if preserved.Overrides.ProfilingJob != nil {
-		dst.Overrides.ProfilingJob = restoreProfilingJobHubOnlyFields(dst.Overrides.ProfilingJob, preserved.Overrides.ProfilingJob)
-	}
-}
-
-// restoreProfilingJobHubOnlyFields starts from the live v1alpha1 projection and
-// copies only v1beta1-only profiling JobSpec leaves from the preserved hub spec.
-func restoreProfilingJobHubOnlyFields(semantic, preserved *batchv1.JobSpec) *batchv1.JobSpec {
-	if preserved == nil {
-		if semantic == nil {
-			return nil
-		}
-		return semantic.DeepCopy()
-	}
-	if semantic == nil && !profilingJobHasHubOnlyFields(preserved) {
-		return nil
-	}
-
-	out := &batchv1.JobSpec{}
-	if semantic != nil {
-		out = semantic.DeepCopy()
-	}
-
-	p := preserved.DeepCopy()
-	copyStructFieldsExcept(out, p, "Template")
-	out.Template.ObjectMeta = *p.Template.ObjectMeta.DeepCopy()
-	restoreProfilingPodSpecHubOnlyFields(&out.Template.Spec, &p.Template.Spec)
-	return out
-}
-
-func restoreProfilingPodSpecHubOnlyFields(dst, preserved *corev1.PodSpec) {
-	p := preserved.DeepCopy()
-	copyStructFieldsExcept(dst, p, "Containers", "NodeSelector", "Tolerations")
-	dst.Containers = restoreProfilingContainersHubOnlyFields(dst.Containers, p.Containers)
-}
-
-func restoreProfilingContainersHubOnlyFields(semantic, preserved []corev1.Container) []corev1.Container {
-	if len(preserved) == 0 {
-		if len(semantic) == 0 && preserved != nil {
-			return []corev1.Container{}
-		}
-		return slices.Clone(semantic)
-	}
-
-	var firstSemantic *corev1.Container
-	if len(semantic) > 0 {
-		firstSemantic = &semantic[0]
-	}
-
-	out := make([]corev1.Container, 0, len(preserved))
-	first := restoreProfilingFirstContainerHubOnlyFields(firstSemantic, &preserved[0])
-	if firstSemantic != nil || profilingFirstContainerHasHubOnlyFields(&preserved[0]) || len(preserved) > 1 {
-		out = append(out, first)
-	}
-	for i := 1; i < len(preserved); i++ {
-		out = append(out, *preserved[i].DeepCopy())
-	}
-	return out
-}
-
-func restoreProfilingFirstContainerHubOnlyFields(semantic, preserved *corev1.Container) corev1.Container {
-	out := corev1.Container{}
-	if semantic != nil {
-		out = *semantic.DeepCopy()
-	}
-	// The first container's Resources is represented by v1alpha1
-	// ProfilingConfig.Resources; every other container field is hub-only here.
-	p := preserved.DeepCopy()
-	copyStructFieldsExcept(&out, p, "Resources")
-	return out
-}
-
-func saveProfilingJobHubOnlyFields(job *batchv1.JobSpec) *batchv1.JobSpec {
-	if job == nil || !profilingJobHasHubOnlyFields(job) {
-		return nil
-	}
-	out := job.DeepCopy()
-	podSpec := &out.Template.Spec
-	podSpec.NodeSelector = nil
-	podSpec.Tolerations = nil
-	if len(podSpec.Containers) > 0 {
-		podSpec.Containers[0].Resources = corev1.ResourceRequirements{}
-		if len(podSpec.Containers) == 1 && apiequality.Semantic.DeepEqual(podSpec.Containers[0], corev1.Container{}) {
-			podSpec.Containers = nil
-		}
-	}
-	return out
-}
-
-func copyStructFieldsExcept(dst, src any, except ...string) {
-	dstValue := reflect.ValueOf(dst)
-	srcValue := reflect.ValueOf(src)
-	if dstValue.Kind() != reflect.Ptr || srcValue.Kind() != reflect.Ptr ||
-		dstValue.IsNil() || srcValue.IsNil() {
-		panic("copyStructFieldsExcept expects non-nil pointers")
-	}
-
-	dstStruct := dstValue.Elem()
-	srcStruct := srcValue.Elem()
-	if dstStruct.Kind() != reflect.Struct || srcStruct.Kind() != reflect.Struct ||
-		dstStruct.Type() != srcStruct.Type() {
-		panic("copyStructFieldsExcept expects pointers to the same struct type")
-	}
-
-	skip := map[string]struct{}{}
-	for _, name := range except {
-		skip[name] = struct{}{}
-	}
-	for i := 0; i < dstStruct.NumField(); i++ {
-		field := dstStruct.Type().Field(i)
-		if _, ok := skip[field.Name]; ok {
-			continue
-		}
-		if dstStruct.Field(i).CanSet() {
-			dstStruct.Field(i).Set(srcStruct.Field(i))
-		}
-	}
-}
-
-func profilingJobHasHubOnlyFields(job *batchv1.JobSpec) bool {
-	if job == nil {
-		return false
-	}
-	cp := job.DeepCopy()
-	podSpec := &cp.Template.Spec
-	podSpec.NodeSelector = nil
-	podSpec.Tolerations = nil
-	hasEmptyContainersShape := podSpec.Containers != nil && len(podSpec.Containers) == 0
-	if len(podSpec.Containers) > 0 {
-		podSpec.Containers[0].Resources = corev1.ResourceRequirements{}
-		if len(podSpec.Containers) == 1 && apiequality.Semantic.DeepEqual(podSpec.Containers[0], corev1.Container{}) {
-			podSpec.Containers = nil
-		}
-	}
-	return hasEmptyContainersShape || !apiequality.Semantic.DeepEqual(*cp, batchv1.JobSpec{})
-}
-
-func profilingFirstContainerHasHubOnlyFields(container *corev1.Container) bool {
-	if container == nil {
-		return false
-	}
-	cp := container.DeepCopy()
-	cp.Resources = corev1.ResourceRequirements{}
-	return !apiequality.Semantic.DeepEqual(*cp, corev1.Container{})
-}
-
-// convertDGDRSpecFromHub converts representable hub fields from the live source,
-// restores v1alpha1-only fields from the preserved target, and saves source-only
-// hub fields.
-func convertDGDRSpecFromHub(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, restored *DynamoGraphDeploymentRequestSpec, save *v1beta1.DynamoGraphDeploymentRequestSpec, ctx dgdrConversionContext) {
-	if src == nil || dst == nil {
-		return
-	}
-
+// convertDGDRSpecFrom converts the v1beta1 Spec back into the v1alpha1 Spec.
+func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.Model = src.Model
 	if src.AutoApply != nil {
 		dst.AutoApply = *src.AutoApply
@@ -1312,8 +417,8 @@ func convertDGDRSpecFromHub(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *
 		dst.UseMocker = src.Features.Mocker.Enabled
 	}
 
-	if ctx.hubObject.Annotations != nil {
-		if v, ok := ctx.hubObject.Annotations[annDGDREnableGPUDisc]; ok && v == annotationTrue {
+	if srcObj.Annotations != nil {
+		if v, ok := srcObj.Annotations[annDGDREnableGPUDisc]; ok && v == "true" {
 			trueVal := true
 			dst.EnableGPUDiscovery = &trueVal
 		}
@@ -1322,22 +427,16 @@ func convertDGDRSpecFromHub(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *
 	// Reconstruct the JSON blob: start from the round-trip annotation (preserves unknown
 	// keys), then overwrite with structured v1beta1 fields (structured fields win).
 	var blob map[string]interface{}
-	blobFromAnnotation := false
-	if ctx.hubObject.Annotations != nil {
-		if rawBlob, ok := ctx.hubObject.Annotations[annDGDRProfilingConfig]; ok && rawBlob != "" {
-			if err := json.Unmarshal([]byte(rawBlob), &blob); err != nil || blob == nil {
-				dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(rawBlob)}
-			} else {
-				pruneKnownProfilingBlobFields(src, blob)
-				blobFromAnnotation = true
-			}
+	if srcObj.Annotations != nil {
+		if rawBlob, ok := srcObj.Annotations[annDGDRProfilingConfig]; ok && rawBlob != "" {
+			_ = json.Unmarshal([]byte(rawBlob), &blob) // best-effort
 		}
 	}
 	if src.SLA != nil || src.Workload != nil {
 		if blob == nil {
 			blob = make(map[string]interface{})
 		}
-		mergeSLAWorkloadIntoBlob(src, blob, !blobFromAnnotation)
+		mergeSLAWorkloadIntoBlob(src, blob)
 	}
 	if src.ModelCache != nil {
 		if blob == nil {
@@ -1352,9 +451,7 @@ func convertDGDRSpecFromHub(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *
 		mergePlannerIntoBlob(src.Features.Planner, blob)
 	}
 	if blob != nil {
-		if len(blob) == 0 && !blobFromAnnotation {
-			dst.ProfilingConfig.Config = nil
-		} else if data, err := json.Marshal(blob); err == nil {
+		if data, err := json.Marshal(blob); err == nil {
 			dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: data}
 		}
 	}
@@ -1366,118 +463,37 @@ func convertDGDRSpecFromHub(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *
 		dst.ProfilingConfig.ProfilerImage = src.Image
 	}
 
-	restoreAnnotationFields(ctx.hubObject, dst)
+	restoreAnnotationFields(srcObj, dst)
 	restoreProfilingJobResources(src, dst)
-	fillDGDRSpokeSpecFromPreserved(dst, restored, ctx.preservedImageUnmodified)
-	if save != nil {
-		saveDGDRHubOnlySpec(src, save)
-	}
-}
-
-func pruneKnownProfilingBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
-	pruneSLAWorkloadBlobFields(src, blob)
-	pruneModelCacheBlobFields(src, blob)
-	if src.Features == nil || src.Features.Planner == nil || len(src.Features.Planner.Raw) == 0 {
-		delete(blob, "planner")
-	}
-}
-
-func pruneSLAWorkloadBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
-	slaMap, ok := blob[dgdrProfilingBlobSLAKey].(map[string]interface{})
-	if !ok {
-		return
-	}
-	deleted := false
-	if src.SLA == nil || src.SLA.TTFT == nil {
-		_, had := slaMap[dgdrProfilingBlobTTFTKey]
-		delete(slaMap, dgdrProfilingBlobTTFTKey)
-		deleted = deleted || had
-	}
-	if src.SLA == nil || src.SLA.ITL == nil {
-		_, had := slaMap[dgdrProfilingBlobITLKey]
-		delete(slaMap, dgdrProfilingBlobITLKey)
-		deleted = deleted || had
-	}
-	if src.SLA == nil || src.SLA.OptimizationType == nil {
-		_, had := slaMap[dgdrProfilingBlobOptimizationTypeKey]
-		delete(slaMap, dgdrProfilingBlobOptimizationTypeKey)
-		deleted = deleted || had
-	}
-	if src.Workload == nil || src.Workload.ISL == nil {
-		_, had := slaMap[dgdrProfilingBlobISLKey]
-		delete(slaMap, dgdrProfilingBlobISLKey)
-		deleted = deleted || had
-	}
-	if src.Workload == nil || src.Workload.OSL == nil {
-		_, had := slaMap[dgdrProfilingBlobOSLKey]
-		delete(slaMap, dgdrProfilingBlobOSLKey)
-		deleted = deleted || had
-	}
-	if deleted && len(slaMap) == 0 {
-		delete(blob, dgdrProfilingBlobSLAKey)
-	}
-}
-
-func pruneModelCacheBlobFields(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
-	deployMap, ok := blob["deployment"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	deleted := false
-	if src.ModelCache == nil ||
-		(src.ModelCache.PVCName == "" &&
-			src.ModelCache.PVCModelPath == "" &&
-			src.ModelCache.PVCMountPath == "") {
-		if _, ok := deployMap["modelCache"]; ok {
-			delete(deployMap, "modelCache")
-			deleted = true
-		}
-	}
-	if deleted && len(deployMap) == 0 {
-		delete(blob, "deployment")
-	}
 }
 
 // mergeSLAWorkloadIntoBlob writes SLA and Workload structured fields back into the JSON blob,
 // overwriting any existing values for those keys.
-func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}, preserveEmpty bool) {
-	slaMap, hadSLA := blob[dgdrProfilingBlobSLAKey].(map[string]interface{})
+func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
+	slaMap, _ := blob["sla"].(map[string]interface{})
 	if slaMap == nil {
 		slaMap = make(map[string]interface{})
 	}
-	wrote := false
 	if src.SLA != nil {
 		if src.SLA.TTFT != nil {
-			slaMap[dgdrProfilingBlobTTFTKey] = *src.SLA.TTFT
-			wrote = true
+			slaMap["ttft"] = *src.SLA.TTFT
 		}
 		if src.SLA.ITL != nil {
-			slaMap[dgdrProfilingBlobITLKey] = *src.SLA.ITL
-			wrote = true
+			slaMap["itl"] = *src.SLA.ITL
 		}
 		if src.SLA.OptimizationType != nil {
-			slaMap[dgdrProfilingBlobOptimizationTypeKey] = string(*src.SLA.OptimizationType)
-			wrote = true
+			slaMap["optimizationType"] = string(*src.SLA.OptimizationType)
 		}
 	}
 	if src.Workload != nil {
 		if src.Workload.ISL != nil {
-			slaMap[dgdrProfilingBlobISLKey] = float64(*src.Workload.ISL)
-			wrote = true
+			slaMap["isl"] = float64(*src.Workload.ISL)
 		}
 		if src.Workload.OSL != nil {
-			slaMap[dgdrProfilingBlobOSLKey] = float64(*src.Workload.OSL)
-			wrote = true
+			slaMap["osl"] = float64(*src.Workload.OSL)
 		}
 	}
-	emptySLA := src.SLA != nil &&
-		src.SLA.TTFT == nil &&
-		src.SLA.ITL == nil &&
-		src.SLA.E2ELatency == nil &&
-		src.SLA.OptimizationType == nil
-	if wrote || hadSLA || preserveEmpty || emptySLA {
-		blob[dgdrProfilingBlobSLAKey] = slaMap
-	}
+	blob["sla"] = slaMap
 }
 
 // mergeModelCacheIntoBlob writes ModelCache structured fields back into blob["deployment"]["modelCache"].
@@ -1569,7 +585,7 @@ func restoreAnnotationFields(srcObj *v1beta1.DynamoGraphDeploymentRequest, dst *
 	}
 }
 
-// restoreProfilingJobResources restores representable profiling pod fields from
+// restoreProfilingJobResources restores Resources and Tolerations from
 // v1beta1 Overrides.ProfilingJob back into v1alpha1 ProfilingConfig.
 func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec) {
 	if src.Overrides == nil || src.Overrides.ProfilingJob == nil {
@@ -1578,143 +594,69 @@ func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec,
 	podSpec := &src.Overrides.ProfilingJob.Template.Spec
 	if len(podSpec.Containers) > 0 {
 		res := podSpec.Containers[0].Resources
-		dst.ProfilingConfig.Resources = &res
+		if len(res.Requests) > 0 || len(res.Limits) > 0 {
+			dst.ProfilingConfig.Resources = &res
+		}
 	}
 	if len(podSpec.Tolerations) > 0 {
 		dst.ProfilingConfig.Tolerations = podSpec.Tolerations
 	}
-	if len(podSpec.NodeSelector) > 0 {
-		dst.ProfilingConfig.NodeSelector = maps.Clone(podSpec.NodeSelector)
-	}
 }
 
-func fillDGDRSpokeSpecFromPreserved(dst *DynamoGraphDeploymentRequestSpec, preserved *DynamoGraphDeploymentRequestSpec, preservedSourceUnmodified bool) {
-	if preserved == nil {
-		return
-	}
-	if dst.EnableGPUDiscovery == nil {
-		dst.EnableGPUDiscovery = preserved.EnableGPUDiscovery
-	}
-	if dst.ProfilingConfig.Config == nil && preserved.ProfilingConfig.Config != nil {
-		dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: slices.Clone(preserved.ProfilingConfig.Config.Raw)}
-	}
-	if dst.ProfilingConfig.ConfigMapRef == nil && preserved.ProfilingConfig.ConfigMapRef != nil {
-		cp := *preserved.ProfilingConfig.ConfigMapRef
-		dst.ProfilingConfig.ConfigMapRef = &cp
-	}
-	if dst.ProfilingConfig.OutputPVC == "" {
-		dst.ProfilingConfig.OutputPVC = preserved.ProfilingConfig.OutputPVC
-	}
-	hasPreservedWorkersImage := preserved.DeploymentOverrides != nil &&
-		preserved.DeploymentOverrides.WorkersImage != "" &&
-		(preservedSourceUnmodified ||
-			dst.ProfilingConfig.ProfilerImage == preserved.DeploymentOverrides.WorkersImage)
-	clearProfilerImage := hasPreservedWorkersImage &&
-		preserved.ProfilingConfig.ProfilerImage == "" &&
-		dst.ProfilingConfig.ProfilerImage == preserved.DeploymentOverrides.WorkersImage
-	// ProfilerImage and DeploymentOverrides.WorkersImage both collapse to
-	// hub Image. If Image came from WorkersImage, do not invent ProfilerImage.
-	if clearProfilerImage {
-		dst.ProfilingConfig.ProfilerImage = ""
-	}
-	fillDGDRDeploymentOverridesFromPreserved(dst, preserved, hasPreservedWorkersImage)
-}
-
-func fillDGDRDeploymentOverridesFromPreserved(dst *DynamoGraphDeploymentRequestSpec, preserved *DynamoGraphDeploymentRequestSpec, restoreWorkersImage bool) {
-	if preserved.DeploymentOverrides == nil {
-		return
-	}
-	if dst.DeploymentOverrides == nil {
-		dst.DeploymentOverrides = &DeploymentOverridesSpec{}
-	}
-	if restoreWorkersImage && dst.DeploymentOverrides.WorkersImage == "" {
-		dst.DeploymentOverrides.WorkersImage = preserved.DeploymentOverrides.WorkersImage
-	}
-	if dst.DeploymentOverrides.Name == "" {
-		dst.DeploymentOverrides.Name = preserved.DeploymentOverrides.Name
-	}
-	if dst.DeploymentOverrides.Namespace == "" {
-		dst.DeploymentOverrides.Namespace = preserved.DeploymentOverrides.Namespace
-	}
-	if len(dst.DeploymentOverrides.Labels) == 0 {
-		dst.DeploymentOverrides.Labels = preserved.DeploymentOverrides.Labels
-	}
-	if len(dst.DeploymentOverrides.Annotations) == 0 {
-		dst.DeploymentOverrides.Annotations = preserved.DeploymentOverrides.Annotations
-	}
-}
-
-// convertDGDRStatusToHub converts represented status fields from live v1alpha1
-// state, restores hub-only status leaves from the preserved target, and saves
-// source-only v1alpha1 leaves.
-func convertDGDRStatusToHub(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, restored *v1beta1.DynamoGraphDeploymentRequestStatus, save *DynamoGraphDeploymentRequestStatus, ctx dgdrConversionContext) {
-	if src == nil || dst == nil {
-		return
-	}
-
+// convertDGDRStatusTo converts the v1alpha1 Status into the v1beta1 Status.
+func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.Phase = dgdrStateToPhase(string(src.State), src.Deployment)
 	dst.ObservedGeneration = src.ObservedGeneration
-	dst.Conditions = slices.Clone(src.Conditions)
+	dst.Conditions = src.Conditions
 
 	if src.Backend != "" {
-		setAnnOnObj(ctx.hubObject, annDGDRStatusBackend, src.Backend)
+		setAnnotation(dstObj, annDGDRStatusBackend, src.Backend)
 	}
 	if src.ProfilingResults != "" {
-		setAnnOnObj(ctx.hubObject, annDGDRProfilingResults, src.ProfilingResults)
+		setAnnotation(dstObj, annDGDRProfilingResults, src.ProfilingResults)
 	}
 	if src.GeneratedDeployment != nil {
 		if dst.ProfilingResults == nil {
 			dst.ProfilingResults = &v1beta1.ProfilingResultsStatus{}
 		}
-		dst.ProfilingResults.SelectedConfig = src.GeneratedDeployment.DeepCopy()
+		dst.ProfilingResults.SelectedConfig = src.GeneratedDeployment
 	}
 	if src.Deployment != nil {
 		dst.DGDName = src.Deployment.Name
-		setJSONAnnOnObj(ctx.hubObject, annDGDRDeploymentStatus, src.Deployment)
+		if data, err := json.Marshal(src.Deployment); err == nil {
+			setAnnotation(dstObj, annDGDRDeploymentStatus, string(data))
+		}
 	}
 
-	// ProfilingJobName has no v1alpha1 status field, so ConvertFrom stores it
-	// as an annotation and ConvertTo passes the captured value in after scrubbing.
-	if ctx.profilingJobName != "" {
-		dst.ProfilingJobName = ctx.profilingJobName
-	}
-	fillDGDRHubStatusFromPreserved(dst, restored, ctx.preservedStatusPhaseUnmodified)
-	if save != nil {
-		saveDGDRAlphaOnlyStatus(src, save)
+	// ProfilingJobName — read from annotation (stored during ConvertFrom for round-trip)
+	if ann, ok := dstObj.Annotations[annDGDRProfilingJobName]; ok && ann != "" {
+		dst.ProfilingJobName = ann
 	}
 }
 
-// convertDGDRStatusFromHub converts represented status fields from the live hub
-// source, restores v1alpha1-only status leaves from the preserved target, and
-// saves hub-only status leaves.
-func convertDGDRStatusFromHub(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, restored *DynamoGraphDeploymentRequestStatus, save *v1beta1.DynamoGraphDeploymentRequestStatus, ctx dgdrConversionContext) {
-	if src == nil || dst == nil {
-		return
-	}
-
+// convertDGDRStatusFrom converts the v1beta1 Status back into the v1alpha1 Status.
+func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.State = DGDRState(dgdrPhaseToState(src.Phase))
 	dst.ObservedGeneration = src.ObservedGeneration
-	dst.Conditions = slices.Clone(src.Conditions)
+	dst.Conditions = src.Conditions
 
-	if ctx.hubObject.Annotations != nil {
-		if v, ok := ctx.hubObject.Annotations[annDGDRStatusBackend]; ok {
+	if srcObj.Annotations != nil {
+		if v, ok := srcObj.Annotations[annDGDRStatusBackend]; ok {
 			dst.Backend = v
 		}
-		if v, ok := ctx.hubObject.Annotations[annDGDRProfilingResults]; ok {
+		if v, ok := srcObj.Annotations[annDGDRProfilingResults]; ok {
 			dst.ProfilingResults = v
 		}
 	}
 
 	if src.ProfilingResults != nil && src.ProfilingResults.SelectedConfig != nil {
-		dst.GeneratedDeployment = src.ProfilingResults.SelectedConfig.DeepCopy()
+		dst.GeneratedDeployment = src.ProfilingResults.SelectedConfig
 	}
 
-	if ctx.hubObject.Annotations != nil {
-		if v, ok := ctx.hubObject.Annotations[annDGDRDeploymentStatus]; ok && v != "" {
+	if srcObj.Annotations != nil {
+		if v, ok := srcObj.Annotations[annDGDRDeploymentStatus]; ok && v != "" {
 			var depStatus DeploymentStatus
 			if err := json.Unmarshal([]byte(v), &depStatus); err == nil {
-				depStatus.Name = src.DGDName
-				depStatus.Created = src.Phase == v1beta1.DGDRPhaseDeployed
 				dst.Deployment = &depStatus
 			}
 		}
@@ -1724,94 +666,9 @@ func convertDGDRStatusFromHub(src *v1beta1.DynamoGraphDeploymentRequestStatus, d
 	if dst.Deployment == nil && src.DGDName != "" {
 		dst.Deployment = &DeploymentStatus{
 			Name:    src.DGDName,
-			Created: src.Phase == v1beta1.DGDRPhaseDeployed,
+			Created: false,
 		}
 	}
-	fillDGDRSpokeStatusFromPreserved(dst, restored, ctx.preservedStatusUnmodified)
-	if save != nil {
-		saveDGDRHubOnlyStatus(src, save)
-	}
-}
-
-func fillDGDRHubStatusFromPreserved(dst *v1beta1.DynamoGraphDeploymentRequestStatus, preserved *v1beta1.DynamoGraphDeploymentRequestStatus, preservedPhaseUnmodified bool) {
-	if preserved == nil {
-		return
-	}
-	if preservedPhaseUnmodified {
-		dst.Phase = preserved.Phase
-	}
-	if dst.ProfilingPhase == "" {
-		dst.ProfilingPhase = preserved.ProfilingPhase
-	}
-	if dst.ProfilingJobName == "" {
-		dst.ProfilingJobName = preserved.ProfilingJobName
-	}
-	if dst.DeploymentInfo == nil {
-		dst.DeploymentInfo = preserved.DeploymentInfo
-	}
-	if preserved.ProfilingResults != nil && len(preserved.ProfilingResults.Pareto) > 0 {
-		if dst.ProfilingResults == nil {
-			dst.ProfilingResults = &v1beta1.ProfilingResultsStatus{}
-		}
-		dst.ProfilingResults.Pareto = preserved.ProfilingResults.DeepCopy().Pareto
-	}
-}
-
-func fillDGDRSpokeStatusFromPreserved(dst *DynamoGraphDeploymentRequestStatus, preserved *DynamoGraphDeploymentRequestStatus, preservedSourceUnmodified bool) {
-	if preserved == nil {
-		return
-	}
-	if preservedSourceUnmodified && dst.State == DGDRStatePending {
-		dst.State = preserved.State
-	}
-	if dst.Backend == "" {
-		dst.Backend = preserved.Backend
-	}
-	if dst.ProfilingResults == "" {
-		dst.ProfilingResults = preserved.ProfilingResults
-	}
-	if preserved.Deployment != nil {
-		if dst.Deployment == nil {
-			if preservedSourceUnmodified {
-				cp := *preserved.Deployment
-				dst.Deployment = &cp
-			}
-		} else {
-			if dst.Deployment.Namespace == "" {
-				dst.Deployment.Namespace = preserved.Deployment.Namespace
-			}
-			if dst.Deployment.State == "" {
-				dst.Deployment.State = preserved.Deployment.State
-			}
-			if preservedSourceUnmodified && !dst.Deployment.Created {
-				dst.Deployment.Created = preserved.Deployment.Created
-			}
-		}
-	}
-}
-
-func dgdrNeedsHubPreservation(specSave *v1beta1.DynamoGraphDeploymentRequestSpec, statusSave *v1beta1.DynamoGraphDeploymentRequestStatus) bool {
-	if !dgdrHubSpecSaveIsZero(specSave) {
-		return true
-	}
-	if !dgdrHubStatusSaveIsZero(statusSave) {
-		return true
-	}
-	return false
-}
-
-func dgdrPhaseRoundTripsThroughAlpha(status *v1beta1.DynamoGraphDeploymentRequestStatus) bool {
-	if status == nil {
-		return true
-	}
-	var deployment *DeploymentStatus
-	if status.DGDName != "" {
-		deployment = &DeploymentStatus{
-			Name:    status.DGDName,
-			Created: status.Phase == v1beta1.DGDRPhaseDeployed,
-		}
-	}
-	return dgdrStateToPhase(dgdrPhaseToState(status.Phase), deployment) == status.Phase
 }
 
 // dgdrStateToPhase maps v1alpha1 state strings to v1beta1 DGDRPhase.

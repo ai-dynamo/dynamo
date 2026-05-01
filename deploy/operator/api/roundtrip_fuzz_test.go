@@ -22,7 +22,7 @@
 //
 //   - hub -> spoke -> hub (start from a v1beta1 hub object); the spoke must
 //     losslessly carry every hub shape, with no-v1alpha1-equivalent fields
-//     stashed via reserved "nvidia.com/{dgd,dcd,dgdr,dgdsa}-*" annotations.
+//     stashed via reserved "nvidia.com/{dgd,dcd,dgdsa}-*" annotations.
 //   - spoke -> hub -> spoke (start from a v1alpha1 spoke object); the hub
 //     must be a strict superset of the spoke.
 //
@@ -78,7 +78,6 @@ var (
 var reservedAnnotationPrefixes = []string{
 	"nvidia.com/dgd-",
 	"nvidia.com/dcd-",
-	"nvidia.com/dgdr-",
 	"nvidia.com/dgdsa-",
 }
 
@@ -361,18 +360,6 @@ func TestFuzzRoundTrip_DCD_HubSpokeHub(t *testing.T) {
 func TestFuzzRoundTrip_DCD_SpokeHubSpoke(t *testing.T) {
 	fuzzSpokeHubSpoke[*v1beta1.DynamoComponentDeployment, v1alpha1.DynamoComponentDeployment](t, "DCD",
 		func() *v1beta1.DynamoComponentDeployment { return &v1beta1.DynamoComponentDeployment{} },
-	)
-}
-
-func TestFuzzRoundTrip_DGDR_HubSpokeHub(t *testing.T) {
-	fuzzHubSpokeHub[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
-		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
-	)
-}
-
-func TestFuzzRoundTrip_DGDR_SpokeHubSpoke(t *testing.T) {
-	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
-		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
 	)
 }
 

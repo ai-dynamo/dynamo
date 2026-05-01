@@ -80,13 +80,12 @@ func setAnnOnObj(obj metav1.Object, key, value string) {
 	obj.SetAnnotations(anns)
 }
 
-func setJSONAnnOnObj(obj metav1.Object, key string, value any) bool {
+func setJSONAnnOnObj(obj metav1.Object, key string, value any) {
 	data, err := json.Marshal(value)
 	if err != nil {
-		return false
+		return
 	}
 	setAnnOnObj(obj, key, string(data))
-	return true
 }
 
 func getAnnFromObj(obj metav1.Object, key string) (string, bool) {
@@ -108,15 +107,6 @@ func getJSONAnnFromObj[T any](obj metav1.Object, key string) (T, bool) {
 		return out, false
 	}
 	return out, true
-}
-
-func jsonAnnMatches(obj metav1.Object, key string, value any) bool {
-	current, err := json.Marshal(value)
-	if err != nil {
-		return false
-	}
-	raw, ok := getAnnFromObj(obj, key)
-	return ok && raw == string(current)
 }
 
 func delAnnFromObj(obj metav1.Object, key string) {
