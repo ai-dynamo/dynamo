@@ -203,6 +203,10 @@ pub enum ParserConfig {
     Dsml(DsmlParserConfig),
     KimiK2(KimiK2ParserConfig),
     Glm47(Glm47ParserConfig),
+    /// Gemma 4 uses a custom non-JSON grammar with bare keys, `<|"|>` string
+    /// delimiters, and fixed `<|tool_call>...<tool_call|>` markers. No
+    /// configuration is required at runtime — markers are not user-tunable.
+    Gemma4,
 }
 
 impl ParserConfig {
@@ -218,6 +222,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
             ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
         }
     }
 
@@ -233,6 +238,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_END.to_string()],
         }
     }
 }
@@ -448,6 +454,20 @@ impl ToolCallConfig {
         // Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
         Self {
             parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
+        }
+    }
+
+    /// Gemma 4 tool-call format (custom non-JSON grammar):
+    ///
+    /// ```text
+    /// <|tool_call>call:func_name{location:<|"|>Tokyo<|"|>,count:42}<tool_call|>
+    /// ```
+    ///
+    /// Bare unquoted keys, `<|"|>`-delimited strings, supports nested objects /
+    /// arrays. Multiple tool calls are concatenated without separators.
+    pub fn gemma4() -> Self {
+        Self {
+            parser_config: ParserConfig::Gemma4,
         }
     }
 }

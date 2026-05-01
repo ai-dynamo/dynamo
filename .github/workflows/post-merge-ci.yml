@@ -208,6 +208,22 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}
     secrets: inherit
 
+  sglang-efa-build:
+    name: sglang-runtime-efa
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_version: '["12.9"]'
+      make_efa: true
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
+    secrets: inherit
+
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [config]
@@ -732,7 +748,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

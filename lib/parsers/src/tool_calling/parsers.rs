@@ -6,6 +6,9 @@ use super::config::{ParserConfig, ToolCallConfig};
 use super::dsml::{
     detect_tool_call_start_dsml, find_tool_call_end_position_dsml, try_tool_call_parse_dsml,
 };
+use super::gemma4::{
+    detect_tool_call_start_gemma4, find_tool_call_end_position_gemma4, try_tool_call_parse_gemma4,
+};
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -51,6 +54,8 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
         map.insert("glm47", ToolCallConfig::glm47());
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
+        map.insert("gemma4", ToolCallConfig::gemma4());
+        map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
         map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
@@ -101,6 +106,10 @@ pub async fn try_tool_call_parse(
         ParserConfig::KimiK2(kimi_config) => {
             let (results, normal_content) =
                 try_tool_call_parse_kimi_k2(message, kimi_config, tools)?;
+            Ok((results, normal_content))
+        }
+        ParserConfig::Gemma4 => {
+            let (results, normal_content) = try_tool_call_parse_gemma4(message, tools)?;
             Ok((results, normal_content))
         }
     }
@@ -159,6 +168,7 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             ParserConfig::KimiK2(kimi_config) => {
                 Ok(detect_tool_call_start_kimi_k2(chunk, kimi_config))
             }
+            ParserConfig::Gemma4 => Ok(detect_tool_call_start_gemma4(chunk)),
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -211,6 +221,7 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
+            ParserConfig::Gemma4 => find_tool_call_end_position_gemma4(chunk),
         },
         None => Some(chunk.len()),
     }
@@ -253,6 +264,8 @@ mod tests {
             "minimax_m2",
             "glm47",
             "kimi_k2",
+            "gemma4",
+            "gemma-4",
             "qwen25",
         ];
         for parser in available_parsers {
