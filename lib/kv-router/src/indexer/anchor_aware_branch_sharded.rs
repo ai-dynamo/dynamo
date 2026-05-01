@@ -188,6 +188,11 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
     }
 
     fn least_loaded_shard(&self) -> usize {
+        // TODO: This static monotonic load heuristic can leave shards badly
+        // imbalanced when a low-entropy routing prefix owns most future traffic.
+        // Consider adaptive/deeper hot-branch splitting or a load signal tied
+        // to dispatched backend work before treating this variant as a
+        // throughput competitor to base CRTC.
         (0..self.num_shards)
             .min_by_key(|&shard| {
                 (
