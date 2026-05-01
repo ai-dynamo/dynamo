@@ -19,7 +19,16 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 from typing import cast
+
+# Force vLLM's EngineCore subprocesses to fork from the test process instead of
+# spawning a fresh interpreter. Spawn launches a clean Python that re-imports
+# vllm.v1 from sys.path, which fails in the pytest+venv layout used in CI
+# (`ModuleNotFoundError: No module named 'vllm.v1'` during pickle.load). Fork
+# inherits the parent's already-loaded modules, sidestepping the import. Must
+# run before any vllm import so it precedes vllm's own multiproc setup.
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
 import pytest
 import pytest_asyncio

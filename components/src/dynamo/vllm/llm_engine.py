@@ -64,8 +64,8 @@ class VllmLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self) -> EngineConfig:
-        os.environ["VLLM_NO_USAGE_STATS"] = "1"
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             self._prometheus_temp_dir = tempfile.TemporaryDirectory(
