@@ -16,7 +16,6 @@
 #     --reasoning-parser deepseek_v4
 #
 # Shape: 1 replica x 8 GPUs, TP=8 + Expert Parallel. Fills a single 8-GPU node.
-##
 # Weights: served from the `model-cache` PVC populated by
 #          `../../model-cache/model-download.yaml`.
 apiVersion: nvidia.com/v1alpha1
