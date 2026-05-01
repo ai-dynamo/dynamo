@@ -64,6 +64,8 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
+PREFILL_GPU_MEM_ARGS=""
+DECODE_GPU_MEM_ARGS=""
 
 # GPU assignments
 DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
@@ -73,17 +75,26 @@ DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-1}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
-PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
-
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PREFILL_WORKER_GPU=0
     DYN_DECODE_WORKER_GPU=0
     DYN_PREFILL_GPU_MEM=0.45
     DYN_DECODE_GPU_MEM=0.45
     EXTRA_ARGS="--enforce-eager"
+    # Default KV cache cap from profiling for single-GPU worker packing; the
+    # profiler/test framework overrides via env, and gpu_utils.sh builds args.
+    : "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=$((512 * 1024 * 1024))}"
     PD_EXTRA_ARGS="--max-model-len 4096 \
---kv-cache-memory-bytes $PD_KV_CACHE_BYTES \
 --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
+fi
+
+PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -n "$PD_GPU_MEM_ARGS" ]]; then
+    PREFILL_GPU_MEM_ARGS="$PD_GPU_MEM_ARGS"
+    DECODE_GPU_MEM_ARGS="$PD_GPU_MEM_ARGS"
+else
+    PREFILL_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PREFILL_GPU_MEM"
+    DECODE_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_DECODE_GPU_MEM"
 fi
 
 # Start prefill worker (handles image loading internally, no --route-to-encoder)
@@ -94,7 +105,7 @@ python -m dynamo.vllm \
   --disaggregation-mode prefill \
   --enable-multimodal \
   --model $MODEL_NAME \
-  --gpu-memory-utilization $DYN_PREFILL_GPU_MEM \
+  $PREFILL_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
@@ -109,7 +120,7 @@ python -m dynamo.vllm \
   --enable-multimodal \
   --enable-mm-embeds \
   --model $MODEL_NAME \
-  --gpu-memory-utilization $DYN_DECODE_GPU_MEM \
+  $DECODE_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \

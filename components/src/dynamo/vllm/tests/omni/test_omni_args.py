@@ -22,6 +22,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0.0),
 ]
 
 _DIFFUSION_FIELDS = {f.name for f in dataclasses.fields(OmniDiffusionKwargs)}
