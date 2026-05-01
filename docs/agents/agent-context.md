@@ -64,17 +64,17 @@ Then start any Dynamo OpenAI-compatible backend.
 <details>
 <summary>Environment variable reference</summary>
 
-| Environment Variable | Required | Default | Description |
-|----------------------|:--------:|---------|-------------|
-| `DYN_AGENT_TRACE_SINKS` | Yes | unset | Enables local trace sinks. Supported values: `jsonl`, `jsonl_gz`, `stderr`, or a comma-separated list such as `jsonl_gz,stderr`. |
-| `DYN_AGENT_TRACE_OUTPUT_PATH` | If `jsonl` or `jsonl_gz` is selected | unset | Local trace output path. For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the segment prefix used to derive `.jsonl.gz` files. |
-| `DYN_AGENT_TRACE_CAPACITY` | No | `1024` | In-process trace bus capacity. |
-| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES` | No | `1048576` | JSONL writer buffer size. For `jsonl_gz`, this is the max uncompressed batch size before appending a complete gzip member. |
-| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS` | No | `1000` | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member. |
-| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES` | No | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes. |
-| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES` | No | unset | Optional `jsonl_gz` segment roll threshold in records. |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | No | unset | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion. |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | No | unset | Optional ZMQ topic filter for harness tool events. |
+| Environment Variable                       |               Required               | Default     | Description                                                                                                                                       |
+| ------------------------------------------ | :----------------------------------: | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DYN_AGENT_TRACE_SINKS`                    |                 Yes                  | unset       | Enables local trace sinks. Supported values: `jsonl`, `jsonl_gz`, `stderr`, or a comma-separated list such as `jsonl_gz,stderr`.                  |
+| `DYN_AGENT_TRACE_OUTPUT_PATH`              | If `jsonl` or `jsonl_gz` is selected | unset       | Local trace output path. For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the segment prefix used to derive `.jsonl.gz` files. |
+| `DYN_AGENT_TRACE_CAPACITY`                 |                  No                  | `1024`      | In-process trace bus capacity.                                                                                                                    |
+| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES`       |                  No                  | `1048576`   | JSONL writer buffer size. For `jsonl_gz`, this is the max uncompressed batch size before appending a complete gzip member.                        |
+| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS`  |                  No                  | `1000`      | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member.                                                         |
+| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |                  No                  | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes.                                                                                          |
+| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |                  No                  | unset       | Optional `jsonl_gz` segment roll threshold in records.                                                                                            |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |                  No                  | unset       | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion.                                                            |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |                  No                  | unset       | Optional ZMQ topic filter for harness tool events.                                                                                                |
 
 </details>
 
@@ -89,16 +89,18 @@ Each harness LLM call should include `nvext.agent_context`:
 
 ```json
 {
-  "model": "my-model",
-  "messages": [{"role": "user", "content": "Research Dynamo agent tracing."}],
-  "nvext": {
-    "agent_context": {
-      "workflow_type_id": "deep_research",
-      "workflow_id": "research-run-42",
-      "program_id": "research-run-42:researcher",
-      "parent_program_id": "research-run-42:planner"
+    "model": "my-model",
+    "messages": [
+        { "role": "user", "content": "Research Dynamo agent tracing." }
+    ],
+    "nvext": {
+        "agent_context": {
+            "workflow_type_id": "deep_research",
+            "workflow_id": "research-run-42",
+            "program_id": "research-run-42:researcher",
+            "parent_program_id": "research-run-42:planner"
+        }
     }
-  }
 }
 ```
 
@@ -127,12 +129,12 @@ def instrument_llm_request(kwargs, agent_context):
 `x-request-id` is the harness's logical LLM-call ID. Dynamo copies it into
 `request.x_request_id`; it is separate from Dynamo's internal request ID.
 
-| Field | Required | Meaning |
-|-------|:--------:|---------|
-| `workflow_type_id` | Yes | Reusable workload/profile class, such as `deep_research` or `coding_agent`. |
-| `workflow_id` | Yes | Top-level run identifier. |
-| `program_id` | Yes | One schedulable reasoning/tool trajectory. |
-| `parent_program_id` | No | Parent program for subagents. |
+| Field               | Required | Meaning                                                                     |
+| ------------------- | :------: | --------------------------------------------------------------------------- |
+| `workflow_type_id`  |   Yes    | Reusable workload/profile class, such as `deep_research` or `coding_agent`. |
+| `workflow_id`       |   Yes    | Top-level run identifier.                                                   |
+| `program_id`        |   Yes    | One schedulable reasoning/tool trajectory.                                  |
+| `parent_program_id` |    No    | Parent program for subagents.                                               |
 
 ## Step 3: Send Tool Events to Dynamo
 
@@ -147,7 +149,7 @@ The ZMQ wire format is:
 [topic, seq_be_u64, msgpack(AgentTraceRecord)]
 ```
 
-Use the same producer pattern as SGLang KV events: a bounded queue, a background
+Use the same producer pattern as our KV event publisher pattern in [vllm](https://github.com/vllm-project/vllm/blob/399005a986a2b99f435919777427b6d73d36a277/vllm/distributed/kv_events.py#L103) and [SGLang](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/kv_events.py): a bounded queue, a background
 publisher thread, monotonically increasing sequence numbers, and a PUB socket
 with a high-water mark. Plain ZMQ PUB/SUB is best-effort for early frames, so a
 terminal tool record should be self-contained with `started_at_unix_ms`,
@@ -232,23 +234,23 @@ lanes.
 
 ```json
 {
-  "schema": "dynamo.agent.trace.v1",
-  "event_type": "tool_end",
-  "event_time_unix_ms": 1777312801500,
-  "event_source": "harness",
-  "agent_context": {
-    "workflow_type_id": "deep_research",
-    "workflow_id": "research-run-42",
-    "program_id": "research-run-42:researcher"
-  },
-  "tool": {
-    "tool_call_id": "call-abc",
-    "tool_class": "web_search",
-    "status": "succeeded",
-    "started_at_unix_ms": 1777312801080,
-    "ended_at_unix_ms": 1777312801500,
-    "duration_ms": 420.5
-  }
+    "schema": "dynamo.agent.trace.v1",
+    "event_type": "tool_end",
+    "event_time_unix_ms": 1777312801500,
+    "event_source": "harness",
+    "agent_context": {
+        "workflow_type_id": "deep_research",
+        "workflow_id": "research-run-42",
+        "program_id": "research-run-42:researcher"
+    },
+    "tool": {
+        "tool_call_id": "call-abc",
+        "tool_class": "web_search",
+        "status": "succeeded",
+        "started_at_unix_ms": 1777312801080,
+        "ended_at_unix_ms": 1777312801500,
+        "duration_ms": 420.5
+    }
 }
 ```
 
@@ -266,7 +268,7 @@ gzip -cd "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz | jq .
 Each line is a recorder envelope:
 
 ```json
-{"timestamp": 1234, "event": {"schema": "dynamo.agent.trace.v1"}}
+{ "timestamp": 1234, "event": { "schema": "dynamo.agent.trace.v1" } }
 ```
 
 Convert traces to Chrome Trace JSON for Perfetto UI:
@@ -286,10 +288,10 @@ with the matching `tool_start` record when present.
 
 Useful converter flags:
 
-| Flag | Meaning |
-|------|---------|
-| `--include-markers` | Emit first-token instant markers. |
-| `--no-stages` | Show request slices without prefill/decode stage slices. |
+| Flag                      | Meaning                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `--include-markers`       | Emit first-token instant markers.                                              |
+| `--no-stages`             | Show request slices without prefill/decode stage slices.                       |
 | `--separate-stage-tracks` | Place prefill/decode stages on adjacent tracks for debugging timeline nesting. |
 
 ## Harness Integration Patterns
@@ -423,62 +425,62 @@ Nullable fields are omitted when the serving path did not record them.
 
 ```json
 {
-  "schema": "dynamo.agent.trace.v1",
-  "event_type": "request_end",
-  "event_time_unix_ms": 1777312801000,
-  "event_source": "dynamo",
-  "agent_context": {
-    "workflow_type_id": "deep_research",
-    "workflow_id": "research-run-42",
-    "program_id": "research-run-42:researcher",
-    "parent_program_id": "research-run-42:planner"
-  },
-  "request": {
-    "request_id": "dynamo-request-id",
-    "x_request_id": "llm-call-42",
-    "model": "my-model",
-    "input_tokens": 4096,
-    "output_tokens": 512,
-    "cached_tokens": 3584,
-    "request_received_ms": 1777312800000,
-    "prefill_wait_time_ms": 12.1,
-    "prefill_time_ms": 70.3,
-    "ttft_ms": 82.4,
-    "total_time_ms": 1000.1,
-    "avg_itl_ms": 1.8,
-    "kv_hit_rate": 0.875,
-    "kv_transfer_estimated_latency_ms": 4.2,
-    "queue_depth": 3,
-    "worker": {
-      "prefill_worker_id": 0,
-      "prefill_dp_rank": 0,
-      "decode_worker_id": 1,
-      "decode_dp_rank": 0
+    "schema": "dynamo.agent.trace.v1",
+    "event_type": "request_end",
+    "event_time_unix_ms": 1777312801000,
+    "event_source": "dynamo",
+    "agent_context": {
+        "workflow_type_id": "deep_research",
+        "workflow_id": "research-run-42",
+        "program_id": "research-run-42:researcher",
+        "parent_program_id": "research-run-42:planner"
+    },
+    "request": {
+        "request_id": "dynamo-request-id",
+        "x_request_id": "llm-call-42",
+        "model": "my-model",
+        "input_tokens": 4096,
+        "output_tokens": 512,
+        "cached_tokens": 3584,
+        "request_received_ms": 1777312800000,
+        "prefill_wait_time_ms": 12.1,
+        "prefill_time_ms": 70.3,
+        "ttft_ms": 82.4,
+        "total_time_ms": 1000.1,
+        "avg_itl_ms": 1.8,
+        "kv_hit_rate": 0.875,
+        "kv_transfer_estimated_latency_ms": 4.2,
+        "queue_depth": 3,
+        "worker": {
+            "prefill_worker_id": 0,
+            "prefill_dp_rank": 0,
+            "decode_worker_id": 1,
+            "decode_dp_rank": 0
+        }
     }
-  }
 }
 ```
 
 Request records capture Dynamo-owned serving metrics:
 
-| Field | Meaning |
-|-------|---------|
-| `request_id` | Dynamo request ID for the LLM call. |
-| `x_request_id` | Caller-provided logical request ID when present. |
-| `model` | Requested model name. |
-| `input_tokens` | Prompt/input token count when known. |
-| `output_tokens` | Final output token count when known. |
-| `cached_tokens` | Prompt tokens served from prefix/KV cache when known. |
-| `request_received_ms` | Request receive time in Unix epoch milliseconds. |
-| `prefill_wait_time_ms` | Time from request receipt to prefill start. |
-| `prefill_time_ms` | Time from prefill start to first token. |
-| `ttft_ms` | Time from request receipt to first token. |
-| `total_time_ms` | Time from request receipt to request completion. |
-| `avg_itl_ms` | Average inter-token latency after first token. |
-| `kv_hit_rate` | Effective KV-cache hit rate observed by the router. |
+| Field                              | Meaning                                                  |
+| ---------------------------------- | -------------------------------------------------------- |
+| `request_id`                       | Dynamo request ID for the LLM call.                      |
+| `x_request_id`                     | Caller-provided logical request ID when present.         |
+| `model`                            | Requested model name.                                    |
+| `input_tokens`                     | Prompt/input token count when known.                     |
+| `output_tokens`                    | Final output token count when known.                     |
+| `cached_tokens`                    | Prompt tokens served from prefix/KV cache when known.    |
+| `request_received_ms`              | Request receive time in Unix epoch milliseconds.         |
+| `prefill_wait_time_ms`             | Time from request receipt to prefill start.              |
+| `prefill_time_ms`                  | Time from prefill start to first token.                  |
+| `ttft_ms`                          | Time from request receipt to first token.                |
+| `total_time_ms`                    | Time from request receipt to request completion.         |
+| `avg_itl_ms`                       | Average inter-token latency after first token.           |
+| `kv_hit_rate`                      | Effective KV-cache hit rate observed by the router.      |
 | `kv_transfer_estimated_latency_ms` | Upper-bound estimated disaggregated KV transfer latency. |
-| `queue_depth` | Router queue depth observed when routing the request. |
-| `worker` | Prefill/decode worker IDs and DP ranks when recorded. |
+| `queue_depth`                      | Router queue depth observed when routing the request.    |
+| `worker`                           | Prefill/decode worker IDs and DP ranks when recorded.    |
 
 Trace records do not include prompt/response content, sampling parameters,
 finish reason, or error status. Use the audit sink for request/response payload
