@@ -177,8 +177,8 @@ impl Router {
     /// namespace. Uses `hash_pod_name` (same as Dynamo discovery) for the
     /// worker_id and reads pod IPs directly from the K8s API.
     async fn build_worker_pod_map(&self) -> HashMap<u64, String> {
-        use kube::{Api, Client, api::ListParams};
         use k8s_openapi::api::core::v1::Pod;
+        use kube::{Api, Client, api::ListParams};
 
         let client = match Client::try_default().await {
             Ok(c) => c,
@@ -192,14 +192,13 @@ impl Router {
         // target_namespace is the Dynamo namespace (e.g., "atchernych-qwen-9f792849"),
         // the K8s namespace is the first segment before the first hyphen that starts
         // the Dynamo suffix. Use the POD_NAMESPACE env var if available.
-        let k8s_namespace = std::env::var("POD_NAMESPACE")
-            .unwrap_or_else(|_| {
-                self.target_namespace
-                    .split('-')
-                    .next()
-                    .unwrap_or(&self.target_namespace)
-                    .to_string()
-            });
+        let k8s_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| {
+            self.target_namespace
+                .split('-')
+                .next()
+                .unwrap_or(&self.target_namespace)
+                .to_string()
+        });
 
         let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
         let pod_list = match pods.list(&ListParams::default()).await {
@@ -216,11 +215,7 @@ impl Router {
                 Some(n) => n,
                 None => continue,
             };
-            let pod_ip = match pod
-                .status
-                .as_ref()
-                .and_then(|s| s.pod_ip.as_ref())
-            {
+            let pod_ip = match pod.status.as_ref().and_then(|s| s.pod_ip.as_ref()) {
                 Some(ip) => ip,
                 None => continue,
             };
@@ -746,18 +741,30 @@ impl EndpointPicker for Router {
         // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
         // x-prefill-dp-rank, x-dynamo-routing-mode
         let mut headers = vec![
-            ("x-worker-instance-id".to_string(), format!("{}", decode_worker.worker_id)),
+            (
+                "x-worker-instance-id".to_string(),
+                format!("{}", decode_worker.worker_id),
+            ),
             ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
         ];
 
         if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
-            headers.push(("x-dynamo-routing-mode".to_string(), "disaggregated".to_string()));
-            headers.push(("x-prefill-instance-id".to_string(), format!("{}", prefill_worker_id)));
+            headers.push((
+                "x-dynamo-routing-mode".to_string(),
+                "disaggregated".to_string(),
+            ));
+            headers.push((
+                "x-prefill-instance-id".to_string(),
+                format!("{}", prefill_worker_id),
+            ));
             if let Some(rank) = prefill_dp_rank {
                 headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
             }
         } else {
-            headers.push(("x-dynamo-routing-mode".to_string(), "aggregated".to_string()));
+            headers.push((
+                "x-dynamo-routing-mode".to_string(),
+                "aggregated".to_string(),
+            ));
         }
 
         tracing::info!(

@@ -136,7 +136,10 @@ impl RequestContext {
         if self.state == StreamState::HeaderRequestResponseComplete
             && !self.req_body_resp.is_empty()
         {
-            tracing::info!(count = self.req_body_resp.len(), "[WIRE] Sending req_body_resp to Envoy");
+            tracing::info!(
+                count = self.req_body_resp.len(),
+                "[WIRE] Sending req_body_resp to Envoy"
+            );
             out.append(&mut self.req_body_resp);
             self.state = StreamState::BodyRequestResponsesComplete;
         }
@@ -422,14 +425,18 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         tracing::info!(
                             request_body_mode = pc.request_body_mode,
                             response_body_mode = pc.response_body_mode,
-                            send_body_without_waiting = pc.send_body_without_waiting_for_header_response,
+                            send_body_without_waiting =
+                                pc.send_body_without_waiting_for_header_response,
                             "[PROTOCOL] ProtocolConfiguration from Envoy"
                         );
                     }
 
                     match req.request {
                         Some(processing_request::Request::RequestHeaders(ref hdr)) => {
-                            tracing::info!(eos = hdr.end_of_stream, "[MSG-ORDER] Received RequestHeaders from Envoy");
+                            tracing::info!(
+                                eos = hdr.end_of_stream,
+                                "[MSG-ORDER] Received RequestHeaders from Envoy"
+                            );
                             ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
                             if hdr.end_of_stream {
@@ -446,7 +453,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             }
                         }
                         Some(processing_request::Request::RequestBody(ref body)) => {
-                            tracing::info!(eos = body.end_of_stream, body_len = body.body.len(), "[MSG-ORDER] Received RequestBody from Envoy");
+                            tracing::info!(
+                                eos = body.end_of_stream,
+                                body_len = body.body.len(),
+                                "[MSG-ORDER] Received RequestBody from Envoy"
+                            );
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {

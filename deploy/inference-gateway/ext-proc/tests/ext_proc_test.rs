@@ -13,14 +13,13 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 
-use dynamo_ext_proc::picker::{EndpointPicker, Endpoint, PickError, PickResult, RequestInfo};
+use dynamo_ext_proc::ExtProcServer;
+use dynamo_ext_proc::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use dynamo_ext_proc::proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use dynamo_ext_proc::proto::envoy::service::ext_proc::v3::{
-    self as ext_proc,
-    external_processor_client::ExternalProcessorClient,
-    processing_response, ProcessingRequest,
+    self as ext_proc, ProcessingRequest, external_processor_client::ExternalProcessorClient,
+    processing_response,
 };
-use dynamo_ext_proc::ExtProcServer;
 
 // ---------------------------------------------------------------------------
 // MockPicker
@@ -51,16 +50,27 @@ async fn test_ext_proc_disaggregated_routing() {
         endpoint: "10.0.1.100:8000".to_string(),
         fallbacks: vec![],
         headers: vec![
-            ("x-worker-instance-id".to_string(), "2173882273627495".to_string()),
+            (
+                "x-worker-instance-id".to_string(),
+                "2173882273627495".to_string(),
+            ),
             ("x-dp-rank".to_string(), "0".to_string()),
-            ("x-dynamo-routing-mode".to_string(), "disaggregated".to_string()),
-            ("x-prefill-instance-id".to_string(), "966999679619852".to_string()),
+            (
+                "x-dynamo-routing-mode".to_string(),
+                "disaggregated".to_string(),
+            ),
+            (
+                "x-prefill-instance-id".to_string(),
+                "966999679619852".to_string(),
+            ),
             ("x-prefill-dp-rank".to_string(), "0".to_string()),
         ],
         token_ids: Some(vec![1, 2, 3, 4, 5]),
     };
 
-    let picker = Arc::new(MockPicker { result: pick_result });
+    let picker = Arc::new(MockPicker {
+        result: pick_result,
+    });
     let server = ExtProcServer::new(picker);
 
     // Bind to a random port
@@ -89,24 +99,18 @@ async fn test_ext_proc_disaggregated_routing() {
     let (tx, rx) = tokio::sync::mpsc::channel::<ProcessingRequest>(10);
     let request_stream = ReceiverStream::new(rx);
 
-    let mut response_stream = client
-        .process(request_stream)
-        .await
-        .unwrap()
-        .into_inner();
+    let mut response_stream = client.process(request_stream).await.unwrap().into_inner();
 
     // Send RequestHeaders (eos=false)
     tx.send(ProcessingRequest {
         request: Some(ext_proc::processing_request::Request::RequestHeaders(
             ext_proc::HttpHeaders {
                 headers: Some(HeaderMap {
-                    headers: vec![
-                        HeaderValue {
-                            key: "content-type".to_string(),
-                            raw_value: b"application/json".to_vec(),
-                            ..Default::default()
-                        },
-                    ],
+                    headers: vec![HeaderValue {
+                        key: "content-type".to_string(),
+                        raw_value: b"application/json".to_vec(),
+                        ..Default::default()
+                    }],
                 }),
                 end_of_stream: false,
             },
@@ -159,10 +163,16 @@ async fn test_ext_proc_disaggregated_routing() {
         other => panic!("Expected RequestHeaders response, got: {other:?}"),
     };
 
-    let common = req_headers.response.as_ref().expect("missing CommonResponse");
+    let common = req_headers
+        .response
+        .as_ref()
+        .expect("missing CommonResponse");
     assert!(common.clear_route_cache, "clear_route_cache should be true");
 
-    let header_mutation = common.header_mutation.as_ref().expect("missing HeaderMutation");
+    let header_mutation = common
+        .header_mutation
+        .as_ref()
+        .expect("missing HeaderMutation");
     let set_headers: std::collections::HashMap<String, String> = header_mutation
         .set_headers
         .iter()
@@ -240,8 +250,14 @@ async fn test_ext_proc_disaggregated_routing() {
         other => panic!("Expected RequestBody response, got: {other:?}"),
     };
 
-    let body_common = req_body.response.as_ref().expect("missing body CommonResponse");
-    let body_mutation = body_common.body_mutation.as_ref().expect("missing BodyMutation");
+    let body_common = req_body
+        .response
+        .as_ref()
+        .expect("missing body CommonResponse");
+    let body_mutation = body_common
+        .body_mutation
+        .as_ref()
+        .expect("missing BodyMutation");
 
     let streamed = match &body_mutation.mutation {
         Some(ext_proc::body_mutation::Mutation::StreamedResponse(s)) => s,
