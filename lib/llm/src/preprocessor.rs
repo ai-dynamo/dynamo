@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+mod image_token;
 pub mod media;
 pub mod prompt;
 pub mod speculative_prefill;
@@ -206,37 +207,17 @@ impl OpenAIPreprocessor {
         let context_length = mdc.context_length;
 
         // Resolve the model's image-placeholder token ID for approx MM
-        // routing. We try a small list of well-known placeholder strings
-        // covering the common VLM families; the first one present in the
-        // vocab wins. If none match, approx MM routing is disabled for
-        // this model and the router falls back to pure text-prefix routing.
-        const KNOWN_IMAGE_PLACEHOLDERS: &[&str] = &[
-            "<|image_pad|>",     // Qwen2-VL / Qwen3-VL
-            "<image>",           // LLaVA / LLaVA-NeXT / Idefics2/3 / Mllama
-            "[IMG]",             // Pixtral
-            "<IMG_CONTEXT>",     // InternVL
-            "<|image|>",         // Some custom VLMs
-        ];
-        let image_token_id = KNOWN_IMAGE_PLACEHOLDERS
-            .iter()
-            .find_map(|tok| tokenizer.token_to_id(tok).map(|id| (tok, id)));
-        let image_token_id = match image_token_id {
-            Some((tok, id)) => {
-                tracing::info!(
-                    image_token = tok,
-                    image_token_id = id,
-                    "[mm-approx] resolved image-placeholder token for approx MM routing"
-                );
-                Some(id)
-            }
-            None => {
-                tracing::warn!(
-                    "[mm-approx] cannot find the image token in the tokenizer; \
-                     MM-aware approx routing disabled for this model"
-                );
-                None
-            }
-        };
+        // routing. With the `image-token-pyo3` feature on, we ask HF
+        // transformers directly via a defensive lookup chain
+        // (`AutoProcessor.tokenizer.image_token_id`, `AutoConfig.image_token_index`,
+        // `AutoProcessor.image_token`, vocab probe); otherwise we fall back
+        // to a small hardcoded list of well-known placeholder strings. If
+        // neither resolves a placeholder, MM-aware approx routing is disabled
+        // for this model and the router falls back to pure text-prefix routing.
+        let image_token_id = image_token::resolve_image_token_id(
+            Some(mdc.display_name.as_str()),
+            tokenizer.as_ref(),
+        );
 
         Ok(Arc::new(Self {
             formatter,

@@ -13,7 +13,8 @@ cd "${DYNAMO_ROOT}"
 
 MODEL="${MODEL:-Qwen/Qwen3-VL-2B-Instruct}"
 NAMESPACE="${NAMESPACE:-dynamo}"
-HTTP_PORT="${HTTP_PORT:-8000}"
+# Honor DYN_HTTP_PORT (set by the tests/serve harness) when HTTP_PORT isn't given.
+HTTP_PORT="${HTTP_PORT:-${DYN_HTTP_PORT:-8000}}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.35}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -30,10 +31,31 @@ VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 FRONTEND_DECODING="${FRONTEND_DECODING:-true}"
 
 # Pass-through extra args for `python -m dynamo.vllm` (word-split intentionally).
+# `--model X` is intercepted below; everything else is forwarded as-is.
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 if [[ "${FRONTEND_DECODING}" == "true" ]]; then
     VLLM_EXTRA_ARGS="--frontend-decoding ${VLLM_EXTRA_ARGS}"
 fi
+
+# Minimal CLI parsing (mirrors agg_multimodal.sh) so the serve test harness can
+# drive this script with `--model X` like it does the other launch scripts.
+PASSTHRU_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--model NAME] [EXTRA_VLLM_ARGS...]"
+            exit 0
+            ;;
+        *)
+            PASSTHRU_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
 
 echo "=== Native MM Approx Routing Launch ==="
 echo "MODEL=${MODEL}, NUM_WORKERS=${NUM_WORKERS}, BLOCK_SIZE=${BLOCK_SIZE}"
@@ -75,7 +97,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --enforce-eager \
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
         --max-model-len "${MAX_MODEL_LEN}" \
-        ${VLLM_EXTRA_ARGS} &
+        ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 

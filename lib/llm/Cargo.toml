@@ -29,6 +29,11 @@ block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicat
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
+# Resolve the multimodal image-placeholder token at startup by loading the HF
+# processor via Python (transformers). Requires `transformers` available on the
+# Python interpreter at runtime. When off, the same code path falls back to the
+# small hardcoded list of well-known placeholder strings.
+image-token-pyo3 = ["dep:pyo3"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 
@@ -122,6 +127,13 @@ aligned-vec = { version = "0.6.4", optional = true }
 nixl-sys = { version = "=0.10.1", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
+
+# image-token-pyo3 — call HF transformers AutoProcessor at startup
+# to read processor.image_token. Auto-initializes the Python interpreter.
+pyo3 = { version = "0.23.4", optional = true, default-features = false, features = [
+  "macros",
+  "auto-initialize",
+] }
 
 # media (zlib compression for NIXL metadata)
 flate2 = { version = "1" }

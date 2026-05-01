@@ -778,6 +778,73 @@ def test_multimodal_b64_frontend_decoding(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.pre_merge
+@pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct")
+@pytest.mark.timeout(300)
+def test_multimodal_b64_approx_routing(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """Test multimodal inference under approximate MM-aware KV routing.
+
+    Drives the same agg_multimodal_approx.sh launch script that ships with
+    this PR, asserting the model still produces a correct color description
+    when the request goes through the Rust frontend's mm_routing_info path
+    (URL pass-through; --frontend-decoding intentionally not enabled).
+
+    Output-content correctness is the value-add over
+    ``tests/mm_router/test_approx_mm_router.py``, which only asserts the
+    routing-overlap bookkeeping in the router log.
+    """
+    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
+
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=2,  # second send exercises the sticky-routing fast path
+        expected_response=["green"],
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+    config = VLLMConfig(
+        name="test_multimodal_b64_approx_routing",
+        directory=vllm_dir,
+        script_name="agg_multimodal_approx.sh",
+        marks=[],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+        ],
+        # Single worker is enough to exercise the approx-routing pipeline at
+        # the serve-test scope; multi-worker affinity is covered separately
+        # by tests/mm_router/test_approx_mm_router.py.
+        env={"NUM_WORKERS": "1"},
+        delayed_start=0,
+        timeout=300,
+        request_payloads=[b64_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
 
