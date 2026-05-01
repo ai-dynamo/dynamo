@@ -8,16 +8,50 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: 'Framework to validate'
+        type: choice
+        options: [all, vllm, sglang, trtllm]
+        default: all
 
 permissions:
   contents: read
 
 jobs:
   # ============================================================================
+  # DISPATCH CONFIG
+  # On workflow_dispatch, narrows the run to a single framework.
+  # On push, all run flags resolve to true (full pipeline as before).
+  # ============================================================================
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      run_vllm:   ${{ steps.flags.outputs.run_vllm }}
+      run_sglang: ${{ steps.flags.outputs.run_sglang }}
+      run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
+    steps:
+      - id: flags
+        shell: bash
+        env:
+          FW: ${{ github.event.inputs.framework || 'all' }}
+        run: |
+          for f in vllm sglang trtllm; do
+            if [[ "$FW" == "all" || "$FW" == "$f" ]]; then
+              echo "run_$f=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run_$f=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -63,6 +97,7 @@ jobs:
 
   snapshot-agent:
     name: Snapshot Agent
+    if: github.event_name != 'workflow_dispatch'
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -87,6 +122,8 @@ jobs:
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -102,6 +139,8 @@ jobs:
 
   vllm-dev-build:
     name: vllm-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -118,6 +157,8 @@ jobs:
 
   vllm-efa-build:
     name: vllm-runtime-efa
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -134,6 +175,8 @@ jobs:
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -149,6 +192,8 @@ jobs:
 
   sglang-dev-build:
     name: sglang-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -163,8 +208,26 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}
     secrets: inherit
 
+  sglang-efa-build:
+    name: sglang-runtime-efa
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_version: '["12.9"]'
+      make_efa: true
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
+    secrets: inherit
+
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -180,6 +243,8 @@ jobs:
 
   trtllm-dev-build:
     name: trtllm-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -196,6 +261,8 @@ jobs:
 
   trtllm-efa-build:
     name: trtllm-runtime-efa
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -212,6 +279,7 @@ jobs:
 
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -227,6 +295,8 @@ jobs:
 
   frontend-build:
     name: frontend
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -477,6 +547,20 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  vllm-dev-copy-to-acr:
+    name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-dev-build]
+    if: |
+      always() &&
+      needs.vllm-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, sglang-test]
@@ -492,6 +576,20 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  sglang-dev-copy-to-acr:
+    name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-dev-build]
+    if: |
+      always() &&
+      needs.sglang-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, trtllm-test]
@@ -502,6 +600,20 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  trtllm-dev-copy-to-acr:
+    name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-dev-build]
+    if: |
+      always() &&
+      needs.trtllm-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.trtllm-dev-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 20
@@ -678,7 +790,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -698,7 +810,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: always()
+    if: always() && github.event_name != 'workflow_dispatch'
     needs: [ deploy-status-check ]
     permissions:
       contents: read

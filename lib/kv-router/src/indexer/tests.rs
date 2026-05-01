@@ -229,6 +229,13 @@ fn tree_size_indexer_template(
 ) {
 }
 
+#[template]
+#[rstest]
+fn approx_indexer_template(
+    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+) {
+}
+
 fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
     make_indexer_with_metrics(variant, metrics).0
@@ -267,6 +274,42 @@ fn make_indexer_with_metrics(
     (indexer, metrics)
 }
 
+fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterface + Sync> {
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let kv_block_size = 4;
+    let prune_config = PruneConfig { ttl };
+
+    match variant {
+        "single" => Box::new(KvIndexer::new_with_frequency(
+            token,
+            None,
+            kv_block_size,
+            metrics,
+            Some(prune_config),
+        )),
+        "flat" => Box::new(ThreadPoolIndexer::new_with_pruning(
+            PositionalIndexer::new(32),
+            4,
+            kv_block_size,
+            prune_config,
+        )),
+        "concurrent" => Box::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTree::new(),
+            4,
+            kv_block_size,
+            prune_config,
+        )),
+        "concurrent_compressed" => Box::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            4,
+            kv_block_size,
+            prune_config,
+        )),
+        _ => panic!("Unknown variant: {}", variant),
+    }
+}
+
 async fn flush_and_settle(index: &dyn KvIndexerInterface) {
     index.flush().await;
 }
@@ -303,6 +346,36 @@ async fn assert_query_score_and_tree_size(
 async fn assert_no_scores(index: &dyn KvIndexerInterface, query: &[u64]) {
     let scores = query_scores(index, query).await;
     assert!(scores.scores.is_empty());
+}
+
+async fn route_approx_tokens(
+    index: &dyn KvIndexerInterface,
+    tokens: &[u32],
+    worker: WorkerWithDpRank,
+) {
+    let mut tokens_with_hashes = TokensWithHashes::new(tokens.to_vec(), 4);
+    index
+        .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+        .await
+        .unwrap();
+    flush_and_settle(index).await;
+}
+
+async fn request_scores(index: &dyn KvIndexerInterface, tokens: &[u32]) -> OverlapScores {
+    index
+        .find_matches_for_request(tokens, None, None)
+        .await
+        .unwrap()
+}
+
+async fn assert_request_score(
+    index: &dyn KvIndexerInterface,
+    tokens: &[u32],
+    worker: WorkerWithDpRank,
+    expected_score: u32,
+) {
+    let scores = request_scores(index, tokens).await;
+    assert_eq!(scores.scores.get(&worker), Some(&expected_score));
 }
 
 async fn assert_exact_scores(
@@ -870,6 +943,119 @@ mod interface_tests {
             .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[apply(approx_indexer_template)]
+    async fn test_approx_routing_decision_creates_match(variant: &str) {
+        let index = make_approx_indexer(variant, Duration::from_secs(60));
+        let tokens = vec![1, 2, 3, 4];
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        route_approx_tokens(index.as_ref(), &tokens, worker).await;
+
+        assert_request_score(index.as_ref(), &tokens, worker, 1).await;
+    }
+
+    #[tokio::test]
+    #[apply(approx_indexer_template)]
+    async fn test_approx_ttl_expiry_removes_match(variant: &str) {
+        let ttl = Duration::from_millis(25);
+        let index = make_approx_indexer(variant, ttl);
+        let tokens = vec![1, 2, 3, 4];
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        route_approx_tokens(index.as_ref(), &tokens, worker).await;
+        assert_request_score(index.as_ref(), &tokens, worker, 1).await;
+
+        time::sleep(ttl + Duration::from_millis(25)).await;
+        flush_and_settle(index.as_ref()).await;
+
+        let scores = request_scores(index.as_ref(), &tokens).await;
+        assert!(scores.scores.is_empty());
+    }
+
+    #[tokio::test]
+    #[apply(approx_indexer_template)]
+    async fn test_approx_remove_worker_dp_rank_cleans_prune_metadata(variant: &str) {
+        let index = make_approx_indexer(variant, Duration::from_secs(60));
+        let tokens = vec![1, 2, 3, 4];
+        let removed_worker = WorkerWithDpRank::new(7, 0);
+        let retained_worker = WorkerWithDpRank::new(7, 1);
+
+        route_approx_tokens(index.as_ref(), &tokens, removed_worker).await;
+        route_approx_tokens(index.as_ref(), &tokens, retained_worker).await;
+
+        index
+            .remove_worker_dp_rank(removed_worker.worker_id, removed_worker.dp_rank)
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        let scores = request_scores(index.as_ref(), &tokens).await;
+        assert!(!scores.scores.contains_key(&removed_worker));
+        assert_eq!(scores.scores.get(&retained_worker), Some(&1));
+    }
+
+    #[tokio::test]
+    #[apply(approx_indexer_template)]
+    async fn test_approx_remove_worker_cleans_prune_metadata(variant: &str) {
+        let index = make_approx_indexer(variant, Duration::from_secs(60));
+        let tokens = vec![1, 2, 3, 4];
+        let removed_worker = WorkerWithDpRank::new(7, 0);
+        let retained_worker = WorkerWithDpRank::new(8, 0);
+
+        route_approx_tokens(index.as_ref(), &tokens, removed_worker).await;
+        route_approx_tokens(index.as_ref(), &tokens, retained_worker).await;
+
+        index.remove_worker(removed_worker.worker_id).await;
+        flush_and_settle(index.as_ref()).await;
+
+        let scores = request_scores(index.as_ref(), &tokens).await;
+        assert!(!scores.scores.contains_key(&removed_worker));
+        assert_eq!(scores.scores.get(&retained_worker), Some(&1));
+    }
+
+    #[tokio::test]
+    #[apply(approx_indexer_template)]
+    async fn test_kv_store_events_do_not_expire_through_approx_ttl(variant: &str) {
+        let ttl = Duration::from_millis(25);
+        let index = make_approx_indexer(variant, ttl);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        flush_and_settle(index.as_ref()).await;
+        assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
+
+        time::sleep(ttl + Duration::from_millis(25)).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
+    }
+
+    #[tokio::test]
+    async fn test_failed_threaded_approx_event_ack_does_not_register() {
+        let index = ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTree::new(),
+            1,
+            32,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        );
+        index.shutdown();
+
+        let tokens = vec![1, 2, 3, 4];
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), 32);
+        let result = index
+            .process_routing_decision_for_request(
+                &mut tokens_with_hashes,
+                WorkerWithDpRank::new(7, 0),
+            )
+            .await;
+
+        assert!(matches!(result, Err(KvRouterError::IndexerOffline)));
+        let scores = request_scores(&index, &tokens).await;
+        assert!(scores.scores.is_empty());
     }
 
     #[tokio::test]
