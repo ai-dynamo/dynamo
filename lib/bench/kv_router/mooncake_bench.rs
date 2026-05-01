@@ -127,11 +127,6 @@ struct Args {
     #[clap(long, default_value = "0")]
     find_matches_concurrency: usize,
 
-    /// Optional threshold (in blocks) for reporting shallow overlaps where
-    /// `0 < overlap < threshold`.
-    #[clap(long)]
-    overlap_threshold_blocks: Option<u32>,
-
     /// Use approximate routing-decision writes instead of offline-generated KV events.
     #[clap(long)]
     approx: bool,
@@ -452,7 +447,6 @@ async fn main() -> anyhow::Result<()> {
                             .inference_worker_duplication_factor,
                         count_events: config.supports_remove(),
                         find_matches_concurrency: args.find_matches_concurrency,
-                        overlap_threshold_blocks: args.overlap_threshold_blocks,
                         block_size: args.common.block_size,
                     },
                 )
@@ -560,7 +554,6 @@ async fn main() -> anyhow::Result<()> {
                         .inference_worker_duplication_factor,
                     count_events: config.supports_remove(),
                     find_matches_concurrency: args.find_matches_concurrency,
-                    overlap_threshold_blocks: args.overlap_threshold_blocks,
                     block_size: args.common.block_size,
                 },
             )

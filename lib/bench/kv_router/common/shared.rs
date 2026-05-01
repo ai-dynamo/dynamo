@@ -43,16 +43,6 @@ pub struct BenchmarkResults {
 pub struct BenchmarkRun {
     pub results: BenchmarkResults,
     pub kept_up: bool,
-    pub overlap_stats: OverlapStats,
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct OverlapStats {
-    pub total_requests: usize,
-    pub zero_overlap_requests: usize,
-    pub shallow_overlap_requests: usize,
-    pub avg_best_overlap_blocks: f32,
-    pub max_best_overlap_blocks: u32,
 }
 
 /// Load, transform, and partition the mooncake trace into per-worker request lists.
@@ -122,7 +112,6 @@ pub fn compute_benchmark_run(
     benchmark_duration_ms: u64,
     total_duration: Duration,
     mut latencies_ns: Vec<u64>,
-    overlap_stats: OverlapStats,
 ) -> BenchmarkRun {
     let kept_up = total_duration <= Duration::from_millis(benchmark_duration_ms * 11 / 10);
     let benchmark_duration_secs = (benchmark_duration_ms as f32 / 1000.0).max(1e-6);
@@ -149,7 +138,6 @@ pub fn compute_benchmark_run(
             latency_p99_us,
         },
         kept_up,
-        overlap_stats,
     }
 }
 

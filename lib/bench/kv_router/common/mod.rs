@@ -8,8 +8,8 @@ use std::time::Duration;
 #[path = "shared.rs"]
 mod shared;
 
-use dynamo_kv_router::protocols::XXH3_SEED;
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::protocols::XXH3_SEED;
 use dynamo_mocker::loadgen::{ReplayRequestHashes, Trace};
 use dynamo_tokens::compute_hash_v2;
 use plotters::prelude::*;
@@ -21,9 +21,9 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 pub use shared::{
+    BenchmarkResults, BenchmarkRun, NoopSequencePublisher, WorkerReplayArtifacts,
     compute_benchmark_run, default_mock_engine_args, generate_replay_artifacts, make_progress_bar,
-    process_mooncake_trace, rescale_trace_timestamps, BenchmarkResults, BenchmarkRun,
-    NoopSequencePublisher, OverlapStats, WorkerReplayArtifacts,
+    process_mooncake_trace, rescale_trace_timestamps,
 };
 
 /// Shared CLI arguments for trace-based benchmarks.

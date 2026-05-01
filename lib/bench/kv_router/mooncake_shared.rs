@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use dynamo_kv_router::LocalBlockHash;
@@ -21,8 +21,8 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{
-    compute_benchmark_run, make_progress_bar, rescale_trace_timestamps, BenchmarkRun, OverlapStats,
-    WorkerReplayArtifacts,
+    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run, make_progress_bar,
+    rescale_trace_timestamps,
 };
 
 #[allow(dead_code)]
@@ -248,55 +248,7 @@ pub struct MooncakeBenchmarkConfig {
     pub inference_worker_duplication_factor: usize,
     pub count_events: bool,
     pub find_matches_concurrency: usize,
-    pub overlap_threshold_blocks: Option<u32>,
     pub block_size: u32,
-}
-
-#[derive(Default)]
-struct OverlapAccumulator {
-    total_requests: usize,
-    zero_overlap_requests: usize,
-    shallow_overlap_requests: usize,
-    total_best_overlap_blocks: u64,
-    max_best_overlap_blocks: u32,
-}
-
-impl OverlapAccumulator {
-    fn record(&mut self, best_overlap_blocks: u32, threshold: Option<u32>) {
-        self.total_requests += 1;
-        self.total_best_overlap_blocks += best_overlap_blocks as u64;
-        self.max_best_overlap_blocks = self.max_best_overlap_blocks.max(best_overlap_blocks);
-        if best_overlap_blocks == 0 {
-            self.zero_overlap_requests += 1;
-        } else if threshold.is_some_and(|t| best_overlap_blocks < t) {
-            self.shallow_overlap_requests += 1;
-        }
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.total_requests += other.total_requests;
-        self.zero_overlap_requests += other.zero_overlap_requests;
-        self.shallow_overlap_requests += other.shallow_overlap_requests;
-        self.total_best_overlap_blocks += other.total_best_overlap_blocks;
-        self.max_best_overlap_blocks = self
-            .max_best_overlap_blocks
-            .max(other.max_best_overlap_blocks);
-    }
-
-    fn finish(self) -> OverlapStats {
-        let avg_best_overlap_blocks = if self.total_requests == 0 {
-            0.0
-        } else {
-            self.total_best_overlap_blocks as f32 / self.total_requests as f32
-        };
-        OverlapStats {
-            total_requests: self.total_requests,
-            zero_overlap_requests: self.zero_overlap_requests,
-            shallow_overlap_requests: self.shallow_overlap_requests,
-            avg_best_overlap_blocks,
-            max_best_overlap_blocks: self.max_best_overlap_blocks,
-        }
-    }
 }
 
 /// A single entry in a worker's merged benchmark timeline.
@@ -456,19 +408,15 @@ pub async fn run_benchmark(
             let worker_id = worker_id + replica * worker_traces.len();
             tasks.push(tokio::spawn(async move {
                 let mut request_latencies = Vec::with_capacity(trace.len());
-                let mut overlap = OverlapAccumulator::default();
-                let overlap_threshold = config.overlap_threshold_blocks;
 
                 let submit = |entry: WorkerTrace| async {
                     match entry.entry {
                         WorkerTraceEntry::Request(request) => {
                             let start = minstant::Instant::now();
-                            let scores = indexer.find_matches(request).await?;
-                            let best_overlap = scores.scores.values().copied().max().unwrap_or(0);
-                            Ok::<Option<(u64, u32)>, anyhow::Error>(Some((
-                                start.elapsed().as_nanos() as u64,
-                                best_overlap,
-                            )))
+                            indexer.find_matches(request).await?;
+                            Ok::<Option<u64>, anyhow::Error>(
+                                Some(start.elapsed().as_nanos() as u64),
+                            )
                         }
                         WorkerTraceEntry::Event(event) => {
                             indexer
@@ -498,18 +446,14 @@ pub async fn run_benchmark(
                     let mut processed = 1;
                     let entry_timestamp_us = entry.timestamp_us;
 
-                    if let Some((latency, best_overlap)) = submit(entry.clone()).await? {
+                    if let Some(latency) = submit(entry.clone()).await? {
                         request_latencies.push(latency);
-                        overlap.record(best_overlap, overlap_threshold);
                     }
 
                     while let Some(next) = trace.peek() {
                         if next.timestamp_us == entry_timestamp_us {
-                            if let Some((latency, best_overlap)) =
-                                submit(trace.next().unwrap().clone()).await?
-                            {
+                            if let Some(latency) = submit(trace.next().unwrap().clone()).await? {
                                 request_latencies.push(latency);
-                                overlap.record(best_overlap, overlap_threshold);
                             }
                             processed += 1;
                         } else {
@@ -535,7 +479,7 @@ pub async fn run_benchmark(
 
                 progress.inc(local_count);
 
-                Ok::<_, anyhow::Error>((request_latencies, overlap))
+                Ok::<_, anyhow::Error>(request_latencies)
             }));
         }
     }
@@ -576,11 +520,8 @@ pub async fn run_benchmark(
     }
 
     let mut latencies = Vec::new();
-    let mut overlap = OverlapAccumulator::default();
     for task in tasks {
-        let (task_latencies, task_overlap) = task.await??;
-        latencies.extend(task_latencies);
-        overlap.merge(task_overlap);
+        latencies.extend(task.await??);
     }
 
     fm_stop.store(true, Ordering::Relaxed);
@@ -655,7 +596,6 @@ pub async fn run_benchmark(
         config.benchmark_duration_ms,
         total_duration,
         latencies,
-        overlap.finish(),
     );
 
     println!(
@@ -667,26 +607,6 @@ pub async fn run_benchmark(
         run.results.offered_block_throughput as u64, run.results.block_throughput as u64,
     );
     println!("Latency p99: {}us", run.results.latency_p99_us);
-    if run.overlap_stats.total_requests > 0 {
-        let zero_pct = 100.0 * run.overlap_stats.zero_overlap_requests as f32
-            / run.overlap_stats.total_requests as f32;
-        println!(
-            "Overlap stats: zero-overlap = {}/{} ({zero_pct:.1}%), avg best overlap = {:.2} blocks, max best overlap = {} blocks",
-            run.overlap_stats.zero_overlap_requests,
-            run.overlap_stats.total_requests,
-            run.overlap_stats.avg_best_overlap_blocks,
-            run.overlap_stats.max_best_overlap_blocks,
-        );
-        if let Some(threshold) = config.overlap_threshold_blocks {
-            let shallow_pct = 100.0 * run.overlap_stats.shallow_overlap_requests as f32
-                / run.overlap_stats.total_requests as f32;
-            println!(
-                "Overlap stats: shallow-overlap (0 < overlap < {threshold}) = {}/{} ({shallow_pct:.1}%)",
-                run.overlap_stats.shallow_overlap_requests,
-                run.overlap_stats.total_requests,
-            );
-        }
-    }
 
     Ok(run)
 }
