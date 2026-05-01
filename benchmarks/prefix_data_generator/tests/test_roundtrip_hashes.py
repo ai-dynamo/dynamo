@@ -97,6 +97,7 @@ class TestRoundtripHashes:
             # Phase 2: Test roundtrip
             roundtrip_hasher = RollingHasher(block_size=DEFAULT_BLOCK_SIZE)
             mismatches = []
+            generation_failures = []
             tested = 0
 
             for i, trace in enumerate(traces):
@@ -113,6 +114,7 @@ class TestRoundtripHashes:
                     )
                 except Exception as e:
                     print(f"  Trace {i}: Generation failed - {e}")
+                    generation_failures.append((i, str(e)))
                     continue
 
                 # Step 2: Re-encode text (simulates what server does)
@@ -141,6 +143,19 @@ class TestRoundtripHashes:
                     )
 
             print(f"\nTested {tested} traces with hash_ids")
+
+            if tested == 0:
+                failure_details = ""
+                if generation_failures:
+                    preview = "; ".join(
+                        f"trace {i}: {error}"
+                        for i, error in generation_failures[:5]
+                    )
+                    failure_details = f" Generation failures: {preview}"
+                pytest.fail(
+                    "No traces were successfully tested for hash roundtrip."
+                    f"{failure_details}"
+                )
 
             # Report results
             if mismatches:
