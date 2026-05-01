@@ -59,6 +59,20 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
     }
 }
 
+/// EOF-as-end-token recovery — finalize-only path. Returns the JSON-looking
+/// tail after `start_token` when the outer end-token never arrived. Gated on
+/// `JsonParserConfig::allow_eof_recovery` so streaming early-exit doesn't
+/// fire mid-stream before the end-token has shown up.
+fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Option<String> {
+    let start_pos = input.find(start_token)?;
+    let tail = input[start_pos + start_token.len()..].trim();
+    if tail.starts_with('{') || tail.starts_with('[') {
+        Some(tail.to_string())
+    } else {
+        None
+    }
+}
+
 // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
 // Handles single tool and multiple tool call cases for single start_token like <|python_tag|>
 fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<String> {
@@ -110,6 +124,56 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         return Some(String::new());
     }
     Some(format!("[{}]", items.join(",")))
+}
+
+/// Attempt to repair JSON truncated by max_tokens / EOS. Walks the input
+/// tracking string state and brace/bracket nesting; on EOF closes any
+/// open string and pops outstanding closers. Returns `Some(repaired)` only
+/// when at least one closer needed to be appended (so we don't churn
+/// already-valid JSON).
+pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for c in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    if !escape && !in_string && stack.is_empty() {
+        return None;
+    }
+    let mut repaired = s.to_string();
+    // EOF mid-escape sequence: pair the trailing `\` with another `\` so the
+    // closing quote we append next isn't itself escaped.
+    if escape {
+        repaired.push('\\');
+    }
+    if in_string {
+        repaired.push('"');
+    }
+    while let Some(closer) = stack.pop() {
+        repaired.push(closer);
+    }
+    Some(repaired)
 }
 
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
@@ -237,7 +301,17 @@ pub fn try_tool_call_parse_basic_json(
                     }
                     (false, false) => {
                         // Start and end token case
-                        let result = extract_tool_call_content(&json, start_token, end_token);
+                        let mut result = extract_tool_call_content(&json, start_token, end_token);
+                        // EOF recovery: only when explicitly opted in (finalize
+                        // path). Streaming jails leave `allow_eof_recovery=false`
+                        // so the parser doesn't claim a complete call before
+                        // the end-token has actually arrived.
+                        if result.is_none()
+                            && config.allow_eof_recovery
+                            && json.contains(start_token.as_str())
+                        {
+                            result = extract_tool_call_content_eof_recovery(&json, start_token);
+                        }
                         if let Some(content) = result {
                             // Check if we found a start token but got empty JSON back
                             // This indicates the token was found but no valid JSON followed
@@ -329,6 +403,43 @@ pub fn try_tool_call_parse_basic_json(
         return Ok((results, Some(normal_text)));
     }
 
+    // Truncation recovery: balance unclosed strings/braces (common
+    // max_tokens / EOS pattern) and retry the same three parses. Gated on
+    // `allow_eof_recovery` so streaming jails don't claim a complete tool
+    // call while the model is still emitting JSON tokens.
+    if config.allow_eof_recovery
+        && let Some(repaired) = try_repair_truncated_json(json)
+    {
+        let repaired = repaired.as_str();
+        if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(repaired) {
+            return Ok((
+                vec![parse(single.name, single.parameters)?],
+                Some(normal_text),
+            ));
+        } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(repaired) {
+            return Ok((
+                vec![parse(single.name, single.arguments)?],
+                Some(normal_text),
+            ));
+        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(repaired) {
+            let mut results = Vec::new();
+            for item in array {
+                if let Ok(func_args) =
+                    serde_json::from_value::<CalledFunctionArguments>(item.clone())
+                {
+                    results.push(parse(func_args.name, func_args.arguments)?);
+                } else if let Ok(func_params) =
+                    serde_json::from_value::<CalledFunctionParameters>(item)
+                {
+                    results.push(parse(func_params.name, func_params.parameters)?);
+                }
+            }
+            if !results.is_empty() {
+                return Ok((results, Some(normal_text)));
+            }
+        }
+    }
+
     // If we found a start token but no valid JSON, return empty content
     // to avoid leaking the token and invalid JSON content
     if found_start_token_with_no_valid_json {
@@ -385,6 +496,24 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
     });
 
     has_partial_token || trimmed.contains('{') || trimmed.contains('[')
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    // EOF inside an escape sequence (`{"k":"a\` → `{"k":"a\\"}`). Without
+    // the `escape` guard, the appended `"` would itself be escaped and the
+    // resulting JSON would still be invalid.
+    #[test]
+    fn test_repair_eof_after_backslash() {
+        let repaired = try_repair_truncated_json(r#"{"k":"a\"#).expect("must repair");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&repaired).is_ok(),
+            "repaired must parse: {:?}",
+            repaired
+        );
+    }
 }
 
 #[cfg(test)]

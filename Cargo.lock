@@ -2449,6 +2449,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "lazy_static",
+ "lru 0.12.5",
  "memfile",
  "minijinja",
  "minijinja-contrib",
