@@ -1,0 +1,154 @@
+   Compiling dynamo-runtime v1.2.0 (/home/bgreengus/dev/dynamo-worktrees/dynamo-want-benchmark-dynamo-when-using-98f072cd-039f-4068-88ac-1e514a5be9fd/lib/runtime)
+    Finished `bench` profile [optimized] target(s) in 30.06s
+     Running benches/channel_mpsc_perf.rs (target/release/deps/channel_mpsc_perf-f0cd328311033ae0)
+Gnuplot not found, using plotters backend
+Benchmarking mpsc_bounded_spsc_flume/1
+Benchmarking mpsc_bounded_spsc_flume/1: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/1: Collecting 100 samples in estimated 43.741 s (200 iterations)
+Benchmarking mpsc_bounded_spsc_flume/1: Analyzing
+mpsc_bounded_spsc_flume/1
+                        time:   [192.78 ms 197.73 ms 202.91 ms]
+                        thrpt:  [80.744 Kelem/s 82.860 Kelem/s 84.987 Kelem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/2
+Benchmarking mpsc_bounded_spsc_flume/2: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/2: Collecting 100 samples in estimated 37.301 s (300 iterations)
+Benchmarking mpsc_bounded_spsc_flume/2: Analyzing
+mpsc_bounded_spsc_flume/2
+                        time:   [145.55 ms 149.24 ms 153.09 ms]
+                        thrpt:  [107.02 Kelem/s 109.78 Kelem/s 112.57 Kelem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/4
+Benchmarking mpsc_bounded_spsc_flume/4: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/4: Collecting 100 samples in estimated 32.767 s (400 iterations)
+Benchmarking mpsc_bounded_spsc_flume/4: Analyzing
+mpsc_bounded_spsc_flume/4
+                        time:   [148.29 ms 169.76 ms 192.50 ms]
+                        thrpt:  [85.112 Kelem/s 96.512 Kelem/s 110.49 Kelem/s]
+Benchmarking mpsc_bounded_spsc_flume/64
+Benchmarking mpsc_bounded_spsc_flume/64: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/64: Collecting 100 samples in estimated 30.806 s (2000 iterations)
+Benchmarking mpsc_bounded_spsc_flume/64: Analyzing
+mpsc_bounded_spsc_flume/64
+                        time:   [7.8445 ms 9.2099 ms 10.806 ms]
+                        thrpt:  [1.5162 Melem/s 1.7789 Melem/s 2.0886 Melem/s]
+Found 15 outliers among 100 measurements (15.00%)
+  2 (2.00%) high mild
+  13 (13.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/128
+Benchmarking mpsc_bounded_spsc_flume/128: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/128: Collecting 100 samples in estimated 58.619 s (10k iterations)
+Benchmarking mpsc_bounded_spsc_flume/128: Analyzing
+mpsc_bounded_spsc_flume/128
+                        time:   [3.6662 ms 3.7887 ms 3.9350 ms]
+                        thrpt:  [4.1636 Melem/s 4.3244 Melem/s 4.4689 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/256
+Benchmarking mpsc_bounded_spsc_flume/256: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/256: Collecting 100 samples in estimated 33.251 s (15k iterations)
+Benchmarking mpsc_bounded_spsc_flume/256: Analyzing
+mpsc_bounded_spsc_flume/256
+                        time:   [2.3280 ms 2.4872 ms 2.6802 ms]
+                        thrpt:  [6.1131 Melem/s 6.5872 Melem/s 7.0378 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/1024
+Benchmarking mpsc_bounded_spsc_flume/1024: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/1024: Collecting 100 samples in estimated 33.923 s (25k iterations)
+Benchmarking mpsc_bounded_spsc_flume/1024: Analyzing
+mpsc_bounded_spsc_flume/1024
+                        time:   [1.1877 ms 1.2269 ms 1.2682 ms]
+                        thrpt:  [12.920 Melem/s 13.354 Melem/s 13.794 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/2048
+Benchmarking mpsc_bounded_spsc_flume/2048: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/2048: Collecting 100 samples in estimated 31.544 s (30k iterations)
+Benchmarking mpsc_bounded_spsc_flume/2048: Analyzing
+mpsc_bounded_spsc_flume/2048
+                        time:   [971.38 µs 1.0167 ms 1.0680 ms]
+                        thrpt:  [15.341 Melem/s 16.116 Melem/s 16.867 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/4096
+Benchmarking mpsc_bounded_spsc_flume/4096: Warming up for 10.000 s
+Benchmarking mpsc_bounded_spsc_flume/4096: Collecting 100 samples in estimated 32.588 s (35k iterations)
+Benchmarking mpsc_bounded_spsc_flume/4096: Analyzing
+mpsc_bounded_spsc_flume/4096
+                        time:   [912.03 µs 951.00 µs 993.24 µs]
+                        thrpt:  [16.496 Melem/s 17.228 Melem/s 17.964 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+
+Benchmarking mpsc_bounded_mpsc_flume/64
+Benchmarking mpsc_bounded_mpsc_flume/64: Warming up for 10.000 s
+Benchmarking mpsc_bounded_mpsc_flume/64: Collecting 100 samples in estimated 34.241 s (30k iterations)
+Benchmarking mpsc_bounded_mpsc_flume/64: Analyzing
+mpsc_bounded_mpsc_flume/64
+                        time:   [1.1003 ms 1.1456 ms 1.1954 ms]
+                        thrpt:  [13.706 Melem/s 14.301 Melem/s 14.891 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking mpsc_bounded_mpsc_flume/128
+Benchmarking mpsc_bounded_mpsc_flume/128: Warming up for 10.000 s
+Benchmarking mpsc_bounded_mpsc_flume/128: Collecting 100 samples in estimated 30.846 s (30k iterations)
+Benchmarking mpsc_bounded_mpsc_flume/128: Analyzing
+mpsc_bounded_mpsc_flume/128
+                        time:   [973.71 µs 1.0066 ms 1.0400 ms]
+                        thrpt:  [15.754 Melem/s 16.276 Melem/s 16.826 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mpsc_bounded_mpsc_flume/256
+Benchmarking mpsc_bounded_mpsc_flume/256: Warming up for 10.000 s
+Benchmarking mpsc_bounded_mpsc_flume/256: Collecting 100 samples in estimated 33.637 s (30k iterations)
+Benchmarking mpsc_bounded_mpsc_flume/256: Analyzing
+mpsc_bounded_mpsc_flume/256
+                        time:   [987.38 µs 1.0172 ms 1.0493 ms]
+                        thrpt:  [15.614 Melem/s 16.107 Melem/s 16.593 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking mpsc_bounded_mpsc_flume/1024
+Benchmarking mpsc_bounded_mpsc_flume/1024: Warming up for 10.000 s
+Benchmarking mpsc_bounded_mpsc_flume/1024: Collecting 100 samples in estimated 31.693 s (30k iterations)
+Benchmarking mpsc_bounded_mpsc_flume/1024: Analyzing
+mpsc_bounded_mpsc_flume/1024
+                        time:   [1.2666 ms 1.4042 ms 1.5296 ms]
+                        thrpt:  [10.711 Melem/s 11.668 Melem/s 12.936 Melem/s]
+Benchmarking mpsc_bounded_mpsc_flume/2048
+Benchmarking mpsc_bounded_mpsc_flume/2048: Warming up for 10.000 s
+Benchmarking mpsc_bounded_mpsc_flume/2048: Collecting 100 samples in estimated 34.192 s (25k iterations)
+Benchmarking mpsc_bounded_mpsc_flume/2048: Analyzing
+mpsc_bounded_mpsc_flume/2048
+                        time:   [1.3859 ms 1.4645 ms 1.5460 ms]
+                        thrpt:  [10.598 Melem/s 11.187 Melem/s 11.822 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mpsc_bounded_mpsc_flume/4096
+Benchmarking mpsc_bounded_mpsc_flume/4096: Warming up for 10.000 s
+Benchmarking mpsc_bounded_mpsc_flume/4096: Collecting 100 samples in estimated 30.825 s (35k iterations)
+Benchmarking mpsc_bounded_mpsc_flume/4096: Analyzing
+mpsc_bounded_mpsc_flume/4096
+                        time:   [901.36 µs 936.83 µs 974.40 µs]
+                        thrpt:  [16.814 Melem/s 17.489 Melem/s 18.177 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking mpsc_unbounded_spsc_flume/send_recv
+Benchmarking mpsc_unbounded_spsc_flume/send_recv: Warming up for 10.000 s
+Benchmarking mpsc_unbounded_spsc_flume/send_recv: Collecting 100 samples in estimated 33.219 s (50k iterations)
+Benchmarking mpsc_unbounded_spsc_flume/send_recv: Analyzing
+mpsc_unbounded_spsc_flume/send_recv
+                        time:   [739.76 µs 776.21 µs 817.71 µs]
+                        thrpt:  [20.037 Melem/s 21.108 Melem/s 22.148 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+

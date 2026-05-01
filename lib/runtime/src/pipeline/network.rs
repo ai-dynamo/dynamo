@@ -15,6 +15,7 @@ pub mod manager;
 pub mod tcp;
 
 use crate::SystemHealth;
+use crate::channels::mpsc;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -158,21 +159,24 @@ pub trait ResponseService {
 // was not an error, would indicate the RequestStreamReceiver is read
 // to receive data.
 pub struct StreamSender {
-    tx: tokio::sync::mpsc::Sender<TwoPartMessage>,
+    tx: mpsc::Sender<TwoPartMessage>,
     prologue: Option<ResponseStreamPrologue>,
 }
 
 impl StreamSender {
     pub async fn send(&self, data: Bytes) -> Result<()> {
-        Ok(self.tx.send(TwoPartMessage::from_data(data)).await?)
+        self.tx
+            .send(TwoPartMessage::from_data(data))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
     }
 
     pub async fn send_control(&self, control: ControlMessage) -> Result<()> {
         let bytes = serde_json::to_vec(&control)?;
-        Ok(self
-            .tx
+        self.tx
             .send(TwoPartMessage::from_header(bytes.into()))
-            .await?)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
     }
 
     #[allow(clippy::needless_update)]

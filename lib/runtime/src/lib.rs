@@ -20,6 +20,7 @@ use async_once_cell::OnceCell;
 pub mod config;
 pub use config::RuntimeConfig;
 
+pub mod channels;
 pub mod component;
 pub mod compute;
 pub mod discovery;

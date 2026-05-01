@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::channels::mpsc;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
 use tokio::{
@@ -130,7 +131,7 @@ impl TcpClient {
             .map_err(|e| error!("failed to send handshake: {:?}", e))?;
 
         // set up the channel to send bytes to the transport layer
-        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
+        let (bytes_tx, bytes_rx) = mpsc::channel(64);
 
         // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
 
@@ -293,7 +294,7 @@ async fn handle_reader(
 
 async fn handle_writer(
     mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
-    mut bytes_rx: tokio::sync::mpsc::Receiver<TwoPartMessage>,
+    mut bytes_rx: mpsc::Receiver<TwoPartMessage>,
     alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
@@ -358,7 +359,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
     use tokio_util::codec::FramedRead;
 
     struct WriterHarness {

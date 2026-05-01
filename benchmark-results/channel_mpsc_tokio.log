@@ -1,0 +1,491 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.228
+   Compiling cfg-if v1.0.4
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.0
+   Compiling pin-project-lite v0.2.17
+   Compiling smallvec v1.15.1
+   Compiling log v0.4.29
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling parking_lot_core v0.9.12
+   Compiling futures-core v0.3.32
+   Compiling scopeguard v1.2.0
+   Compiling futures-sink v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling zmij v1.0.21
+   Compiling futures-channel v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling futures-task v0.3.32
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling version_check v0.9.5
+   Compiling syn v2.0.117
+   Compiling equivalent v1.0.2
+   Compiling serde_json v1.0.149
+   Compiling jobserver v0.1.34
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.3
+   Compiling mio v1.1.1
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling cc v1.2.61
+   Compiling zeroize v1.8.2
+   Compiling hashbrown v0.17.0
+   Compiling either v1.15.0
+   Compiling percent-encoding v2.3.2
+   Compiling autocfg v1.5.0
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.2.17
+   Compiling zerocopy v0.8.48
+   Compiling num-traits v0.2.19
+   Compiling cmake v0.1.58
+   Compiling dunce v1.0.5
+   Compiling indexmap v2.14.0
+   Compiling fs_extra v1.3.0
+   Compiling rustls-pki-types v1.14.1
+   Compiling tower-service v0.3.3
+   Compiling aws-lc-sys v0.40.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling httparse v1.10.1
+   Compiling base64 v0.22.1
+   Compiling try-lock v0.2.5
+   Compiling want v0.3.1
+   Compiling ring v0.17.14
+   Compiling form_urlencoded v1.2.2
+   Compiling anyhow v1.0.102
+   Compiling aws-lc-rs v1.16.3
+   Compiling httpdate v1.0.3
+   Compiling untrusted v0.9.0
+   Compiling rayon-core v1.13.0
+   Compiling subtle v2.6.1
+   Compiling heck v0.5.0
+   Compiling ipnet v2.12.0
+   Compiling mime v0.3.17
+   Compiling atomic-waker v1.1.2
+   Compiling synstructure v0.13.2
+   Compiling aho-corasick v1.1.4
+   Compiling ident_case v1.0.1
+   Compiling thiserror v2.0.18
+   Compiling rustls v0.23.39
+   Compiling ryu v1.0.23
+   Compiling strsim v0.11.1
+   Compiling regex-syntax v0.8.10
+   Compiling sync_wrapper v1.0.2
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling tower-layer v0.3.3
+   Compiling getrandom v0.4.2
+   Compiling crossbeam-epoch v0.9.18
+   Compiling generic-array v0.14.7
+   Compiling icu_properties_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.6.1
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling zerofrom-derive v0.1.7
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling yoke-derive v0.8.2
+   Compiling zerocopy-derive v0.8.48
+   Compiling zerofrom v0.1.7
+   Compiling zerovec-derive v0.11.3
+   Compiling yoke v0.8.2
+   Compiling displaydoc v0.2.5
+   Compiling zerovec v0.11.6
+   Compiling tinystr v0.8.3
+   Compiling bytes v1.11.1
+   Compiling regex-automata v0.4.14
+   Compiling thiserror-impl v2.0.18
+   Compiling icu_locale_core v2.2.0
+   Compiling potential_utf v0.1.5
+   Compiling zerotrie v0.2.4
+   Compiling unicase v2.9.0
+   Compiling tokio v1.48.0
+   Compiling http v1.4.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling http-body v1.0.1
+   Compiling http-body-util v0.1.3
+   Compiling crossbeam-deque v0.8.6
+   Compiling itertools v0.14.0
+   Compiling rustix v1.1.4
+   Compiling thiserror v1.0.69
+   Compiling getrandom v0.3.4
+   Compiling bitflags v2.11.1
+   Compiling typenum v1.20.0
+   Compiling futures-executor v0.3.32
+   Compiling thiserror-impl v1.0.69
+   Compiling prost-derive v0.14.3
+   Compiling semver v1.0.28
+   Compiling rustc_version v0.4.1
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling serde_urlencoded v0.7.1
+   Compiling crossbeam-queue v0.3.12
+   Compiling crossbeam-channel v0.5.15
+   Compiling target-lexicon v0.12.16
+   Compiling rayon v1.12.0
+   Compiling crypto-common v0.1.7
+   Compiling idna_adapter v1.2.1
+   Compiling crossbeam v0.8.4
+   Compiling block-buffer v0.10.4
+   Compiling regex v1.12.3
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling pin-project-internal v1.1.11
+   Compiling darling_core v0.20.11
+   Compiling tokio-util v0.7.18
+   Compiling rustversion v1.0.22
+   Compiling h2 v0.4.13
+   Compiling tower v0.5.3
+   Compiling winnow v0.7.15
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling darling_macro v0.20.11
+   Compiling jwalk v0.8.1
+   Compiling pin-project v1.1.11
+   Compiling digest v0.10.7
+   Compiling idna v1.1.0
+   Compiling toml_edit v0.22.27
+   Compiling openssl-probe v0.2.1
+   Compiling ucd-trie v0.1.7
+   Compiling prettyplease v0.2.37
+   Compiling pulldown-cmark v0.13.3
+   Compiling cfg-expr v0.15.8
+   Compiling pest v2.8.6
+   Compiling rustls-native-certs v0.8.3
+   Compiling url v2.5.8
+   Compiling dircpy v0.3.20
+   Compiling darling v0.20.11
+   Compiling tokio-stream v0.1.18
+   Compiling hyper v1.9.0
+   Compiling toml v0.8.23
+   Compiling futures v0.3.32
+   Compiling webpki-roots v1.0.7
+   Compiling foldhash v0.1.5
+   Compiling ref-cast v1.0.25
+   Compiling iri-string v0.7.12
+   Compiling time-core v0.1.8
+   Compiling pkg-config v0.3.33
+   Compiling base64ct v1.8.3
+   Compiling powerfmt v0.2.0
+   Compiling lazy_static v1.5.0
+   Compiling num-conv v0.2.1
+   Compiling version-compare v0.2.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling deranged v0.5.8
+   Compiling time-macros v0.2.27
+   Compiling system-deps v6.2.2
+   Compiling hyper-util v0.1.20
+   Compiling tower-http v0.6.8
+   Compiling prost v0.14.3
+   Compiling pem-rfc7468 v0.7.0
+   Compiling hashbrown v0.15.5
+   Compiling pest_meta v2.8.6
+   Compiling zeromq-src v0.2.6+4.3.4
+   Compiling axum-core v0.5.6
+   Compiling hyper-timeout v0.5.2
+   Compiling opentelemetry v0.31.0
+   Compiling ref-cast-impl v1.0.25
+   Compiling axum-macros v0.5.1
+   Compiling async-trait v0.1.89
+   Compiling serde_derive_internals v0.29.1
+   Compiling serde_path_to_error v0.1.20
+   Compiling rand_core v0.6.4
+   Compiling proc-macro-error-attr2 v2.0.0
+   Compiling const-oid v0.9.6
+   Compiling matchit v0.8.4
+   Compiling fixedbitset v0.5.7
+   Compiling k8s-openapi v0.26.1
+   Compiling iana-time-zone v0.1.65
+   Compiling fastrand v2.4.1
+   Compiling num_threads v0.1.7
+   Compiling chrono v0.4.44
+   Compiling petgraph v0.8.3
+   Compiling time v0.3.47
+   Compiling tempfile v3.27.0
+   Compiling axum v0.8.4
+   Compiling schemars_derive v1.2.1
+   Compiling der v0.7.10
+   Compiling proc-macro-error2 v2.0.1
+   Compiling pulldown-cmark-to-cmark v22.0.0
+   Compiling pest_generator v2.8.6
+   Compiling zmq-sys v0.12.0
+   Compiling prost-types v0.14.3
+   Compiling signature v2.2.0
+   Compiling rand_core v0.9.5
+   Compiling curve25519-dalek v4.1.3
+   Compiling mime_guess v2.0.5
+   Compiling jsonptr v0.7.1
+   Compiling derive_more-impl v2.1.1
+   Compiling concurrent-queue v2.5.0
+   Compiling num-integer v0.1.46
+   Compiling ordered-float v2.10.1
+   Compiling ahash v0.8.12
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling cpufeatures v0.2.17
+   Compiling parking v2.2.1
+   Compiling dyn-clone v1.0.20
+   Compiling multimap v0.10.1
+   Compiling utf8parse v0.2.2
+   Compiling schemars v1.2.1
+   Compiling prost-build v0.14.3
+   Compiling anstyle-parse v1.0.0
+   Compiling event-listener v5.4.1
+   Compiling derive_more v2.1.1
+   Compiling serde-value v0.7.0
+   Compiling json-patch v4.1.0
+   Compiling pest_derive v2.8.6
+   Compiling rand_chacha v0.9.0
+   Compiling spki v0.7.3
+   Compiling rand_chacha v0.3.1
+   Compiling tonic-build v0.14.5
+   Compiling derive_builder_core v0.20.2
+   Compiling http v0.2.12
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling enum-ordinalize-derive v4.3.2
+   Compiling darling_core v0.21.3
+   Compiling anstyle-query v1.1.5
+   Compiling allocator-api2 v0.2.21
+   Compiling colorchoice v1.0.5
+   Compiling bitflags v1.3.2
+   Compiling winnow v1.0.2
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling unsafe-libyaml v0.2.11
+   Compiling anstyle v1.0.14
+   Compiling yansi v1.0.1
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling anstream v1.0.0
+   Compiling enum-ordinalize v4.3.2
+   Compiling derive_builder_macro v0.20.2
+   Compiling tonic-prost-build v0.14.5
+   Compiling darling_macro v0.21.3
+   Compiling rand v0.8.6
+   Compiling jsonpath-rust v0.7.5
+   Compiling pkcs8 v0.10.2
+   Compiling rand v0.9.4
+   Compiling event-listener-strategy v0.5.4
+   Compiling sha2 v0.10.9
+   Compiling num-bigint v0.4.6
+   Compiling ed25519 v2.2.3
+   Compiling sharded-slab v0.1.7
+   Compiling matchers v0.2.0
+   Compiling tracing-serde v0.2.0
+   Compiling async-stream-impl v0.3.6
+   Compiling pem v3.0.6
+   Compiling secrecy v0.10.3
+   Compiling uncased v0.9.10
+   Compiling socket2 v0.5.10
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling home v0.5.12
+   Compiling portable-atomic v1.13.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling protobuf v3.7.2
+   Compiling clap_lex v1.1.0
+   Compiling toml_write v0.1.2
+   Compiling zmq v0.10.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling toml_edit v0.25.11+spec-1.1.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling clap_builder v4.6.0
+   Compiling num-rational v0.4.2
+   Compiling async-stream v0.3.6
+   Compiling kube-core v2.0.1
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling async-broadcast v0.7.2
+   Compiling signatory v0.27.1
+   Compiling etcd-client v0.17.0
+   Compiling darling v0.21.3
+   Compiling derive_builder v0.20.2
+   Compiling educe v0.6.0
+   Compiling pear_codegen v0.2.9
+   Compiling h2 v0.3.27
+   Compiling http-body v0.4.6
+   Compiling backon v1.6.0
+   Compiling num-iter v0.1.45
+   Compiling getset v0.1.6
+   Compiling protobuf-support v3.7.2
+   Compiling rstest_macros v0.23.0
+   Compiling half v2.7.1
+   Compiling neli-proc-macros v0.2.2
+   Compiling clap_derive v4.6.1
+   Compiling num-complex v0.4.6
+   Compiling blake3 v1.8.4
+   Compiling rustls-pemfile v2.2.0
+   Compiling figment v0.10.19
+   Compiling inotify-sys v0.1.5
+   Compiling hostname v0.4.2
+   Compiling bit-vec v0.6.3
+   Compiling byteorder v1.5.0
+   Compiling openssl-probe v0.1.6
+   Compiling data-encoding v2.11.0
+   Compiling prometheus v0.14.0
+   Compiling inlinable_string v0.1.15
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling ciborium-ll v0.2.2
+   Compiling clap v4.6.1
+   Compiling nkeys v0.4.5
+   Compiling pear v0.2.9
+   Compiling plotters-svg v0.3.7
+   Compiling neli v0.7.4
+   Compiling bit-set v0.5.3
+   Compiling rustls-native-certs v0.7.3
+   Compiling hyper v0.14.32
+   Compiling inotify v0.9.6
+   Compiling num v0.4.3
+   Compiling kube-derive v2.0.1
+   Compiling proc-macro-crate v3.5.0
+   Compiling nuid v0.5.0
+   Compiling uuid v1.23.1
+   Compiling validator_derive v0.20.0
+   Compiling itertools v0.10.5
+   Compiling tryhard v0.5.2
+   Compiling serde_nanos v0.1.4
+   Compiling serde_repr v0.1.20
+   Compiling rustls-webpki v0.102.8
+   Compiling rmp v0.8.15
+   Compiling mio v0.8.11
+   Compiling filetime v0.2.27
+   Compiling nom v8.0.0
+   Compiling encoding_rs v0.8.35
+   Compiling hashbrown v0.14.5
+   Compiling cpufeatures v0.3.0
+   Compiling glob v0.3.3
+   Compiling arrayvec v0.7.6
+   Compiling arrayref v0.3.9
+   Compiling sync_wrapper v0.1.2
+   Compiling cast v0.3.0
+   Compiling base64 v0.21.7
+   Compiling relative-path v1.9.3
+   Compiling constant_time_eq v0.4.2
+   Compiling criterion-plot v0.5.0
+   Compiling reqwest v0.11.27
+   Compiling dashmap v6.1.0
+   Compiling notify v6.1.1
+   Compiling iso8601 v0.6.3
+   Compiling rmp-serde v1.3.1
+   Compiling validator v0.20.0
+   Compiling local-ip-address v0.6.12
+   Compiling fraction v0.13.1
+   Compiling fancy-regex v0.11.0
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling tokio-rayon v2.1.0
+   Compiling dynamo-config v1.2.0 (/home/bgreengus/dev/dynamo-worktrees/dynamo-want-benchmark-dynamo-when-using-98f072cd-039f-4068-88ac-1e514a5be9fd/lib/config)
+   Compiling opentelemetry-appender-tracing v0.31.1
+   Compiling tracing-opentelemetry v0.32.1
+   Compiling lru v0.12.5
+   Compiling arc-swap v1.9.1
+   Compiling tinytemplate v1.2.1
+   Compiling bincode v1.3.3
+   Compiling derive-getters v0.5.0
+   Compiling is-terminal v0.4.17
+   Compiling xxhash-rust v0.8.15
+   Compiling humantime v2.3.0
+   Compiling futures-timer v3.0.3
+   Compiling anes v0.1.6
+   Compiling num-cmp v0.1.0
+   Compiling async-once-cell v0.5.4
+   Compiling oorandom v11.1.5
+   Compiling bytecount v0.6.9
+   Compiling criterion v0.5.1
+   Compiling rstest v0.23.0
+   Compiling jsonschema v0.17.1
+   Compiling temp-env v0.3.6
+   Compiling stdio-override v0.2.0
+   Compiling tmq v0.5.0
+   Compiling rustls-webpki v0.103.13
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling tonic v0.14.5
+   Compiling async-nats v0.45.0
+   Compiling reqwest v0.12.28
+   Compiling kube-client v2.0.1
+   Compiling opentelemetry-http v0.31.0
+   Compiling tonic-prost v0.14.5
+   Compiling opentelemetry-proto v0.31.0
+   Compiling kube-runtime v2.0.1
+   Compiling kube v2.0.1
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling dynamo-runtime v1.2.0 (/home/bgreengus/dev/dynamo-worktrees/dynamo-want-benchmark-dynamo-when-using-98f072cd-039f-4068-88ac-1e514a5be9fd/lib/runtime)
+    Finished `bench` profile [optimized] target(s) in 3m 56s
+     Running benches/channel_mpsc_perf.rs (target/release/deps/channel_mpsc_perf-d923b87412afec86)
+Gnuplot not found, using plotters backend
+Benchmarking mpsc_bounded_spsc_tokio/1
+Benchmarking mpsc_bounded_spsc_tokio/1: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 33.1s, or reduce sample count to 10.
+Benchmarking mpsc_bounded_spsc_tokio/1: Collecting 100 samples in estimated 33.116 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/1: Analyzing
+mpsc_bounded_spsc_tokio/1
+                        time:   [319.63 ms 329.63 ms 340.58 ms]
+                        thrpt:  [48.106 Kelem/s 49.705 Kelem/s 51.260 Kelem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/64
+Benchmarking mpsc_bounded_spsc_tokio/64: Warming up for 3.0000 s
+Benchmarking mpsc_bounded_spsc_tokio/64: Collecting 100 samples in estimated 5.4625 s (600 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/64: Analyzing
+mpsc_bounded_spsc_tokio/64
+                        time:   [7.5236 ms 7.9568 ms 8.4462 ms]
+                        thrpt:  [1.9398 Melem/s 2.0591 Melem/s 2.1777 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/1024
+Benchmarking mpsc_bounded_spsc_tokio/1024: Warming up for 3.0000 s
+Benchmarking mpsc_bounded_spsc_tokio/1024: Collecting 100 samples in estimated 5.1771 s (1700 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/1024: Analyzing
+mpsc_bounded_spsc_tokio/1024
+                        time:   [2.3430 ms 2.5108 ms 2.6928 ms]
+                        thrpt:  [6.0843 Melem/s 6.5255 Melem/s 6.9927 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking mpsc_bounded_mpsc_tokio/64
+Benchmarking mpsc_bounded_mpsc_tokio/64: Warming up for 3.0000 s
+Benchmarking mpsc_bounded_mpsc_tokio/64: Collecting 100 samples in estimated 5.0515 s (2000 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/64: Analyzing
+mpsc_bounded_mpsc_tokio/64
+                        time:   [2.2875 ms 2.4439 ms 2.6150 ms]
+                        thrpt:  [6.2655 Melem/s 6.7039 Melem/s 7.1623 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high mild
+Benchmarking mpsc_bounded_mpsc_tokio/1024
+Benchmarking mpsc_bounded_mpsc_tokio/1024: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.6s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/1024: Collecting 100 samples in estimated 8.6348 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/1024: Analyzing
+mpsc_bounded_mpsc_tokio/1024
+                        time:   [1.6257 ms 1.6895 ms 1.7706 ms]
+                        thrpt:  [9.2532 Melem/s 9.6976 Melem/s 10.078 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv: Warming up for 3.0000 s
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv: Collecting 100 samples in estimated 11.978 s (15k iterations)
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv: Analyzing
+mpsc_unbounded_spsc_tokio/send_recv
+                        time:   [1.1207 ms 1.1837 ms 1.2442 ms]
+                        thrpt:  [13.168 Melem/s 13.841 Melem/s 14.619 Melem/s]
+

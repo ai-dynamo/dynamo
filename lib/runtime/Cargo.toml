@@ -22,6 +22,7 @@ testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
+flume-channels = ["dep:flume"] # Use flume async mpsc channels behind dynamo_runtime::channels::mpsc
 # NVTX timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_ENABLE_RUST_NVTX).
 # Overhead: feature off = zero; feature on, env off = ~1ns AtomicBool load; feature on, env on = ~50ns/annotation.
 nvtx = ["dep:cudarc"]
@@ -81,6 +82,7 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
+flume = { version = "0.12.0", optional = true }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
@@ -111,4 +113,8 @@ harness = false
 
 [[bench]]
 name = "tcp_codec_perf"
+harness = false
+
+[[bench]]
+name = "channel_mpsc_perf"
 harness = false

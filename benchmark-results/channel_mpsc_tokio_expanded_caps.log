@@ -1,0 +1,226 @@
+   Compiling dynamo-runtime v1.2.0 (/home/bgreengus/dev/dynamo-worktrees/dynamo-want-benchmark-dynamo-when-using-98f072cd-039f-4068-88ac-1e514a5be9fd/lib/runtime)
+    Finished `bench` profile [optimized] target(s) in 16.83s
+     Running benches/channel_mpsc_perf.rs (target/release/deps/channel_mpsc_perf-d923b87412afec86)
+Gnuplot not found, using plotters backend
+Benchmarking mpsc_bounded_spsc_tokio/1
+Benchmarking mpsc_bounded_spsc_tokio/1: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 34.8s, or reduce sample count to 10.
+Benchmarking mpsc_bounded_spsc_tokio/1: Collecting 100 samples in estimated 34.832 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/1: Analyzing
+mpsc_bounded_spsc_tokio/1
+                        time:   [329.76 ms 333.08 ms 336.49 ms]
+                        thrpt:  [48.691 Kelem/s 49.189 Kelem/s 49.684 Kelem/s]
+                 change:
+                        time:   [-2.3172% +1.0480% +4.3614%] (p = 0.55 > 0.05)
+                        thrpt:  [-4.1791% -1.0371% +2.3721%]
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking mpsc_bounded_spsc_tokio/2
+Benchmarking mpsc_bounded_spsc_tokio/2: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 17.5s, or reduce sample count to 20.
+Benchmarking mpsc_bounded_spsc_tokio/2: Collecting 100 samples in estimated 17.519 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/2: Analyzing
+mpsc_bounded_spsc_tokio/2
+                        time:   [169.24 ms 171.39 ms 173.62 ms]
+                        thrpt:  [94.370 Kelem/s 95.592 Kelem/s 96.808 Kelem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking mpsc_bounded_spsc_tokio/4
+Benchmarking mpsc_bounded_spsc_tokio/4: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.3s, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_tokio/4: Collecting 100 samples in estimated 8.3334 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/4: Analyzing
+mpsc_bounded_spsc_tokio/4
+                        time:   [86.074 ms 87.709 ms 89.570 ms]
+                        thrpt:  [182.92 Kelem/s 186.80 Kelem/s 190.35 Kelem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/64
+Benchmarking mpsc_bounded_spsc_tokio/64: Warming up for 3.0000 s
+Benchmarking mpsc_bounded_spsc_tokio/64: Collecting 100 samples in estimated 5.3995 s (1000 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/64: Analyzing
+mpsc_bounded_spsc_tokio/64
+                        time:   [5.3235 ms 5.4301 ms 5.5427 ms]
+                        thrpt:  [2.9560 Melem/s 3.0173 Melem/s 3.0777 Melem/s]
+                 change:
+                        time:   [-36.030% -31.755% -27.651%] (p = 0.00 < 0.05)
+                        thrpt:  [+38.218% +46.532% +56.322%]
+                        Performance has improved.
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/128
+Benchmarking mpsc_bounded_spsc_tokio/128: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.2s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_tokio/128: Collecting 100 samples in estimated 9.1908 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/128: Analyzing
+mpsc_bounded_spsc_tokio/128
+                        time:   [1.7562 ms 1.9317 ms 2.1570 ms]
+                        thrpt:  [7.5957 Melem/s 8.4817 Melem/s 9.3294 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) high mild
+  7 (7.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/256
+Benchmarking mpsc_bounded_spsc_tokio/256: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_tokio/256: Collecting 100 samples in estimated 7.2862 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/256: Analyzing
+mpsc_bounded_spsc_tokio/256
+                        time:   [1.4758 ms 1.5268 ms 1.5812 ms]
+                        thrpt:  [10.361 Melem/s 10.731 Melem/s 11.102 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking mpsc_bounded_spsc_tokio/1024
+Benchmarking mpsc_bounded_spsc_tokio/1024: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.8s, enable flat sampling, or reduce sample count to 60.
+Benchmarking mpsc_bounded_spsc_tokio/1024: Collecting 100 samples in estimated 6.7841 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/1024: Analyzing
+mpsc_bounded_spsc_tokio/1024
+                        time:   [1.3041 ms 1.3355 ms 1.3755 ms]
+                        thrpt:  [11.911 Melem/s 12.268 Melem/s 12.564 Melem/s]
+                 change:
+                        time:   [-49.234% -45.296% -41.120%] (p = 0.00 < 0.05)
+                        thrpt:  [+69.836% +82.801% +96.981%]
+                        Performance has improved.
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/2048
+Benchmarking mpsc_bounded_spsc_tokio/2048: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.4s, enable flat sampling, or reduce sample count to 60.
+Benchmarking mpsc_bounded_spsc_tokio/2048: Collecting 100 samples in estimated 6.4278 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/2048: Analyzing
+mpsc_bounded_spsc_tokio/2048
+                        time:   [1.2990 ms 1.3210 ms 1.3462 ms]
+                        thrpt:  [12.171 Melem/s 12.402 Melem/s 12.613 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking mpsc_bounded_spsc_tokio/4096
+Benchmarking mpsc_bounded_spsc_tokio/4096: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.6s, enable flat sampling, or reduce sample count to 60.
+Benchmarking mpsc_bounded_spsc_tokio/4096: Collecting 100 samples in estimated 6.6392 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_tokio/4096: Analyzing
+mpsc_bounded_spsc_tokio/4096
+                        time:   [1.2490 ms 1.2971 ms 1.3489 ms]
+                        thrpt:  [12.146 Melem/s 12.631 Melem/s 13.118 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking mpsc_bounded_mpsc_tokio/64
+Benchmarking mpsc_bounded_mpsc_tokio/64: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.8s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/64: Collecting 100 samples in estimated 8.7534 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/64: Analyzing
+mpsc_bounded_mpsc_tokio/64
+                        time:   [1.6804 ms 1.6976 ms 1.7136 ms]
+                        thrpt:  [9.5611 Melem/s 9.6515 Melem/s 9.7501 Melem/s]
+                 change:
+                        time:   [-36.051% -31.560% -26.664%] (p = 0.00 < 0.05)
+                        thrpt:  [+36.359% +46.114% +56.375%]
+                        Performance has improved.
+Found 13 outliers among 100 measurements (13.00%)
+  7 (7.00%) low severe
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking mpsc_bounded_mpsc_tokio/128
+Benchmarking mpsc_bounded_mpsc_tokio/128: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/128: Collecting 100 samples in estimated 8.2939 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/128: Analyzing
+mpsc_bounded_mpsc_tokio/128
+                        time:   [1.6433 ms 1.6644 ms 1.6852 ms]
+                        thrpt:  [9.7223 Melem/s 9.8439 Melem/s 9.9703 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) low severe
+  7 (7.00%) low mild
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking mpsc_bounded_mpsc_tokio/256
+Benchmarking mpsc_bounded_mpsc_tokio/256: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.5s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/256: Collecting 100 samples in estimated 8.4780 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/256: Analyzing
+mpsc_bounded_mpsc_tokio/256
+                        time:   [1.6589 ms 1.6707 ms 1.6830 ms]
+                        thrpt:  [9.7349 Melem/s 9.8067 Melem/s 9.8761 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low severe
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_mpsc_tokio/1024
+Benchmarking mpsc_bounded_mpsc_tokio/1024: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.4s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/1024: Collecting 100 samples in estimated 8.4093 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/1024: Analyzing
+mpsc_bounded_mpsc_tokio/1024
+                        time:   [1.6549 ms 1.6933 ms 1.7329 ms]
+                        thrpt:  [9.4547 Melem/s 9.6756 Melem/s 9.9004 Melem/s]
+                 change:
+                        time:   [-1.8089% +1.8828% +5.5897%] (p = 0.32 > 0.05)
+                        thrpt:  [-5.2938% -1.8480% +1.8423%]
+                        No change in performance detected.
+Found 14 outliers among 100 measurements (14.00%)
+  2 (2.00%) low severe
+  8 (8.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_mpsc_tokio/2048
+Benchmarking mpsc_bounded_mpsc_tokio/2048: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.0s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/2048: Collecting 100 samples in estimated 8.9700 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/2048: Analyzing
+mpsc_bounded_mpsc_tokio/2048
+                        time:   [1.6593 ms 1.7042 ms 1.7440 ms]
+                        thrpt:  [9.3948 Melem/s 9.6140 Melem/s 9.8743 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_mpsc_tokio/4096
+Benchmarking mpsc_bounded_mpsc_tokio/4096: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.6s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_tokio/4096: Collecting 100 samples in estimated 9.5829 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_tokio/4096: Analyzing
+mpsc_bounded_mpsc_tokio/4096
+                        time:   [1.8234 ms 1.8573 ms 1.8875 ms]
+                        thrpt:  [8.6804 Melem/s 8.8214 Melem/s 8.9856 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  6 (6.00%) low severe
+  4 (4.00%) low mild
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv: Warming up for 3.0000 s
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv: Collecting 100 samples in estimated 10.165 s (15k iterations)
+Benchmarking mpsc_unbounded_spsc_tokio/send_recv: Analyzing
+mpsc_unbounded_spsc_tokio/send_recv
+                        time:   [680.98 µs 701.88 µs 726.15 µs]
+                        thrpt:  [22.563 Melem/s 23.343 Melem/s 24.059 Melem/s]
+                 change:
+                        time:   [-36.787% -32.786% -28.677%] (p = 0.00 < 0.05)
+                        thrpt:  [+40.207% +48.779% +58.194%]
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+

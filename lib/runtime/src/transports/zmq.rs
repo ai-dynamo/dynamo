@@ -16,6 +16,7 @@
 //! equivalent of a connection pool per upstream service at the cost of needing an extra internal
 //! routing step per service endpoint.
 
+use crate::channels::mpsc;
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use derive_getters::Dissolve;
@@ -23,10 +24,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tmq::{AsZmqSocket, Context as TmqContext, dealer, router};
-use tokio::{
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
-};
+use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 pub type MultipartMessage = Vec<Vec<u8>>;
@@ -365,7 +363,7 @@ mod tests {
         let state = server.state.clone();
 
         let id = "test-request".to_string();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(512);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(512);
         state.lock().await.active_streams.insert(id.clone(), tx);
 
         // Create client

@@ -1,0 +1,204 @@
+   Compiling dynamo-runtime v1.2.0 (/home/bgreengus/dev/dynamo-worktrees/dynamo-want-benchmark-dynamo-when-using-98f072cd-039f-4068-88ac-1e514a5be9fd/lib/runtime)
+    Finished `bench` profile [optimized] target(s) in 18.03s
+     Running benches/channel_mpsc_perf.rs (target/release/deps/channel_mpsc_perf-f0cd328311033ae0)
+Gnuplot not found, using plotters backend
+Benchmarking mpsc_bounded_spsc_flume/1
+Benchmarking mpsc_bounded_spsc_flume/1: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 17.7s, or reduce sample count to 20.
+Benchmarking mpsc_bounded_spsc_flume/1: Collecting 100 samples in estimated 17.746 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_flume/1: Analyzing
+mpsc_bounded_spsc_flume/1
+                        time:   [170.02 ms 172.44 ms 175.01 ms]
+                        thrpt:  [93.620 Kelem/s 95.011 Kelem/s 96.367 Kelem/s]
+                 change:
+                        time:   [-22.443% -20.167% -17.915%] (p = 0.00 < 0.05)
+                        thrpt:  [+21.825% +25.262% +28.938%]
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/2
+Benchmarking mpsc_bounded_spsc_flume/2: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 11.7s, or reduce sample count to 40.
+Benchmarking mpsc_bounded_spsc_flume/2: Collecting 100 samples in estimated 11.692 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_flume/2: Analyzing
+mpsc_bounded_spsc_flume/2
+                        time:   [110.14 ms 111.60 ms 113.13 ms]
+                        thrpt:  [144.83 Kelem/s 146.81 Kelem/s 148.76 Kelem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/4
+Benchmarking mpsc_bounded_spsc_flume/4: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.8s, or reduce sample count to 70.
+Benchmarking mpsc_bounded_spsc_flume/4: Collecting 100 samples in estimated 6.7976 s (100 iterations)
+Benchmarking mpsc_bounded_spsc_flume/4: Analyzing
+mpsc_bounded_spsc_flume/4
+                        time:   [69.282 ms 71.122 ms 73.186 ms]
+                        thrpt:  [223.87 Kelem/s 230.36 Kelem/s 236.48 Kelem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/64
+Benchmarking mpsc_bounded_spsc_flume/64: Warming up for 3.0000 s
+Benchmarking mpsc_bounded_spsc_flume/64: Collecting 100 samples in estimated 5.1212 s (1000 iterations)
+Benchmarking mpsc_bounded_spsc_flume/64: Analyzing
+mpsc_bounded_spsc_flume/64
+                        time:   [5.3491 ms 5.4527 ms 5.5599 ms]
+                        thrpt:  [2.9468 Melem/s 3.0047 Melem/s 3.0629 Melem/s]
+                 change:
+                        time:   [-17.496% -14.683% -11.907%] (p = 0.00 < 0.05)
+                        thrpt:  [+13.516% +17.209% +21.206%]
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/128
+Benchmarking mpsc_bounded_spsc_flume/128: Warming up for 3.0000 s
+Benchmarking mpsc_bounded_spsc_flume/128: Collecting 100 samples in estimated 5.0602 s (1900 iterations)
+Benchmarking mpsc_bounded_spsc_flume/128: Analyzing
+mpsc_bounded_spsc_flume/128
+                        time:   [2.6001 ms 2.6666 ms 2.7437 ms]
+                        thrpt:  [5.9716 Melem/s 6.1442 Melem/s 6.3014 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/256
+Benchmarking mpsc_bounded_spsc_flume/256: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.8s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_flume/256: Collecting 100 samples in estimated 9.7965 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_flume/256: Analyzing
+mpsc_bounded_spsc_flume/256
+                        time:   [1.9022 ms 1.9478 ms 2.0065 ms]
+                        thrpt:  [8.1655 Melem/s 8.4116 Melem/s 8.6131 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking mpsc_bounded_spsc_flume/1024
+Benchmarking mpsc_bounded_spsc_flume/1024: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.9s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_flume/1024: Collecting 100 samples in estimated 9.8860 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_flume/1024: Analyzing
+mpsc_bounded_spsc_flume/1024
+                        time:   [1.9180 ms 1.9396 ms 1.9604 ms]
+                        thrpt:  [8.3576 Melem/s 8.4469 Melem/s 8.5423 Melem/s]
+                 change:
+                        time:   [+11.472% +17.508% +24.175%] (p = 0.00 < 0.05)
+                        thrpt:  [-19.469% -14.899% -10.292%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/2048
+Benchmarking mpsc_bounded_spsc_flume/2048: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_flume/2048: Collecting 100 samples in estimated 9.2830 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_flume/2048: Analyzing
+mpsc_bounded_spsc_flume/2048
+                        time:   [1.8978 ms 1.9185 ms 1.9401 ms]
+                        thrpt:  [8.4449 Melem/s 8.5400 Melem/s 8.6330 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+Benchmarking mpsc_bounded_spsc_flume/4096
+Benchmarking mpsc_bounded_spsc_flume/4096: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.1s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_spsc_flume/4096: Collecting 100 samples in estimated 9.0523 s (5050 iterations)
+Benchmarking mpsc_bounded_spsc_flume/4096: Analyzing
+mpsc_bounded_spsc_flume/4096
+                        time:   [1.7960 ms 1.8431 ms 1.8828 ms]
+                        thrpt:  [8.7021 Melem/s 8.8896 Melem/s 9.1226 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) low severe
+  5 (5.00%) low mild
+  1 (1.00%) high severe
+
+Benchmarking mpsc_bounded_mpsc_flume/64
+Benchmarking mpsc_bounded_mpsc_flume/64: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.5s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_flume/64: Collecting 100 samples in estimated 8.5226 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_flume/64: Analyzing
+mpsc_bounded_mpsc_flume/64
+                        time:   [1.3383 ms 1.4405 ms 1.5364 ms]
+                        thrpt:  [10.664 Melem/s 11.374 Melem/s 12.242 Melem/s]
+                 change:
+                        time:   [+43.377% +51.736% +60.890%] (p = 0.00 < 0.05)
+                        thrpt:  [-37.846% -34.096% -30.254%]
+                        Performance has regressed.
+Benchmarking mpsc_bounded_mpsc_flume/128
+Benchmarking mpsc_bounded_mpsc_flume/128: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.2s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_flume/128: Collecting 100 samples in estimated 8.1767 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_flume/128: Analyzing
+mpsc_bounded_mpsc_flume/128
+                        time:   [1.3718 ms 1.4588 ms 1.5474 ms]
+                        thrpt:  [10.588 Melem/s 11.231 Melem/s 11.943 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) low mild
+Benchmarking mpsc_bounded_mpsc_flume/256
+Benchmarking mpsc_bounded_mpsc_flume/256: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_flume/256: Collecting 100 samples in estimated 8.3063 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_flume/256: Analyzing
+mpsc_bounded_mpsc_flume/256
+                        time:   [1.6654 ms 1.7409 ms 1.8018 ms]
+                        thrpt:  [9.0933 Melem/s 9.4111 Melem/s 9.8376 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  13 (13.00%) low mild
+Benchmarking mpsc_bounded_mpsc_flume/1024
+Benchmarking mpsc_bounded_mpsc_flume/1024: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.2s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_flume/1024: Collecting 100 samples in estimated 8.2229 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_flume/1024: Analyzing
+mpsc_bounded_mpsc_flume/1024
+                        time:   [1.4075 ms 1.5161 ms 1.6274 ms]
+                        thrpt:  [10.067 Melem/s 10.807 Melem/s 11.640 Melem/s]
+                 change:
+                        time:   [+59.010% +69.689% +80.796%] (p = 0.00 < 0.05)
+                        thrpt:  [-44.689% -41.069% -37.111%]
+                        Performance has regressed.
+Benchmarking mpsc_bounded_mpsc_flume/2048
+Benchmarking mpsc_bounded_mpsc_flume/2048: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.1s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_flume/2048: Collecting 100 samples in estimated 9.1070 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_flume/2048: Analyzing
+mpsc_bounded_mpsc_flume/2048
+                        time:   [1.6667 ms 1.7260 ms 1.7814 ms]
+                        thrpt:  [9.1974 Melem/s 9.4925 Melem/s 9.8301 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+Benchmarking mpsc_bounded_mpsc_flume/4096
+Benchmarking mpsc_bounded_mpsc_flume/4096: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.7s, enable flat sampling, or reduce sample count to 50.
+Benchmarking mpsc_bounded_mpsc_flume/4096: Collecting 100 samples in estimated 8.6631 s (5050 iterations)
+Benchmarking mpsc_bounded_mpsc_flume/4096: Analyzing
+mpsc_bounded_mpsc_flume/4096
+                        time:   [898.06 µs 948.97 µs 1.0055 ms]
+                        thrpt:  [16.295 Melem/s 17.265 Melem/s 18.244 Melem/s]
+
+Benchmarking mpsc_unbounded_spsc_flume/send_recv
+Benchmarking mpsc_unbounded_spsc_flume/send_recv: Warming up for 3.0000 s
+Benchmarking mpsc_unbounded_spsc_flume/send_recv: Collecting 100 samples in estimated 11.277 s (15k iterations)
+Benchmarking mpsc_unbounded_spsc_flume/send_recv: Analyzing
+mpsc_unbounded_spsc_flume/send_recv
+                        time:   [627.46 µs 650.00 µs 673.28 µs]
+                        thrpt:  [24.335 Melem/s 25.206 Melem/s 26.112 Melem/s]
+                 change:
+                        time:   [-0.4262% +4.6079% +9.8258%] (p = 0.07 > 0.05)
+                        thrpt:  [-8.9467% -4.4050% +0.4280%]
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
