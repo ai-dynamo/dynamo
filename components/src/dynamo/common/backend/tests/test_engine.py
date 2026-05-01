@@ -15,6 +15,7 @@ from dynamo.common.backend import EngineConfig, GenerateChunk, LLMEngine
 # Framework-agnostic: routed to sample-unified-test via
 # `pre_merge and gpu_0 and unified` (see test_engine.py module docstring).
 pytestmark = [
+    pytest.mark.unit,
     pytest.mark.unified,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,

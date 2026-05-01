@@ -21,6 +21,7 @@ from dynamo.llm.exceptions import DynamoException, Unknown
 # Framework-agnostic; routed to sample-unified-test via `pre_merge and gpu_0
 # and unified`.  See test_engine.py for the rationale.
 pytestmark = [
+    pytest.mark.unit,
     pytest.mark.unified,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,

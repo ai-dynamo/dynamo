@@ -32,6 +32,7 @@ _BASE_ARGV = [
 ]
 
 pytestmark = [
+    pytest.mark.integration,
     pytest.mark.trtllm,
     pytest.mark.unified,
     pytest.mark.gpu_1,
