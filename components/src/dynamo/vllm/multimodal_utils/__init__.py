@@ -11,7 +11,6 @@ from dynamo.vllm.multimodal_utils.encode_utils import (
 )
 from dynamo.vllm.multimodal_utils.model import (
     ModelFamily,
-    SupportedModels,
     construct_mm_data,
     load_vision_model,
     resolve_model_family,
@@ -33,7 +32,6 @@ __all__ = [
     "get_http_client",
     "ImageLoader",
     "ModelFamily",
-    "SupportedModels",
     "construct_mm_data",
     "load_vision_model",
     "resolve_model_family",

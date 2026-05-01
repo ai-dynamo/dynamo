@@ -32,30 +32,6 @@ logger = logging.getLogger(__name__)
 VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
-class SupportedModels:
-    """Reference data: HF identifiers per supported multimodal model.
-
-    Authoritative family dispatch lives in `resolve_model_family`; this
-    class is the source of truth for the human-readable HF ids that feed
-    its name-stage registry.
-    """
-
-    LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
-    QWEN_2_VL_2B = "Qwen/Qwen2-VL-2B-Instruct"
-    QWEN_2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
-    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
-    QWEN_2_5_VL_32B = "Qwen/Qwen2.5-VL-32B-Instruct"
-    QWEN_3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
-    QWEN_3_VL_30B_A3B = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-    QWEN_3_VL_30B_A3B_FP8 = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
-    QWEN_3_VL_8B = "Qwen/Qwen3-VL-8B-Instruct"
-    QWEN_3_VL_8B_FP8 = "Qwen/Qwen3-VL-8B-Instruct-FP8"
-    QWEN_3_VL_4B = "Qwen/Qwen3-VL-4B-Instruct"
-    QWEN_3_VL_4B_FP8 = "Qwen/Qwen3-VL-4B-Instruct-FP8"
-    QWEN_3_VL_32B = "Qwen/Qwen3-VL-32B-Instruct"
-    QWEN_3_VL_32B_FP8 = "Qwen/Qwen3-VL-32B-Instruct-FP8"
-
-
 class ModelFamily(StrEnum):
     """Multimodal model families dynamo's encoder pipeline knows how to dispatch."""
 
@@ -63,12 +39,12 @@ class ModelFamily(StrEnum):
     LLAVA = "llava"
 
 
-# Per-family architecture set (matched against `config.json` `architectures`)
-# and HF-id set (matched against normalized name strings). These are the
-# source of truth for `resolve_model_family`. The encoder reaches into vLLM
-# internals (`model.visual` for Qwen, `vision_tower` + `multi_modal_projector`
-# for LLaVA) whose attribute paths vary per family — entries here must
-# correspond to extractor logic in `encode_utils.py`.
+# Per-family registries used by `resolve_model_family`. The encoder reaches
+# into vLLM internals (`model.visual` for Qwen, `vision_tower` +
+# `multi_modal_projector` for LLaVA) whose attribute paths vary per family —
+# entries here must correspond to extractor logic in `encode_utils.py`.
+#
+# Architectures are matched verbatim against `config.json` `architectures`.
 _FAMILY_ARCHITECTURES: Dict[ModelFamily, FrozenSet[str]] = {
     ModelFamily.QWEN_VL: frozenset(
         {
@@ -81,25 +57,13 @@ _FAMILY_ARCHITECTURES: Dict[ModelFamily, FrozenSet[str]] = {
     ModelFamily.LLAVA: frozenset({"LlavaForConditionalGeneration"}),
 }
 
-_FAMILY_HF_IDS: Dict[ModelFamily, FrozenSet[str]] = {
-    ModelFamily.QWEN_VL: frozenset(
-        {
-            SupportedModels.QWEN_2_VL_2B,
-            SupportedModels.QWEN_2_5_VL_3B,
-            SupportedModels.QWEN_2_5_VL_7B,
-            SupportedModels.QWEN_2_5_VL_32B,
-            SupportedModels.QWEN_3_VL_2B,
-            SupportedModels.QWEN_3_VL_30B_A3B,
-            SupportedModels.QWEN_3_VL_30B_A3B_FP8,
-            SupportedModels.QWEN_3_VL_8B,
-            SupportedModels.QWEN_3_VL_8B_FP8,
-            SupportedModels.QWEN_3_VL_4B,
-            SupportedModels.QWEN_3_VL_4B_FP8,
-            SupportedModels.QWEN_3_VL_32B,
-            SupportedModels.QWEN_3_VL_32B_FP8,
-        }
-    ),
-    ModelFamily.LLAVA: frozenset({SupportedModels.LLAVA_1_5_7B}),
+# Name-stage substring patterns (lowercase). A new size / quantization /
+# MoE variant of an existing family doesn't require a registry change as
+# long as it shares the family-level prefix; only a genuinely new family
+# (e.g. Qwen4-VL) needs a pattern added.
+_FAMILY_NAME_PATTERNS: Dict[ModelFamily, FrozenSet[str]] = {
+    ModelFamily.QWEN_VL: frozenset({"qwen2-vl", "qwen2.5-vl", "qwen3-vl"}),
+    ModelFamily.LLAVA: frozenset({"llava-1.5-7b-hf"}),
 }
 
 
@@ -166,8 +130,10 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
          Authoritative when present; falls through silently on
          missing/malformed config or unrecognized arch.
       2. **Name.** Normalize the input and substring-match against each
-         family's HF-id set. Full `<org>/<model>` first, bare `<model>`
-         second (covers org-less paths like `/foo/qwen3-vl-2b-instruct/v2`).
+         family's name patterns (e.g. `qwen2-vl`, `qwen3-vl`,
+         `llava-1.5-7b-hf`). Patterns are family-level prefixes, so new
+         sizes / quantizations of an existing family resolve without a
+         registry change.
     """
     config = _load_model_config(model_name)
     if config is not None:
@@ -177,13 +143,9 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
                     return family
 
     normalized = _normalize_model_name(model_name).lower()
-    for family, hf_ids in _FAMILY_HF_IDS.items():
-        for hf_id in hf_ids:
-            hf_id_lower = hf_id.lower()
-            if hf_id_lower in normalized:
-                return family
-            bare = hf_id_lower.rsplit("/", 1)[-1]
-            if bare and bare in normalized:
+    for family, patterns in _FAMILY_NAME_PATTERNS.items():
+        for pattern in patterns:
+            if pattern in normalized:
                 return family
 
     return None
