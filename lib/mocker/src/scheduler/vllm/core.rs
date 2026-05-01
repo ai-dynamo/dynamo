@@ -21,6 +21,8 @@ use crate::common::protocols::{
 use crate::common::sequence::ActiveSequence;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
+#[cfg(feature = "kvbm-offload")]
+use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
@@ -409,14 +411,21 @@ impl VllmCore {
             let unique = request.sequence.unique_blocks();
             let plhs = request.sequence.positional_lineage_hashes();
             let local_hashes = request.sequence.block_hashes();
+            let token_ids = request.sequence.block_token_ids();
             unique
                 .iter()
                 .zip(plhs.iter())
                 .zip(local_hashes.iter())
+                .zip(token_ids.iter())
                 .skip(skip)
                 .take(count)
-                .filter_map(|((block, plh), local)| match block {
-                    UniqueBlock::FullBlock(seq_hash) => Some((*seq_hash, *plh, *local)),
+                .filter_map(|(((block, plh), local), token_ids)| match block {
+                    UniqueBlock::FullBlock(seq_hash) => Some(SwapInRegistrationBlock {
+                        seq_hash: *seq_hash,
+                        plh: *plh,
+                        local_hash: *local,
+                        token_ids: Some(token_ids.clone()),
+                    }),
                     UniqueBlock::PartialBlock(_) => None,
                 })
                 .collect()
@@ -434,14 +443,12 @@ impl VllmCore {
                 _ => None,
             }
         };
-        let outcome = self.kv_manager.register_swapped_in_blocks(
-            &entries,
-            parent_hash,
-            aws.destination_slots,
-        );
+        let entries_len = entries.len();
+        let outcome =
+            self.kv_manager
+                .register_swapped_in_blocks(entries, parent_hash, aws.destination_slots);
         debug_assert_eq!(
-            outcome.consumed_entries,
-            entries.len(),
+            outcome.consumed_entries, entries_len,
             "reserved destination slots should cover every swapped-in block"
         );
         self.state.prepend_waiting(aws.uuid);
@@ -619,10 +626,10 @@ impl VllmCore {
         // but the worker still has blocked requests or pending source-slot
         // releases, so `is_done()` never triggers.
         #[cfg(feature = "kvbm-offload")]
-        if end_ms <= now_ms {
-            if let Some(deadline) = self.kv_manager.earliest_offload_deadline() {
-                end_ms = deadline.max(now_ms);
-            }
+        if end_ms <= now_ms
+            && let Some(deadline) = self.kv_manager.earliest_offload_deadline()
+        {
+            end_ms = deadline.max(now_ms);
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);

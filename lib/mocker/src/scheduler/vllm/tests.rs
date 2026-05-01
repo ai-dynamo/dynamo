@@ -1391,7 +1391,7 @@ mod offload {
             .sequence
             .positional_lineage_hashes();
         assert_eq!(plhs.len(), 1, "test request should have one full block");
-        seed_g2_blocks(engine.g2_manager(), &plhs);
+        seed_g2_blocks(engine.g2_manager(), plhs);
 
         core.kv_manager.attach_new_offload_engine(engine);
         let mut collector = crate::replay::TraceCollector::default();
@@ -1473,7 +1473,7 @@ mod offload {
             .sequence
             .positional_lineage_hashes();
         assert_eq!(plhs.len(), 1, "test request should have one full block");
-        seed_g2_blocks(engine.g2_manager(), &plhs);
+        seed_g2_blocks(engine.g2_manager(), plhs);
         core.kv_manager.attach_new_offload_engine(engine);
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1649,7 +1649,7 @@ mod offload {
             .positional_lineage_hashes();
         assert!(!plhs.is_empty(), "test sequence must have full blocks");
 
-        seed_g2_blocks(engine.g2_manager(), &plhs);
+        seed_g2_blocks(engine.g2_manager(), plhs);
         core.kv_manager.attach_new_offload_engine(engine);
 
         // Pass 1 (t=0.0): admission detects G2 prefix, parks the
@@ -1698,7 +1698,7 @@ mod offload {
     /// Replaying the same synthetic G2-offload trace twice with the same
     /// `now_ms` sequence must produce byte-identical scheduler behaviour.
     /// Live/offline mode is a caller concern: the engine sees only the
-    /// timestamps passed into `tick` / `try_onboard_prefix`.
+    /// timestamps passed into `tick` and swap-in start.
     #[tokio::test]
     async fn equivalence_replayed_twice_with_g2_offload() {
         use std::sync::{Arc, Mutex};
@@ -1799,7 +1799,7 @@ mod offload {
                 .unwrap()
                 .sequence
                 .positional_lineage_hashes();
-            seed_g2_blocks(engine.g2_manager(), &plhs);
+            seed_g2_blocks(engine.g2_manager(), plhs);
             core.kv_manager.attach_new_offload_engine(engine);
 
             // Drive 5 passes at well-separated `now_ms`. Pass 1 parks
