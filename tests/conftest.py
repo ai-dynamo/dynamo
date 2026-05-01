@@ -266,28 +266,19 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     old_downloads_ready = os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV)
     old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
     downloads_ready = False
-    if models_dir is None:
-        selected_fixtures = {
-            fixture
-            for item in session.items
-            for fixture in getattr(item, "fixturenames", ())
-        }
-        needs_models = "predownload_models" in selected_fixtures
-        needs_tokenizers = "predownload_tokenizers" in selected_fixtures
-        if needs_models or needs_tokenizers:
-            models = getattr(config, "models_to_download", None)
-            models = sorted(models) if models else None
-            model_list = ", ".join(models) if models else "default test models"
-            with FileLock(_download_lock_path):
-                if needs_models:
-                    print(f"GPU parallel: pre-downloading models: {model_list}")
-                    download_models(model_list=models)
-                else:
-                    print(f"GPU parallel: pre-downloading tokenizers: {model_list}")
-                    download_models(model_list=models, ignore_weights=True)
-            _enable_offline_with_mistral_patch()
-            os.environ[_GPU_PARALLEL_DOWNLOADS_READY_ENV] = "1"
-            downloads_ready = True
+    if models_dir is None and any(
+        "predownload_models" in getattr(item, "fixturenames", ())
+        for item in session.items
+    ):
+        models = getattr(config, "models_to_download", None)
+        models = sorted(models) if models else None
+        model_list = ", ".join(models) if models else "default test models"
+        with FileLock(_download_lock_path):
+            print(f"GPU parallel: pre-downloading models: {model_list}")
+            download_models(model_list=models)
+        _enable_offline_with_mistral_patch()
+        os.environ[_GPU_PARALLEL_DOWNLOADS_READY_ENV] = "1"
+        downloads_ready = True
 
     try:
         rc = run_parallel(
