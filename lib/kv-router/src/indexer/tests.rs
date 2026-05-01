@@ -2407,7 +2407,12 @@ async fn test_routing_decision_pads_short_mm_infos() {
     })]);
 
     index
-        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes, short_infos)
+        .process_routing_decision_with_hashes(
+            worker,
+            local_hashes.clone(),
+            sequence_hashes,
+            short_infos,
+        )
         .await
         .unwrap();
     flush_and_settle(&index).await;
