@@ -558,7 +558,7 @@ jobs:
       target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -587,7 +587,7 @@ jobs:
       target_tag_plain: ${{ needs.sglang-dev-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   trtllm-copy-to-acr:
@@ -616,7 +616,7 @@ jobs:
       target_tag_plain: ${{ needs.trtllm-dev-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   frontend-copy-to-acr:
