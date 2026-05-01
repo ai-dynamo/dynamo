@@ -106,10 +106,12 @@ pub(super) fn get_new_batch_prefill(
         }
 
         let alloc = if req.materialized_tokens > 0 {
-            let Some(last_node) = prev_node else {
-                rejected.push_back(req);
-                break;
-            };
+            let last_node = prev_node.unwrap_or_else(|| {
+                panic!(
+                    "prefill: request {} has materialized_tokens={} but last_node is None",
+                    req.uuid, req.materialized_tokens
+                )
+            });
             kv_manager.allocate_after_prefix(
                 &alloc_tokens,
                 req.materialized_tokens,

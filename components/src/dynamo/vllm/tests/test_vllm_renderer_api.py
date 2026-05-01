@@ -400,8 +400,7 @@ class TestVllmRendererApi:
             "events",
             "kv_transfer_params",
             "trace_headers",
-            "num_cached_tokens",
-            "num_external_computed_tokens",
+            "prefill_stats",
             "routed_experts",
             "num_nans_in_logits",
         )
