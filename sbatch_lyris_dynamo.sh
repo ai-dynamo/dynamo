@@ -403,7 +403,7 @@ echo "Infrastructure services are ready"
 # ==============================================================================
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
-DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_WORKER_POOL_SIZE=768 && export DYN_LOG=debug"
+DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_WORKER_POOL_SIZE=768 && export DYN_LOG=debug && export UCX_LOG_LEVEL=debug"
 
 echo "Starting prefill workers (6x TP2/EP2)"
 

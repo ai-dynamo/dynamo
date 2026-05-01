@@ -33,7 +33,7 @@ TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 
 ETCD_PORT=2379
 NATS_PORT=4222
 FRONTEND_PORT=8000
-DYNAMO_REQUEST_PLANE=tcp
+DYNAMO_REQUEST_PLANE=nats
 
 # DYN_SYSTEM_PORT assignments (one per worker, starting at 8081)
 DYN_SYS_PORT_CTX0=8081
@@ -86,6 +86,39 @@ trap cleanup EXIT
 start_bg() {
     "$@" &
     SRUN_PIDS+=($!)
+}
+
+# Poll dynamo_work_handler_inflight_requests on each worker's DYN_SYSTEM_PORT
+# and append CSV rows to the given output file. Runs as a head-node-local
+# background process and is reaped via the cleanup trap.
+start_inflight_monitor() {
+    local output_path="$1"
+    local interval="${2:-2}"
+    local -a targets=(
+        "prefill_0:${PREFILL_NODE_A}:${DYN_SYS_PORT_CTX0}"
+        "prefill_1:${PREFILL_NODE_B}:${DYN_SYS_PORT_CTX1}"
+        "decode:${DECODE_NODE}:${DYN_SYS_PORT_GEN}"
+    )
+    (
+        echo "timestamp,worker,inflight"
+        while true; do
+            local ts
+            ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            for entry in "${targets[@]}"; do
+                local name="${entry%%:*}"
+                local rest="${entry#*:}"
+                local host="${rest%%:*}"
+                local port="${rest##*:}"
+                local val
+                val=$(curl -fsS --max-time 1 "http://${host}:${port}/metrics" 2>/dev/null \
+                    | awk '/^dynamo_component_inflight_requests[ {]/{print $NF; exit}')
+                echo "${ts},${name},${val:-NA}"
+            done
+            sleep "${interval}"
+        done
+    ) >> "${output_path}" 2>&1 &
+    SRUN_PIDS+=($!)
+    echo "Inflight monitor started (pid=${SRUN_PIDS[-1]}, interval=${interval}s, log=${output_path})"
 }
 
 require_alive() {
@@ -407,7 +440,9 @@ echo "Infrastructure services are ready"
 # ==============================================================================
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
-DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug"
+DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug && export UCX_LOG_LEVEL=debug"
+PREFILL_TCP_POOL_SIZE=512
+DECODE_TCP_POOL_SIZE=1024
 
 echo "Starting prefill workers (2x TP4/EP4)"
 
@@ -423,7 +458,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX0} && export CUDA_VISIBLE_DEVICES=0,1,2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_TCP_WORKER_POOL_SIZE=${PREFILL_TCP_POOL_SIZE} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX0} && export CUDA_VISIBLE_DEVICES=0,1,2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX0_PID="${SRUN_PIDS[-1]}"
 
 start_bg srun \
@@ -438,7 +473,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX1} && export CUDA_VISIBLE_DEVICES=0,1,2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_TCP_WORKER_POOL_SIZE=${PREFILL_TCP_POOL_SIZE} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX1} && export CUDA_VISIBLE_DEVICES=0,1,2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX1_PID="${SRUN_PIDS[-1]}"
 
 echo "Starting decode worker (1x TP4/EP4 on ${DECODE_NODE})"
@@ -454,7 +489,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_GEN} && export CUDA_VISIBLE_DEVICES=0,1,2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode decode --extra-engine-args /logs/trtllm_decode.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_TCP_WORKER_POOL_SIZE=${DECODE_TCP_POOL_SIZE} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_GEN} && export CUDA_VISIBLE_DEVICES=0,1,2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode decode --extra-engine-args /logs/trtllm_decode.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 GEN_PID="${SRUN_PIDS[-1]}"
 
 for pid_name in CTX0_PID CTX1_PID GEN_PID; do
@@ -478,7 +513,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug && python3 -m dynamo.frontend --http-port ${FRONTEND_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_LOG=debug && python3 -m dynamo.frontend --http-port ${FRONTEND_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
 FRONTEND_PID="${SRUN_PIDS[-1]}"
 require_alive "${FRONTEND_PID}" "FRONTEND_PID"
 
@@ -501,6 +536,8 @@ fi
 
 echo "All workers healthy and model is serving - starting benchmark"
 
+start_inflight_monitor "${LOG_DIR}/inflight_monitor.csv" 2
+
 # ==============================================================================
 # Stage 5: Run benchmark
 # ==============================================================================
@@ -515,4 +552,4 @@ srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "export SRTCTL_FRONTEND_TYPE=dynamo && bash /srtctl-benchmarks/sa-bench/bench.sh http://localhost:${FRONTEND_PORT} 1024 1024 1024 inf /model ${MODEL_NAME} true 12 8 4 0.8 16 2 glm_moe_dsa true random"
+    bash -c "export SRTCTL_FRONTEND_TYPE=dynamo && bash /srtctl-benchmarks/sa-bench/bench.sh http://localhost:${FRONTEND_PORT} 1024 1024 8192 inf /model ${MODEL_NAME} true 12 8 4 0.8 16 2 glm_moe_dsa true random"
