@@ -201,7 +201,44 @@ lanes.
 The runtime event-plane hop is internal to Dynamo. Harnesses should publish to
 the ZMQ endpoint, not directly to Dynamo's event plane.
 
-## Harness Integration Pattern
+## Step 4: Inspect the Trace
+
+Read compressed trace records directly:
+
+```bash
+gzip -cd /tmp/dynamo-agent-trace.*.jsonl.gz | jq .
+```
+
+Each line is a recorder envelope:
+
+```json
+{"timestamp": 1234, "event": {"schema": "dynamo.agent.trace.v1"}}
+```
+
+Convert traces to Chrome Trace JSON for Perfetto UI:
+
+```bash
+python3 benchmarks/agent_trace/convert_to_perfetto.py \
+  "/tmp/dynamo-agent-trace.*.jsonl.gz" \
+  --output /tmp/dynamo-agent-trace.perfetto.json
+```
+
+Open `/tmp/dynamo-agent-trace.perfetto.json` in
+[Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
+slice grouped by workflow and program lane. Tool terminal records become tool
+slices on adjacent tool tracks when duration is available. If a terminal tool
+event has no duration, the converter pairs it with the matching `tool_start`
+record when present.
+
+Useful converter flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--include-markers` | Emit first-token instant markers. |
+| `--no-stages` | Show request slices without prefill/decode stage slices. |
+| `--separate-stage-tracks` | Place prefill/decode stages on adjacent tracks for debugging timeline nesting. |
+
+## Harness Integration Patterns
 
 An existing harness does not need to import Dynamo packages or link against
 Dynamo runtime APIs. The ms-agent integration used this shape:
@@ -242,42 +279,72 @@ Dynamo code knows:
   - trace sinks
 ```
 
-## Step 4: Inspect the Trace
+## End-to-End Example with ms-agent
 
-Read compressed trace records directly:
+The ms-agent integration currently lives on Ishan's fork:
 
-```bash
-gzip -cd /tmp/dynamo-agent-trace.*.jsonl.gz | jq .
-```
+- Fork: [github.com/ishandhanani/ms-agent](https://github.com/ishandhanani/ms-agent)
+- Branch: `idhanani/dynamo-agent-trace`
 
-Each line is a recorder envelope:
-
-```json
-{"timestamp": 1234, "event": {"schema": "dynamo.agent.trace.v1"}}
-```
-
-Convert traces to Chrome Trace JSON for Perfetto UI:
+Install the fork in editable mode:
 
 ```bash
-python3 benchmarks/agent_trace/convert_to_perfetto.py \
-  "/tmp/dynamo-agent-trace.*.jsonl.gz" \
-  --output /tmp/dynamo-agent-trace.perfetto.json
+git clone https://github.com/ishandhanani/ms-agent.git
+cd ms-agent
+git checkout idhanani/dynamo-agent-trace
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements/research.txt
+pip install -e .
 ```
 
-Open `/tmp/dynamo-agent-trace.perfetto.json` in
-[Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
-slice grouped by workflow and program lane. Tool terminal records become tool
-slices on adjacent tool tracks when duration is available. If a terminal tool
-event has no duration, the converter pairs it with the matching `tool_start`
-record when present.
+Start Dynamo with trace sinks and the tool-event relay enabled:
 
-Useful converter flags:
+```bash
+export DYN_AGENT_TRACE_SINKS=jsonl_gz
+export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-ms-agent-trace
+export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 
-| Flag | Meaning |
-|------|---------|
-| `--include-markers` | Emit first-token instant markers. |
-| `--no-stages` | Show request slices without prefill/decode stage slices. |
-| `--separate-stage-tracks` | Place prefill/decode stages on adjacent tracks for debugging timeline nesting. |
+# Start a Dynamo OpenAI-compatible backend in this environment.
+```
+
+Point ms-agent at the Dynamo frontend from a second shell:
+
+```bash
+cd ms-agent
+source .venv/bin/activate
+
+export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+export OPENAI_API_KEY=unused
+export DYNAMO_AGENT_WORKFLOW_TYPE_ID=ms_agent
+export DYNAMO_AGENT_WORKFLOW_ID=ms-agent-$(date +%s)
+export DYNAMO_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+```
+
+The fork automatically attaches `nvext.agent_context` and `x-request-id` to
+ms-agent OpenAI-compatible LLM calls while an agent context is active. When
+`DYNAMO_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` is set, the ms-agent CLI also binds a
+ZMQ PUB socket and publishes tool lifecycle records to Dynamo's tool-event
+relay. Python entrypoints that do not use the CLI lazily initialize the same
+publisher on the first tool event.
+
+For DeepResearch v2, keep the normal ms-agent setup: configure
+`OPENAI_BASE_URL`, `OPENAI_API_KEY`, search keys such as `EXA_API_KEY`, and the
+model names in `projects/deep_research/v2/*.yaml`. Then run the workflow from
+the fork root:
+
+```bash
+PYTHONPATH=. python ms_agent/cli/cli.py run \
+  --config projects/deep_research/v2/researcher.yaml \
+  --query "Write your research question here" \
+  --trust_remote_code true \
+  --output_dir output/deep_research/runs
+```
+
+The CLI path captures Dynamo LLM request records through the forked ms-agent
+OpenAI wrappers and publishes tool events from shared ms-agent tool execution
+paths.
 
 ## Record Semantics
 
