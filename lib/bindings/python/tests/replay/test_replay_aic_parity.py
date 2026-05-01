@@ -50,7 +50,10 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
     )
 
 
-@pytest.mark.timeout(120)
+# DEBUG: method="thread" so pytest-timeout fires even while the main thread is
+# blocked inside the Rust mocker FFI call (default signal method can't fire
+# until control returns to Python, which never happens on the hang).
+@pytest.mark.timeout(600, method="thread")
 @pytest.mark.parametrize(
     (
         "backend_name",
