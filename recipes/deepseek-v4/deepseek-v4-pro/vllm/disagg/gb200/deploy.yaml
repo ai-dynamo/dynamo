@@ -1,0 +1,266 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeployment for deepseek-ai/DeepSeek-V4-Pro on vLLM,
+# disaggregated prefill/decode serving.
+#
+# Shape: 1 prefill replica + 1 decode replica, each spanning 2 GB200 nodes
+#        with 4 GPUs per node (DP=8, TP=1). Total: 4 nodes x 4 GPUs = 16 GPUs.
+#
+# Cross-node fabric: NVLink72 (MNNVL) via ComputeDomain. UCX active-messages
+# control plane goes over TCP (eth0); bulk KV flows over MNNVL/cuda_ipc.
+#
+# Prerequisites: DRA / ComputeDomain controller installed cluster-wide.
+# Image: replace `:my-tag` with a Dynamo + vLLM image (see ../container/README.md).
+# Weights: served from the `model-cache` PVC (see ../../model-cache/model-download.yaml).
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv4-pro-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: dsv4-pro-compute-domain-channel
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-disagg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 40Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: HF_HOME
+              value: /opt/models
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv4-pro-compute-domain-channel
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          # ~90 min budget for first launch (weights + autotune + cudagraph): 10 * 540 = 5400s.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 540
+          env:
+            - name: SERVED_MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4-Pro
+            - name: MODEL_PATH
+              value: deepseek-ai/DeepSeek-V4-Pro
+            - name: HF_HOME
+              value: /opt/models
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "5400"
+            - name: TILELANG_CLEANUP_TEMP_FILES
+              value: "1"
+            - name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+              value: "1024"
+            - name: VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+              value: "2048"
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NCCL_P2P_LEVEL
+              value: NVL
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            # UCX_TLS must include an AM-capable transport (tcp); cuda_ipc/cuda_copy
+            # are memory-type-only and cannot carry NIXL's UCX control plane.
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
+            - name: UCX_TLS
+              value: cuda_copy,cuda_ipc,tcp
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              # Bind vLLM's DP coordinator on :29500 so the operator's wait-for-leader-mp
+              # init container's TCP probe is satisfied by the real RPC server.
+              exec python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --kv-cache-dtype fp8 \
+                --block-size 256 \
+                --tensor-parallel-size 1 \
+                --pipeline-parallel-size 1 \
+                --data-parallel-size 8 \
+                --data-parallel-rpc-port 29500 \
+                --disaggregation-mode prefill \
+                --enable-expert-parallel \
+                --enforce-eager \
+                --max-model-len 9280 \
+                --max-num-seqs 16 \
+                --max-num-batched-tokens 32768 \
+                --no-enable-prefix-caching \
+                --no-enable-flashinfer-autotune \
+                --no-async-scheduling \
+                --gpu-memory-utilization 0.8 \
+                --no-disable-hybrid-kv-cache-manager \
+                --enable-sleep-mode \
+                --numa-bind \
+                --offload-group-size 3 \
+                --offload-num-in-group 1 \
+                --offload-prefetch-step 2 \
+                --tokenizer-mode deepseek_v4 \
+                --dyn-reasoning-parser deepseek_v4 \
+                --dyn-tool-call-parser deepseek_v4 \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv4-pro-compute-domain-channel
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 540
+          env:
+            - name: SERVED_MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4-Pro
+            - name: MODEL_PATH
+              value: deepseek-ai/DeepSeek-V4-Pro
+            - name: HF_HOME
+              value: /opt/models
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "5400"
+            - name: TILELANG_CLEANUP_TEMP_FILES
+              value: "1"
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_MNNVL_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NCCL_P2P_LEVEL
+              value: NVL
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: UCX_MEMTYPE_CACHE
+              value: "n"
+            - name: UCX_TLS
+              value: cuda_copy,cuda_ipc,tcp
+            - name: UCX_CUDA_IPC_ENABLE_MNNVL
+              value: "y"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              # See VllmPrefillWorker for the :29500 / wait-for-leader-mp rationale.
+              exec python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --kv-cache-dtype fp8 \
+                --block-size 256 \
+                --tensor-parallel-size 1 \
+                --pipeline-parallel-size 1 \
+                --data-parallel-size 8 \
+                --data-parallel-rpc-port 29500 \
+                --enable-expert-parallel \
+                --max-model-len 9280 \
+                --max-num-seqs 128 \
+                --max-cudagraph-capture-size 128 \
+                --max-num-batched-tokens 128 \
+                --no-enable-prefix-caching \
+                --gpu-memory-utilization 0.9 \
+                --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","mode":0}' \
+                --stream-interval 50 \
+                --no-disable-hybrid-kv-cache-manager \
+                --enable-sleep-mode \
+                --tokenizer-mode deepseek_v4 \
+                --dyn-reasoning-parser deepseek_v4 \
+                --dyn-tool-call-parser deepseek_v4 \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel

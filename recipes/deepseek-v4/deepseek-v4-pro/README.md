@@ -5,37 +5,44 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4-Pro Recipe
 
-Aggregated-serving recipe for **DeepSeek-V4-Pro** on Dynamo. Two backends are documented side by side: **vLLM** and **SGLang**. Both are single-replica decode-only deployments that fill all 8 GPUs of a B200 node.
+Recipes for **DeepSeek-V4-Pro** on Dynamo across two backends (**vLLM**, **SGLang**) and two hardware targets (**B200**, **GB200**). Single-node aggregated serving fills 8 GPUs of a B200 box; on GB200 the model exceeds a single 4-GPU NVL4 tray, so V4-Pro spans two GB200 trays via NVLink72 (MNNVL) — either **aggregated with TP=8 cross-node** or **disaggregated prefill/decode**.
 
-| Variant | Backend | Manifest | GPUs | Topology | Container |
-|---------|---------|----------|------|----------|-----------|
-| **vllm-agg**   | vLLM   | [`vllm/agg/deploy.yaml`](vllm/agg/deploy.yaml)     | 8x B200 | TP=8 + Expert Parallel                         | Standard Dynamo vLLM runtime image |
-| **sglang-agg** | SGLang | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml) | 8x B200 | TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4 | Prebuilt NGC image; optional [custom build](../container/) |
+| Variant | Backend | Hardware | Manifest | Topology | Container |
+|---------|---------|----------|----------|----------|-----------|
+| **vllm-agg-b200**       | vLLM   | 1 node, 8x B200 | [`vllm/agg/b200/deploy.yaml`](vllm/agg/b200/deploy.yaml)         | TP=8 + Expert Parallel (single node)                                            | Standard Dynamo vLLM runtime image |
+| **vllm-agg-gb200**      | vLLM   | 2 nodes, 4x GB200 each (8 total) | [`vllm/agg/gb200/deploy.yaml`](vllm/agg/gb200/deploy.yaml)       | TP=8 + Expert Parallel cross-node, MNNVL via ComputeDomain (NVLink72)           | Standard Dynamo vLLM runtime image (arm64) |
+| **vllm-disagg-gb200**   | vLLM   | 2 nodes, 4x GB200 each (8 prefill + 8 decode = 16 total) | [`vllm/disagg/gb200/deploy.yaml`](vllm/disagg/gb200/deploy.yaml) | 1P + 1D, DP=8 + Expert Parallel per worker, MNNVL via ComputeDomain (NVLink72) | Standard Dynamo vLLM runtime image (arm64) |
+| **sglang-agg**          | SGLang | 1 node, 8x B200 | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml)               | TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4                                   | Prebuilt NGC image; optional [custom build](../container/) |
+
+A perf-benchmark Job for the GB200 disagg variant is provided alongside the deploy:
+
+| Perf Job | Notes |
+|---|---|
+| [`vllm/disagg/gb200/perf.yaml`](vllm/disagg/gb200/perf.yaml) | Runs `aiperf profile` against `dsv4-pro-disagg-frontend:8000` with an 8K-input / 1K-output concurrency sweep (256 / 512 / 1024). Override `CONCURRENCIES` in the Job env for a smaller smoke run. |
 
 Status: **Experimental** (Day-0). Modality: text only.
-
-> **⚠️ Known Day-0 issue (vLLM): thinking modes produce corrupted output.**
-> On the **vLLM** variant, requests with `chat_template_kwargs: {"thinking": true, ...}` emit malformed tokens (numeric tokens spliced mid-word, occasional special-token leakage). The bug is in the OSS port of DeepSeek-V4-Pro's sparse-attention path on the dsv4 vLLM stack and does not affect DeepSeek-V4-Flash on the same stack. Until the upstream fix lands, send `chat_template_kwargs: {"thinking": false}` in chat completion requests against the vLLM variant. Tool calling, structured output, and non-thinking responses work normally. The SGLang variant uses a different attention path (MXFP4 MoE + EAGLE MTP); exercise caution and verify output if testing thinking modes there.
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
-2. **GPU cluster** with at least 8 B200 GPUs available on one node (TP=8 fills an 8-GPU box).
+2. **GPU cluster.** Hardware depends on the variant:
+   - **B200 variants** (`vllm-agg-b200`, `sglang-agg`): 8 B200 GPUs available on a single node (x86_64). TP=8 fills the box.
+   - **GB200 variants** (`vllm-agg-gb200`, `vllm-disagg-gb200`): **2 GB200 nodes**, each with 4 GPUs (single NVL4 tray each), connected to the **same NVLink72 clique**. Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule`. The cluster must have the **DRA / ComputeDomain controller** installed (verify with `kubectl get crd | grep computedomain`); each manifest's `ComputeDomain` CR + `resourceClaims` are how the operator co-locates the worker pod set on the same NVLink72 fabric (the agg variant places 2 pods, the disagg variant places 4).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Pro`.
 4. **Container image.** Pick the path that matches your variant:
 
    - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 
-   - **vLLM** (`vllm-agg`): Build the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
+   - **vLLM** (`vllm-agg-b200` or `vllm-disagg-gb200`): Build the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
 
      ```bash
      container/render.py --framework vllm --target runtime --output-short-filename
      docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
      ```
 
-     Then set the `image:` fields in `vllm/agg/deploy.yaml` (both the Frontend and the decode worker) to your pushed image tag.
+     For the GB200 variant, build with `--platform linux/arm64`. Then set the `image:` fields in your chosen `vllm/.../deploy.yaml` (Frontend + both worker pods on disagg) to your pushed image tag.
 
-   > The Pro and Flash recipes share the same image on each backend. If you've already built the vLLM or SGLang runtime for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
+   > The Pro and Flash recipes share the same image on each backend and architecture. If you've already built the vLLM or SGLang runtime for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
 
 ## Quick Start
 
@@ -59,18 +66,49 @@ kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
 
-### Deploy — vLLM (`vllm-agg`)
+### Deploy — vLLM B200 (`vllm-agg-b200`)
 
 ```bash
-# Update the `image:` fields in vllm/agg/deploy.yaml to your Dynamo + vLLM build
-# (Prerequisite 4 — vLLM path).
-kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
+# Update the `image:` fields in vllm/agg/b200/deploy.yaml to your Dynamo + vLLM
+# build (Prerequisite 4 — vLLM path).
+kubectl apply -f vllm/agg/b200/deploy.yaml -n ${NAMESPACE}
 
 # First launch of the decode worker takes up to ~90 minutes (TP=8 weight load +
 # FlashInfer autotune + cudagraph warmup). The startup probe is sized for this.
 kubectl wait --for=condition=Ready pod \
   -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg \
   -n ${NAMESPACE} --timeout=5400s
+```
+
+### Deploy — vLLM GB200 agg (`vllm-agg-gb200`)
+
+```bash
+# Update the `image:` fields in vllm/agg/gb200/deploy.yaml to your arm64
+# Dynamo + vLLM build (Prerequisite 4 — vLLM path).
+kubectl apply -f vllm/agg/gb200/deploy.yaml -n ${NAMESPACE}
+
+# First launch of the decode worker takes up to ~90 minutes (TP=8 weight load
+# + NCCL bring-up over MNNVL + cudagraph capture across 2 nodes).
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg \
+  -n ${NAMESPACE} --timeout=5400s
+```
+
+### Deploy — vLLM GB200 disagg (`vllm-disagg-gb200`)
+
+```bash
+# Update the `image:` fields in vllm/disagg/gb200/deploy.yaml to your arm64
+# Dynamo + vLLM build (Prerequisite 4 — vLLM path).
+kubectl apply -f vllm/disagg/gb200/deploy.yaml -n ${NAMESPACE}
+
+# First launch of each leader takes up to ~90 minutes (DP=8 weight load +
+# NIXL/UCX setup + NCCL bring-up over MNNVL + cudagraph capture).
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-disagg \
+  -n ${NAMESPACE} --timeout=5400s
+
+# Optional: run the perf benchmark Job (8K input / 1K output sweep at c=256/512/1024)
+# kubectl apply -f vllm/disagg/gb200/perf.yaml -n ${NAMESPACE}
 ```
 
 ### Deploy — SGLang (`sglang-agg`)
@@ -91,8 +129,12 @@ kubectl wait --for=condition=Ready pod \
 Port-forward the variant you deployed:
 
 ```bash
-# vLLM
+# vLLM B200 agg or GB200 agg (same DGD/service name — only one of these
+# variants can be deployed in a given namespace at a time)
 kubectl port-forward svc/dsv4-pro-agg-frontend 8000:8000 -n ${NAMESPACE}
+
+# vLLM GB200 disagg
+kubectl port-forward svc/dsv4-pro-disagg-frontend 8000:8000 -n ${NAMESPACE}
 
 # SGLang
 kubectl port-forward svc/sglang-dsv4-pro-frontend 8000:8000 -n ${NAMESPACE}
@@ -113,7 +155,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Recipe Details
 
-### vLLM (`vllm/agg/deploy.yaml`)
+### vLLM B200 agg (`vllm/agg/b200/deploy.yaml`)
 
 | Flag | Purpose |
 |------|---------|
@@ -125,6 +167,33 @@ curl http://localhost:8000/v1/chat/completions \
 | `--tensor-parallel-size 8 --enable-expert-parallel` | TP=8 across 8 GPUs of one node, with EP enabled for the MoE experts |
 | `--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Conservative cudagraph mode appropriate for the larger Pro model (matches upstream V4-Pro example) |
 | `--max-num-seqs 256` | Concurrency cap |
+
+### vLLM GB200 agg (`vllm/agg/gb200/deploy.yaml`)
+
+V4-Pro at ~865 GB on disk does not fit a single GB200 NVL4 tray (~768 GB HBM across 4 GPUs), so the GB200 agg recipe stretches one tensor-parallel group across **two** trays — the cross-node TP all-reduce / all-gather flows over NVLink72 (MNNVL), not RoCE. The two pods are co-located on the same NVLink72 clique by the DRA `ComputeDomain` controller.
+
+| Flag / env | Purpose |
+|---|---|
+| `--tensor-parallel-size 8 --enable-expert-parallel` | TP=8 + EP across 2 nodes (4 GPUs/node × 2 nodes) — no DP. |
+| `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":false}}'` | FULL_AND_PIECEWISE cudagraph + all custom ops; `fuse_allreduce_rms:false` avoids a non-fatal FlashInfer trtllm allreduce-norm workspace warning at startup. |
+| `--attention-config '{"use_fp4_indexer_cache":true}'` + `--moe-backend deep_gemm_mega_moe` | Blackwell FP4 indexer cache + DeepGEMM "mega MoE" kernel — same kernels as the B200 agg variant. |
+| `NCCL_MNNVL_ENABLE=1`, `UCX_CUDA_IPC_ENABLE_MNNVL=y`, `UCX_TLS=cuda_copy,cuda_ipc,tcp`, `NCCL_NVLS_ENABLE=1`, `NCCL_P2P_LEVEL=NVL` | Enable cross-node NVLink72 / MNNVL fabric. Required because the TP=8 process group spans 2 nodes. |
+| `ComputeDomain` CR + `resourceClaimTemplate` (top of manifest) | DRA primitive that asks the scheduler to allocate an MNNVL channel on demand and co-locate the 2-pod set on the same NVLink72 clique. |
+| (no `--data-parallel-rpc-port`) | TP-only — torch.distributed master binds `MASTER_PORT` (29500) for the cross-node rendezvous, which also satisfies the operator's `wait-for-leader-mp` TCP probe. |
+
+### vLLM GB200 disagg (`vllm/disagg/gb200/deploy.yaml`)
+
+V4-Pro at ~865 GB on disk does not fit a single GB200 NVL4 tray (~768 GB HBM across 4 GPUs), so the GB200 recipe is the **disaggregated** prefill/decode shape: one prefill replica spanning 2 GB200 nodes (DP=8 + EP) and one decode replica spanning 2 GB200 nodes (DP=8 + EP), all four pods placed on the same NVLink72 clique by the DRA `ComputeDomain` controller.
+
+| Flag / env | Purpose |
+|---|---|
+| `--data-parallel-size 8 --enable-expert-parallel --tensor-parallel-size 1` | DP=8 + EP across 2 nodes per worker (4 GPUs/node × 2 nodes) — TP=1 |
+| `--data-parallel-rpc-port 29500` | Binds vLLM's DP coordinator on `:29500`. The dynamo operator's `wait-for-leader-mp` init container does a TCP probe to `<leader>:29500` and blocks worker startup until that port accepts; pinning the DP coord port to 29500 makes the real RPC server satisfy the probe (cleaner than parking a placeholder listener). |
+| `--disaggregation-mode prefill` (prefill only) + `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'` | Prefill writes KV blocks via NIXL; decode reads them. NIXL's UCX active-messages control plane goes over TCP (`UCX_TLS=cuda_ipc,cuda_copy,tcp`) while bulk KV flows over MNNVL. |
+| `NCCL_MNNVL_ENABLE=1`, `UCX_CUDA_IPC_ENABLE_MNNVL=y`, `NCCL_NVLS_ENABLE=1`, `NCCL_P2P_LEVEL=NVL` | Enable cross-node NVLink72 / MNNVL fabric. Required because the prefill and decode workers each span 2 nodes. |
+| `ComputeDomain` CR + `resourceClaimTemplate` (top of manifest) | DRA primitive that asks the scheduler to allocate an MNNVL channel on demand and co-locate the 4-pod set on the same NVLink72 clique. Without it, NCCL bring-up across pods fails — TCP-only fallback is not viable for DP=8 cross-pod all-reduce. |
+| `--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'` (decode), `--enforce-eager` (prefill) | Conservative compile/graph config — matches the B200 agg variant's V4-Pro tuning. |
+| `--max-model-len 9280`, `--max-num-seqs 16` (prefill) / `128` (decode) | Capped to the 8K-input / 1K-output benchmark shape. |
 
 ### SGLang (`sglang/agg/deploy.yaml`)
 
@@ -141,7 +210,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Why TP=8 (not DP=4 like Flash)?
 
-DeepSeek-V4-Pro is ~5.5x larger than Flash on disk (~865 GB vs. ~160 GB). With FP4+FP8 mixed weights it does not fit in 4 ranks at typical batch shapes, so the upstream tested shape for Pro is **TP=8 across all 8 GPUs of one node** on both backends. On vLLM, Expert Parallel is layered on top of TP — TP shards the dense (attention/router/norm) weights, EP shards the experts. On SGLang, the MXFP4 MoE backend handles the expert sharding internally under the same TP=8 process group.
+DeepSeek-V4-Pro is ~5.5x larger than Flash on disk (~865 GB vs. ~160 GB). With FP4+FP8 mixed weights it does not fit in 4 ranks at typical batch shapes, so the upstream tested shape for Pro is **TP=8** on both backends — across all 8 GPUs of one B200 node, or across two GB200 NVL4 trays connected by NVLink72. On vLLM, Expert Parallel is layered on top of TP — TP shards the dense (attention/router/norm) weights, EP shards the experts. On SGLang, the MXFP4 MoE backend handles the expert sharding internally under the same TP=8 process group.
 
 ## Model Details
 
@@ -238,9 +307,9 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### vLLM-specific
 
-- **Image tag.** `vllm/agg/deploy.yaml` ships with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace it with your built standard Dynamo vLLM runtime image — see Prerequisite 4.
-- **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe (`failureThreshold: 540` at `periodSeconds: 10`).
-- **Day-0 thinking modes.** Send `chat_template_kwargs: {"thinking": false}` until the upstream sparse-attention fix lands — see the callout at the top of this README.
+- **Image tag.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) ship with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace with your built Dynamo vLLM runtime tag — see Prerequisite 4. Both GB200 manifests expect an arm64 build.
+- **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe budget (`failureThreshold: 540` at `periodSeconds: 10`).
+- **GB200: agg vs. disagg.** Both spread V4-Pro across two GB200 NVL4 trays via MNNVL/ComputeDomain. The agg variant runs one TP=8 group across both nodes (lower-latency, simpler topology, 2 pods); the disagg variant runs separate prefill and decode DP=8 workers (higher steady-state throughput at high concurrency, 4 pods). Use the agg variant for general-purpose serving and the disagg variant when prefill/decode separation pays off for the workload.
 
 ### SGLang-specific
 

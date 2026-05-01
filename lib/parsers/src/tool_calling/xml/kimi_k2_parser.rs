@@ -455,6 +455,28 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
+    // Pin current behavior when JSON args are truncated mid-value (e.g.
+    // max_tokens fires inside `"location":"NYC` with no closing quote)
+    // INSIDE complete `<|tool_call_end|>` + `<|tool_calls_section_end|>`
+    // fences. Distinct from `test_parse_invalid_json_falls_back_to_raw_string`
+    // (which uses syntactically-bad-but-complete JSON and falls back to a
+    // raw string) and from `test_parse_truncated_mid_argument_no_section_end`
+    // (which omits the closing fences entirely). This is the
+    // "fences-complete-but-payload-truncated" cell — Kimi today drops the
+    // call instead of falling back. Promoting to fallback is a parser change.
+    #[test] // CASE.4
+    fn test_parse_truncated_json_inside_complete_fences_silent_drop() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Kimi K2 today drops calls with truncated JSON args even when fences are complete"
+        );
+    }
+
     #[test] // CASE.5, CASE.16 (PR #8208)
     fn test_parse_malformed_no_section_end() {
         let config = default_config();

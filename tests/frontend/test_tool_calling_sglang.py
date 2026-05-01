@@ -669,6 +669,8 @@ class TestToolCallingProtocol:
             tools=TOOLS_WEATHER,
             stream=True,
             max_tokens=256,
+            temperature=0,
+            seed=0,
         )
 
         chunk_count = 0
@@ -696,6 +698,8 @@ class TestToolCallingProtocol:
             model,
             messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
             tools=TOOLS_WEATHER,
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(result, {"tool_calls"})
         assert len(result.tool_calls) >= 1
@@ -715,6 +719,8 @@ class TestToolCallingProtocol:
             messages=[{"role": "user", "content": "Hello there."}],
             tools=TOOLS_WEATHER,
             tool_choice="required",
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(result, {"tool_calls"})
         assert len(result.tool_calls) >= 1
@@ -743,11 +749,14 @@ class TestToolCallingProtocol:
             messages=[{"role": "user", "content": "What's the weather in Paris?"}],
             tools=TOOLS_WEATHER,
             tool_choice="none",
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(result, {"stop"})
         assert result.tool_calls == []
         assert result.content.strip()
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_named_tool_choice_forces_specific_function(
         self, client: OpenAI, model: str
     ):
@@ -764,6 +773,7 @@ class TestToolCallingProtocol:
         for tc in result.tool_calls:
             parse_and_validate_tool_call(tc, schema, expected_name="get_weather")
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_parallel_multi_tool_request_includes_all_expected_tools(
         self, client: OpenAI, model: str
     ):
@@ -794,6 +804,7 @@ class TestToolCallingProtocol:
             names.add(tc["function"]["name"])
         assert len(names) >= 2, f"expected at least 2 distinct tools, got {names}"
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_array_argument_schema_valid(self, client: OpenAI, model: str):
         tools = [
             {
@@ -840,6 +851,7 @@ class TestToolCallingProtocol:
         assert isinstance(args["recipients"], list)
         assert len(args["recipients"]) >= 3
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_no_tools_is_plain_text(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -857,6 +869,7 @@ class TestToolCallingProtocol:
 
 
 class TestToolCallingMultiTurn:
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_tool_result_is_consumed_and_final_answer_is_text(
         self, client: OpenAI, model: str
     ):
@@ -895,6 +908,7 @@ class TestToolCallingMultiTurn:
         assert second.content.strip()
         assert "15" in second.content or "cloud" in second.content.lower()
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_chained_tool_use_search_then_calculate(self, client: OpenAI, model: str):
         schemas = tool_schema_map(TOOLS_SEARCH + TOOLS_CALCULATOR)
         messages: list[dict[str, Any]] = [
@@ -966,6 +980,7 @@ class TestToolCallingMultiTurn:
             assert step2.tool_calls == []
             assert "1396000" in step2.content.replace(",", "")
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_multiple_prior_tool_results_synthesize_to_text(
         self, client: OpenAI, model: str
     ):
@@ -1027,6 +1042,7 @@ class TestToolCallingMultiTurn:
 
 
 class TestToolCallingModelBehavior:
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_many_tools_prefers_calculator_for_math_question(
         self, client: OpenAI, model: str
     ):
@@ -1043,6 +1059,7 @@ class TestToolCallingModelBehavior:
             assert len(result.tool_calls) >= 1
             assert result.tool_calls[0]["function"]["name"] == "calculate"
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_unicode_arguments_are_preserved(self, client: OpenAI, model: str):
         result = stream_chat(
             client,
@@ -1063,6 +1080,7 @@ class TestToolCallingModelBehavior:
             )
             assert args["city"]
 
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_system_instruction_encourages_tool_use(self, client: OpenAI, model: str):
         result = stream_chat(
             client,

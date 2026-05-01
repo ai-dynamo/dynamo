@@ -459,12 +459,16 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	}
 
 	// Env vars to remove: replaced by failover-specific values or intentionally omitted.
+	// DYN_FORWARDPASS_METRIC_PORT is removed here so we can override it per engine
+	// below — both engines share the pod network namespace, so the base value
+	// stamped by component_worker.go collides on bind.
 	removeSet := map[string]bool{
 		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": true,
 		"DYN_SYSTEM_PORT":                       true,
 		"DYN_SYSTEM_ENABLED":                    true,
 		"DYN_HEALTH_CHECK_ENABLED":              true,
 		"CONTAINER_NAME":                        true,
+		"DYN_FORWARDPASS_METRIC_PORT":           true,
 	}
 
 	var filtered []corev1.EnvVar
@@ -481,6 +485,10 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},
 		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
+		// Per-engine FPM port. data_parallel_index is 0 for both failover
+		// engines (orthogonal axis), so without this override both bind to
+		// the same base port and engine-1 fails with EADDRINUSE.
+		{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort + engineID)},
 	}
 	engine.Env = append(filtered, failoverEnvs...)
 

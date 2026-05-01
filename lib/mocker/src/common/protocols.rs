@@ -444,6 +444,36 @@ pub struct MockEngineArgs {
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
 
+    /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
+    /// feature is enabled, setting this explicitly opts the mocker into
+    /// G2 offload simulation. When unset, no G2 offload engine is attached.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub num_g2_blocks: Option<usize>,
+
+    /// Batch size for the G1→G2 offload pipeline. Offloads are grouped
+    /// into batches of this size before being handed to the worker.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub offload_batch_size: Option<usize>,
+
+    /// G1→G2 offload bandwidth in GB/s for the PS-queue simulation.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default (host DRAM PCIe
+    /// ballpark) when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g1_to_g2_gbps: Option<f64>,
+
+    /// G2→G1 onboard bandwidth in GB/s for the PS-queue simulation.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g2_to_g1_gbps: Option<f64>,
+
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
     #[builder(default = "None")]
@@ -596,6 +626,10 @@ impl MockEngineArgs {
             "bootstrap_port",
             "kv_bytes_per_token",
             "kv_transfer_bandwidth",
+            "num_g2_blocks",
+            "offload_batch_size",
+            "bandwidth_g1_to_g2_gbps",
+            "bandwidth_g2_to_g1_gbps",
             "reasoning",
             "zmq_kv_events_port",
             "zmq_replay_port",
@@ -726,6 +760,30 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.kv_transfer_bandwidth(Some(num));
+        }
+
+        if let Some(value) = extra_args.get("num_g2_blocks")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.num_g2_blocks(Some(num as usize));
+        }
+
+        if let Some(value) = extra_args.get("offload_batch_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.offload_batch_size(Some(num as usize));
+        }
+
+        if let Some(value) = extra_args.get("bandwidth_g1_to_g2_gbps")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.bandwidth_g1_to_g2_gbps(Some(num));
+        }
+
+        if let Some(value) = extra_args.get("bandwidth_g2_to_g1_gbps")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.bandwidth_g2_to_g1_gbps(Some(num));
         }
 
         if let Some(value) = extra_args.get("reasoning")
