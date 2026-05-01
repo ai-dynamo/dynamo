@@ -95,4 +95,4 @@ For clusters with native IB (e.g., DGX), add `rdma/ib` resource limits and ensur
 - **EAGLE disabled** — Causes OOM on TP8 (4.23 GB free with EAGLE vs 7.75 without)
 - **`mem-fraction-static=0.75`** — Lower than default to prevent OOM during FP4 MxFP4 weight shuffle
 - **`cuda-graph-max-bs=128`** — Limits CUDA graph capture memory
-- **Cold start ~45 min** — FP4 weight shuffle dominates (40 min on GCP Filestore)
+- **Cold start ~45 min** — FP4 weight shuffle dominates startup time
