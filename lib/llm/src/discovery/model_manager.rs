@@ -39,20 +39,22 @@ use crate::{
 /// State for prefill router activation rendezvous.
 ///
 /// Once a prefill endpoint has been observed for a (model, namespace) pair,
-/// `PrefillReady(Endpoint)` is left in the activator map indefinitely (until
-/// prefill workers all disappear). This survives `register_prefill_router`
-/// consuming the entry — that consumer hands out a fresh `oneshot::Receiver`
-/// synthesized from the cached endpoint, then re-inserts `PrefillReady` so
-/// future decode WorkerSet rebuilds (e.g., decode pod restarts) can find it
-/// and activate immediately without waiting for prefill workers to
-/// re-register.
+/// `PrefillReady` is left in the activator map indefinitely (until prefill
+/// workers all disappear). This survives `register_prefill_router` consuming
+/// the entry — that consumer hands out a fresh `oneshot::Receiver` synthesized
+/// from the cached endpoint, then re-inserts `PrefillReady` so future decode
+/// WorkerSet rebuilds (e.g., decode pod restarts) can find it and activate
+/// immediately without waiting for prefill workers to re-register.
 enum PrefillActivationState {
     /// Decode model registered, waiting for prefill endpoint
     DecodeWaiting(oneshot::Sender<Endpoint>),
     /// Prefill endpoint observed and cached for this (model, namespace).
     /// Anyone calling `register_prefill_router` synthesizes a fresh
     /// `oneshot::Receiver` from this and re-inserts the cached endpoint.
-    PrefillReady(Endpoint),
+    ///
+    /// Boxed to keep the enum variant sizes balanced (`Endpoint` is much
+    /// larger than `oneshot::Sender`). Satisfies `clippy::large_enum_variant`.
+    PrefillReady(Box<Endpoint>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -687,7 +689,7 @@ impl ModelManager {
                 // subsequent decode WorkerSet rebuild (e.g., decode pod
                 // restart) finds it and activates immediately.
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(endpoint.clone());
+                let _ = tx.send((*endpoint).clone());
                 self.prefill_router_activators
                     .insert(cache_key, PrefillActivationState::PrefillReady(endpoint));
                 tracing::debug!(
@@ -759,7 +761,7 @@ impl ModelManager {
                 // bare requests to decode workers that reject them with
                 // "Disaggregated params required for decode mode".
                 self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(endpoint));
+                    .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
 
                 Ok(())
             }
@@ -782,7 +784,7 @@ impl ModelManager {
                 };
 
                 self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(endpoint));
+                    .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
 
                 if reactivated {
                     tracing::info!(
@@ -814,7 +816,7 @@ impl ModelManager {
                     // call finds PrefillReady instead of falling back to
                     // DecodeWaiting and stalling.
                     self.prefill_router_activators
-                        .insert(key, PrefillActivationState::PrefillReady(endpoint));
+                        .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
@@ -826,7 +828,7 @@ impl ModelManager {
                 // No existing deactivated router -- cache endpoint for a future
                 // decode registration.
                 self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(endpoint));
+                    .insert(key, PrefillActivationState::PrefillReady(Box::new(endpoint)));
                 tracing::info!(
                     model_name = %model_name,
                     namespace = %namespace,
