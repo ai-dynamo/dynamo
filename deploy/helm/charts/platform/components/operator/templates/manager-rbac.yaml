@@ -73,6 +73,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
@@ -295,6 +303,16 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - inference.networking.x-k8s.io
+  resources:
+  - inferencepools
+  - inferenceobjectives
+  - inferencemodelrewrites
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - nvidia.com
