@@ -131,6 +131,17 @@ fn resolve_via_pyo3(model_name_or_path: &str) -> anyhow::Result<Option<Resolved>
     use pyo3::prelude::*;
     use pyo3::types::PyAnyMethods;
 
+    // The pyo3 dep is built without `auto-initialize` (multi-arch builds can't
+    // ship libpython for embedding), so `Python::with_gil` panics when no
+    // Python interpreter is running in the host process. That's the case for
+    // standalone Rust test/bench binaries — return None and let the caller
+    // fall back to the vocab-probe path. The actual deployment (`python -m
+    // dynamo.frontend`) always has Python initialized by the time we get here.
+    // SAFETY: `Py_IsInitialized` is a thread-safe read of a global flag.
+    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+        return Ok(None);
+    }
+
     Python::with_gil(|py| -> PyResult<Option<Resolved>> {
         let transformers = py.import("transformers")?;
         let auto_processor = transformers.getattr("AutoProcessor")?;

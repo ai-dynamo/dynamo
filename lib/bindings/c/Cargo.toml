@@ -44,7 +44,11 @@ once_cell = { version = "1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../llm" }
+# Take dynamo-llm without `image-token-pyo3`: this is the C-API library
+# (loaded by C/C++/Go callers, not by a Python interpreter), so pulling in
+# pyo3 would force a libpython link in build envs that don't ship one
+# (e.g., the slim frontend multi-arch image).
+dynamo-llm = { path = "../../llm", default-features = false, features = ["block-manager"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
