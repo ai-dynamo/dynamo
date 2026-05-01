@@ -34,16 +34,38 @@ class MultimodalEmbeddingCacheConnectorMetadata(ECConnectorMetadata):
     evicts: list[str] = field(default_factory=list)
 
 
+@dataclass
+class _CpuEntry:
+    """Worker-side CPU-resident embedding with async-save / async-load lifetime tracking.
+
+    save_done resolves when the DtoH copy on _save_stream has finished writing
+    cpu_tensor; pending_loads carries one event per in-flight HtoD reading from
+    cpu_tensor on the compute stream. Both are queried (never synchronized) by
+    the reaper so eviction never blocks the hot path. is_pinned distinguishes
+    the async/pinned path from the sync/pageable cap-fallback path; load and
+    reap branch on it.
+    """
+
+    cpu_tensor: torch.Tensor
+    save_done: torch.cuda.Event
+    pending_loads: list[torch.cuda.Event] = field(default_factory=list)
+    nbytes: int = 0
+    is_pinned: bool = True
+
+
 class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     """EC connector with scheduler-authoritative CPU embedding cache.
 
     The scheduler maintains a logical LRU cache (OrderedDict) and issues
     load/save/evict commands to the worker via ECConnectorMetadata. The
-    worker holds a plain dict[str, Tensor] on CPU and obeys commands
+    worker holds a plain dict[str, _CpuEntry] on CPU and obeys commands
     without independent caching decisions.
 
-    This mirrors vLLM's EncoderCacheManager pattern: the scheduler is the
-    single source of truth for cache state; the worker is a plain dict storage.
+    Worker-side DtoH (save) runs on a dedicated CUDA stream with pinned
+    host buffers; HtoD (load) runs on the compute stream and waits on the
+    save event before reading. Evict is non-blocking — entries are
+    retired and reaped lazily once their save_done and any pending_loads
+    have resolved.
     """
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
@@ -62,16 +84,13 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 "ec_transfer_config must be set for DynamoMultimodalEmbeddingCacheConnector"
             )
 
-        if "multimodal_embedding_cache_capacity_gb" not in (
-            transfer_config.ec_connector_extra_config or {}
-        ):
+        extra_config = transfer_config.ec_connector_extra_config or {}
+        if "multimodal_embedding_cache_capacity_gb" not in extra_config:
             raise ValueError(
                 "multimodal_embedding_cache_capacity_gb must be set in "
                 "ec_connector_extra_config for DynamoMultimodalEmbeddingCacheConnector"
             )
-        capacity_gb: float = transfer_config.ec_connector_extra_config[
-            "multimodal_embedding_cache_capacity_gb"
-        ]
+        capacity_gb: float = extra_config["multimodal_embedding_cache_capacity_gb"]
 
         # --- Scheduler-side: logical LRU for CPU embedding cache ---
         # Mirrors EncoderCacheManager but for the CPU tier, tracking bytes.
@@ -89,15 +108,36 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._saves_this_step: set[str] = set()
         self._evicts_this_step: set[str] = set()
 
-        # --- Worker-side: dumb CPU tensor store ---
-        self._cpu_store: dict[str, torch.Tensor] = {}
+        # --- Worker-side: async DtoH/HtoD state ---
+        self._pin_memory: bool = bool(extra_config.get("pin_memory", True))
+        self._pinned_overhead_pct: float = float(
+            extra_config.get("pinned_overhead_pct", 25.0)
+        )
+        self._pinned_cap_bytes: int = int(
+            self._capacity_bytes * (1.0 + self._pinned_overhead_pct / 100.0)
+        )
+        self._log_every_n_steps: int = int(
+            extra_config.get("ec_log_every_n_steps", 100)
+        )
+
+        self._cpu_store: dict[str, _CpuEntry] = {}
+        self._retired: list[_CpuEntry] = []
+        self._save_stream: torch.cuda.Stream | None = None
+        self._device: torch.device | None = None
+        self._pinned_bytes_active: int = 0
+        self._pinned_bytes_retired: int = 0
+        self._already_done_event: torch.cuda.Event | None = None
+        self._step_counter: int = 0
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
-            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d",
+            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d, "
+            "pin_memory=%s, pinned_cap_bytes=%d",
             capacity_gb,
             self._capacity_bytes,
             self._bytes_per_embed,
+            self._pin_memory,
+            self._pinned_cap_bytes,
         )
 
     # ==============================
@@ -189,6 +229,28 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     # it simply obeys the scheduler's load/save/evict commands.
     # ==============================
 
+    def _ensure_streams(self, device: torch.device) -> None:
+        """Lazily create the save stream and lock the connector to a device.
+
+        The sentinel `_already_done_event` is recorded on the save stream and
+        synchronized once so subsequent .query() calls always return True. We
+        use it as save_done for sync-DtoH (pageable fallback) entries so the
+        load path branches uniformly without an `is_pinned` check on every
+        load.
+        """
+        if self._save_stream is None:
+            self._device = device
+            self._save_stream = torch.cuda.Stream(device=device)
+            sentinel = torch.cuda.Event()
+            sentinel.record(self._save_stream)
+            self._save_stream.synchronize()
+            self._already_done_event = sentinel
+        else:
+            assert device == self._device, (
+                f"EC connector bound to device {self._device} "
+                f"but received tensor on {device}"
+            )
+
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs
     ) -> None:
@@ -198,25 +260,79 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
+        compute = torch.cuda.current_stream()
+        self._ensure_streams(compute.device)
+
         for mm_hash in metadata.loads:
             if mm_hash in encoder_cache:
                 continue
-            if mm_hash in self._cpu_store:
-                encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    "cuda", non_blocking=True
-                )
-            else:
+            entry = self._cpu_store.get(mm_hash)
+            if entry is None:
                 logger.warning(
                     "start_load_caches: hash %s not in cpu_store, skipping", mm_hash
                 )
+                continue
+
+            # Make compute wait for the prior DtoH on save_stream. For pageable
+            # entries the sentinel event is already-resolved, so this is a no-op.
+            compute.wait_event(entry.save_done)
+
+            # HtoD on compute. Genuinely async for pinned; PyTorch silently
+            # falls back to sync for pageable, which is correct for that path.
+            gpu_tensor = entry.cpu_tensor.to(
+                device=compute.device, non_blocking=entry.is_pinned
+            )
+
+            # Symmetric record_stream on the destination: tells the caching
+            # allocator the new tensor's storage is consumed by compute, so
+            # if vLLM pops encoder_cache[h] before compute is done, the GPU
+            # buffer is not reused early.
+            gpu_tensor.record_stream(compute)
+
+            load_done = torch.cuda.Event()
+            load_done.record(compute)
+            entry.pending_loads.append(load_done)
+
+            encoder_cache[mm_hash] = gpu_tensor
 
         for mm_hash in metadata.evicts:
-            self._cpu_store.pop(mm_hash, None)
+            entry = self._cpu_store.pop(mm_hash, None)
+            if entry is not None:
+                if entry.is_pinned:
+                    self._pinned_bytes_active -= entry.nbytes
+                    self._pinned_bytes_retired += entry.nbytes
+                self._retired.append(entry)
+
+        self._prune_active_load_events()
+        self._reap_retired()
+
+        self._step_counter += 1
+        if self._step_counter % self._log_every_n_steps == 0:
+            logger.info(
+                "EC pinned bytes: active=%d retired=%d cap=%d "
+                "(entries=%d retired_count=%d)",
+                self._pinned_bytes_active,
+                self._pinned_bytes_retired,
+                self._pinned_cap_bytes,
+                len(self._cpu_store),
+                len(self._retired),
+            )
 
     def save_caches(
         self, encoder_cache: dict[str, torch.Tensor], mm_hash: str, **kwargs
     ) -> None:
-        """Copy a newly computed embedding from GPU encoder_cache to CPU store."""
+        """Copy a newly computed embedding from GPU encoder_cache to CPU store.
+
+        Pinned path: queue an async DtoH on _save_stream after waiting on
+        compute, record save_done, hand the entry to _cpu_store immediately
+        (load path will gate on save_done). The pinned-bytes accounting tracks
+        active vs retired separately so the reaper can release retired bytes
+        once both save and any pending loads have drained.
+
+        Sync fallback (pin_memory=False or over-cap): a pageable .cpu() copy
+        with the always-resolved sentinel as save_done, accounted as
+        is_pinned=False so the budget is not double-counted.
+        """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
@@ -230,4 +346,87 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 mm_hash,
             )
             return
-        self._cpu_store[mm_hash] = encoder_cache[mm_hash].cpu()
+
+        src = encoder_cache[mm_hash]
+        if not src.is_contiguous():
+            logger.debug(
+                "save_caches: non-contiguous source for hash %s, materializing",
+                mm_hash,
+            )
+            src = src.contiguous()
+
+        self._ensure_streams(src.device)
+        nbytes = src.numel() * src.element_size()
+
+        over_cap = (
+            self._pinned_bytes_active + self._pinned_bytes_retired + nbytes
+            > self._pinned_cap_bytes
+        )
+        use_pinned = self._pin_memory and not over_cap
+
+        if use_pinned:
+            cpu_buf = torch.empty(
+                src.shape, dtype=src.dtype, device="cpu", pin_memory=True
+            )
+            compute = torch.cuda.current_stream(src.device)
+            assert self._save_stream is not None
+            self._save_stream.wait_stream(compute)
+            with torch.cuda.stream(self._save_stream):
+                cpu_buf.copy_(src, non_blocking=True)
+                # Symmetric record_stream on the source: protects the GPU
+                # source memory in case vLLM pops encoder_cache[h] before the
+                # async DtoH finishes.
+                src.record_stream(self._save_stream)
+            save_done = torch.cuda.Event()
+            save_done.record(self._save_stream)
+            self._cpu_store[mm_hash] = _CpuEntry(
+                cpu_tensor=cpu_buf,
+                save_done=save_done,
+                nbytes=nbytes,
+                is_pinned=True,
+            )
+            self._pinned_bytes_active += nbytes
+        else:
+            if over_cap:
+                logger.warning(
+                    "save_caches: pinned budget exceeded "
+                    "(active=%d retired=%d new=%d cap=%d); "
+                    "falling back to sync DtoH for hash %s",
+                    self._pinned_bytes_active,
+                    self._pinned_bytes_retired,
+                    nbytes,
+                    self._pinned_cap_bytes,
+                    mm_hash,
+                )
+            assert self._already_done_event is not None
+            self._cpu_store[mm_hash] = _CpuEntry(
+                cpu_tensor=src.cpu(),
+                save_done=self._already_done_event,
+                nbytes=nbytes,
+                is_pinned=False,
+            )
+
+        self._reap_retired()
+
+    def _prune_active_load_events(self) -> None:
+        """Drop resolved load events from active entries to bound the list size."""
+        for entry in self._cpu_store.values():
+            if entry.pending_loads:
+                entry.pending_loads = [e for e in entry.pending_loads if not e.query()]
+
+    def _reap_retired(self) -> None:
+        """Release retired entries whose save and all pending loads have drained.
+
+        Never blocks — uses event.query() only. Safe to call from save_caches
+        and start_load_caches.
+        """
+        if not self._retired:
+            return
+        still_pending: list[_CpuEntry] = []
+        for entry in self._retired:
+            if entry.save_done.query() and all(e.query() for e in entry.pending_loads):
+                if entry.is_pinned:
+                    self._pinned_bytes_retired -= entry.nbytes
+                continue
+            still_pending.append(entry)
+        self._retired = still_pending
