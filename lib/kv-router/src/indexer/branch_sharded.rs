@@ -37,8 +37,8 @@
 //!    `remove_broadcast_count` tracks how often this occurs.
 
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -456,11 +456,9 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         }
 
         // Propagate partial FNV state on the last block of this batch.
-        if let Some(fnv_state) = new_fnv_state {
-            if let Some(last_block) = store_data.blocks.last() {
-                self.block_to_fnv_state
-                    .insert(last_block.block_hash.0, fnv_state);
-            }
+        if let (Some(fnv_state), Some(last_block)) = (new_fnv_state, store_data.blocks.last()) {
+            self.block_to_fnv_state
+                .insert(last_block.block_hash.0, fnv_state);
         }
 
         self.shards[shard_idx].apply_event(event).await;
@@ -544,103 +542,6 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                 shard.apply_event(broadcast_event).await;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-
-    fn block(block_hash: u64, tokens_hash: u64) -> KvCacheStoredBlockData {
-        KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(block_hash),
-            tokens_hash: LocalBlockHash(tokens_hash),
-            mm_extra_info: None,
-        }
-    }
-
-    fn stored_event(
-        worker_id: WorkerId,
-        parent_hash: Option<u64>,
-        blocks: Vec<KvCacheStoredBlockData>,
-    ) -> RouterEvent {
-        RouterEvent::new(
-            worker_id,
-            KvCacheEvent {
-                event_id: worker_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                    start_position: None,
-                    blocks,
-                }),
-                dp_rank: 0,
-            },
-        )
-    }
-
-    fn make_indexer(
-        num_shards: usize,
-        prefix_depth: usize,
-    ) -> BranchShardedIndexer<ConcurrentRadixTreeCompressed> {
-        let shards = (0..num_shards)
-            .map(|_| ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32))
-            .collect();
-        BranchShardedIndexer::new_with_options(shards, prefix_depth, 32)
-    }
-
-    #[tokio::test]
-    async fn short_query_hits_after_full_root_batch_registers_intermediate_keys() {
-        let indexer = make_indexer(2, 2);
-        indexer
-            .apply_event(stored_event(
-                1,
-                None,
-                vec![block(101, 11), block(102, 22), block(103, 33)],
-            ))
-            .await;
-        indexer.flush().await;
-
-        let overlap = indexer
-            .find_matches(vec![LocalBlockHash(11)])
-            .await
-            .expect("query should succeed");
-        let best = overlap.scores.values().copied().max().unwrap_or(0);
-        assert_eq!(
-            best, 1,
-            "short query should get shallow overlap instead of miss"
-        );
-    }
-
-    #[tokio::test]
-    async fn short_query_hits_after_shallow_root_crosses_prefix_depth() {
-        let indexer = make_indexer(1, 4);
-        indexer
-            .apply_event(stored_event(1, None, vec![block(201, 11)]))
-            .await;
-        indexer
-            .apply_event(stored_event(
-                1,
-                Some(201),
-                vec![
-                    block(202, 22),
-                    block(203, 33),
-                    block(204, 44),
-                    block(205, 55),
-                ],
-            ))
-            .await;
-        indexer.flush().await;
-
-        let overlap = indexer
-            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(22)])
-            .await
-            .expect("query should succeed");
-        let best = overlap.scores.values().copied().max().unwrap_or(0);
-        assert_eq!(
-            best, 2,
-            "prefix keys added during depth crossing should route short queries correctly"
-        );
     }
 }
 
@@ -817,5 +718,102 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
              remove broadcasts = {broadcasts}  (fallback for blocks absent from index)",
             branch_dist.join(", ")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+
+    fn block(block_hash: u64, tokens_hash: u64) -> KvCacheStoredBlockData {
+        KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash(block_hash),
+            tokens_hash: LocalBlockHash(tokens_hash),
+            mm_extra_info: None,
+        }
+    }
+
+    fn stored_event(
+        worker_id: WorkerId,
+        parent_hash: Option<u64>,
+        blocks: Vec<KvCacheStoredBlockData>,
+    ) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id: worker_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank: 0,
+            },
+        )
+    }
+
+    fn make_indexer(
+        num_shards: usize,
+        prefix_depth: usize,
+    ) -> BranchShardedIndexer<ConcurrentRadixTreeCompressed> {
+        let shards = (0..num_shards)
+            .map(|_| ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32))
+            .collect();
+        BranchShardedIndexer::new_with_options(shards, prefix_depth, 32)
+    }
+
+    #[tokio::test]
+    async fn short_query_hits_after_full_root_batch_registers_intermediate_keys() {
+        let indexer = make_indexer(2, 2);
+        indexer
+            .apply_event(stored_event(
+                1,
+                None,
+                vec![block(101, 11), block(102, 22), block(103, 33)],
+            ))
+            .await;
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 1,
+            "short query should get shallow overlap instead of miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_query_hits_after_shallow_root_crosses_prefix_depth() {
+        let indexer = make_indexer(1, 4);
+        indexer
+            .apply_event(stored_event(1, None, vec![block(201, 11)]))
+            .await;
+        indexer
+            .apply_event(stored_event(
+                1,
+                Some(201),
+                vec![
+                    block(202, 22),
+                    block(203, 33),
+                    block(204, 44),
+                    block(205, 55),
+                ],
+            ))
+            .await;
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(22)])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 2,
+            "prefix keys added during depth crossing should route short queries correctly"
+        );
     }
 }
