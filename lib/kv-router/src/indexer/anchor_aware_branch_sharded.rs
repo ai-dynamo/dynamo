@@ -20,9 +20,11 @@ use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
+#[cfg(feature = "bench")]
+use super::ShardedIndexerMetrics;
 use super::{
-    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot,
-    ShardedIndexerMetrics, SyncIndexer, ThreadPoolIndexer,
+    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer,
+    ThreadPoolIndexer,
 };
 use crate::protocols::*;
 
@@ -98,6 +100,7 @@ pub struct AnchorAwareBranchShardedIndexer<T: SyncIndexer> {
     root: Arc<RoutingNode>,
     worker_block_index: DashMap<WorkerWithDpRank, WorkerRoutingLookup, FxBuildHasher>,
     installed_worker_anchors: DashSet<(usize, WorkerWithDpRank, u64), FxBuildHasher>,
+    #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
 
@@ -116,6 +119,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             root: Arc::new(RoutingNode::root()),
             worker_block_index: DashMap::with_hasher(FxBuildHasher),
             installed_worker_anchors: DashSet::with_hasher(FxBuildHasher),
+            #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
     }
@@ -321,6 +325,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             return Ok(scores);
         }
         let shard_idx = node.shard();
+        #[cfg(feature = "bench")]
         self.metrics
             .counters
             .find_match_dispatches
@@ -363,6 +368,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             // while backend anchor application is idempotent by anchor_id.
             match self.shards[shard_idx].enqueue_anchor(worker, task) {
                 Ok(()) => {
+                    #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .anchor_installs
@@ -373,6 +379,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
                 }
             }
         } else {
+            #[cfg(feature = "bench")]
             self.metrics
                 .counters
                 .anchor_reuses
@@ -452,6 +459,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         if let Some(lookup) = self.worker_block_index.get(&worker) {
             for &block_hash in &remove_data.block_hashes {
                 let Some(entry) = lookup.get(&block_hash).map(|entry| entry.clone()) else {
+                    #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .remove_broadcasts
@@ -470,6 +478,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             }
         } else {
             for &block_hash in &remove_data.block_hashes {
+                #[cfg(feature = "bench")]
                 self.metrics
                     .counters
                     .remove_broadcasts
@@ -568,6 +577,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                         );
                     }
                     if active.is_empty() {
+                        #[cfg(feature = "bench")]
                         self.metrics
                             .counters
                             .find_match_early_returns
@@ -576,6 +586,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                     }
                 }
                 None => {
+                    #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .find_match_early_returns
@@ -586,6 +597,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
             }
         }
 
+        #[cfg(feature = "bench")]
         self.metrics
             .counters
             .find_match_early_returns
@@ -707,56 +719,61 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
     }
 
     fn timing_report(&self) -> String {
-        let dispatched = self
-            .metrics
-            .counters
-            .find_match_dispatches
-            .load(Ordering::Relaxed);
-        let shallow = self
-            .metrics
-            .counters
-            .find_match_early_returns
-            .load(Ordering::Relaxed);
-        let total_calls = dispatched + shallow;
-        if total_calls == 0 {
-            return String::new();
+        #[cfg(not(feature = "bench"))]
+        {
+            String::new()
         }
-        let broadcasts = self
-            .metrics
-            .counters
-            .remove_broadcasts
-            .load(Ordering::Relaxed);
-        let anchor_installs = self
-            .metrics
-            .counters
-            .anchor_installs
-            .load(Ordering::Relaxed);
-        let anchor_reuses = self.metrics.counters.anchor_reuses.load(Ordering::Relaxed);
 
         #[cfg(feature = "bench")]
-        let timing = {
-            let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-            let avg_routing_ns = if calls > 0 {
-                self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
-            } else {
-                0
-            };
-            let avg_shard_us = if calls > 0 {
-                self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
-            } else {
-                0
-            };
-            format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
-        };
-        #[cfg(not(feature = "bench"))]
-        let timing = String::new();
+        {
+            let dispatched = self
+                .metrics
+                .counters
+                .find_match_dispatches
+                .load(Ordering::Relaxed);
+            let shallow = self
+                .metrics
+                .counters
+                .find_match_early_returns
+                .load(Ordering::Relaxed);
+            let total_calls = dispatched + shallow;
+            if total_calls == 0 {
+                return String::new();
+            }
+            let broadcasts = self
+                .metrics
+                .counters
+                .remove_broadcasts
+                .load(Ordering::Relaxed);
+            let anchor_installs = self
+                .metrics
+                .counters
+                .anchor_installs
+                .load(Ordering::Relaxed);
+            let anchor_reuses = self.metrics.counters.anchor_reuses.load(Ordering::Relaxed);
 
-        format!(
-            "AnchorAwareBranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
+            let timing = {
+                let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
+                let avg_routing_ns = if calls > 0 {
+                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
+                } else {
+                    0
+                };
+                let avg_shard_us = if calls > 0 {
+                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
+                } else {
+                    0
+                };
+                format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
+            };
+
+            format!(
+                "AnchorAwareBranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
              {shallow} shallow):{timing}\n  \
              remove broadcasts = {broadcasts}\n  \
              anchors = {anchor_installs} installs / {anchor_reuses} reuses"
-        )
+            )
+        }
     }
 }
 
@@ -983,14 +1000,17 @@ mod tests {
 
         assert_eq!(score(&scores, worker(0)), Some(2));
         assert_eq!(score(&scores, worker(1)), Some(2));
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .find_match_dispatches
-                .load(Ordering::Relaxed),
-            0
-        );
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_dispatches
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
     }
 
     #[tokio::test]
@@ -1013,14 +1033,17 @@ mod tests {
             .sum();
 
         assert_eq!(score(&scores, worker(0)), Some(3));
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .anchor_installs
-                .load(Ordering::Relaxed),
-            0
-        );
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .anchor_installs
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
         assert_eq!(backend_blocks, 0);
     }
 
@@ -1037,22 +1060,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(score(&scores, worker(1)), Some(4));
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .anchor_installs
-                .load(Ordering::Relaxed),
-            2
-        );
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .find_match_dispatches
-                .load(Ordering::Relaxed),
-            1
-        );
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .anchor_installs
+                    .load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_dispatches
+                    .load(Ordering::Relaxed),
+                1
+            );
+        }
 
         index
             .apply_event(remove_hash_event(1, 0, &[1, 2, 5, 6], 2))
@@ -1138,14 +1164,17 @@ mod tests {
         assert_eq!(e.shard(), 1);
         assert_eq!(e.live_workers.len(), worker_count);
         assert_eq!(index.installed_worker_anchors.len(), worker_count + 1);
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .anchor_installs
-                .load(Ordering::Relaxed),
-            worker_count as u64 + 1
-        );
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .anchor_installs
+                    .load(Ordering::Relaxed),
+                worker_count as u64 + 1
+            );
+        }
 
         let scores = index
             .find_matches(local_hashes(&[1, 2, 5, 6]))
@@ -1195,22 +1224,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(score(&scores, worker(0)), Some(2));
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .find_match_early_returns
-                .load(Ordering::Relaxed),
-            1
-        );
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .find_match_dispatches
-                .load(Ordering::Relaxed),
-            0
-        );
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_early_returns
+                    .load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_dispatches
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
     }
 
     #[tokio::test]
@@ -1228,14 +1260,17 @@ mod tests {
         index.flush().await;
 
         assert!(b.live_workers.contains(&worker(0)));
-        assert_eq!(
-            index
-                .metrics
-                .counters
-                .remove_broadcasts
-                .load(Ordering::Relaxed),
-            0
-        );
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .remove_broadcasts
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
 
         let prefix = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
         assert_eq!(score(&prefix, worker(0)), Some(2));

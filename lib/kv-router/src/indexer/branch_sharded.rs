@@ -48,10 +48,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 
-use super::{
-    KvIndexerInterface, KvRouterError, ShardSizeSnapshot, ShardedIndexerMetrics, SyncIndexer,
-    ThreadPoolIndexer,
-};
+#[cfg(feature = "bench")]
+use super::ShardedIndexerMetrics;
+use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
 use crate::protocols::*;
 
 // ---------------------------------------------------------------------------
@@ -206,6 +205,7 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
 
     kv_block_size: u32,
 
+    #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
 
@@ -239,6 +239,7 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             block_to_shard: DashMap::with_hasher(FxBuildHasher),
             block_to_fnv_state: DashMap::with_hasher(FxBuildHasher),
             kv_block_size,
+            #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
     }
@@ -448,6 +449,7 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                     shard_blocks[shard_idx].push(block_hash);
                 }
                 None => {
+                    #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .remove_broadcasts
@@ -519,6 +521,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         let shard_idx = match self.lookup_shard(branch_key) {
             Some(idx) => idx,
             None => {
+                #[cfg(feature = "bench")]
                 self.metrics
                     .counters
                     .find_match_early_returns
@@ -526,6 +529,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 return Ok(OverlapScores::new());
             }
         };
+        #[cfg(feature = "bench")]
         self.metrics
             .counters
             .find_match_dispatches
@@ -657,62 +661,67 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     }
 
     fn timing_report(&self) -> String {
-        let dispatched = self
-            .metrics
-            .counters
-            .find_match_dispatches
-            .load(Ordering::Relaxed);
-        let misses = self
-            .metrics
-            .counters
-            .find_match_early_returns
-            .load(Ordering::Relaxed);
-        let total_calls = dispatched + misses;
-        let broadcasts = self
-            .metrics
-            .counters
-            .remove_broadcasts
-            .load(Ordering::Relaxed);
-        if total_calls == 0 {
-            return String::new();
+        #[cfg(not(feature = "bench"))]
+        {
+            String::new()
         }
-        let miss_pct = 100.0 * misses as f64 / total_calls as f64;
 
         #[cfg(feature = "bench")]
-        let timing = {
-            let timing_calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-            let avg_routing_ns = if timing_calls > 0 {
-                self.metrics.timing.routing_ns.load(Ordering::Relaxed) / timing_calls
-            } else {
-                0
-            };
-            let avg_shard_us = if timing_calls > 0 {
-                self.metrics.timing.shard_ns.load(Ordering::Relaxed) / timing_calls / 1000
-            } else {
-                0
-            };
-            format!(
-                "\n  avg routing    = {avg_routing_ns}ns  (routing table lookup)\n  \
-                 avg shard      = {avg_shard_us}µs  (CRTC traversal, inline on caller thread)"
-            )
-        };
-        #[cfg(not(feature = "bench"))]
-        let timing = String::new();
+        {
+            let dispatched = self
+                .metrics
+                .counters
+                .find_match_dispatches
+                .load(Ordering::Relaxed);
+            let misses = self
+                .metrics
+                .counters
+                .find_match_early_returns
+                .load(Ordering::Relaxed);
+            let total_calls = dispatched + misses;
+            let broadcasts = self
+                .metrics
+                .counters
+                .remove_broadcasts
+                .load(Ordering::Relaxed);
+            if total_calls == 0 {
+                return String::new();
+            }
+            let miss_pct = 100.0 * misses as f64 / total_calls as f64;
 
-        let branch_counts = self.branch_counts.lock().unwrap();
-        let total_branches: usize = branch_counts.iter().sum();
-        let branch_dist: Vec<String> = branch_counts
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("shard[{i}]={c}"))
-            .collect();
-        drop(branch_counts);
-        format!(
-            "BranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
+            let timing = {
+                let timing_calls = self.metrics.timing.calls.load(Ordering::Relaxed);
+                let avg_routing_ns = if timing_calls > 0 {
+                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / timing_calls
+                } else {
+                    0
+                };
+                let avg_shard_us = if timing_calls > 0 {
+                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / timing_calls / 1000
+                } else {
+                    0
+                };
+                format!(
+                    "\n  avg routing    = {avg_routing_ns}ns  (routing table lookup)\n  \
+                 avg shard      = {avg_shard_us}µs  (CRTC traversal, inline on caller thread)"
+                )
+            };
+
+            let branch_counts = self.branch_counts.lock().unwrap();
+            let total_branches: usize = branch_counts.iter().sum();
+            let branch_dist: Vec<String> = branch_counts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("shard[{i}]={c}"))
+                .collect();
+            drop(branch_counts);
+            format!(
+                "BranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
              {misses} early-exit / {miss_pct:.1}% miss):{timing}\n  \
              branches known = {total_branches}  ({})\n  \
              remove broadcasts = {broadcasts}  (fallback for blocks absent from index)",
-            branch_dist.join(", ")
-        )
+                branch_dist.join(", ")
+            )
+        }
     }
 }

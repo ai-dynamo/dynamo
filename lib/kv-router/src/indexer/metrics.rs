@@ -5,6 +5,7 @@
 use std::sync::Arc;
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::OnceLock;
+#[cfg(feature = "bench")]
 use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "runtime-protocols")]
@@ -66,6 +67,7 @@ impl std::fmt::Display for EventWarningKind {
     }
 }
 
+#[cfg(feature = "bench")]
 pub(crate) struct ShardedIndexerCounters {
     pub(crate) find_match_dispatches: AtomicU64,
     pub(crate) find_match_early_returns: AtomicU64,
@@ -74,6 +76,7 @@ pub(crate) struct ShardedIndexerCounters {
     pub(crate) remove_broadcasts: AtomicU64,
 }
 
+#[cfg(feature = "bench")]
 impl ShardedIndexerCounters {
     fn new() -> Self {
         Self {
@@ -104,17 +107,17 @@ impl ShardedIndexerTiming {
     }
 }
 
+#[cfg(feature = "bench")]
 pub(crate) struct ShardedIndexerMetrics {
     pub(crate) counters: ShardedIndexerCounters,
-    #[cfg(feature = "bench")]
     pub(crate) timing: ShardedIndexerTiming,
 }
 
+#[cfg(feature = "bench")]
 impl ShardedIndexerMetrics {
     pub(crate) fn new() -> Self {
         Self {
             counters: ShardedIndexerCounters::new(),
-            #[cfg(feature = "bench")]
             timing: ShardedIndexerTiming::new(),
         }
     }
