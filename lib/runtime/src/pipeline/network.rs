@@ -13,6 +13,8 @@ pub mod egress;
 pub mod ingress;
 pub mod manager;
 pub mod tcp;
+#[cfg(feature = "velo-transport")]
+pub mod velo;
 
 use crate::SystemHealth;
 use std::sync::{Arc, OnceLock};

@@ -729,6 +729,14 @@ where
                             );
                             (subject.clone(), "transport.nats.request")
                         }
+                        TransportType::Velo(velo_endpoint) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                velo_endpoint = %velo_endpoint,
+                                "Using velo transport for instance"
+                            );
+                            (velo_endpoint.clone(), "transport.velo.request")
+                        }
                     })
             };
 
