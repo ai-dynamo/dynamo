@@ -17,11 +17,13 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct CheckedFile {
-    /// Either a path on local disk or a remote URL (usually nats object store)
     path: Either<PathBuf, Url>,
 
     /// Checksum of the contents of path
     checksum: Checksum,
+
+    /// Size of the file in bytes. `None` for legacy (pre-size) wire format.
+    size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -48,11 +50,13 @@ impl CheckedFile {
         if !path.is_file() {
             anyhow::bail!("Not a file: {}", path.display());
         }
+        let size = std::fs::metadata(&path)?.len();
         let hash = b3sum(&path)?;
 
         Ok(CheckedFile {
             path: Either::Left(path),
             checksum: Checksum::blake3(hash),
+            size: Some(size),
         })
     }
 
@@ -84,6 +88,10 @@ impl CheckedFile {
 
     pub fn checksum(&self) -> &Checksum {
         &self.checksum
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.size
     }
 
     /// Does the given file checksum to the same value as this CheckedFile?
@@ -144,12 +152,16 @@ impl Serialize for CheckedFile {
     where
         S: Serializer,
     {
-        let mut cf = serializer.serialize_struct("CheckedFile", 2)?;
+        let n = if self.size.is_some() { 3 } else { 2 };
+        let mut cf = serializer.serialize_struct("CheckedFile", n)?;
         match &self.path {
             Either::Left(path) => cf.serialize_field("path", &path)?,
             Either::Right(url) => cf.serialize_field("path", &url)?,
         };
         cf.serialize_field("checksum", &self.checksum)?;
+        if let Some(size) = self.size {
+            cf.serialize_field("size", &size)?;
+        }
         cf.end()
     }
 }
@@ -159,6 +171,8 @@ impl Serialize for CheckedFile {
 struct WireCheckedFile {
     path: String,
     checksum: Checksum,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 // Convert from the temporary struct to CheckedFile with path type logic.
@@ -169,10 +183,12 @@ impl From<WireCheckedFile> for CheckedFile {
             Ok(url) => CheckedFile {
                 path: Either::Right(url),
                 checksum: temp.checksum,
+                size: temp.size,
             },
             Err(_) => CheckedFile {
                 path: Either::Left(PathBuf::from(temp.path)),
                 checksum: temp.checksum,
+                size: temp.size,
             },
         }
     }

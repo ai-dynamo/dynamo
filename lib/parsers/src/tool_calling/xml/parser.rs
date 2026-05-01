@@ -902,6 +902,54 @@ rust programming
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
     }
 
+    // Pin current behavior when the OUTER </tool_call> fence is absent due
+    // to max_tokens / EOS truncation. The qwen3_coder dialect (which uses
+    // XmlParserConfig::default()) silently drops the in-flight call today
+    // — the failure mode TEST_CASES.md flags. Distinct
+    // from `test_parse_missing_*_closing_tag` above, which exercises missing
+    // INNER close tags (a separate, already-recovering path).
+    #[test] // CASE.5 — qwen3_coder
+    fn test_parse_qwen3_no_outer_close_silent_drop() {
+        // Inner content fully complete; only outer </tool_call> missing.
+        let input = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+NYC
+</parameter>
+</function>"#;
+
+        let (calls, normal_text) =
+            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "qwen3_coder today drops the in-flight call when </tool_call> is missing"
+        );
+        assert_eq!(normal_text, Some(input.to_string()));
+    }
+
+    #[test] // CASE.5 — minimax_m2
+    fn test_parse_minimax_m2_no_outer_close_silent_drop() {
+        let config = XmlParserConfig {
+            tool_call_start_token: "<minimax:tool_call>".to_string(),
+            tool_call_end_token: "</minimax:tool_call>".to_string(),
+            function_start_token: "<invoke name=".to_string(),
+            function_end_token: "</invoke>".to_string(),
+            parameter_start_token: "<parameter name=".to_string(),
+            parameter_end_token: "</parameter>".to_string(),
+        };
+        // Inner invoke fully closed; only outer </minimax:tool_call> missing.
+        let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
+
+        let (calls, normal_text) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "minimax_m2 today drops the in-flight call when </minimax:tool_call> is missing"
+        );
+        assert_eq!(normal_text, Some(input.to_string()));
+    }
+
     #[test] // CASE.18
     fn test_schema_aware_type_conversion() {
         // This test matches the Python test_parse_streaming_increment_multiple_parameters

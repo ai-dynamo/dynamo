@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4-Flash on vLLM, aggregated, GB200 (TP=4 + EP, single NVL4 tray).
+# Image: replace `:my-tag` with an arm64 Dynamo + vLLM build.
+# Weights: pre-staged on the `model-cache` PVC by `../../model-cache/model-download.yaml`.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-flash-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: HF_HOME
+              value: /opt/models
+            - name: HF_HUB_OFFLINE
+              value: "1"
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          # ~60 min budget for first launch (10 * 360 = 3600s).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          env:
+            - name: SERVED_MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4-Flash
+            - name: MODEL_PATH
+              value: deepseek-ai/DeepSeek-V4-Flash
+            - name: HF_HOME
+              value: /opt/models
+            # Set to "0" for a one-shot cold download into the PVC.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "3600"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "1"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NCCL_P2P_LEVEL
+              value: NVL
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              exec python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --kv-cache-dtype fp8 \
+                --block-size 256 \
+                --tensor-parallel-size 4 \
+                --enable-expert-parallel \
+                --tokenizer-mode deepseek_v4 \
+                --dyn-reasoning-parser deepseek_v4 \
+                --dyn-tool-call-parser deepseek_v4 \
+                --attention-config '{"use_fp4_indexer_cache":true}' \
+                --moe-backend deep_gemm_mega_moe \
+                --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+                --max-num-seqs 256
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
