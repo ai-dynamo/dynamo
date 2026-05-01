@@ -91,8 +91,6 @@ pub struct AgentReplayMetrics {
     pub trace_block_size: usize,
     pub input_length: usize,
     pub input_sequence_hashes: Vec<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_length: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

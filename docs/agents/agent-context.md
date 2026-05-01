@@ -323,8 +323,7 @@ Nullable fields are omitted when the serving path did not record them.
     "replay": {
       "trace_block_size": 64,
       "input_length": 4096,
-      "input_sequence_hashes": [14879255164371896291, 274632075616497421],
-      "output_length": 512
+      "input_sequence_hashes": [14879255164371896291, 274632075616497421]
     }
   }
 }
@@ -354,7 +353,6 @@ Request records capture Dynamo-owned serving metrics:
 | `replay.trace_block_size` | Token block size used to derive replay hashes. |
 | `replay.input_length` | Prompt/input token count represented by the replay hashes. |
 | `replay.input_sequence_hashes` | Stable sequence-aware prompt block hashes. These are replay labels, not raw tokens and not compact Mooncake `hash_ids`. |
-| `replay.output_length` | Final output token count copied from `output_tokens` when known. |
 
 Trace records do not include prompt/response content, raw token IDs, sampling
 parameters, finish reason, or error status. Replay hashes expose prompt prefix
@@ -364,7 +362,7 @@ observability.
 
 When converted to Mooncake JSONL, aggregate mocker replay uses ordered
 same-session rows to recover decode-materialized full KV blocks from the next
-turn's input hashes. `output_length` supplies the generated-token span, so output
+turn's input hashes. `output_tokens` supplies the generated-token span, so output
 token IDs are not required for cache-reuse modeling.
 
 ## Consistency Model

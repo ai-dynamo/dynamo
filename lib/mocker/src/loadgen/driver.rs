@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use super::types::{ReadyTurn, ReplayRequestHashes, Trace};
+use super::types::{ReadyTurn, ReplayGeneratedBlock, ReplayRequestHashes, Trace};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,13 +346,15 @@ fn infer_generated_hashes(turns: &mut [TurnRuntime], engine_block_size: usize) {
             continue;
         }
 
-        let generated_local_block_hashes =
-            next_hashes.local_block_hashes[generated_start_block..generated_end_block].to_vec();
-        let generated_sequence_hashes =
-            next_hashes.sequence_hashes[generated_start_block..generated_end_block].to_vec();
-
-        turns[idx].replay_hashes.generated_local_block_hashes = generated_local_block_hashes;
-        turns[idx].replay_hashes.generated_sequence_hashes = generated_sequence_hashes;
+        turns[idx].replay_hashes.generated_blocks = next_hashes.local_block_hashes
+            [generated_start_block..generated_end_block]
+            .iter()
+            .zip(&next_hashes.sequence_hashes[generated_start_block..generated_end_block])
+            .map(|(&local_block_hash, &sequence_hash)| ReplayGeneratedBlock {
+                local_block_hash,
+                sequence_hash,
+            })
+            .collect();
     }
 }
 
@@ -542,13 +544,14 @@ mod tests {
         let first_turn = &driver.sessions[0].turns[0];
         let second_turn = &driver.sessions[0].turns[1];
 
+        assert_eq!(first_turn.replay_hashes.generated_blocks.len(), 1);
         assert_eq!(
-            first_turn.replay_hashes.generated_local_block_hashes,
-            second_turn.replay_hashes.local_block_hashes[1..2]
+            first_turn.replay_hashes.generated_blocks[0].local_block_hash,
+            second_turn.replay_hashes.local_block_hashes[1]
         );
         assert_eq!(
-            first_turn.replay_hashes.generated_sequence_hashes,
-            second_turn.replay_hashes.sequence_hashes[1..2]
+            first_turn.replay_hashes.generated_blocks[0].sequence_hash,
+            second_turn.replay_hashes.sequence_hashes[1]
         );
     }
 }

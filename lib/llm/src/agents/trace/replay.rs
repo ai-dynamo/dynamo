@@ -24,7 +24,6 @@ pub(crate) fn request_replay_metrics(token_ids: &[TokenIdType]) -> Option<AgentR
         trace_block_size: policy.replay_block_size,
         input_length: token_ids.len(),
         input_sequence_hashes: input_sequence_hashes(token_ids, policy.replay_block_size),
-        output_length: None,
     })
 }
 
@@ -41,29 +40,19 @@ pub(crate) fn input_sequence_hashes(
     // crate with the router/mocker hash path. Agent tracing, Mooncake export,
     // and replay should not each carry subtly different block hash logic.
     let block_size = trace_block_size as u32;
-    let full_blocks =
+    let mut block_hashes =
         compute_block_hash_for_seq(token_ids, block_size, BlockHashOptions::default());
-    let mut sequence_hashes = compute_seq_hash_for_block(&full_blocks);
 
-    let full_token_count = full_blocks.len() * trace_block_size;
+    let full_token_count = block_hashes.len() * trace_block_size;
     if full_token_count < token_ids.len() {
-        let partial_hash = partial_local_block_hash(&token_ids[full_token_count..]);
-        let sequence_hash = match sequence_hashes.last().copied() {
-            Some(parent) => sequence_hash_for_child(parent, partial_hash),
-            None => partial_hash.0,
-        };
-        sequence_hashes.push(sequence_hash);
+        block_hashes.push(partial_local_block_hash(&token_ids[full_token_count..]));
     }
 
-    sequence_hashes
+    compute_seq_hash_for_block(&block_hashes)
 }
 
 fn partial_local_block_hash(tokens: &[TokenIdType]) -> LocalBlockHash {
     LocalBlockHash(compute_hash_v2(cast_slice(tokens), XXH3_SEED))
-}
-
-fn sequence_hash_for_child(parent: u64, child: LocalBlockHash) -> u64 {
-    compute_hash_v2(cast_slice(&[parent, child.0]), XXH3_SEED)
 }
 
 #[cfg(test)]

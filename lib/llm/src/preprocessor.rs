@@ -1565,7 +1565,7 @@ impl
             request_model,
             request_tracker,
             x_request_id,
-            mut replay_metrics,
+            replay_metrics,
         )) = trace_state
         {
             let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
@@ -1583,9 +1583,6 @@ impl
                     request_model,
                     request_tracker.as_deref(),
                 );
-                if let Some(replay) = replay_metrics.as_mut() {
-                    replay.output_length = metrics.output_tokens;
-                }
                 metrics.replay = replay_metrics;
                 crate::agents::trace::emit_request_end(agent_context, metrics);
             });

@@ -314,18 +314,8 @@ impl OfflineReplayRouter {
         worker_idx: usize,
         replay_hashes: &ReplayRequestHashes,
     ) -> Result<()> {
-        if replay_hashes.generated_sequence_hashes.is_empty() {
+        if replay_hashes.generated_blocks.is_empty() {
             return Ok(());
-        }
-
-        if replay_hashes.generated_local_block_hashes.len()
-            != replay_hashes.generated_sequence_hashes.len()
-        {
-            return Err(anyhow!(
-                "generated replay local/sequence hash lengths differ: {} vs {}",
-                replay_hashes.generated_local_block_hashes.len(),
-                replay_hashes.generated_sequence_hashes.len()
-            ));
         }
 
         let parent_hash = replay_hashes
@@ -334,12 +324,11 @@ impl OfflineReplayRouter {
             .copied()
             .map(ExternalSequenceBlockHash);
         let blocks = replay_hashes
-            .generated_sequence_hashes
+            .generated_blocks
             .iter()
-            .zip(&replay_hashes.generated_local_block_hashes)
-            .map(|(&sequence_hash, &local_hash)| KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(sequence_hash),
-                tokens_hash: local_hash,
+            .map(|block| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(block.sequence_hash),
+                tokens_hash: block.local_block_hash,
                 mm_extra_info: None,
             })
             .collect();
