@@ -359,10 +359,11 @@ reuse structure without storing the prompt text. Use the audit sink for
 request/response payload capture and OpenTelemetry export for span-based
 observability.
 
-When converted to Mooncake JSONL, aggregate mocker replay uses ordered
-same-session rows to recover decode-materialized full KV blocks from the next
-turn's input hashes. `output_tokens` supplies the generated-token span, so output
-token IDs are not required for cache-reuse modeling.
+Replay hashes describe the cumulative input presented to each LLM request. They
+do not by themselves declare that a block was reused or that a prior decode
+stored a block in KV cache. Mooncake conversion maps these sequence hashes to
+compact per-file `hash_ids`; replay computes reuse from those request block IDs
+and the cache state modeled by the replay engine.
 
 ## Consistency Model
 

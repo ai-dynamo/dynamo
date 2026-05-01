@@ -93,13 +93,6 @@ pub struct RouterSequence {
 pub struct ReplayRequestHashes {
     pub local_block_hashes: Vec<LocalBlockHash>,
     pub sequence_hashes: Vec<SequenceHash>,
-    pub generated_blocks: Vec<ReplayGeneratedBlock>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReplayGeneratedBlock {
-    pub local_block_hash: LocalBlockHash,
-    pub sequence_hash: SequenceHash,
 }
 
 #[derive(Debug, Clone)]

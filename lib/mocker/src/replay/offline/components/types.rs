@@ -25,7 +25,6 @@ pub(in crate::replay::offline) enum EnginePassMode {
 pub(crate) struct WorkerAdmission {
     pub(crate) uuid: Uuid,
     pub(crate) worker_idx: usize,
-    pub(crate) reused_input_tokens: usize,
     /// Number of blocks the router matched against the prefix cache at
     /// admission time. Used by the traffic accumulator to derive an
     /// average KV hit rate for the planner.

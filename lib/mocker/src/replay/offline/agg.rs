@@ -260,13 +260,11 @@ impl AggRuntime {
         for WorkerAdmission {
             uuid,
             worker_idx,
-            reused_input_tokens,
             overlap_blocks,
             isl_blocks,
         } in admissions
         {
             self.traffic.on_admission(overlap_blocks, isl_blocks);
-            self.collector.on_reuse_observed(uuid, reused_input_tokens);
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -302,21 +300,15 @@ impl AggRuntime {
         if self.router.is_none() {
             self.requests.insert(
                 uuid,
-                AggRequestState::new_running(
-                    request.tokens.len(),
-                    request.max_output_tokens,
-                    replay_hashes,
-                ),
+                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
             );
             let worker_idx = self.next_worker();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
         }
         let queued_request = request.clone();
-        self.requests.insert(
-            uuid,
-            AggRequestState::new_queued(request, replay_hashes.clone()),
-        );
+        self.requests
+            .insert(uuid, AggRequestState::new_queued(request));
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
@@ -378,23 +370,12 @@ impl AggRuntime {
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
-    fn process_output_signal(
-        &mut self,
-        worker_idx: usize,
-        signal: OutputSignal,
-    ) -> anyhow::Result<()> {
+    fn process_output_signal(&mut self, signal: OutputSignal) -> anyhow::Result<()> {
         let mut admissions = Vec::new();
         if signal.completed {
             #[cfg(test)]
             self.remove_active_request(signal.uuid);
             if let Some(router) = self.router.as_mut() {
-                if let Some(replay_hashes) = self
-                    .requests
-                    .get(&signal.uuid)
-                    .and_then(|state| state.replay_hashes.as_ref())
-                {
-                    router.on_replay_generated_blocks(worker_idx, replay_hashes)?;
-                }
                 admissions = router
                     .on_request_completed(signal.uuid, self.now_ms)?
                     .admissions;
@@ -477,7 +458,7 @@ impl AggRuntime {
     ) -> anyhow::Result<()> {
         self.apply_router_events(kv_events)?;
         for signal in output_signals {
-            self.process_output_signal(_worker_idx, signal)?;
+            self.process_output_signal(signal)?;
         }
         Ok(())
     }
@@ -1039,57 +1020,6 @@ mod tests {
         assert_eq!(
             request_report.prefix_cache_reused_ratio,
             workload_report.prefix_cache_reused_ratio
-        );
-    }
-
-    #[test]
-    fn test_trace_workload_kv_router_reuses_inferred_generated_blocks() {
-        let args = MockEngineArgs::builder()
-            .block_size(2)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(128))
-            .max_num_seqs(Some(4))
-            .enable_prefix_caching(true)
-            .enable_chunked_prefill(true)
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
-        let workload = Trace {
-            block_size: 2,
-            sessions: vec![SessionTrace {
-                session_id: "session".to_string(),
-                first_arrival_timestamp_ms: Some(0.0),
-                turns: vec![
-                    TurnTrace {
-                        input_length: 3,
-                        max_output_tokens: 1,
-                        hash_ids: vec![1, 2],
-                        delay_after_previous_ms: 0.0,
-                    },
-                    TurnTrace {
-                        input_length: 4,
-                        max_output_tokens: 1,
-                        hash_ids: vec![1, 3],
-                        delay_after_previous_ms: 1.0,
-                    },
-                ],
-            }],
-        };
-
-        let collector = run_trace_workload_multi_collect_with_stats(
-            &args,
-            workload,
-            1,
-            ReplayRouterMode::KvRouter,
-        )
-        .0;
-        let report = collector.finish();
-
-        assert_eq!(report.request_counts.total_input_tokens, 7);
-        assert_eq!(report.request_counts.total_output_tokens, 2);
-        assert_eq!(
-            report.request_counts.total_reused_input_tokens, 4,
-            "second turn should fully reuse its input prefix"
         );
     }
 

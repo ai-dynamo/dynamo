@@ -306,13 +306,11 @@ impl DisaggRuntime {
         for WorkerAdmission {
             uuid,
             worker_idx,
-            reused_input_tokens,
             overlap_blocks,
             isl_blocks,
         } in admissions
         {
             self.traffic.on_admission(overlap_blocks, isl_blocks);
-            self.collector.on_reuse_observed(uuid, reused_input_tokens);
             if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
                 bail!("offline disagg replay expected queued prefill request for {uuid}");
             }

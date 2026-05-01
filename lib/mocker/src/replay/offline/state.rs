@@ -5,7 +5,6 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::ReplayRequestHashes;
 use crate::replay::TraceCollector;
 use crate::scheduler::{EngineCore, EnginePassResult};
 use uuid::Uuid;
@@ -22,14 +21,10 @@ pub(crate) struct AggRequestState {
     pub(in crate::replay::offline) prefill_completed: bool,
     pub(in crate::replay::offline) input_tokens: usize,
     pub(in crate::replay::offline) output_tokens: usize,
-    pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
 }
 
 impl AggRequestState {
-    pub(crate) fn new_queued(
-        request: DirectRequest,
-        replay_hashes: Option<ReplayRequestHashes>,
-    ) -> Self {
+    pub(crate) fn new_queued(request: DirectRequest) -> Self {
         let input_tokens = request.tokens.len();
         let output_tokens = request.max_output_tokens;
         Self {
@@ -38,22 +33,16 @@ impl AggRequestState {
             prefill_completed: false,
             input_tokens,
             output_tokens,
-            replay_hashes,
         }
     }
 
-    pub(crate) fn new_running(
-        input_tokens: usize,
-        output_tokens: usize,
-        replay_hashes: Option<ReplayRequestHashes>,
-    ) -> Self {
+    pub(crate) fn new_running(input_tokens: usize, output_tokens: usize) -> Self {
         Self {
             request: None,
             phase: AggRequestPhase::Running,
             prefill_completed: false,
             input_tokens,
             output_tokens,
-            replay_hashes,
         }
     }
 
