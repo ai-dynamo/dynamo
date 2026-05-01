@@ -154,6 +154,26 @@ terminal tool record should be self-contained with `started_at_unix_ms`,
 `ended_at_unix_ms`, and `duration_ms`. Keep `tool_start` for live/in-flight
 status, but do not require it to reconstruct completed spans.
 
+### Publisher Ownership
+
+Most framework integrations should create one exporter per harness or runtime
+instance. In-process systems, such as callback or middleware integrations, can
+emit records directly into the root queued publisher.
+
+If a harness runs tools or subagents in child processes, do not let each child
+bind the same ZMQ endpoint. Keep the root process as the only network publisher
+and forward child records to it over the framework event bus, a multiprocessing
+queue, or a local collector. The child should forward the same normalized
+`AgentTraceRecord`; the parent handles ZMQ framing and sequence numbers.
+
+```text
+in-process callbacks / tool wrappers
+  -> root queued publisher -> ZMQ PUB -> Dynamo relay
+
+child process tools / subagents
+  -> process queue or event bus -> root queued publisher -> ZMQ PUB -> Dynamo relay
+```
+
 A compact publisher looks like this:
 
 ```python
@@ -269,7 +289,7 @@ Useful converter flags:
 ## Harness Integration Patterns
 
 An existing harness does not need to import Dynamo packages or link against
-Dynamo runtime APIs. The ms-agent integration used this shape:
+Dynamo runtime APIs. Framework integrations should use this shape:
 
 - Add a small helper module that stores the current `agent_context` in a context
   variable.
@@ -277,6 +297,8 @@ Dynamo runtime APIs. The ms-agent integration used this shape:
   same `workflow_id` and `program_id`.
 - Call one helper before each OpenAI-compatible LLM request to merge
   `extra_body.nvext.agent_context` and set `x-request-id`.
+- For LangGraph/LangChain-style in-process runtimes, implement callbacks or
+  middleware that emit directly to the root publisher.
 - Emit `tool_start` and a terminal `tool_end` or `tool_error` wherever the
   harness executes model-requested tools. Include `started_at_unix_ms`,
   `ended_at_unix_ms`, and `duration_ms` on terminal records so completed spans
@@ -285,6 +307,8 @@ Dynamo runtime APIs. The ms-agent integration used this shape:
   when those paths can make LLM calls or emit tool records.
 - Register a queued ZMQ publisher at process startup when tool tracing is
   enabled.
+- If tools or subagents run in subprocesses, forward normalized tool records
+  back to the root publisher instead of binding another ZMQ endpoint.
 
 You do not need custom code in every tool implementation when existing tool
 calls already pass through shared harness code. Add explicit hooks only for paths
@@ -323,10 +347,10 @@ git clone https://github.com/ishandhanani/ms-agent.git
 cd ms-agent
 git checkout idhanani/dynamo-agent-trace
 
-python3 -m venv .venv
+uv venv .venv
 source .venv/bin/activate
-pip install -r requirements/research.txt
-pip install -e .
+uv pip install -r requirements/research.txt
+uv pip install -e .
 ```
 
 Start Dynamo with trace sinks and the tool-event relay enabled:
@@ -356,7 +380,10 @@ The fork automatically attaches `nvext.agent_context` and `x-request-id` to
 ms-agent OpenAI-compatible LLM calls while an agent context is active. When
 `DYNAMO_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` is set, the ms-agent CLI also binds a
 ZMQ PUB socket and publishes tool lifecycle records to Dynamo's tool-event
-relay. Python entrypoints that do not use the CLI lazily initialize the same
+relay. Shared tool execution paths publish directly to that root publisher;
+`agent_tools` subprocesses forward normalized tool records back to the root
+process, so subprocess isolation remains enabled without each child binding the
+endpoint. Python entrypoints that do not use the CLI lazily initialize the same
 publisher on the first tool event.
 
 For DeepResearch v2, keep the normal ms-agent setup: configure
