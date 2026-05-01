@@ -428,6 +428,10 @@ static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
+/// Environment variable to set the tokenize endpoint path (default: `/tokenize`)
+static HTTP_SVC_TOKENIZE_PATH_ENV: &str = "DYN_HTTP_SVC_TOKENIZE_PATH";
+/// Environment variable to set the detokenize endpoint path (default: `/detokenize`)
+static HTTP_SVC_DETOKENIZE_PATH_ENV: &str = "DYN_HTTP_SVC_DETOKENIZE_PATH";
 
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
@@ -535,6 +539,11 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
+            super::tokenize::tokenize_router(state.clone(), var(HTTP_SVC_TOKENIZE_PATH_ENV).ok()),
+            super::tokenize::detokenize_router(
+                state.clone(),
+                var(HTTP_SVC_DETOKENIZE_PATH_ENV).ok(),
+            ),
         ];
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
