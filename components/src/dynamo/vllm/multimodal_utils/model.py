@@ -17,7 +17,7 @@ import functools
 import json
 import logging
 import os
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
-class ModelFamily(StrEnum):
+class ModelFamily(str, Enum):
     """Multimodal model families dynamo's encoder pipeline knows how to dispatch."""
 
     QWEN_VL = "qwen-vl"
