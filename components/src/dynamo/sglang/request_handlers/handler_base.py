@@ -26,6 +26,8 @@ from typing import (
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
     KvEventPublisher,
@@ -449,9 +451,24 @@ class LoraMixin:
                                 "lora_id": lora_id,
                             }
 
+                            # Match the base-model registration topology so the
+                            # prefill router activates for the LoRA model name
+                            # the same way it does for the base model. Without
+                            # this, prefill workers register the LoRA as a
+                            # chat-completions target and the frontend routes
+                            # chat requests directly to prefill, which then
+                            # waits forever for a KV transfer. For non-prefill
+                            # workers, honor --endpoint-types so the LoRA is
+                            # exposed on the same endpoints as the base model.
+                            if self.config.serving_mode == DisaggregationMode.PREFILL:
+                                lora_model_type = ModelType.Prefill
+                            else:
+                                lora_model_type = parse_endpoint_types(
+                                    self.config.dynamo_args.endpoint_types
+                                )
                             await register_llm(
                                 model_input=ModelInput.Tokens,
-                                model_type=ModelType.Chat | ModelType.Completions,
+                                model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.server_args.model_path,
                                 kv_cache_block_size=self.config.server_args.page_size,
