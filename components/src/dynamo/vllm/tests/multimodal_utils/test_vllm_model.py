@@ -67,6 +67,11 @@ class TestResolveModelFamily:
                 id="hf-id-qwen3-vl",
             ),
             pytest.param(
+                "Qwen/Qwen3.5-9B",
+                ModelFamily.QWEN_VL,
+                id="hf-id-qwen3.5-unified",
+            ),
+            pytest.param(
                 "llava-hf/llava-1.5-7b-hf",
                 ModelFamily.LLAVA,
                 id="hf-id-llava",
@@ -119,6 +124,12 @@ class TestResolveModelFamilyOnDisk:
                 ["LlavaForConditionalGeneration"],
                 ModelFamily.LLAVA,
                 id="metadata-llava",
+            ),
+            pytest.param(
+                "Qwen--Qwen3.5-9B/v1",
+                ["Qwen3_5ForConditionalGeneration"],
+                ModelFamily.QWEN_VL,
+                id="metadata-qwen3.5-unified",
             ),
         ],
     )

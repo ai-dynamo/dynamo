@@ -53,6 +53,14 @@ _FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
             "Qwen2_5_VLForConditionalGeneration",
             "Qwen3VLForConditionalGeneration",
             "Qwen3VLMoeForConditionalGeneration",
+            # Qwen3.5 subclasses Qwen3VL in vLLM
+            # (`Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration)`)
+            # with the same `self.visual = Qwen3_VisionTransformer(...)` and an
+            # identical preprocessor (`Qwen2VLImageProcessorFast`); the encoder
+            # pipeline is inherited unchanged. Inclusion based on source +
+            # config inspection — pending empirical verification against a
+            # deployed Qwen3.5 model.
+            "Qwen3_5ForConditionalGeneration",
         }
     ),
     ModelFamily.LLAVA: frozenset({"LlavaForConditionalGeneration"}),
@@ -63,7 +71,18 @@ _FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
 # long as it shares the family-level prefix; only a genuinely new family
 # (e.g. Qwen4-VL) needs a pattern added.
 _FAMILY_NAME_PATTERNS: Dict[ModelFamily, frozenset[str]] = {
-    ModelFamily.QWEN_VL: frozenset({"qwen2-vl", "qwen2.5-vl", "qwen3-vl"}),
+    ModelFamily.QWEN_VL: frozenset(
+        {
+            "qwen2-vl",
+            "qwen2.5-vl",
+            "qwen3-vl",
+            # Qwen3.5 ids omit "-vl" because it's a unified multimodal
+            # architecture; bare "qwen3.5" matches all variants. Routes to
+            # QWEN_VL via the subclass relationship documented in
+            # _FAMILY_ARCHITECTURES.
+            "qwen3.5",
+        }
+    ),
     ModelFamily.LLAVA: frozenset({"llava-1.5-7b-hf"}),
 }
 
