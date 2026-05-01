@@ -275,13 +275,68 @@ def test_fetch_pypi_license_retries_with_pep440_base_version(
     assert any("/pypi/torchaudio/2.9.1/json" in c for c in calls)
 
 
-def test_fetch_pypi_license_does_not_retry_when_no_local_segment(
+def test_fetch_pypi_license_does_not_retry_base_when_no_local_segment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plain versions must only hit PyPI once even on a 404."""
+    """A plain version must hit per-version + latest, but not a base retry."""
     calls = _patch_http(monkeypatch, {})
     assert license_lookup.fetch_pypi_license("missing", "1.2.3") == "UNKNOWN"
-    assert sum(1 for c in calls if "/pypi/missing/" in c) == 1
+    pypi_calls = [c for c in calls if "/pypi/missing/" in c]
+    # per-version (1.2.3) and latest (no version segment) - exactly two.
+    assert len(pypi_calls) == 2
+    assert any("/pypi/missing/1.2.3/json" in c for c in pypi_calls)
+    assert any(c.endswith("/pypi/missing/json") for c in pypi_calls)
+
+
+def test_fetch_pypi_license_falls_back_to_latest_metadata_on_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the per-version endpoint 404s, latest metadata must be tried.
+
+    PyPI does not always preserve historical info dicts: yanked or otherwise
+    removed releases return 404 even though the project (and its license)
+    still exists at the latest endpoint.
+    """
+    calls = _patch_http(
+        monkeypatch,
+        {
+            "/pypi/my-test-package/json": {
+                "info": {"license": "MIT"},
+            },
+        },
+    )
+    assert license_lookup.fetch_pypi_license("my-test-package", "1.0") == "MIT"
+    # Per-version endpoint must have been tried first.
+    assert any("/pypi/my-test-package/1.0/json" in c for c in calls)
+    # Latest endpoint must have been tried second.
+    assert any(c.endswith("/pypi/my-test-package/json") for c in calls)
+
+
+def test_fetch_pypi_license_falls_back_to_latest_metadata_on_empty_per_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-version with empty info but latest with a classifier must resolve.
+
+    Older releases sometimes predate the project gaining classifiers; PyPI
+    snapshots ``info`` at upload time and never backfills it.
+    """
+    calls = _patch_http(
+        monkeypatch,
+        {
+            "/pypi/foo/0.1.0/json": {"info": {"license": "", "classifiers": []}},
+            "/pypi/foo/json": {
+                "info": {
+                    "license": "",
+                    "classifiers": [
+                        "License :: OSI Approved :: Apache Software License"
+                    ],
+                },
+            },
+        },
+    )
+    assert license_lookup.fetch_pypi_license("foo", "0.1.0") == "Apache-2.0"
+    assert any("/pypi/foo/0.1.0/json" in c for c in calls)
+    assert any(c.endswith("/pypi/foo/json") for c in calls)
 
 
 # ---------- resolve_licenses + cache ----------

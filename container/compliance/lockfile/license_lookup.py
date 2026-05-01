@@ -247,22 +247,53 @@ def fetch_pypi_license(name: str, version: str) -> str:
     """
     if not name or not version:
         return "UNKNOWN"
-    _throttle("pypi.org", _PYPI_THROTTLE_SECS)
     safe_name = urllib.parse.quote(name, safe="")
-    safe_version = urllib.parse.quote(version, safe="")
-    url = f"https://pypi.org/pypi/{safe_name}/{safe_version}/json"
-    payload = _http_json(url)
-    if not payload:
-        base_version = _strip_pep440_local(version)
-        if base_version != version:
-            _throttle("pypi.org", _PYPI_THROTTLE_SECS)
-            safe_base = urllib.parse.quote(base_version, safe="")
-            payload = _http_json(
-                f"https://pypi.org/pypi/{safe_name}/{safe_base}/json"
-            )
+
+    # Try, in order: exact version, PEP 440 base version (if different),
+    # latest. The first endpoint to come back with a recognisable license
+    # wins; a 404 or an info dict missing all license fields silently falls
+    # through to the next.
+    versions: list[str] = [version]
+    base_version = _strip_pep440_local(version)
+    if base_version != version:
+        versions.append(base_version)
+
+    seen_info: dict | None = None
+    for v in versions:
+        _throttle("pypi.org", _PYPI_THROTTLE_SECS)
+        safe_v = urllib.parse.quote(v, safe="")
+        payload = _http_json(f"https://pypi.org/pypi/{safe_name}/{safe_v}/json")
         if not payload:
-            return "UNKNOWN"
-    info = payload.get("info") or {}
+            continue
+        info = payload.get("info") or {}
+        if seen_info is None:
+            seen_info = info
+        spdx = _spdx_from_pypi_info(info)
+        if spdx != "UNKNOWN":
+            return spdx
+
+    # Per-version metadata can be missing or incomplete - the version may have
+    # been yanked, or it predates the project gaining classifiers/a license
+    # string. Fall back to the latest-version endpoint, which returns the
+    # maintainer's current metadata even when historical versions 404.
+    _throttle("pypi.org", _PYPI_THROTTLE_SECS)
+    latest = _http_json(f"https://pypi.org/pypi/{safe_name}/json")
+    if latest:
+        info = latest.get("info") or {}
+        if seen_info is None:
+            seen_info = info
+        spdx = _spdx_from_pypi_info(info)
+        if spdx != "UNKNOWN":
+            return spdx
+
+    # Final fallback: ask GitHub for the repo's licensee-detected SPDX. PyPI's
+    # JSON often omits PEP 639 fields even when the wheel METADATA has them,
+    # but most maintainers link a github.com URL in project_urls.
+    return _github_license_for_pypi(seen_info or {})
+
+
+def _spdx_from_pypi_info(info: dict) -> str:
+    """Extract an SPDX license from a PyPI ``info`` dict, or UNKNOWN."""
     expr = info.get("license_expression")
     if isinstance(expr, str) and expr.strip():
         return expr.strip()
@@ -283,10 +314,7 @@ def fetch_pypi_license(name: str, version: str) -> str:
             and len(candidate) < 64
         ):
             return candidate
-    # Final fallback: ask GitHub for the repo's licensee-detected SPDX. PyPI's
-    # JSON often omits PEP 639 fields even when the wheel METADATA has them,
-    # but most maintainers link a github.com URL in project_urls.
-    return _github_license_for_pypi(info)
+    return "UNKNOWN"
 
 
 _GITHUB_REPO_RE = re.compile(r"https?://github\.com/([^/?#]+)/([^/?#]+)")

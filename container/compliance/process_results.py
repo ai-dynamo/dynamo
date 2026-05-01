@@ -17,9 +17,11 @@ Usage:
 
 import argparse
 import csv
+import fnmatch
 import functools
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,107 @@ _MD_HEADER = (
 )
 
 
+# ---- LicenseRef-* normalization -----------------------------------------------
+#
+# Syft normalizes fuzzy classifier strings ("Apache 2.0", "Apache License v2.0",
+# "Expat", "BSD License") into ad-hoc LicenseRef-* identifiers instead of
+# mapping to the canonical SPDX-id. The audit at
+# dynamo-tpm/releases/110/compliance/audit/AUDIT.md found ~230 such rows in the
+# rc9 example. Map the unambiguous patterns to their SPDX equivalents here.
+#
+# Only 1:1 mappings: bare "LicenseRef-BSD" stays as-is because the BSD version
+# is unknown. NVIDIA EULAs (LicenseRef-NVIDIA-*) are preserved because they are
+# not on the SPDX license list.
+
+_LICENSE_REF_NORMALIZE: dict[str, str] = {
+    # Apache-2.0 variants (12 spellings observed in syft output).
+    "LicenseRef-Apache": "Apache-2.0",
+    "LicenseRef-Apache-2": "Apache-2.0",
+    "LicenseRef-Apache-2.0": "Apache-2.0",
+    "LicenseRef-Apache-2.0-License": "Apache-2.0",
+    "LicenseRef-Apache-License-2.0": "Apache-2.0",
+    "LicenseRef-Apache-License-v2.0": "Apache-2.0",
+    "LicenseRef-Apache-License-Version-2.0": "Apache-2.0",
+    "LicenseRef-Apache-License--Version-2.0": "Apache-2.0",
+    "LicenseRef-Apache-Software-License": "Apache-2.0",
+    # MIT variants. Expat is the original name of the MIT license.
+    "LicenseRef-Expat": "MIT",
+    "LicenseRef-MIT": "MIT",
+    "LicenseRef-MIT-License": "MIT",
+    # BSD variants where the version is explicit. Bare "LicenseRef-BSD" is
+    # ambiguous and intentionally left alone.
+    "LicenseRef-BSD-2": "BSD-2-Clause",
+    "LicenseRef-BSD-3": "BSD-3-Clause",
+    "LicenseRef-BSD-4": "BSD-4-Clause",
+    "LicenseRef-BSD-2-Clause-License": "BSD-2-Clause",
+    "LicenseRef-BSD-3-Clause-License": "BSD-3-Clause",
+    # Tautological - syft sometimes emits "LicenseRef-UNKNOWN" which makes
+    # downstream license-counting code think the row is resolved.
+    "LicenseRef-UNKNOWN": "UNKNOWN",
+}
+
+# Splits an SPDX expression on AND/OR/WITH operators while preserving the
+# operator chunks so we can reconstruct the expression after token rewriting.
+_SPDX_OP_RE = re.compile(r"(\s+(?:AND|OR|WITH)\s+)")
+
+# Syft sometimes tokenizes English preamble words from license texts as
+# separate LicenseRef-* identifiers (e.g. the PSF preamble "By using this
+# software... Permission is granted... Redistribution and use..." becomes
+# "LicenseRef-By AND ... LicenseRef-Permission AND LicenseRef-Redistribution AND
+# LicenseRef-This"). When two or more of these noise tokens co-occur in a
+# compound, the entire expression is unreliable and should fall back to UNKNOWN
+# so the curated overrides in license_overrides.yaml can fill it in.
+_NOISE_LICENSE_REFS: frozenset[str] = frozenset(
+    {
+        "LicenseRef-By",
+        "LicenseRef-This",
+        "LicenseRef-Permission",
+        "LicenseRef-Redistribution",
+        "LicenseRef-Use",
+        "LicenseRef-And",
+        "LicenseRef-For",
+        "LicenseRef-To",
+        "LicenseRef-Of",
+        "LicenseRef-That",
+        "LicenseRef-Is",
+        "LicenseRef-Are",
+    }
+)
+
+
+def _normalize_one_token(token: str) -> str:
+    """Rewrite a single SPDX token, preserving wrapping parentheses."""
+    bare = token.strip("()")
+    n_lead = len(token) - len(token.lstrip("("))
+    n_trail = len(token) - len(token.rstrip(")"))
+    return "(" * n_lead + _LICENSE_REF_NORMALIZE.get(bare, bare) + ")" * n_trail
+
+
+def _normalize_license_refs(expr: str) -> str:
+    """Rewrite known LicenseRef-* tokens to canonical SPDX identifiers.
+
+    Operates on full SPDX expressions including AND/OR/WITH compounds. Only
+    rewrites tokens we have unambiguous 1:1 mappings for; ambiguous LicenseRef-
+    entries (bare LicenseRef-BSD, hash-based identifiers, NVIDIA EULAs) and
+    license strings already in canonical SPDX form pass through unchanged.
+
+    If the expression contains two or more noise LicenseRef- tokens (English
+    preamble words syft mis-parsed as license identifiers), the entire
+    expression is collapsed to "UNKNOWN" so a curated override can supply the
+    real value.
+    """
+    if not expr or expr == "UNKNOWN":
+        return expr
+    # _SPDX_OP_RE.split returns [tok, sep, tok, sep, ..., tok]; even indices
+    # are tokens, odd indices are AND/OR/WITH separators we pass through.
+    parts = _SPDX_OP_RE.split(expr)
+    tokens = parts[::2]
+    if sum(1 for t in tokens if t.strip("()") in _NOISE_LICENSE_REFS) >= 2:
+        return "UNKNOWN"
+    parts[::2] = [_normalize_one_token(t) for t in tokens]
+    return "".join(parts)
+
+
 # ---- Existing CSV pipeline (preserved byte-for-byte) --------------------------
 
 
@@ -65,7 +168,7 @@ def read_tsv(tsv_path: Path, pkg_type: str) -> list[dict[str, str]]:
                 "package_name": pkg_name,
                 "version": version,
                 "type": pkg_type,
-                "spdx_license": spdx_license,
+                "spdx_license": _normalize_license_refs(spdx_license),
             }
         )
     return packages
@@ -128,33 +231,65 @@ def _resolve_python_csv_licenses(
 
 
 @functools.lru_cache(maxsize=None)
-def _load_overrides(yaml_path: str) -> dict[tuple[str, str], str]:
-    """Load (ecosystem, name) -> SPDX license map from a hand-curated YAML.
+def _load_overrides(
+    yaml_path: str,
+) -> tuple[dict[tuple[str, str], str], tuple[tuple[str, str, str], ...]]:
+    """Load curated overrides from YAML.
+
+    Returns ``(exact_map, pattern_list)``:
+
+    - ``exact_map``: {(ecosystem, name): license} for entries with an exact
+      ``name`` field. O(1) lookup.
+    - ``pattern_list``: tuple of (ecosystem, fnmatch_glob, license) for entries
+      with ``name_pattern``. O(N_patterns) per package, evaluated only on rows
+      that miss the exact map.
 
     Used to fill in licenses for packages that public registries cannot
     resolve (NVIDIA-internal CUDA components, repackaged wheels with empty
     PyPI metadata, OpenSSL's DEP-5 copyright file, etc). Missing or unreadable
-    YAML returns an empty map - the rest of the pipeline degrades to UNKNOWN
-    just as it did before.
+    YAML returns empty containers - the rest of the pipeline degrades to
+    UNKNOWN just as it did before.
     """
     if yaml is None or not yaml_path:
-        return {}
+        return {}, ()
     path = Path(yaml_path)
     if not path.is_file():
-        return {}
+        return {}, ()
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:  # pragma: no cover - defensive
         print(f"WARNING: failed to parse {yaml_path}: {exc}", file=sys.stderr)
-        return {}
-    out: dict[tuple[str, str], str] = {}
+        return {}, ()
+    exact: dict[tuple[str, str], str] = {}
+    patterns: list[tuple[str, str, str]] = []
     for entry in data.get("overrides", []) or []:
         ecosystem = (entry.get("ecosystem") or "").strip().lower()
         name = (entry.get("name") or "").strip()
+        name_pattern = (entry.get("name_pattern") or "").strip()
         license_id = (entry.get("license") or "").strip()
-        if ecosystem and name and license_id:
-            out[(ecosystem, name)] = license_id
-    return out
+        if not ecosystem or not license_id:
+            continue
+        if name:
+            exact[(ecosystem, name)] = license_id
+        elif name_pattern:
+            patterns.append((ecosystem, name_pattern, license_id))
+    return exact, tuple(patterns)
+
+
+def _resolve_override(
+    exact: dict[tuple[str, str], str],
+    patterns: tuple[tuple[str, str, str], ...],
+    ecosystem: str,
+    name: str,
+) -> str | None:
+    """Return the override license for ``(ecosystem, name)`` or None."""
+    license_id = exact.get((ecosystem, name))
+    if license_id:
+        return license_id
+    for pat_ecosystem, pat_glob, pat_license in patterns:
+        if pat_ecosystem == ecosystem and fnmatch.fnmatchcase(name, pat_glob):
+            return pat_license
+    return None
 
 
 def _apply_overrides_to_csv(
@@ -167,18 +302,16 @@ def _apply_overrides_to_csv(
     """
     if not overrides_path:
         return 0
-    overrides = _load_overrides(overrides_path)
-    if not overrides:
+    exact, patterns = _load_overrides(overrides_path)
+    if not exact and not patterns:
         return 0
     rewritten = 0
     for pkg in packages:
         if (pkg.get("spdx_license") or "UNKNOWN") != "UNKNOWN":
             continue
-        key = (
-            (pkg.get("type") or "").strip().lower(),
-            (pkg.get("package_name") or "").strip(),
-        )
-        license_id = overrides.get(key)
+        ecosystem = (pkg.get("type") or "").strip().lower()
+        name = (pkg.get("package_name") or "").strip()
+        license_id = _resolve_override(exact, patterns, ecosystem, name)
         if license_id:
             pkg["spdx_license"] = license_id
             rewritten += 1
@@ -197,15 +330,15 @@ def _apply_overrides_to_pkgs(
     """
     if not overrides_path:
         return 0
-    overrides = _load_overrides(overrides_path)
-    if not overrides:
+    exact, patterns = _load_overrides(overrides_path)
+    if not exact and not patterns:
         return 0
     rewritten = 0
     for pkg in pkgs:
         if (pkg.get("license") or "UNKNOWN") != "UNKNOWN":
             continue
-        key = (ecosystem, (pkg.get("name") or "").strip())
-        license_id = overrides.get(key)
+        name = (pkg.get("name") or "").strip()
+        license_id = _resolve_override(exact, patterns, ecosystem, name)
         if license_id:
             pkg["license"] = license_id
             rewritten += 1
@@ -271,7 +404,7 @@ def _spdx_license_for_pkg(pkg: dict[str, Any]) -> str:
     for key in ("licenseConcluded", "licenseDeclared"):
         val = pkg.get(key)
         if val and val not in ("NOASSERTION", "NONE", ""):
-            return val
+            return _normalize_license_refs(val)
     return "UNKNOWN"
 
 
@@ -705,6 +838,26 @@ Examples:
     if not target_packages:
         print(f"ERROR: no packages found in {target_dir}", file=sys.stderr)
         sys.exit(1)
+
+    # First-party Dynamo wheels (ai-dynamo, ai-dynamo-runtime, dynamo-*) are
+    # filtered from the python attributions markdown by write_attributions_python.
+    # Match that behavior in the CSV pipeline so attribution.csv and
+    # ATTRIBUTIONS-Python.md describe the same third-party set.
+    before_first_party = len(target_packages)
+    target_packages = [
+        pkg
+        for pkg in target_packages
+        if not (
+            pkg.get("type") == "python"
+            and _is_first_party_python(pkg.get("package_name", ""))
+        )
+    ]
+    dropped_first_party = before_first_party - len(target_packages)
+    if dropped_first_party:
+        print(
+            f"  filtered {dropped_first_party} first-party Dynamo python rows",
+            file=sys.stderr,
+        )
 
     if args.lookup_licenses:
         _resolve_python_csv_licenses(target_packages, args.license_cache)
