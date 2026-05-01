@@ -27,6 +27,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
     KvEventPublisher,
@@ -456,12 +457,14 @@ class LoraMixin:
                             # this, prefill workers register the LoRA as a
                             # chat-completions target and the frontend routes
                             # chat requests directly to prefill, which then
-                            # waits forever for a KV transfer.
+                            # waits forever for a KV transfer. For non-prefill
+                            # workers, honor --endpoint-types so the LoRA is
+                            # exposed on the same endpoints as the base model.
                             if self.config.serving_mode == DisaggregationMode.PREFILL:
                                 lora_model_type = ModelType.Prefill
                             else:
-                                lora_model_type = (
-                                    ModelType.Chat | ModelType.Completions
+                                lora_model_type = parse_endpoint_types(
+                                    self.config.dynamo_args.endpoint_types
                                 )
                             await register_llm(
                                 model_input=ModelInput.Tokens,
