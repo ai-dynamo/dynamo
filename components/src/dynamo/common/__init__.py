@@ -25,3 +25,5 @@ except Exception:
         __version__ = "0.0.0+unknown"
 
 __all__ = ["__version__", "config_dump", "constants", "utils"]
+
+# revalidate 9d0755a4931 2026-05-01T18:49:04Z
