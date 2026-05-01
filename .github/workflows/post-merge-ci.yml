@@ -547,6 +547,20 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  vllm-dev-copy-to-acr:
+    name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-dev-build]
+    if: |
+      always() &&
+      needs.vllm-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, sglang-test]
@@ -562,6 +576,20 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  sglang-dev-copy-to-acr:
+    name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-dev-build]
+    if: |
+      always() &&
+      needs.sglang-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, trtllm-test]
@@ -572,6 +600,20 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  trtllm-dev-copy-to-acr:
+    name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-dev-build]
+    if: |
+      always() &&
+      needs.trtllm-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.trtllm-dev-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 20

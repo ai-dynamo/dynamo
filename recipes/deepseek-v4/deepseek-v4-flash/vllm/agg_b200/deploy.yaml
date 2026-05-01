@@ -10,11 +10,6 @@
 # Shape: 1 replica x 4 B200 GPUs, DP=4 + Expert Parallel, TP=1.
 #        Tested on 4 of 8 GPUs per B200 node.
 #
-# Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
-#        includes the DeepSeek-V4 stack. See `../container/README.md`
-#        for the reference build -- it overlays dynamo on
-#        vllm/vllm-openai:deepseekv4-cu130.
-#
 # Weights: served from the `model-cache` PVC populated by
 #          `../../model-cache/model-download.yaml`.
 apiVersion: nvidia.com/v1alpha1
@@ -35,7 +30,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -53,7 +48,7 @@ spec:
         size: 200Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           # Up to ~60 min for first launch: weight load + FlashInfer autotune +
           # cudagraph warmup. periodSeconds * failureThreshold = 10 * 360 = 3600s.

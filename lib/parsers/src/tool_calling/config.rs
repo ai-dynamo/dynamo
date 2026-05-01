@@ -32,6 +32,15 @@ pub struct JsonParserConfig {
     /// `tool_call_end_tokens` are ignored.
     #[serde(default)]
     pub bare_json_mode: bool,
+
+    /// Allow recovery when the outer end-token is missing (max_tokens / EOS
+    /// truncation). Streaming jails MUST leave this `false` — otherwise the
+    /// parser claims "complete tool call" before the end-token has actually
+    /// arrived and `should_exit_jail_early` fires too aggressively. Finalize
+    /// / aggregate paths set it to `true` so a real but unterminated call
+    /// isn't silently dropped.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -44,6 +53,7 @@ impl Default for JsonParserConfig {
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
             bare_json_mode: false,
+            allow_eof_recovery: false,
         }
     }
 }
@@ -62,6 +72,11 @@ pub struct XmlParserConfig {
     pub parameter_start_token: String,
     /// End token for parameter (e.g., `</parameter>`)
     pub parameter_end_token: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for XmlParserConfig {
@@ -73,6 +88,7 @@ impl Default for XmlParserConfig {
             function_end_token: "</function>".to_string(),
             parameter_start_token: "<parameter=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -125,6 +141,11 @@ pub struct Glm47ParserConfig {
     pub arg_value_start: String,
     /// End token for argument value (e.g., "</arg_value>")
     pub arg_value_end: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for Glm47ParserConfig {
@@ -136,6 +157,7 @@ impl Default for Glm47ParserConfig {
             arg_key_end: "</arg_key>".to_string(),
             arg_value_start: "<arg_value>".to_string(),
             arg_value_end: "</arg_value>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -433,6 +455,7 @@ impl ToolCallConfig {
                 function_end_token: "</invoke>".to_string(),
                 parameter_start_token: "<parameter name=".to_string(),
                 parameter_end_token: "</parameter>".to_string(),
+                allow_eof_recovery: false,
             }),
         }
     }

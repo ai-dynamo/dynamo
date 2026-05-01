@@ -16,12 +16,6 @@
 #     --reasoning-parser deepseek_v4
 #
 # Shape: 1 replica x 8 GPUs, TP=8 + Expert Parallel. Fills a single 8-GPU node.
-#
-# Image: replace the `:my-tag` placeholder with a Dynamo + vLLM image that
-#        includes the DeepSeek-V4 stack. See `../container/README.md`
-#        for the reference build -- it overlays dynamo on
-#        vllm/vllm-openai:deepseekv4-cu130.
-#
 # Weights: served from the `model-cache` PVC populated by
 #          `../../model-cache/model-download.yaml`.
 apiVersion: nvidia.com/v1alpha1
@@ -42,7 +36,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -60,7 +54,7 @@ spec:
         size: 200Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           # DeepSeek-V4-Pro (1.6T params) is large; first launch loads weights
           # over TP=8 ranks plus FlashInfer autotune + cudagraph warmup. Allow

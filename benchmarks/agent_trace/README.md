@@ -21,6 +21,9 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 - one LLM request slice per Dynamo `request_end`
 - prefill wait, prefill, and decode stage slices stacked under the request by
   default
+- one tool slice per harness `tool_end`/`tool_error` when tool duration is
+  available; otherwise the converter pairs `tool_start` with the terminal tool
+  event when both records are present
 - optional first-token markers with `--include-markers`
 
 Use `--no-stages` for a compact request-only view. Use
@@ -29,3 +32,12 @@ debugging Perfetto nesting or label rendering.
 
 Stage slice boundaries are normalized to avoid same-thread overlap caused by
 independent metric rounding. Raw timing fields remain available in event args.
+
+## Validate Converter
+
+The converter has a local self-check that is intentionally not wired into the
+main pytest suite:
+
+```bash
+python3 benchmarks/agent_trace/validate_convert_to_perfetto.py
+```
