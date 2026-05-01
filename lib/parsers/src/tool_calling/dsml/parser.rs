@@ -290,39 +290,46 @@ mod tests {
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._mixed_param_types_vllm,
     //                                      ..._special_chars_vllm)
     //   - CASE.8   streaming              (test_detect_tool_call_start_v4, test_find_tool_call_end_position_v4,
+    //                                      test_streaming_chunk_boundary_split_v4,
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._fragmented_tokens_vllm)
-    //   - CASE.9   reasoning-plus-tool    (lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm
-    //                                      — fixtures include <think>...</think> alongside DSML)
-    //   - CASE.10  reasoning-only         (reasoning/mod.rs :: test_deepseek_v4_detect_and_parse etc.)
-    //   - CASE.12  finish-reason          (lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm →
-    //                                      FinishReason::ToolCalls; ..._with_no_tools_vllm → FinishReason::Stop
-    //                                      — Length variant NOT covered, see TODO)
+    //   - CASE.9   reasoning-plus-tool    (test_parse_reasoning_plus_tool_v4;
+    //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._with_tools_vllm)
+    //   - CASE.10  reasoning-only         (test_parse_reasoning_only_no_tool_v4;
+    //                                      reasoning/mod.rs :: test_deepseek_v4_detect_and_parse etc.)
+    //   - CASE.11  tool_choice            (lib/llm/tests/tool_choice.rs ::
+    //                                      test_deepseek_v4_tool_choice_{auto,required_pins_current_behavior,
+    //                                      named_correct_tool_passes,named_wrong_tool_filtered};
+    //                                      parser-level invariant in
+    //                                      test_parser_does_not_filter_by_tool_choice_v4;
+    //                                      cross-parser tool_choice parametrisation work-item (tracked separately) covers full cross-parser parametrisation)
+    //   - CASE.12  finish-reason          (parser-level invariant in
+    //                                      test_parser_output_independent_of_upstream_finish_v4;
+    //                                      cross-parser stop/tool_calls/length mapping is
+    //                                      cross-parser finish_reason mapping work-item (tracked separately); lib/llm/tests/test_streaming_tool_parsers
+    //                                      covers ToolCalls / Stop on E2E fixtures)
     //   - CASE.13  interleaved-text       (test_parse_deepseek_v4_multiple_tool_calls prefix text;
     //                                      lib/llm/tests/test_streaming_tool_parsers :: ..._content_before_tool_vllm)
+    //   - CASE.14  empty/null             (test_parse_empty_and_whitespace_inputs_v4)
+    //   - CASE.15  duplicate-calls        (test_parse_duplicate_invokes_same_name_v4)
     //
     //   - CASE.xml.*  N/A — DSML carries per-parameter string="true|false" type hints,
     //                  so XML entity decoding (CASE.xml.entities) and schema-aware
     //                  coercion (CASE.xml.schema-coercion) don't apply.
     //   - CASE.harmony.* N/A — Harmony-only.
     //
-    // TODO — not yet covered for V4:
-    //   - CASE.5  Fix mid-stream truncation: parser currently drops all calls when
-    //             </｜DSML｜tool_calls> is absent (max_tokens / EOS before close).
-    //             Same class as Kimi K2 pre-PR #8208. Recovery pattern: scan for
-    //             complete <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without
-    //             the outer close fence (see kimi_k2_parser.rs for precedent).
-    //             Pinning tests below capture the current silent-drop behavior;
-    //             flip them when recovery lands.
-    //   - CASE.4  Variants not pinned: missing </｜DSML｜parameter> close tag,
-    //             middle-invoke truncation corrupting subsequent invokes (non-greedy
-    //             regex bleed-through). Same structural class as CASE.5.
-    //   - CASE.11 tool_choice auto/required/named/none — cross-parser suites at
-    //             lib/llm/tests/tool_choice.rs run hermes only; V4 not exercised.
-    //   - CASE.12 FinishReason::Length — current E2E fixtures only cover Stop and
-    //             ToolCalls finish reasons. No truncation-forcing fixture.
-    //   - CASE.14 empty-content / null response at the e2e layer.
-    //   - CASE.15 duplicate-calls (same name twice) — universal gap across all parsers.
-    //   - CASE.16 regression — V4 is hours old (2026-04-24); no customer bugs filed yet.
+    // TODO — bugs pinned, parser still needs to be fixed:
+    //   - CASE.5  BUG: parser drops all calls when </｜DSML｜tool_calls> is
+    //             absent (max_tokens / EOS before close). Same class as
+    //             Kimi K2 pre-PR #8208. Fix: scan for complete
+    //             <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without the
+    //             outer close fence (see kimi_k2_parser.rs for precedent).
+    //             Pinning tests below assert the current silent-drop;
+    //             flip them once the parser is fixed.
+    //   - (CASE.4 missing-parameter-close & middle-invoke-truncation now
+    //     pinned: see test_parse_deepseek_v4_missing_parameter_close_loses_param,
+    //     test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next.)
+    // No customer-incident regression tests yet — V4 is hours old
+    // (2026-04-24) and no bugs have been filed against it.
     // -------------------------------------------------------------------
 
     /// `CASE.8` — streaming start-token detection (V4 variant).
@@ -969,5 +976,215 @@ mod tests {
             "Malformed invoke (missing </｜DSML｜invoke>) is dropped today. \
              If recovery is added, flip this assertion."
         );
+    }
+
+    /// `CASE.4` — malformed invoke (missing `</｜DSML｜parameter>` close tag).
+    /// The parameter regex requires its closing tag; if a parameter never
+    /// closes before `</｜DSML｜invoke>`, the parameter is silently lost
+    /// while the call itself still parses. Pin the partial behavior.
+    ///
+    /// TODO(CASE.4) — BUG, NEEDS FIX: parser silently loses the parameter
+    /// and ships an under-specified call to the user. The fix should keep
+    /// the raw value up to `</｜DSML｜invoke>`. Flip this test once fixed.
+    #[test] // CASE.4, CASE.23
+    fn test_parse_deepseek_v4_missing_parameter_close_loses_param() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"test\">\n\
+<｜DSML｜parameter name=\"x\" string=\"true\">value\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        // PIN_ME: replace with observed behavior after first run.
+        assert_eq!(calls.len(), 1);
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "test");
+        assert!(
+            args.get("x").is_none(),
+            "Expected 'x' to be dropped because </｜DSML｜parameter> is missing; \
+             got args={args}"
+        );
+    }
+
+    /// `CASE.4` — middle-invoke truncation. If invoke A is missing its
+    /// `</｜DSML｜invoke>` and invoke B follows inside the same outer block,
+    /// A's body bleeds through into B (regex non-greedy match consumes B's
+    /// markup). Pin the corruption.
+    ///
+    /// TODO(CASE.4) — BUG, NEEDS FIX: A swallows B's parameters and B is
+    /// silently dropped — caller receives wrong args for A and never sees
+    /// B at all. Fix: anchor on `<｜DSML｜invoke name=` to re-sync between
+    /// invokes. Flip this test once fixed.
+    #[test] // CASE.4, CASE.23
+    fn test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"a\">\n\
+<｜DSML｜parameter name=\"x\" string=\"true\">1</｜DSML｜parameter>\n\
+<｜DSML｜invoke name=\"b\">\n\
+<｜DSML｜parameter name=\"y\" string=\"true\">2</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        // Today: invoke A absorbs invoke B's parameter (regex bleed) and B is
+        // dropped entirely. Wrong-but-stable; pin so a fix is intentional.
+        assert_eq!(calls.len(), 1, "B is dropped; A is the lone survivor");
+        let (name, args) = extract_name_and_args(calls[0].clone());
+        assert_eq!(name, "a");
+        assert_eq!(args["x"], "1", "A's own parameter still parses correctly");
+        assert_eq!(
+            args["y"], "2",
+            "BUG: B's parameter bleeds into A because A's body match runs \
+             past the missing </｜DSML｜invoke> until B's close tag"
+        );
+    }
+
+    /// `CASE.8` — streaming chunk-boundary split. Token-by-token assembly:
+    /// the start-token detector and end-position lookup must each tolerate
+    /// the block boundary landing in the middle of a multi-byte fence.
+    #[test] // CASE.8
+    fn test_streaming_chunk_boundary_split_v4() {
+        let config = get_v4_test_config();
+        // Detector should fire on a partial start fence (one char short).
+        assert!(detect_tool_call_start_dsml("<｜DSML｜tool_call", &config));
+        // And on an empty buffer that ends with the very first char of the fence.
+        assert!(detect_tool_call_start_dsml("<", &config));
+        // End-position lookup must return chunk.len() when the end fence
+        // hasn't arrived yet — caller is expected to keep buffering.
+        let partial = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"a\">\n";
+        assert_eq!(
+            find_tool_call_end_position_dsml(partial, &config),
+            partial.len(),
+            "Partial chunk without close fence must report end=len so caller buffers more"
+        );
+    }
+
+    /// `CASE.9` — paired reasoning + tool in same response. DSv4 emits
+    /// `<think>...</think>` before the DSML block; the tool parser is
+    /// concerned only with the DSML, but normal text must round-trip
+    /// the reasoning markup verbatim for the reasoning parser to pick up.
+    #[test] // CASE.9
+    fn test_parse_reasoning_plus_tool_v4() {
+        let input = "<think>Let me check the weather.</think>\
+<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+        let config = get_v4_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let normal = normal_text.unwrap_or_default();
+        assert!(
+            normal.contains("<think>") && normal.contains("</think>"),
+            "Reasoning markup must be preserved in normal_text for the \
+             downstream reasoning parser; got {:?}",
+            normal
+        );
+    }
+
+    /// `CASE.10` — reasoning only (think tags, no tool call). Parser must
+    /// return zero calls and pass the entire input through as normal text.
+    #[test] // CASE.10
+    fn test_parse_reasoning_only_no_tool_v4() {
+        let input = "<think>Just thinking out loud, no tools needed.</think>";
+        let config = get_v4_test_config();
+        let (calls, normal_text) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert!(calls.is_empty());
+        assert_eq!(normal_text.as_deref(), Some(input));
+    }
+
+    /// Parser-level invariant: the dsml parser does NOT filter by
+    /// `tool_choice` — it returns every well-formed invoke, and the jail /
+    /// response builder above this layer is responsible for filtering per
+    /// `tool_choice=named`/`required`/`none`. Real CASE.11 coverage lives
+    /// at the integration layer (`lib/llm/tests/tool_choice.rs`).
+    #[test]
+    fn test_parser_does_not_filter_by_tool_choice_v4() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜invoke name=\"get_time\">\n\
+<｜DSML｜parameter name=\"tz\" string=\"true\">EST</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 2);
+    }
+
+    /// Parser-level invariant: the dsml parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output for any upstream
+    /// stream-end reason. Real CASE.12 coverage (stop / tool_calls / length
+    /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
+    /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
+    #[test]
+    fn test_parser_output_independent_of_upstream_finish_v4() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// `CASE.14` — empty / null content variants. Pin behavior on truly
+    /// empty bytes and whitespace-only inputs.
+    #[test] // CASE.14
+    fn test_parse_empty_and_whitespace_inputs_v4() {
+        let config = get_v4_test_config();
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) = try_tool_call_parse_dsml(input, &config).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            // Empty input fast-path returns Some(""); other whitespace is
+            // trimmed before the search and the no-block branch returns the
+            // trimmed (also empty) string.
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text"
+            );
+        }
+    }
+
+    /// `CASE.15` — duplicate calls (same invoke name twice in one block).
+    /// Universal gap noted in the test taxonomy; first DSML coverage.
+    #[test] // CASE.15
+    fn test_parse_duplicate_invokes_same_name_v4() {
+        let input = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"city\" string=\"true\">LA</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>";
+        let config = get_v4_test_config();
+        let (calls, _) = try_tool_call_parse_dsml(input, &config).unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "Both duplicate-name invokes must be returned"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let (_, args0) = extract_name_and_args(calls[0].clone());
+        let (_, args1) = extract_name_and_args(calls[1].clone());
+        assert_eq!(args0["city"], "NYC");
+        assert_eq!(args1["city"], "LA");
     }
 }
