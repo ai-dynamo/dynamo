@@ -309,7 +309,30 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             Some(ctx.request_size),
             &result.headers,
         ));
-        ctx.req_body_resp = envoy_helpers::build_request_body_responses(raw_body);
+
+        // Inject nvext.token_data into the request body JSON so the backend
+        // skips redundant tokenization. Mirrors Go EPP's setTokenizedPrompt.
+        let forwarded_body = if let Some(ref token_ids) = result.token_ids {
+            match inject_token_data(raw_body, token_ids) {
+                Ok(modified) => {
+                    tracing::info!(
+                        token_count = token_ids.len(),
+                        body_size_before = raw_body.len(),
+                        body_size_after = modified.len(),
+                        "Injected nvext.token_data into request body"
+                    );
+                    modified
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to inject token_data, forwarding original body");
+                    raw_body.to_vec()
+                }
+            }
+        } else {
+            raw_body.to_vec()
+        };
+
+        ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
         tracing::info!(
             has_header_resp = ctx.req_header_resp.is_some(),
             body_resp_count = ctx.req_body_resp.len(),
@@ -507,6 +530,37 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 // ---------------------------------------------------------------------------
 // Request helpers (mirrors Go LW-EPP request.go)
 // ---------------------------------------------------------------------------
+
+/// Inject pre-computed token IDs into the request body JSON as
+/// `nvext.token_data`. This lets the backend skip redundant tokenization.
+/// Mirrors Go EPP's `setTokenizedPrompt` in `shared.go`.
+fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> {
+    let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
+
+    let obj = parsed
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
+
+    let nvext = obj
+        .entry("nvext")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    let nvext_obj = nvext
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
+
+    nvext_obj.insert(
+        "token_data".to_string(),
+        serde_json::Value::Array(
+            token_ids
+                .iter()
+                .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
+                .collect(),
+        ),
+    );
+
+    Ok(serde_json::to_vec(&parsed)?)
+}
 
 /// Extract the "model" field from a JSON request body.
 /// Mirrors Go LW-EPP `extractModelFromBody`.

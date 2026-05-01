@@ -779,6 +779,7 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
+            token_ids: Some(tokens),
         })
     }
 }
