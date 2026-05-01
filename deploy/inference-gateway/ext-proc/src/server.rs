@@ -268,6 +268,13 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
 
+        // Merge routing headers from the picker into the request headers.
+        // These are Dynamo-specific headers (worker IDs, DP ranks, routing mode)
+        // that the backend workers need.
+        for (k, v) in &result.headers {
+            ctx.request_headers.push((k.clone(), v.clone()));
+        }
+
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,

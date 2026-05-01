@@ -47,6 +47,8 @@ pub struct Router {
     model_manager: Arc<ModelManager>,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
+    drt: DistributedRuntime,
+    target_namespace: String,
 }
 
 impl Router {
@@ -135,6 +137,8 @@ impl Router {
             model_manager,
             preprocessor: bootstrap.preprocessor,
             runtime,
+            drt,
+            target_namespace: actual_namespace.to_string(),
         })
     }
 
@@ -150,6 +154,90 @@ impl Router {
 
         let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
         Ok(encoding.token_ids().to_vec())
+    }
+
+    /// Resolve a worker_id to a pod endpoint address via Dynamo discovery.
+    /// Used when no external endpoint list is provided (the router picks
+    /// workers from its own discovery, and we need the pod's IP:port for
+    /// the Envoy routing header).
+    pub async fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
+        let discovery = self.drt.discovery();
+        let instances = match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(error = %e, "Discovery list failed during endpoint resolution");
+                return None;
+            }
+        };
+
+        for instance in &instances {
+            if let DiscoveryInstance::Model { namespace, .. } = instance {
+                if !namespace.starts_with(&self.target_namespace) {
+                    continue;
+                }
+                if instance.instance_id() == worker_id {
+                    if let DiscoveryInstance::Endpoint(inst) = instance {
+                        match &inst.transport {
+                            dynamo_runtime::component::TransportType::Tcp(addr)
+                            | dynamo_runtime::component::TransportType::Http(addr) => {
+                                return Some(addr.clone());
+                            }
+                            dynamo_runtime::component::TransportType::Nats(_) => {}
+                        }
+                    }
+                }
+            }
+
+            if let DiscoveryInstance::Endpoint(inst) = instance {
+                if !inst.namespace.starts_with(&self.target_namespace) {
+                    continue;
+                }
+                if inst.instance_id == worker_id {
+                    match &inst.transport {
+                        dynamo_runtime::component::TransportType::Tcp(addr)
+                        | dynamo_runtime::component::TransportType::Http(addr) => {
+                            return Some(addr.clone());
+                        }
+                        dynamo_runtime::component::TransportType::Nats(_) => {}
+                    }
+                }
+            }
+        }
+
+        tracing::warn!(worker_id, "Could not resolve worker_id to endpoint via discovery");
+        None
+    }
+
+    /// Resolve any available worker to its endpoint address via discovery.
+    /// Used for body-less requests (GET /v1/models) where we just need any
+    /// backend to forward to.
+    pub async fn resolve_any_worker_endpoint(&self) -> Option<String> {
+        let discovery = self.drt.discovery();
+        let instances = match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(error = %e, "Discovery list failed");
+                return None;
+            }
+        };
+
+        for instance in &instances {
+            if let DiscoveryInstance::Endpoint(inst) = instance {
+                if !inst.namespace.starts_with(&self.target_namespace) {
+                    continue;
+                }
+                match &inst.transport {
+                    dynamo_runtime::component::TransportType::Tcp(addr)
+                    | dynamo_runtime::component::TransportType::Http(addr) => {
+                        return Some(addr.clone());
+                    }
+                    dynamo_runtime::component::TransportType::Nats(_) => {}
+                }
+            }
+        }
+
+        tracing::warn!("No worker endpoints found via discovery");
+        None
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -565,32 +653,49 @@ impl EndpointPicker for Router {
         req: &RequestInfo,
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError> {
-        if endpoints.is_empty() {
-            return Err(PickError::NoEndpoints);
-        }
-
-        let subset_filtered = apply_subset_filter(endpoints, &req.candidate_subset);
-        let effective = if subset_filtered.is_empty() && !req.candidate_subset.is_empty() {
-            tracing::warn!(
-                subset = ?req.candidate_subset,
-                total_endpoints = endpoints.len(),
-                "No endpoints match subset hint, falling back to full list"
-            );
-            endpoints.iter().collect::<Vec<_>>()
+        // When the endpoint list is populated (e.g. from a K8s datastore),
+        // use it to constrain which workers the router may select. When empty,
+        // fall back to the router's own discovery-based worker set.
+        let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
+            (None, Vec::new())
         } else {
-            subset_filtered
+            let subset_filtered = apply_subset_filter(endpoints, &req.candidate_subset);
+            let effective = if subset_filtered.is_empty() && !req.candidate_subset.is_empty() {
+                tracing::warn!(
+                    subset = ?req.candidate_subset,
+                    total_endpoints = endpoints.len(),
+                    "No endpoints match subset hint, falling back to full list"
+                );
+                endpoints.iter().collect::<Vec<_>>()
+            } else {
+                subset_filtered
+            };
+
+            if req.body.is_empty() {
+                return Ok(PickResult {
+                    endpoint: effective[0].address_port(),
+                    ..Default::default()
+                });
+            }
+
+            let wm: Vec<(u64, &Endpoint)> = effective
+                .iter()
+                .map(|ep| (hash_pod_name(&ep.pod_name), *ep))
+                .collect();
+            let ids: HashSet<u64> = wm.iter().map(|(id, _)| *id).collect();
+            (Some(ids), wm)
         };
 
-        let worker_map: Vec<(u64, &Endpoint)> = effective
-            .iter()
-            .map(|ep| (hash_pod_name(&ep.pod_name), *ep))
-            .collect();
-        let allowed_worker_ids: HashSet<u64> = worker_map.iter().map(|(id, _)| *id).collect();
-
         if req.body.is_empty() {
+            // No body (GET request) and no external endpoint list —
+            // resolve any worker via discovery and forward to it.
+            let endpoint = self
+                .resolve_any_worker_endpoint()
+                .await
+                .ok_or(PickError::NoEndpoints)?;
             return Ok(PickResult {
-                endpoint: effective[0].address_port(),
-                fallbacks: vec![],
+                endpoint,
+                ..Default::default()
             });
         }
 
@@ -601,44 +706,70 @@ impl EndpointPicker for Router {
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
 
-        let filter = if allowed_worker_ids.is_empty() {
-            None
-        } else {
-            Some(allowed_worker_ids)
-        };
+        // Try prefill routing first (disaggregated mode).
+        // If the prefill router is not activated, this returns an error
+        // and we fall back to aggregated (decode-only) routing.
+        let prefill_result = self
+            .route_prefill(&tokens, allowed_worker_ids.clone())
+            .await;
+
+        let is_disaggregated = prefill_result.is_ok();
 
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, false, filter)
+            .route_decode(&tokens, is_disaggregated, allowed_worker_ids)
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
-        let endpoint = worker_map
-            .iter()
-            .find(|(wid, _)| *wid == decode_worker.worker_id)
-            .map(|(_, ep)| ep.address_port())
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    worker_id = decode_worker.worker_id,
-                    "Selected worker not in endpoint list, using first available"
-                );
-                effective
-                    .first()
-                    .map_or_else(|| endpoints[0].address_port(), |ep| ep.address_port())
-            });
+        let endpoint = if worker_map.is_empty() {
+            self.resolve_worker_endpoint(decode_worker.worker_id)
+                .await
+                .unwrap_or_else(|| format!("worker-{}", decode_worker.worker_id))
+        } else {
+            worker_map
+                .iter()
+                .find(|(wid, _)| *wid == decode_worker.worker_id)
+                .map(|(_, ep)| ep.address_port())
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        worker_id = decode_worker.worker_id,
+                        "Selected worker not in endpoint list, using first available"
+                    );
+                    endpoints[0].address_port()
+                })
+        };
+
+        // Build routing headers matching the Go EPP's disagg plugin:
+        // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
+        // x-prefill-dp-rank, x-dynamo-routing-mode
+        let mut headers = vec![
+            ("x-worker-instance-id".to_string(), format!("{:x}", decode_worker.worker_id)),
+            ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
+        ];
+
+        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
+            headers.push(("x-dynamo-routing-mode".to_string(), "disaggregated".to_string()));
+            headers.push(("x-prefill-instance-id".to_string(), format!("{:x}", prefill_worker_id)));
+            if let Some(rank) = prefill_dp_rank {
+                headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
+            }
+        } else {
+            headers.push(("x-dynamo-routing-mode".to_string(), "aggregated".to_string()));
+        }
 
         tracing::info!(
             worker_id = decode_worker.worker_id,
             dp_rank = decode_worker.dp_rank,
+            is_disaggregated,
             endpoint = %endpoint,
             token_count = tokens.len(),
             model = %req.model,
-            subset_active = !req.candidate_subset.is_empty(),
             "Picked endpoint"
         );
 
         Ok(PickResult {
             endpoint,
             fallbacks: vec![],
+            headers,
         })
     }
 }

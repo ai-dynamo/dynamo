@@ -46,13 +46,17 @@ pub struct RequestInfo {
 }
 
 /// PickResult contains the endpoint selection result.
-/// Mirrors Go `epplight.PickResult`.
-#[derive(Debug, Clone)]
+/// Mirrors Go `epplight.PickResult`, extended with Dynamo-specific
+/// routing headers that the backend workers need.
+#[derive(Debug, Clone, Default)]
 pub struct PickResult {
     /// Primary endpoint in "ip:port" format
     pub endpoint: String,
     /// Optional fallback endpoints in "ip:port" format
     pub fallbacks: Vec<String>,
+    /// Extra headers to inject into the forwarded request.
+    /// Used by Dynamo for routing metadata (worker IDs, DP ranks, routing mode).
+    pub headers: Vec<(String, String)>,
 }
 
 /// EndpointPicker is the central abstraction for endpoint selection.

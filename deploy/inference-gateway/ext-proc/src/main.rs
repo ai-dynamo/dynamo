@@ -134,38 +134,50 @@ async fn main() -> Result<()> {
         .await;
     tracing::info!("Router initialized, health status set to SERVING");
 
-    // Serve ext-proc over TLS on port 9002.
-    let tls_acceptor = create_tls_acceptor()?;
     let picker = Arc::new(router);
     let server = ExtProcServer::new(picker);
-    let svc = server.into_service();
+    let secure_serving = parse_env("DYN_SECURE_SERVING", true);
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{GRPC_PORT}")).await?;
-    tracing::info!(port = GRPC_PORT, "Listening for ext_proc connections (TLS)");
+    if secure_serving {
+        let tls_acceptor = create_tls_acceptor()?;
+        let svc = server.into_service();
+        let listener = TcpListener::bind(addr).await?;
+        tracing::info!(%addr, "Listening for ext_proc connections (TLS)");
 
-    loop {
-        let (tcp_stream, remote_addr) = listener.accept().await?;
-        let tls_acceptor = tls_acceptor.clone();
-        let svc = svc.clone();
+        loop {
+            let (tcp_stream, remote_addr) = listener.accept().await?;
+            let tls_acceptor = tls_acceptor.clone();
+            let svc = svc.clone();
 
-        tokio::spawn(async move {
-            let tls_stream = match tls_acceptor.accept(tcp_stream).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::debug!(%remote_addr, error = %e, "TLS handshake failed");
-                    return;
+            tokio::spawn(async move {
+                let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::debug!(%remote_addr, error = %e, "TLS handshake failed");
+                        return;
+                    }
+                };
+
+                let io = hyper_util::rt::TokioIo::new(tls_stream);
+                let hyper_svc = hyper_util::service::TowerToHyperService::new(svc);
+                if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                )
+                .serve_connection(io, hyper_svc)
+                .await
+                {
+                    tracing::debug!(%remote_addr, error = %e, "Connection ended");
                 }
-            };
-
-            let io = hyper_util::rt::TokioIo::new(tls_stream);
-            let hyper_svc = hyper_util::service::TowerToHyperService::new(svc);
-            if let Err(e) =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection(io, hyper_svc)
-                    .await
-            {
-                tracing::debug!(%remote_addr, error = %e, "Connection ended");
-            }
-        });
+            });
+        }
+    } else {
+        tracing::info!(%addr, "Listening for ext_proc connections (plaintext h2)");
+        tonic::transport::Server::builder()
+            .add_service(server.into_service())
+            .serve(addr)
+            .await?;
     }
+
+    Ok(())
 }
