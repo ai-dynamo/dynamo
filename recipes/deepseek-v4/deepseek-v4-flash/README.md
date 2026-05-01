@@ -27,11 +27,11 @@ Status: **Experimental** (Day-0). Modality: text only.
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.
 4. **Container image.** Pick the path that matches your variant:
 
-   - **SGLang B200** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
+   - **SGLang B200** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` directly — **no build step required.** Optionally users can build SGLang images from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 
    - **SGLang GB200** (`sglang-agg-gb200`): the manifest pulls the prebuilt arm64 NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — same story, **no build step required.**
 
-   - **vLLM** (`vllm-agg-b200` or `vllm-agg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — same story, **no build step required.**
+   - **vLLM** (`vllm-agg-b200` or `vllm-agg-gb200`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` directly — same story, **no build step required.** Optionally users can build vllm image with:
 
      ```bash
      container/render.py --framework vllm --target runtime --output-short-filename
