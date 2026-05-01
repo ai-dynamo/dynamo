@@ -254,7 +254,7 @@ the ZMQ endpoint, not directly to Dynamo's event plane.
 Read compressed trace records directly:
 
 ```bash
-gzip -cd /tmp/dynamo-agent-trace.*.jsonl.gz | jq .
+gzip -cd "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz | jq .
 ```
 
 Each line is a recorder envelope:
@@ -267,11 +267,11 @@ Convert traces to Chrome Trace JSON for Perfetto UI:
 
 ```bash
 python3 benchmarks/agent_trace/convert_to_perfetto.py \
-  "/tmp/dynamo-agent-trace.*.jsonl.gz" \
-  --output /tmp/dynamo-agent-trace.perfetto.json
+  "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
+  --output "${DYN_AGENT_TRACE_OUTPUT_PATH}.perfetto.json"
 ```
 
-Open `/tmp/dynamo-agent-trace.perfetto.json` in
+Open `${DYN_AGENT_TRACE_OUTPUT_PATH}.perfetto.json` in
 [Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
 slice grouped by workflow and program lane. Tool terminal records become tool
 slices on adjacent tool tracks. The converter prefers explicit
@@ -371,14 +371,17 @@ source .venv/bin/activate
 
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=unused
-export DYNAMO_AGENT_WORKFLOW_TYPE_ID=ms_agent
-export DYNAMO_AGENT_WORKFLOW_ID=ms-agent-$(date +%s)
-export DYNAMO_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+export DYN_AGENT_WORKFLOW_TYPE_ID=ms_agent
+export DYN_AGENT_WORKFLOW_ID=ms-agent-$(date +%s)
+export DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
 ```
+
+Use `DYN_AGENT_TRACE_*` variables for the Dynamo runtime and
+`DYN_AGENT_*` variables for the ms-agent harness process.
 
 The fork automatically attaches `nvext.agent_context` and `x-request-id` to
 ms-agent OpenAI-compatible LLM calls while an agent context is active. When
-`DYNAMO_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` is set, the ms-agent CLI also binds a
+`DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` is set, the ms-agent CLI also binds a
 ZMQ PUB socket and publishes tool lifecycle records to Dynamo's tool-event
 relay. Shared tool execution paths publish directly to that root publisher;
 `agent_tools` subprocesses forward normalized tool records back to the root
@@ -390,6 +393,10 @@ For DeepResearch v2, keep the normal ms-agent setup: configure
 `OPENAI_BASE_URL`, `OPENAI_API_KEY`, search keys such as `EXA_API_KEY`, and the
 model names in `projects/deep_research/v2/*.yaml`. Then run the workflow from
 the fork root:
+
+> [!WARNING]
+> `--trust_remote_code true` is security-sensitive. Use it only with trusted
+> repositories and configs.
 
 ```bash
 PYTHONPATH=. python ms_agent/cli/cli.py run \
