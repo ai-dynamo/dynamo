@@ -682,6 +682,11 @@ impl SyncIndexer for ConcurrentRadixTree {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
                 }

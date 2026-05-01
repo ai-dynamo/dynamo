@@ -68,8 +68,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, MatchDetails, PreBoundEventCounters,
-    SyncIndexer, WorkerTask,
+    AnchorRef, AnchorTask, EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError,
+    MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerTask,
 };
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
@@ -267,6 +267,7 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
+    anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
 }
 
@@ -280,6 +281,7 @@ impl Default for ConcurrentRadixTreeCompressed {
 // This custom drop uses an iterative approach.
 impl Drop for ConcurrentRadixTreeCompressed {
     fn drop(&mut self) {
+        self.anchor_nodes.clear();
         let mut stack: Vec<SharedNode> = Vec::new();
         {
             let mut root = self.root.write();
@@ -299,6 +301,7 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(RwLock::new(Node::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
         }
     }
@@ -366,6 +369,21 @@ impl ConcurrentRadixTreeCompressed {
         let resolved = Self::find_in_subtree(&node, hash)?;
         worker_lookup.insert(hash, resolved.clone());
         Some(resolved)
+    }
+
+    fn resolve_anchor_lookup(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+        hash: ExternalSequenceBlockHash,
+    ) -> Option<SharedNode> {
+        let node = self.anchor_nodes.get(&hash)?.clone();
+        {
+            let mut guard = node.write();
+            guard.promote_to_full(worker);
+        }
+        lookup.entry(worker).or_default().insert(hash, node.clone());
+        Some(node)
     }
 
     // ------------------------------------------------------------------
@@ -491,6 +509,21 @@ impl ConcurrentRadixTreeCompressed {
         sequence: &[LocalBlockHash],
         early_exit: bool,
     ) -> MatchDetails {
+        let next_child = if sequence.is_empty() {
+            None
+        } else {
+            let root_guard = read_lock!(self, self.root);
+            root_guard.children.get(&sequence[0]).cloned()
+        };
+        self.find_match_details_from_child(next_child, sequence, early_exit)
+    }
+
+    fn find_match_details_from_child(
+        &self,
+        mut next_child: Option<SharedNode>,
+        sequence: &[LocalBlockHash],
+        early_exit: bool,
+    ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.is_empty() {
             return details;
@@ -510,11 +543,6 @@ impl ConcurrentRadixTreeCompressed {
         // Workers that drop at a node boundary (not present in the new node)
         // were last matched at the end of the previous edge.
         let mut prev_edge_last_hash: Option<ExternalSequenceBlockHash> = None;
-
-        let mut next_child = {
-            let root_guard = read_lock!(self, self.root);
-            root_guard.children.get(&sequence[0]).cloned()
-        };
 
         loop {
             if seq_pos >= sequence.len() {
@@ -711,17 +739,20 @@ impl ConcurrentRadixTreeCompressed {
                         let wl = lookup.get_mut(&worker).unwrap();
                         match Self::resolve_lookup(wl, parent_hash) {
                             Some(n) => n,
-                            None => {
-                                tracing::warn!(
-                                    worker_id = worker.worker_id.to_string(),
-                                    dp_rank = worker.dp_rank,
-                                    id,
-                                    parent_hash = ?op.parent_hash,
-                                    num_blocks = op.blocks.len(),
-                                    "Failed to find parent block; skipping store operation"
-                                );
-                                return Err(KvCacheEventError::ParentBlockNotFound);
-                            }
+                            None => match self.resolve_anchor_lookup(lookup, worker, parent_hash) {
+                                Some(n) => n,
+                                None => {
+                                    tracing::warn!(
+                                        worker_id = worker.worker_id.to_string(),
+                                        dp_rank = worker.dp_rank,
+                                        id,
+                                        parent_hash = ?op.parent_hash,
+                                        num_blocks = op.blocks.len(),
+                                        "Failed to find parent block; skipping store operation"
+                                    );
+                                    return Err(KvCacheEventError::ParentBlockNotFound);
+                                }
+                            },
                         }
                     };
 
@@ -1360,6 +1391,11 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
                 }
@@ -1387,6 +1423,64 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn apply_anchor(
+        &self,
+        worker: WorkerWithDpRank,
+        anchor: AnchorTask,
+    ) -> Result<(), KvCacheEventError> {
+        let anchor_node = {
+            let entry = self
+                .anchor_nodes
+                .entry(anchor.anchor_id)
+                .or_insert_with(|| {
+                    let edge = vec![(anchor.anchor_local_hash, anchor.anchor_id)];
+                    let mut edge_index = FxHashMap::default();
+                    edge_index.insert(anchor.anchor_id, 0);
+                    Arc::new(RwLock::new(Node {
+                        edge,
+                        edge_index,
+                        worker_cutoffs: FxHashMap::default(),
+                        full_edge_workers: FxHashSet::default(),
+                        children: FxHashMap::default(),
+                    }))
+                });
+            entry.clone()
+        };
+
+        {
+            let mut guard = anchor_node.write();
+            guard.promote_to_full(worker);
+        }
+        Ok(())
+    }
+
+    fn find_matches_from_anchor(
+        &self,
+        anchor: AnchorRef,
+        suffix: &[LocalBlockHash],
+    ) -> Result<OverlapScores, KvRouterError> {
+        let Some(anchor_node) = self
+            .anchor_nodes
+            .get(&anchor.anchor_id)
+            .map(|entry| entry.clone())
+        else {
+            return Ok(OverlapScores::new());
+        };
+        let mut sequence = Vec::with_capacity(suffix.len() + 1);
+        sequence.push(anchor.anchor_local_hash);
+        sequence.extend_from_slice(suffix);
+        let mut scores = self
+            .find_match_details_from_child(Some(anchor_node), &sequence, false)
+            .overlap_scores;
+        let depth_adjustment = anchor.anchor_depth.saturating_sub(1) as u32;
+        if depth_adjustment > 0 {
+            for score in scores.scores.values_mut() {
+                *score += depth_adjustment;
+            }
+        }
+        Ok(scores)
     }
 
     fn try_schedule_cleanup(&self) -> bool {
