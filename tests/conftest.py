@@ -271,11 +271,10 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
         for item in session.items
     ):
         models = getattr(config, "models_to_download", None)
-        model_list = list(models) if models else None
-        model_names = ", ".join(model_list) if model_list else "default test models"
+        model_names = ", ".join(models) if models else "default test models"
         with FileLock(_download_lock_path):
             print(f"GPU parallel: pre-downloading models: {model_names}")
-            download_models(model_list=model_list)
+            download_models(model_list=list(models) if models else None)
         _enable_offline_with_mistral_patch()
         os.environ[_GPU_PARALLEL_DOWNLOADS_READY_ENV] = "1"
         downloads_ready = True
