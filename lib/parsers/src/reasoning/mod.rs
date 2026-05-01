@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 mod base_parser;
+mod gemma4_parser;
 mod gpt_oss_parser;
 mod granite_parser;
 mod minimax_append_think_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
+pub use gemma4_parser::Gemma4ReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
@@ -58,6 +60,11 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
             "minimax_append_think",
             ReasoningParserType::MiniMaxAppendThink,
         );
+        // Gemma 4 thinking models: reasoning is wrapped in `<|channel>...<channel|>`
+        // with a `thought\n` role label that this parser strips. Pair with
+        // `--dyn-tool-call-parser gemma4` for end-to-end Gemma 4 support.
+        map.insert("gemma4", ReasoningParserType::Gemma4);
+        map.insert("gemma-4", ReasoningParserType::Gemma4);
         map
     })
 }
@@ -140,6 +147,9 @@ pub enum ReasoningParserType {
     Mistral,
     Granite,
     MiniMaxAppendThink,
+    /// Google Gemma 4 thinking models. Custom `<|channel>...<channel|>`
+    /// delimiters with a `thought\n` role-label prefix stripped by the parser.
+    Gemma4,
 }
 
 #[derive(std::fmt::Debug)]
@@ -240,6 +250,9 @@ impl ReasoningParserType {
             ReasoningParserType::MiniMaxAppendThink => ReasoningParserWrapper {
                 parser: Box::new(MiniMaxAppendThinkParser::new()),
             },
+            ReasoningParserType::Gemma4 => ReasoningParserWrapper {
+                parser: Box::new(Gemma4ReasoningParser::new()),
+            },
         }
     }
 
@@ -289,6 +302,8 @@ mod tests {
             "nemotron3",
             "glm45",
             "minimax_append_think",
+            "gemma4",
+            "gemma-4",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
