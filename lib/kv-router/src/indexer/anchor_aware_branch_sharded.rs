@@ -363,7 +363,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         });
     }
 
-    async fn dispatch_read(
+    fn dispatch_read(
         &self,
         node: Arc<RoutingNode>,
         sequence: Vec<LocalBlockHash>,
@@ -589,9 +589,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
                 let routing_ns = t_routing.elapsed().as_nanos() as u64;
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
-                let result = self
-                    .dispatch_read(node, sequence, router_scores, active)
-                    .await;
+                let result = self.dispatch_read(node, sequence, router_scores, active);
                 #[cfg(feature = "bench")]
                 {
                     self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);

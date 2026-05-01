@@ -90,6 +90,47 @@ type SharedNode = Arc<RwLock<Node>>;
 /// stored here, keeping the map compact and correct across concurrent splits.
 type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
 
+// For short anchored reads this avoids a Vec allocation. For long suffixes,
+// materializing once is faster than paying virtual-index branching throughout
+// the radix walk.
+const MAX_NO_COPY_ANCHORED_SUFFIX_BLOCKS: usize = 32;
+
+trait HashSequence {
+    fn len(&self) -> usize;
+    fn at(&self, index: usize) -> LocalBlockHash;
+}
+
+struct SliceHashSequence<'a>(&'a [LocalBlockHash]);
+
+impl HashSequence for SliceHashSequence<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn at(&self, index: usize) -> LocalBlockHash {
+        self.0[index]
+    }
+}
+
+struct AnchoredHashSequence<'a> {
+    head: LocalBlockHash,
+    tail: &'a [LocalBlockHash],
+}
+
+impl HashSequence for AnchoredHashSequence<'_> {
+    fn len(&self) -> usize {
+        self.tail.len() + 1
+    }
+
+    fn at(&self, index: usize) -> LocalBlockHash {
+        if index == 0 {
+            self.head
+        } else {
+            self.tail[index - 1]
+        }
+    }
+}
+
 /// A node in the concurrent radix tree.
 ///
 /// Stores a compressed edge with per-worker match indices. Workers with full coverage
@@ -520,12 +561,21 @@ impl ConcurrentRadixTreeCompressed {
 
     fn find_match_details_from_child(
         &self,
-        mut next_child: Option<SharedNode>,
+        next_child: Option<SharedNode>,
         sequence: &[LocalBlockHash],
         early_exit: bool,
     ) -> MatchDetails {
+        self.find_match_details_from_child_seq(next_child, SliceHashSequence(sequence), early_exit)
+    }
+
+    fn find_match_details_from_child_seq<S: HashSequence>(
+        &self,
+        mut next_child: Option<SharedNode>,
+        sequence: S,
+        early_exit: bool,
+    ) -> MatchDetails {
         let mut details = MatchDetails::new();
-        if sequence.is_empty() {
+        if sequence.len() == 0 {
             return details;
         }
 
@@ -563,7 +613,7 @@ impl ConcurrentRadixTreeCompressed {
                 // First element is guaranteed by the parent's children HashMap lookup.
                 let mut match_len = 1;
                 for i in 1..walk_len {
-                    if guard.edge[i].0 != sequence[seq_pos + i] {
+                    if guard.edge[i].0 != sequence.at(seq_pos + i) {
                         break;
                     }
                     match_len += 1;
@@ -637,7 +687,7 @@ impl ConcurrentRadixTreeCompressed {
                 {
                     guard
                         .children
-                        .get(&sequence[seq_pos + edge_match_len])
+                        .get(&sequence.at(seq_pos + edge_match_len))
                         .cloned()
                 } else {
                     None
@@ -1468,12 +1518,22 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         else {
             return Ok(OverlapScores::new());
         };
-        let mut sequence = Vec::with_capacity(suffix.len() + 1);
-        sequence.push(anchor.anchor_local_hash);
-        sequence.extend_from_slice(suffix);
-        let mut scores = self
-            .find_match_details_from_child(Some(anchor_node), &sequence, false)
-            .overlap_scores;
+        let details = if suffix.len() <= MAX_NO_COPY_ANCHORED_SUFFIX_BLOCKS {
+            self.find_match_details_from_child_seq(
+                Some(anchor_node),
+                AnchoredHashSequence {
+                    head: anchor.anchor_local_hash,
+                    tail: suffix,
+                },
+                false,
+            )
+        } else {
+            let mut sequence = Vec::with_capacity(suffix.len() + 1);
+            sequence.push(anchor.anchor_local_hash);
+            sequence.extend_from_slice(suffix);
+            self.find_match_details_from_child(Some(anchor_node), &sequence, false)
+        };
+        let mut scores = details.overlap_scores;
         let depth_adjustment = anchor.anchor_depth.saturating_sub(1) as u32;
         if depth_adjustment > 0 {
             for score in scores.scores.values_mut() {
