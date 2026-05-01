@@ -50,16 +50,16 @@ groups turns by
 `workflow_id:program_id`, emits `timestamp` on the first turn in each session,
 and emits `delay` on later turns based on the gap from the previous request end
 to the next request start. Stable trace `input_sequence_hashes` are compacted to
-Mooncake `hash_ids` during conversion. The `hash_ids` describe the cumulative
-input blocks for each LLM request; replay decides reuse by comparing those
-request block IDs against the cache state modeled by the replay engine.
+Mooncake `hash_ids` during conversion. The `hash_ids` are request-level cache
+keys: they describe the cumulative input blocks for each LLM request, not cache
+movement or observed reuse.
 
-This conversion does not reconstruct output token IDs or inject synthetic
-decode-produced KV events. For multi-turn agents, a later row can include blocks
-that came from an earlier assistant response because those blocks are part of the
-later request input. Modeling those blocks as already resident at the prior
-request completion requires an explicit replay event stream or sidecar and is
-tracked as follow-up work.
+Replay/mocker uses these request rows as reads and simulates KV writes/events
+from the configured engine, router, capacity, admission, and timing model. This
+can reproduce the same broad cache pattern as the live run when those parameters
+match, but it is not a byte-for-byte recording of the live cache event stream.
+For higher-fidelity cache movement, add an explicit replay event stream or
+sidecar rather than inferring hidden writes in the converter.
 
 Replay the output with the same block size used when the trace was captured.
 The converter prints this value after writing the Mooncake JSONL.

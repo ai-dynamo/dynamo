@@ -360,10 +360,12 @@ request/response payload capture and OpenTelemetry export for span-based
 observability.
 
 Replay hashes describe the cumulative input presented to each LLM request. They
-do not by themselves declare that a block was reused or that a prior decode
-stored a block in KV cache. Mooncake conversion maps these sequence hashes to
-compact per-file `hash_ids`; replay computes reuse from those request block IDs
-and the cache state modeled by the replay engine.
+do not by themselves declare cache movement, observed reuse, or that a prior
+decode stored a block in KV cache. Mooncake conversion maps these sequence
+hashes to compact per-file `hash_ids`; replay/mocker then treats those rows as
+request reads and simulates KV writes/events from the configured engine, router,
+capacity, admission, and timing model. The simulated cache pattern is only as
+exact as those replay parameters.
 
 ## Consistency Model
 
