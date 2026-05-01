@@ -169,6 +169,8 @@ def _flatten_tool_args(
     for key in (
         "tool_call_id",
         "tool_class",
+        "started_at_unix_ms",
+        "ended_at_unix_ms",
         "status",
         "duration_ms",
         "output_tokens",
@@ -347,10 +349,23 @@ def _prepare_tool_items(tool_records: list[dict[str, Any]]) -> list[dict[str, An
             matched_start = start_stack.pop()
 
         event_time_us = record["event_time_us"]
+        started_at_us = _ms_to_trace_us(tool.get("started_at_unix_ms"))
+        ended_at_us = _ms_to_trace_us(tool.get("ended_at_unix_ms"))
         duration_us = _ms_to_trace_us(tool.get("duration_ms"))
-        if duration_us is not None and duration_us > 0:
-            ts_us = max(0, event_time_us - duration_us)
-            dur_us = event_time_us - ts_us
+        if (
+            started_at_us is not None
+            and ended_at_us is not None
+            and ended_at_us > started_at_us
+        ):
+            ts_us = started_at_us
+            dur_us = ended_at_us - started_at_us
+        elif started_at_us is not None and duration_us is not None and duration_us > 0:
+            ts_us = started_at_us
+            dur_us = duration_us
+        elif duration_us is not None and duration_us > 0:
+            end_us = ended_at_us if ended_at_us is not None else event_time_us
+            ts_us = max(0, end_us - duration_us)
+            dur_us = end_us - ts_us
         elif (
             matched_start is not None and event_time_us > matched_start["event_time_us"]
         ):

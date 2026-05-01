@@ -136,10 +136,10 @@ def instrument_llm_request(kwargs, agent_context):
 
 ## Step 3: Send Tool Events to Dynamo
 
-Harnesses bind a local ZMQ PUB socket and publish tool lifecycle records on the
-configured endpoint. Dynamo accepts `tool_start`, `tool_end`, and `tool_error`
-records from the harness and writes them to the same trace stream as LLM request
-records.
+Harnesses bind a long-lived local ZMQ PUB socket and publish tool lifecycle
+records on the configured endpoint. Dynamo accepts `tool_start`, `tool_end`, and
+`tool_error` records from the harness and writes them to the same trace stream
+as LLM request records.
 
 The ZMQ wire format is:
 
@@ -147,11 +147,21 @@ The ZMQ wire format is:
 [topic, seq_be_u64, msgpack(AgentTraceRecord)]
 ```
 
-A minimal publisher looks like this:
+Use the same producer pattern as SGLang KV events: a bounded queue, a background
+publisher thread, monotonically increasing sequence numbers, and a PUB socket
+with a high-water mark. Plain ZMQ PUB/SUB is best-effort for early frames, so a
+terminal tool record should be self-contained with `started_at_unix_ms`,
+`ended_at_unix_ms`, and `duration_ms`. Keep `tool_start` for live/in-flight
+status, but do not require it to reconstruct completed spans.
+
+A compact publisher looks like this:
 
 ```python
+import atexit
 import msgpack
+import queue
 import struct
+import threading
 import time
 import zmq
 
@@ -160,16 +170,32 @@ class ZmqToolEventPublisher:
     def __init__(self, endpoint: str, topic: str = ""):
         self.topic = topic.encode("utf-8")
         self.seq = 0
+        self.queue = queue.Queue(maxsize=100_000)
         self.socket = zmq.Context.instance().socket(zmq.PUB)
+        self.socket.set_hwm(100_000)
         self.socket.bind(endpoint)
-        time.sleep(0.5)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        atexit.register(self.shutdown)
 
     def publish(self, record: dict):
-        self.seq += 1
         payload = msgpack.packb(record, use_bin_type=True)
-        self.socket.send_multipart(
-            [self.topic, struct.pack(">Q", self.seq), payload]
-        )
+        self.queue.put_nowait(payload)
+
+    def _run(self):
+        while True:
+            payload = self.queue.get()
+            if payload is None:
+                break
+            seq = self.seq
+            self.seq += 1
+            self.socket.send_multipart([self.topic, struct.pack(">Q", seq), payload])
+            self.queue.task_done()
+
+    def shutdown(self):
+        self.queue.put_nowait(None)
+        self.thread.join(timeout=1.0)
+        self.socket.close(linger=0)
 ```
 
 The record must include `agent_context`. Tool events should use the same
@@ -193,6 +219,8 @@ lanes.
     "tool_call_id": "call-abc",
     "tool_class": "web_search",
     "status": "succeeded",
+    "started_at_unix_ms": 1777312801080,
+    "ended_at_unix_ms": 1777312801500,
     "duration_ms": 420.5
   }
 }
@@ -226,9 +254,9 @@ python3 benchmarks/agent_trace/convert_to_perfetto.py \
 Open `/tmp/dynamo-agent-trace.perfetto.json` in
 [Perfetto UI](https://ui.perfetto.dev/). Each LLM request becomes a timeline
 slice grouped by workflow and program lane. Tool terminal records become tool
-slices on adjacent tool tracks when duration is available. If a terminal tool
-event has no duration, the converter pairs it with the matching `tool_start`
-record when present.
+slices on adjacent tool tracks. The converter prefers explicit
+`started_at_unix_ms`/`ended_at_unix_ms`, falls back to `duration_ms`, then pairs
+with the matching `tool_start` record when present.
 
 Useful converter flags:
 
@@ -250,10 +278,12 @@ Dynamo runtime APIs. The ms-agent integration used this shape:
 - Call one helper before each OpenAI-compatible LLM request to merge
   `extra_body.nvext.agent_context` and set `x-request-id`.
 - Emit `tool_start` and a terminal `tool_end` or `tool_error` wherever the
-  harness executes model-requested tools.
+  harness executes model-requested tools. Include `started_at_unix_ms`,
+  `ended_at_unix_ms`, and `duration_ms` on terminal records so completed spans
+  survive best-effort PUB/SUB startup loss.
 - Propagate context through thread pools, subprocesses, and subagent launches
   when those paths can make LLM calls or emit tool records.
-- Register a simple ZMQ publisher at process startup when tool tracing is
+- Register a queued ZMQ publisher at process startup when tool tracing is
   enabled.
 
 You do not need custom code in every tool implementation when existing tool

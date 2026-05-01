@@ -101,6 +101,10 @@ pub struct AgentToolEvent {
     pub tool_call_id: String,
     pub tool_class: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentToolStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
