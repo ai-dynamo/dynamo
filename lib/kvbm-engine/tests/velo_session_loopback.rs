@@ -248,6 +248,145 @@ async fn close_from_holder_terminates_streams() -> Result<()> {
 }
 
 // ============================================================================
+// Case: symmetric finalize() rendezvous
+// ============================================================================
+//
+// Asserts the cooperative shutdown protocol:
+//   1. One side calls `finalize()` → sends terminators +
+//      Frame::Finished. Wire stays alive (no Detached on peer).
+//   2. Other side calls `finalize()` → sends terminators +
+//      Frame::Finished. Now both sides have local+peer
+//      finished → both independently call velo
+//      `StreamSender::finalize`. Each sees the peer's
+//      `Finalized` sentinel and emits Detached lifecycle.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finalize_rendezvous_triggers_both_side_velo_finalize() -> Result<()> {
+    let (h, p) = paired_sides().await;
+    let session_id = uuid::Uuid::new_v4();
+
+    let h_session = h.factory.open(session_id)?;
+    let h_endpoint = h_session.endpoint().expect("holder endpoint");
+    let p_session = p
+        .factory
+        .attach(session_id, h.velo.instance_id(), h_endpoint)
+        .await?;
+
+    let mut h_lifecycle = h_session.lifecycle();
+    let evt = tokio::time::timeout(Duration::from_secs(30), h_lifecycle.next())
+        .await?
+        .expect("holder attached lifecycle");
+    assert!(matches!(evt, LifecycleEvent::Attached { .. }));
+
+    let mut p_lifecycle = p_session.lifecycle();
+    let mut p_commits = p_session.commits();
+    let mut p_avail = p_session.availability();
+
+    // Step 1: holder finalizes alone. Puller sees terminators
+    // but NOT Detached — wire is still alive.
+    h_session.finalize(Some("publish_done".to_string()));
+
+    let next = tokio::time::timeout(Duration::from_secs(30), p_commits.next()).await?;
+    assert!(
+        matches!(next, Some(CommitDelta::Closed)),
+        "expected Closed on commits, got {next:?}"
+    );
+    let next = tokio::time::timeout(Duration::from_secs(30), p_avail.next()).await?;
+    assert!(
+        matches!(next, Some(AvailabilityDelta::Drained)),
+        "expected Drained on availability, got {next:?}"
+    );
+
+    let lifecycle_outcome =
+        tokio::time::timeout(Duration::from_millis(500), p_lifecycle.next()).await;
+    assert!(
+        lifecycle_outcome.is_err(),
+        "finalize() (one side only) must NOT emit Detached on peer; got {:?}",
+        lifecycle_outcome
+    );
+
+    // Step 2: puller also finalizes. Now BOTH sides have
+    // local+peer finished, so both independently call velo
+    // `StreamSender::finalize`. Each side's monitor sees the
+    // `Finalized` sentinel → emits Detached.
+    p_session.finalize(Some("consume_done".to_string()));
+
+    let evt = tokio::time::timeout(Duration::from_secs(30), h_lifecycle.next())
+        .await?
+        .expect("holder detached after rendezvous");
+    assert!(
+        matches!(evt, LifecycleEvent::Detached { .. }),
+        "expected Detached on holder after rendezvous, got {evt:?}"
+    );
+    let evt = tokio::time::timeout(Duration::from_secs(30), p_lifecycle.next())
+        .await?
+        .expect("puller detached after rendezvous");
+    assert!(
+        matches!(evt, LifecycleEvent::Detached { .. }),
+        "expected Detached on puller after rendezvous, got {evt:?}"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Case: active_session_count gauge tracks open + drop accurately
+// ============================================================================
+//
+// Each `open` and `attach` increments the factory's gauge; the
+// `Drop` impl on `VeloSessionInner` decrements when the last
+// strong Arc is released. After both sides go through the
+// rendezvous and lifecycle watchers (or just an explicit drop),
+// the gauge returns to zero. Surfaces leaks if any strong ref
+// outlives the request.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_session_count_returns_to_zero() -> Result<()> {
+    let (h, p) = paired_sides().await;
+    assert_eq!(h.factory.active_session_count(), 0);
+    assert_eq!(p.factory.active_session_count(), 0);
+
+    let session_id = uuid::Uuid::new_v4();
+    let h_session = h.factory.open(session_id)?;
+    assert_eq!(h.factory.active_session_count(), 1);
+    let p_session = p
+        .factory
+        .attach(session_id, h.velo.instance_id(), h_session.endpoint().unwrap())
+        .await?;
+    assert_eq!(p.factory.active_session_count(), 1);
+
+    // Settle the bidi link.
+    let mut h_lifecycle = h_session.lifecycle();
+    let _ = tokio::time::timeout(Duration::from_secs(30), h_lifecycle.next()).await?;
+
+    // Trigger the rendezvous so each side's sender task
+    // processes `OutboundCommand::Finalize` and exits, dropping
+    // its `Arc<VeloSessionInner>`. Without this, sender tasks
+    // wait on `outbound_rx.recv()` forever (the only sender,
+    // `outbound_tx`, is owned by inner — circular).
+    h_session.finalize(Some("test_rendezvous".to_string()));
+    p_session.finalize(Some("test_rendezvous".to_string()));
+
+    drop(h_session);
+    drop(p_session);
+    drop(h_lifecycle);
+
+    // Allow sender tasks + monitor tasks to drop their inner refs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if h.factory.active_session_count() == 0 && p.factory.active_session_count() == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "gauge did not return to zero — holder={} puller={}",
+        h.factory.active_session_count(),
+        p.factory.active_session_count()
+    );
+}
+
+// ============================================================================
 // Case: Frame::PullAck on the holder's inbound dispatch drops pins
 // ============================================================================
 //

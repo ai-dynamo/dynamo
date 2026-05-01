@@ -8478,9 +8478,9 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "velo"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e0cc874c11ea3d03afd7adf90529bcf3df374039deff65bc02a26e71bb5814b"
+checksum = "6718fde677c836cdd0cc8d8f682eb936050df86783472560aece1169318d6f2b"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8516,9 +8516,9 @@ dependencies = [
 
 [[package]]
 name = "velo-discovery"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41107947fe3d15972c56815e42fd2485ca4ba58a5a69ec1a6fd61c00966f8734"
+checksum = "5124bffb71e05ada48e07fe819c597f94c11a13d12cb93cd6a3f1b232e705157"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -8556,9 +8556,9 @@ dependencies = [
 
 [[package]]
 name = "velo-messenger"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ada8ea47ab39a82ef9101024452a3c605bcf5c0acad82c76afcf48a17c0450cf"
+checksum = "4aa7577a4a21079219c196ada0c3d0274143fef5d09bade5907e50ce9958d599"
 dependencies = [
  "anyhow",
  "bs58",
@@ -8587,9 +8587,9 @@ dependencies = [
 
 [[package]]
 name = "velo-observability"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57813414b19b0f845744fcf158ed4b87afe4f5c59ee99d58872c8e5d5534d61b"
+checksum = "3882a39143c15390fe216242e73864b1a73d53090e13b7cc8c613987191177e3"
 dependencies = [
  "prometheus",
  "tracing",
@@ -8597,9 +8597,9 @@ dependencies = [
 
 [[package]]
 name = "velo-queue"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7bcce33f5710d87e33e1eacc5472300cbe6acdfb5f2cd6929c12f2e4908ef38"
+checksum = "3f79c9856688745477bde6e802ad9a8084762a64670673393fb15e7123c1d6e7"
 dependencies = [
  "bytes",
  "dashmap",
@@ -8617,9 +8617,9 @@ dependencies = [
 
 [[package]]
 name = "velo-rendezvous"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1eac77f329b0c3dba1b36114c969e0a7d680bb4a6436720754bef14a24fedde"
+checksum = "9a91178e37c1ce9f6704c2da7786bb028a007fbe312fcf9d14055a94af314af6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8635,9 +8635,9 @@ dependencies = [
 
 [[package]]
 name = "velo-streaming"
-version = "0.1.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd6dc0d71f73c6f369302bb94b05341a807a5693f6c321fc208d9c9a974d918a"
+checksum = "c508f272c5d6268695749a781a9e0c25cb0cbd9ef8a9e0cd1052d0b08f05683a"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8663,9 +8663,9 @@ dependencies = [
 
 [[package]]
 name = "velo-transports"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb5a348cc2fe13fc560824f170d3bdc3d10ec3a11802bb32489a59f49eb12409"
+checksum = "7ce09503ab1541a876700fd063e5c4cec5664a90c1ddd0e3819e29cabbbcd44c"
 dependencies = [
  "anyhow",
  "async-nats",

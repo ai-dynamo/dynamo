@@ -122,7 +122,18 @@ pub enum Frame {
     PullComplete { pull_id: u64 },
     /// Puller→holder. The puller's RDMA read settled.
     PullAck { pull_id: u64 },
-    /// Either side. Initiate teardown.
+    /// Either side. Declare "I have nothing more to publish or
+    /// initiate." Sent by [`Session::finalize`]. Idempotent.
+    /// When both sides have sent `Finished`, each side
+    /// independently calls velo `StreamSender::finalize` and
+    /// the peer's monitor surfaces `LifecycleEvent::Detached`
+    /// via the velo `Finalized` sentinel.
+    Finished,
+    /// Either side. Reserved for future explicit-detach use
+    /// cases. Cooperative shutdown goes through
+    /// [`Frame::Finished`]; abort goes through
+    /// [`Session::close`] which calls velo's wire-level
+    /// finalize directly without sending a protocol frame.
     Detach,
     /// Either side. Terminal error.
     Error { message: String },
@@ -212,8 +223,42 @@ pub trait Session: Send + Sync {
     /// streams; this one carries Attached/Detached/Failed.
     fn lifecycle(&self) -> LifecycleStream;
 
-    /// Finalize and tear down. Implies `finish_commits` and
-    /// `finish_availability` if not already called.
+    /// Declare this side is finished — symmetric cooperative shutdown.
+    ///
+    /// Semantics: "I have published everything I'm going to
+    /// publish AND I will not initiate any more pulls." Idempotent.
+    /// Sends `CommitsClosed` + `Drained` terminators (if not
+    /// already sent) and a `Finished` signal frame to the peer.
+    /// Does NOT detach the wire and does NOT call velo's
+    /// `StreamSender::finalize` — the caller may still be
+    /// obligated to respond to peer-initiated `Pull` frames with
+    /// `PullComplete`.
+    ///
+    /// When BOTH sides have called `finalize`, each side
+    /// independently triggers velo's `StreamSender::finalize`.
+    /// The peer's monitor sees the velo `Finalized` sentinel
+    /// and emits `LifecycleEvent::Detached`; the holder of the
+    /// `Arc<Session>` is responsible for dropping it on that
+    /// signal (typically via a lifecycle watcher).
+    ///
+    /// Failure modes:
+    /// - Peer dies without calling `finalize`: velo heartbeat
+    ///   surfaces `LifecycleEvent::Detached` independently.
+    /// - Peer never calls `finalize`: this side's local
+    ///   resources stay reserved until the caller's watchdog
+    ///   evicts them (recommended in production).
+    fn finalize(&self, reason: Option<String>);
+
+    /// Abort: forcibly tear down the wire from this side.
+    ///
+    /// Implies `finish_commits` + `finish_availability`, then
+    /// calls velo's `StreamSender::finalize` directly (sending
+    /// the `Finalized` sentinel on the wire). Does NOT send a
+    /// protocol-level Detach frame — velo's wire-level
+    /// finalize signals teardown to the peer's monitor, which
+    /// emits `LifecycleEvent::Detached`. Use only for
+    /// fatal-error / aborted-request scenarios; cooperative
+    /// shutdown goes through [`Self::finalize`].
     fn close(&self, reason: Option<String>);
 }
 
@@ -246,6 +291,13 @@ pub trait SessionFactory: Send + Sync {
         peer_instance_id: InstanceId,
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>>;
+
+    /// Live session count: incremented on `open` / `attach`,
+    /// decremented when the session's inner state drops. A
+    /// non-zero value after all known requests should have
+    /// completed indicates a leak — typically a held `Arc`
+    /// somewhere that the lifecycle watchers didn't release.
+    fn active_session_count(&self) -> usize;
 }
 
 // ============================================================================

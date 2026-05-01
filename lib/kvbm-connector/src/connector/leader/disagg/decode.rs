@@ -20,14 +20,25 @@
 //! plan §"Phase A error-path design (deferred)".
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use futures::StreamExt;
 use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest, SessionId};
-use kvbm_engine::disagg::session::{Session, SessionFactory};
+use kvbm_engine::disagg::session::{LifecycleEvent, Session, SessionFactory};
 use kvbm_logical::blocks::ImmutableBlock;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
+
+/// Defensive watchdog for the decode-side lifecycle watcher.
+/// In normal operation, the rendezvous-driven Detached
+/// arrives within a few ms of `process_finished_onboarding`
+/// (decode calls `session.finalize()`, prefill is already
+/// finalized or imminent). 60s is a well-padded fallback so
+/// session leaks are visible as evictions rather than as
+/// unbounded gauge drift.
+const LIFECYCLE_WATCHDOG: Duration = Duration::from_secs(60);
 
 use super::queue::RemotePrefillQueue;
 use super::{ConditionalDisaggPolicy, PolicyInputs, PrefillSelection};
@@ -147,6 +158,68 @@ impl RemotePrefillCoordinator {
         self.states
             .insert(request_id.to_string(), Arc::new(Mutex::new(state)));
 
+        // Spawn the lifecycle watcher: when the rendezvous fires
+        // (peer also called `finalize` → both sides triggered
+        // velo `StreamSender::finalize` → peer monitor sees
+        // `Finalized` → `LifecycleEvent::Detached`) OR velo
+        // heartbeat detects peer detach OR the watchdog times
+        // out, evict the per-request state. The session Arc
+        // held by the state map is the last strong ref; dropping
+        // it lets the per-session sender task drain and exit.
+        let watcher_session = Arc::clone(&session);
+        let watcher_request_id = request_id.to_string();
+        let watcher_session_id = session_id;
+        let watcher_coord = Arc::clone(self);
+        let watchdog = LIFECYCLE_WATCHDOG;
+        self.tokio_handle.spawn(async move {
+            let outcome = tokio::time::timeout(watchdog, async {
+                let mut lifecycle = watcher_session.lifecycle();
+                while let Some(event) = lifecycle.next().await {
+                    match event {
+                        LifecycleEvent::Detached { reason } => {
+                            crate::audit!(
+                                "decode_lifecycle_detached",
+                                role = "decode",
+                                request_id = %watcher_request_id,
+                                session_id = %watcher_session_id,
+                                reason = ?reason
+                            );
+                            return;
+                        }
+                        LifecycleEvent::Failed { reason } => {
+                            crate::audit!(
+                                "decode_lifecycle_failed",
+                                role = "decode",
+                                request_id = %watcher_request_id,
+                                session_id = %watcher_session_id,
+                                reason = %reason
+                            );
+                            return;
+                        }
+                        LifecycleEvent::Attached { .. } => {}
+                    }
+                }
+            })
+            .await;
+            if outcome.is_err() {
+                crate::audit!(
+                    "decode_lifecycle_watchdog_fired",
+                    role = "decode",
+                    request_id = %watcher_request_id,
+                    session_id = %watcher_session_id,
+                    watchdog_secs = watchdog.as_secs()
+                );
+                tracing::warn!(
+                    request_id = %watcher_request_id,
+                    session_id = %watcher_session_id,
+                    watchdog_secs = watchdog.as_secs(),
+                    "decode lifecycle watchdog fired without Detached; \
+                     evicting RemotePrefillState (potential session leak signal)"
+                );
+            }
+            watcher_coord.states.remove(&watcher_request_id);
+        });
+
         let endpoint = session.endpoint();
         tracing::info!(?endpoint, "decode endpoint published; enqueueing remote prefill request");
 
@@ -207,9 +280,14 @@ impl RemotePrefillCoordinator {
         self.states.len()
     }
 
-    /// Drop per-request state and close the session.  Idempotent.
+    /// Cooperative end-of-request: declare decode is finished
+    /// (worker pulls confirmed via process_finished_onboarding)
+    /// and remove the per-request state. Session stays alive
+    /// until the rendezvous fires (peer also finalizes) or velo
+    /// heartbeat detects the peer is gone — at which point the
+    /// lifecycle watcher drops the session Arc. Idempotent.
     pub fn release(&self, request_id: &str) {
-        if let Some((_, state)) = self.states.remove(request_id) {
+        if let Some(state) = self.state_for(request_id) {
             let session = {
                 let mut s = state.lock();
                 if s.status != RemotePrefillStatus::Failed {
@@ -217,10 +295,13 @@ impl RemotePrefillCoordinator {
                 }
                 Arc::clone(&s.session)
             };
-            session.close(Some("released".to_string()));
+            session.finalize(Some("released".to_string()));
         }
     }
 
+    /// Abort path: forcibly tear down the session. Used when
+    /// the request has failed and we don't want to wait for
+    /// the cooperative rendezvous.
     pub(crate) fn mark_failed(&self, request_id: &str, reason: String) {
         if let Some(state) = self.state_for(request_id) {
             let session = {

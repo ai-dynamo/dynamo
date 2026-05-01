@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -32,8 +32,6 @@ use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
-
-use serde::{Deserialize, Serialize};
 
 use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock, Frame,
@@ -47,22 +45,6 @@ use crate::{BlockId, G2, InstanceId, SequenceHash};
 /// Distinct from the legacy `kvbm_conditional_disagg_v1` so the
 /// two impls cannot accidentally interop.
 pub const SESSION_STREAM_SCHEMA: &str = "kvbm_cd_session_v2";
-
-/// Wire-level wrapper assigning a monotonically increasing
-/// per-direction sequence number to each `Frame`. velo's
-/// active-message dispatcher spawns a fresh tokio task per
-/// inbound message (`InlineDispatcher::dispatch`); those tasks
-/// race for the inbound flume channel, so AM bytes can be
-/// reordered relative to the sender's call order. The receive
-/// side reorders by `seq` before invoking the per-variant
-/// dispatch, restoring the FIFO guarantee the protocol depends
-/// on (e.g. `Available` must precede `Drained`, `CommitsClosed`
-/// must follow all `Commit` frames).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SeqFrame {
-    seq: u64,
-    frame: Frame,
-}
 
 // ============================================================================
 // Replay-buffered single-consumer stream
@@ -130,16 +112,6 @@ enum OutboundCommand {
     Finalize,
 }
 
-/// Receive-side reorder state. Frames arrive over velo's
-/// AM-dispatched inbound flume in non-deterministic order
-/// despite single-task FIFO sends; this small buffer holds
-/// future seqs until their predecessors arrive, then drains
-/// the contiguous prefix.
-struct RecvState {
-    buffer: BTreeMap<u64, Frame>,
-    next_seq: u64,
-}
-
 struct VeloSessionInner {
     session_id: SessionId,
     velo: Arc<velo::Velo>,
@@ -154,15 +126,7 @@ struct VeloSessionInner {
     /// once it exists. Holder side: installed on inbound
     /// `Frame::Attach`. Puller side: installed inline by the
     /// factory before the sender task starts. Taken exactly once.
-    outbound_install_tx: Mutex<Option<oneshot::Sender<velo::StreamSender<SeqFrame>>>>,
-    /// Monotonic outbound sequence counter assigned by the
-    /// sender task as it drains the mpsc, so wire seqs match
-    /// drain order. Receivers buffer + reorder by seq.
-    outbound_seq: AtomicU64,
-    /// Receive-side reorder buffer + expected seq. Velo's AM
-    /// dispatcher races concurrent inbound tasks; the monitor
-    /// inserts arriving `SeqFrame`s here and drains in seq order.
-    recv_state: Mutex<RecvState>,
+    outbound_install_tx: Mutex<Option<oneshot::Sender<velo::StreamSender<Frame>>>>,
 
     /// Peer's identity, set when we receive `Frame::Attach`
     /// (holder side) or pre-known via the `attach` path
@@ -201,6 +165,18 @@ struct VeloSessionInner {
     commits_closed: Mutex<bool>,
     avail_drained: Mutex<bool>,
 
+    /// `finished()` was called locally — we send `Frame::Finished`
+    /// exactly once.
+    local_finished: Mutex<bool>,
+    /// Peer has sent `Frame::Finished`. When this AND
+    /// `local_finished` are both true, `maybe_finalize` enqueues
+    /// `OutboundCommand::Finalize` (idempotent).
+    peer_finished: Mutex<bool>,
+    /// Idempotent guard so we only enqueue Finalize once even
+    /// if `maybe_finalize` is called from both `finished()` and
+    /// inbound `Frame::Finished` dispatch.
+    finalize_enqueued: Mutex<bool>,
+
     /// Set when monitor detects shutdown, used to short-circuit.
     closed: Mutex<bool>,
 
@@ -214,6 +190,22 @@ struct VeloSessionInner {
     /// do not need this handle, but the dispatch path (Attach
     /// install, etc.) does.
     runtime: Handle,
+
+    /// Shared with the factory; decremented on `Drop`. Lets the
+    /// factory expose an `active_session_count` gauge without
+    /// holding strong refs into every live session.
+    active_count: Arc<AtomicUsize>,
+}
+
+impl Drop for VeloSessionInner {
+    fn drop(&mut self) {
+        let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
+        crate::engine_audit!(
+            "session_inner_dropped",
+            session_id = %self.session_id,
+            active_after = prev.saturating_sub(1)
+        );
+    }
 }
 
 // ============================================================================
@@ -250,8 +242,15 @@ impl VeloSession {
         local_endpoint: Option<SessionEndpoint>,
         runtime: Handle,
         outbound_tx: mpsc::UnboundedSender<OutboundCommand>,
-        outbound_install_tx: oneshot::Sender<velo::StreamSender<SeqFrame>>,
+        outbound_install_tx: oneshot::Sender<velo::StreamSender<Frame>>,
+        active_count: Arc<AtomicUsize>,
     ) -> Arc<VeloSessionInner> {
+        let prev = active_count.fetch_add(1, Ordering::AcqRel);
+        crate::engine_audit!(
+            "session_inner_created",
+            session_id = %session_id,
+            active_after = prev + 1
+        );
         Arc::new(VeloSessionInner {
             session_id,
             velo,
@@ -259,11 +258,6 @@ impl VeloSession {
             local_endpoint: Mutex::new(local_endpoint),
             outbound_tx,
             outbound_install_tx: Mutex::new(Some(outbound_install_tx)),
-            outbound_seq: AtomicU64::new(0),
-            recv_state: Mutex::new(RecvState {
-                buffer: BTreeMap::new(),
-                next_seq: 0,
-            }),
             peer_instance_id: Mutex::new(None),
             committed: Mutex::new(BTreeSet::new()),
             available_pins: Mutex::new(BTreeMap::new()),
@@ -277,8 +271,12 @@ impl VeloSession {
             lifecycle_stream: ReplayStream::new(),
             commits_closed: Mutex::new(false),
             avail_drained: Mutex::new(false),
+            local_finished: Mutex::new(false),
+            peer_finished: Mutex::new(false),
+            finalize_enqueued: Mutex::new(false),
             closed: Mutex::new(false),
             runtime,
+            active_count,
         })
     }
 
@@ -301,6 +299,30 @@ impl VeloSession {
             .send(OutboundCommand::Finalize)
             .map_err(|_| anyhow!("session outbound channel closed"))
     }
+
+    /// If both sides have signalled `Finished`, enqueue
+    /// `OutboundCommand::Finalize` exactly once. The sender
+    /// task calls velo's `sender.finalize()` after draining
+    /// any in-flight frames; the peer's monitor sees the
+    /// `Finalized` sentinel and emits
+    /// `LifecycleEvent::Detached`.
+    fn maybe_finalize(&self) {
+        let local = *self.inner.local_finished.lock();
+        let peer = *self.inner.peer_finished.lock();
+        if !(local && peer) {
+            return;
+        }
+        let mut enqueued = self.inner.finalize_enqueued.lock();
+        if *enqueued {
+            return;
+        }
+        *enqueued = true;
+        crate::engine_audit!(
+            "session_rendezvous_finalize",
+            session_id = %self.inner.session_id
+        );
+        let _ = self.enqueue_finalize();
+    }
 }
 
 /// Single per-session sender task. Awaits installation of the
@@ -311,7 +333,7 @@ impl VeloSession {
 /// vs. Drained.
 fn spawn_outbound_sender(
     mut rx: mpsc::UnboundedReceiver<OutboundCommand>,
-    install_rx: oneshot::Receiver<velo::StreamSender<SeqFrame>>,
+    install_rx: oneshot::Receiver<velo::StreamSender<Frame>>,
     inner: Arc<VeloSessionInner>,
     runtime: &Handle,
 ) {
@@ -328,15 +350,13 @@ fn spawn_outbound_sender(
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 OutboundCommand::Send(frame) => {
-                    let seq = inner.outbound_seq.fetch_add(1, Ordering::Relaxed);
                     let kind = frame_kind(&frame);
                     crate::engine_audit!(
                         "session_outbound_send",
                         session_id = %session_id,
-                        seq,
                         kind = kind
                     );
-                    if let Err(err) = sender.send(SeqFrame { seq, frame }).await {
+                    if let Err(err) = sender.send(frame).await {
                         tracing::error!(error = %err, "velo outbound send failed");
                         break;
                     }
@@ -364,6 +384,7 @@ fn frame_kind(frame: &Frame) -> &'static str {
         Frame::Pull { .. } => "Pull",
         Frame::PullComplete { .. } => "PullComplete",
         Frame::PullAck { .. } => "PullAck",
+        Frame::Finished => "Finished",
         Frame::Detach => "Detach",
         Frame::Error { .. } => "Error",
     }
@@ -373,44 +394,7 @@ fn frame_kind(frame: &Frame) -> &'static str {
 // Frame handling — runs in the per-session monitor task
 // ============================================================================
 
-/// Wire-side dispatch: insert into the seq buffer and drain
-/// the contiguous prefix in seq order. Velo's AM dispatcher
-/// races concurrent inbound tasks, so seqs may arrive out of
-/// order; this function restores the sender's call order
-/// before invoking [`dispatch_frame_inner`] for each variant.
-fn dispatch_seq_frame(inner: &Arc<VeloSessionInner>, seq_frame: SeqFrame, runtime: &Handle) {
-    let session_id = inner.session_id;
-    let to_dispatch: Vec<Frame> = {
-        let mut state = inner.recv_state.lock();
-        if seq_frame.seq < state.next_seq {
-            tracing::warn!(
-                %session_id,
-                seq = seq_frame.seq,
-                expected = state.next_seq,
-                "duplicate or stale seq dropped"
-            );
-            return;
-        }
-        state.buffer.insert(seq_frame.seq, seq_frame.frame);
-        let mut ready = Vec::new();
-        loop {
-            let next = state.next_seq;
-            match state.buffer.remove(&next) {
-                Some(frame) => {
-                    ready.push(frame);
-                    state.next_seq += 1;
-                }
-                None => break,
-            }
-        }
-        ready
-    };
-    for frame in to_dispatch {
-        dispatch_frame_inner(inner, frame, runtime);
-    }
-}
-
-fn dispatch_frame_inner(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle) {
+fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle) {
     let session_id = inner.session_id;
     match frame {
         Frame::Attach {
@@ -446,7 +430,7 @@ fn dispatch_frame_inner(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &H
                         return;
                     }
                 };
-                let sender = match inner_for_attach.velo.attach_anchor::<SeqFrame>(handle).await {
+                let sender = match inner_for_attach.velo.attach_anchor::<Frame>(handle).await {
                     Ok(s) => s,
                     Err(err) => {
                         tracing::error!(error = %err, "attach outbound on Attach failed");
@@ -593,6 +577,19 @@ fn dispatch_frame_inner(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &H
                 }
             }
         }
+        Frame::Finished => {
+            crate::engine_audit!(
+                "session_recv_finished",
+                session_id = %session_id
+            );
+            *inner.peer_finished.lock() = true;
+            // Check rendezvous: if local has also finished,
+            // both sides independently finalize their wire.
+            let session = VeloSession {
+                inner: Arc::clone(inner),
+            };
+            session.maybe_finalize();
+        }
         Frame::Detach => {
             crate::engine_audit!(
                 "session_recv_detach",
@@ -619,7 +616,7 @@ impl VeloSession {
     /// connection.
     #[cfg(any(test, feature = "testing"))]
     pub fn test_inject_inbound_frame(&self, frame: Frame) {
-        dispatch_frame_inner(&self.inner, frame, &self.inner.runtime);
+        dispatch_frame(&self.inner, frame, &self.inner.runtime);
     }
 
     /// Test-only: count of pins currently held in
@@ -632,16 +629,14 @@ impl VeloSession {
 
 fn spawn_monitor(
     inner: Arc<VeloSessionInner>,
-    mut anchor: velo::StreamAnchor<SeqFrame>,
+    mut anchor: velo::StreamAnchor<Frame>,
     runtime: Handle,
 ) {
     runtime.clone().spawn(async move {
         use futures::StreamExt;
         while let Some(frame) = anchor.next().await {
             match frame {
-                Ok(velo::StreamFrame::Item(seq_frame)) => {
-                    dispatch_seq_frame(&inner, seq_frame, &runtime)
-                }
+                Ok(velo::StreamFrame::Item(frame)) => dispatch_frame(&inner, frame, &runtime),
                 Ok(velo::StreamFrame::Finalized) => {
                     inner
                         .lifecycle_stream
@@ -1037,18 +1032,13 @@ impl Session for VeloSession {
         build_lifecycle_stream(rx, replay)
     }
 
-    fn close(&self, reason: Option<String>) {
+    fn finalize(&self, reason: Option<String>) {
         crate::engine_audit!(
-            "session_close",
+            "session_finalize",
             session_id = %self.inner.session_id,
             reason = ?reason
         );
-        // close() implies finish_commits + finish_availability —
-        // enqueue terminators on the wire if not already sent so
-        // the peer's commit/availability streams close cleanly.
-        // FIFO mpsc enqueue keeps everything in causal order;
-        // the per-session sender task drains, sends each frame,
-        // then runs `Finalize` to close the velo stream.
+        // Idempotent terminators on the publish streams.
         let need_commits_closed = {
             let mut flag = self.inner.commits_closed.lock();
             let was_open = !*flag;
@@ -1058,7 +1048,6 @@ impl Session for VeloSession {
         if need_commits_closed {
             let _ = self.enqueue_frame(Frame::CommitsClosed);
         }
-
         let need_drained = {
             let mut flag = self.inner.avail_drained.lock();
             let was_open = !*flag;
@@ -1068,10 +1057,55 @@ impl Session for VeloSession {
         if need_drained {
             let _ = self.enqueue_frame(Frame::Drained);
         }
+        // Mark local finished + send the symmetric Finished
+        // signal exactly once. Then check whether peer has
+        // also signalled — if so, both sides independently
+        // finalize their wire.
+        let need_finished = {
+            let mut flag = self.inner.local_finished.lock();
+            let was_open = !*flag;
+            *flag = true;
+            was_open
+        };
+        if need_finished {
+            let _ = self.enqueue_frame(Frame::Finished);
+        }
+        self.maybe_finalize();
+    }
 
-        // Best-effort: enqueue Detach. Ignore errors because
-        // close is called even when the peer is gone.
-        let _ = self.enqueue_frame(Frame::Detach);
+    fn close(&self, reason: Option<String>) {
+        crate::engine_audit!(
+            "session_close",
+            session_id = %self.inner.session_id,
+            reason = ?reason
+        );
+        // Abort path: emit terminators (if not already), then
+        // enqueue the wire-level Finalize unconditionally. The
+        // sender task drains the queue and calls velo's
+        // `StreamSender::finalize`, which sends the `Finalized`
+        // sentinel; the peer's monitor surfaces
+        // `LifecycleEvent::Detached`. No protocol-level Detach
+        // frame — velo's wire-level finalize is the teardown
+        // signal. No Frame::Finished either — close() bypasses
+        // the cooperative rendezvous.
+        let need_commits_closed = {
+            let mut flag = self.inner.commits_closed.lock();
+            let was_open = !*flag;
+            *flag = true;
+            was_open
+        };
+        if need_commits_closed {
+            let _ = self.enqueue_frame(Frame::CommitsClosed);
+        }
+        let need_drained = {
+            let mut flag = self.inner.avail_drained.lock();
+            let was_open = !*flag;
+            *flag = true;
+            was_open
+        };
+        if need_drained {
+            let _ = self.enqueue_frame(Frame::Drained);
+        }
         if let Some(reason) = reason {
             self.inner
                 .lifecycle_stream
@@ -1079,9 +1113,17 @@ impl Session for VeloSession {
                     reason: Some(reason),
                 });
         }
-        // Finalize the outbound stream after any in-flight
-        // frames are flushed.
-        let _ = self.enqueue_finalize();
+        // Force the wire finalize even if rendezvous hasn't
+        // completed. Idempotent against the cooperative path.
+        let already_enqueued = {
+            let mut enqueued = self.inner.finalize_enqueued.lock();
+            let was = *enqueued;
+            *enqueued = true;
+            was
+        };
+        if !already_enqueued {
+            let _ = self.enqueue_finalize();
+        }
         *self.inner.closed.lock() = true;
     }
 }
@@ -1116,15 +1158,57 @@ pub struct VeloSessionFactory {
     velo: Arc<velo::Velo>,
     leader: Arc<InstanceLeader>,
     runtime: Handle,
+    /// Live session count. Incremented on `open` / `attach`,
+    /// decremented when a `VeloSessionInner` drops. Shared with
+    /// every `VeloSessionInner` so its `Drop` impl can
+    /// decrement without holding a back-reference to the
+    /// factory.
+    active_count: Arc<AtomicUsize>,
 }
+
+/// Cadence for the active-session gauge audit emission.
+/// 30s is short enough to surface leaks within a typical
+/// debugging session but long enough to avoid log spam in
+/// steady-state.
+const ACTIVE_SESSION_GAUGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl VeloSessionFactory {
     pub fn new(velo: Arc<velo::Velo>, leader: Arc<InstanceLeader>, runtime: Handle) -> Arc<Self> {
-        Arc::new(Self {
+        let active_count = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(Self {
             velo,
             leader,
-            runtime,
-        })
+            runtime: runtime.clone(),
+            active_count: Arc::clone(&active_count),
+        });
+        // Spawn a background gauge emitter. Uses a Weak so the
+        // factory can be dropped naturally (e.g. at process
+        // shutdown) without leaking the task.
+        let weak_count = Arc::downgrade(&active_count);
+        runtime.spawn(async move {
+            let mut ticker = tokio::time::interval(ACTIVE_SESSION_GAUGE_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let Some(c) = weak_count.upgrade() else {
+                    return;
+                };
+                let n = c.load(Ordering::Acquire);
+                crate::engine_audit!(
+                    "session_factory_active_gauge",
+                    active_sessions = n
+                );
+            }
+        });
+        factory
+    }
+
+    /// Snapshot of the live session count. Production callers
+    /// can poll this for leak detection / capacity-planning
+    /// metrics; tests assert the gauge returns to zero after
+    /// rendezvous + watcher cleanup.
+    pub fn active_session_count(&self) -> usize {
+        self.active_count.load(Ordering::Acquire)
     }
 
     /// Test-only: same as the trait `open` but returns the
@@ -1133,7 +1217,7 @@ impl VeloSessionFactory {
     /// without downcasting from `Arc<dyn Session>`.
     #[cfg(any(test, feature = "testing"))]
     pub fn open_concrete(&self, session_id: SessionId) -> Result<Arc<VeloSession>> {
-        let anchor = self.velo.create_anchor::<SeqFrame>();
+        let anchor = self.velo.create_anchor::<Frame>();
         let endpoint = endpoint_from_handle(anchor.handle());
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (install_tx, install_rx) = oneshot::channel();
@@ -1145,6 +1229,7 @@ impl VeloSessionFactory {
             self.runtime.clone(),
             outbound_tx,
             install_tx,
+            Arc::clone(&self.active_count),
         );
         spawn_outbound_sender(outbound_rx, install_rx, Arc::clone(&inner), &self.runtime);
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
@@ -1153,12 +1238,16 @@ impl VeloSessionFactory {
 }
 
 impl SessionFactory for VeloSessionFactory {
+    fn active_session_count(&self) -> usize {
+        self.active_count.load(Ordering::Acquire)
+    }
+
     fn open(&self, session_id: SessionId) -> Result<Arc<dyn Session>> {
         crate::engine_audit!(
             "session_factory_open",
             session_id = %session_id
         );
-        let anchor = self.velo.create_anchor::<SeqFrame>();
+        let anchor = self.velo.create_anchor::<Frame>();
         let endpoint = endpoint_from_handle(anchor.handle());
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (install_tx, install_rx) = oneshot::channel();
@@ -1170,6 +1259,7 @@ impl SessionFactory for VeloSessionFactory {
             self.runtime.clone(),
             outbound_tx,
             install_tx,
+            Arc::clone(&self.active_count),
         );
         spawn_outbound_sender(outbound_rx, install_rx, Arc::clone(&inner), &self.runtime);
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
@@ -1190,6 +1280,7 @@ impl SessionFactory for VeloSessionFactory {
         let velo = Arc::clone(&self.velo);
         let leader = Arc::clone(&self.leader);
         let runtime = self.runtime.clone();
+        let active_count = Arc::clone(&self.active_count);
         Box::pin(async move {
             // 1. Eager metadata exchange — ensures the peer is
             //    velo-registered (the unary AM call surfaces a
@@ -1221,12 +1312,12 @@ impl SessionFactory for VeloSessionFactory {
             // 2. Open outbound to peer.
             let peer_handle = handle_from_endpoint(&peer_endpoint)?;
             let outbound = velo
-                .attach_anchor::<SeqFrame>(peer_handle)
+                .attach_anchor::<Frame>(peer_handle)
                 .await
                 .context("attach outbound to peer endpoint")?;
 
             // 3. Open our inbound anchor for the holder to attach back.
-            let anchor = velo.create_anchor::<SeqFrame>();
+            let anchor = velo.create_anchor::<Frame>();
             let local_endpoint = endpoint_from_handle(anchor.handle());
 
             let our_instance = velo.instance_id();
@@ -1240,6 +1331,7 @@ impl SessionFactory for VeloSessionFactory {
                 runtime.clone(),
                 outbound_tx,
                 install_tx,
+                active_count,
             );
             // Puller knows peer's identity out-of-band.
             *inner.peer_instance_id.lock() = Some(peer_instance_id);

@@ -21,13 +21,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_disagg_protocol::RemotePrefillParams;
 use kvbm_engine::disagg::session::{
-    AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
+    AvailabilityDelta, CommitDelta, CommittedBlock, LifecycleEvent, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 use parking_lot::Mutex;
@@ -35,6 +36,16 @@ use tokio::runtime::Handle;
 
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::{BlockId, G2, SequenceHash};
+
+/// Defensive timeout for the prefill-side lifecycle watcher.
+/// In normal operation, decode's hard close fires within
+/// milliseconds of `process_finished_onboarding`; with a velo
+/// heartbeat-detected detach worst case ~30s. 60s is a
+/// well-padded fallback so we evict `RequestState` (and its
+/// session Arc) even if both signals fail to arrive — preventing
+/// a slow leak that would only show up as a session-count
+/// drift over hours of traffic.
+const LIFECYCLE_WATCHDOG: Duration = Duration::from_secs(60);
 
 use super::peer_resolver::PeerResolver;
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
@@ -477,6 +488,71 @@ impl PrefillCoordinatorImpl {
             .attach(params.session_id, params.initiator_instance_id, endpoint)
             .await?;
         *state.session.lock() = Some(Arc::clone(&session));
+
+        // Spawn the lifecycle watcher: prefill never calls
+        // session.close() (decode owns hard-close, fired from
+        // its own process_finished_onboarding once worker pulls
+        // confirm). Drop RequestState when:
+        //   1. Decode's Detach arrives (peer-driven hard close)
+        //   2. velo heartbeat surfaces a Detached/Failed event
+        //   3. Watchdog fires (defensive — prevents leak if
+        //      heartbeat is misconfigured or peer never detaches)
+        let watcher_session = Arc::clone(&session);
+        let watcher_request_id = request_id.clone();
+        let watcher_session_id = params.session_id;
+        let watcher_coord = self.weak_self.clone();
+        let watchdog = LIFECYCLE_WATCHDOG;
+        self.runtime.spawn(async move {
+            let outcome = tokio::time::timeout(watchdog, async {
+                let mut lifecycle = watcher_session.lifecycle();
+                while let Some(event) = lifecycle.next().await {
+                    match event {
+                        LifecycleEvent::Detached { reason } => {
+                            crate::audit!(
+                                "prefill_lifecycle_detached",
+                                role = "prefill",
+                                request_id = %watcher_request_id,
+                                session_id = %watcher_session_id,
+                                reason = ?reason
+                            );
+                            return;
+                        }
+                        LifecycleEvent::Failed { reason } => {
+                            crate::audit!(
+                                "prefill_lifecycle_failed",
+                                role = "prefill",
+                                request_id = %watcher_request_id,
+                                session_id = %watcher_session_id,
+                                reason = %reason
+                            );
+                            return;
+                        }
+                        LifecycleEvent::Attached { .. } => {}
+                    }
+                }
+            })
+            .await;
+            if outcome.is_err() {
+                crate::audit!(
+                    "prefill_lifecycle_watchdog_fired",
+                    role = "prefill",
+                    request_id = %watcher_request_id,
+                    session_id = %watcher_session_id,
+                    watchdog_secs = watchdog.as_secs()
+                );
+                tracing::warn!(
+                    request_id = %watcher_request_id,
+                    session_id = %watcher_session_id,
+                    watchdog_secs = watchdog.as_secs(),
+                    "prefill lifecycle watchdog fired without Detached; \
+                     evicting RequestState (potential session leak signal)"
+                );
+            }
+            if let Some(coord) = watcher_coord.upgrade() {
+                coord.states.remove(&watcher_request_id);
+            }
+        });
+
         tracing::info!("prefill run_setup: attached, draining commits");
 
         // 2. Drain commit stream until Closed (or until we have
@@ -946,23 +1022,22 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         };
         state.request_finished_seen.store(true, Ordering::Release);
 
-        // Finish our own commit/availability streams and close.
+        // Cooperative finalize: emit terminators + Frame::Finished.
+        // Does NOT call velo's wire finalize — caller may still
+        // need to respond to decode's outstanding Pull-for-net-new.
+        // When decode also calls finalize, both sides
+        // independently trigger velo's StreamSender::finalize and
+        // the watcher cleans up.
         if let Some(session) = state.session.lock().clone() {
-            let _ = session.finish_commits();
-            let _ = session.finish_availability();
-            session.close(Some("request_finished".to_string()));
+            session.finalize(Some("request_finished".to_string()));
         }
 
         let mut status = state.status.lock();
         *status = PrefillStatus::Released;
         drop(status);
-        // Drops the last `Arc<RequestState>` (assuming no
-        // in-flight task still holds one); RAII observer-handle
-        // drop evicts the residual entry. Any in-flight task that
-        // still holds a clone keeps the entry alive until it
-        // finishes — that's intentional, we don't want to evict
-        // mid-pipeline.
-        self.states.remove(request_id);
+        // Note: do NOT remove RequestState here. The lifecycle
+        // watcher removes it on Detach (peer-driven hard close)
+        // or watchdog timeout.
 
         // Suppress unused warning on the unused field — it's
         // checked in `on_usaa` via `pulls_complete` already.

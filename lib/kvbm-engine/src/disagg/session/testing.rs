@@ -161,6 +161,10 @@ struct MockSessionInner {
     finish_availability_called: bool,
     pull_calls: Vec<(Vec<SequenceHash>, Vec<BlockId>)>,
     closed_reason: Option<Option<String>>,
+    finished_reason: Option<Option<String>>,
+    local_finished: bool,
+    peer_finished: bool,
+    rendezvous_finalized: bool,
 
     // ---- per-stream states ----
     commits_state: StreamState<CommitDelta>,
@@ -184,6 +188,10 @@ impl MockSessionInner {
             finish_availability_called: false,
             pull_calls: Vec::new(),
             closed_reason: None,
+            finished_reason: None,
+            local_finished: false,
+            peer_finished: false,
+            rendezvous_finalized: false,
             commits_state: StreamState::new(),
             availability_state: StreamState::new(),
             lifecycle_state: StreamState::new(),
@@ -213,18 +221,35 @@ pub struct MockSession {
     /// auto-resolves Ok by dropping the partner's pins for
     /// the pulled hashes.
     partner: Mutex<Option<Weak<MockSession>>>,
+    /// When the session was created via a factory that tracks
+    /// active sessions, holds an Arc to the factory's gauge so
+    /// the `Drop` impl can decrement.
+    active_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl Drop for MockSession {
+    fn drop(&mut self) {
+        if let Some(c) = &self.active_count {
+            c.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl MockSession {
+    #[cfg(test)]
     fn new(id: SessionId, endpoint: Option<SessionEndpoint>) -> Arc<Self> {
-        Self::new_with_peer(id, endpoint, None)
+        Self::new_with_peer(id, endpoint, None, None)
     }
 
     fn new_with_peer(
         id: SessionId,
         endpoint: Option<SessionEndpoint>,
         peer_instance_id: Option<InstanceId>,
+        active_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
     ) -> Arc<Self> {
+        if let Some(c) = active_count.as_ref() {
+            c.fetch_add(1, Ordering::AcqRel);
+        }
         Arc::new(Self {
             id,
             endpoint,
@@ -232,6 +257,7 @@ impl MockSession {
             inner: Mutex::new(MockSessionInner::new()),
             pull_index: AtomicU64::new(0),
             partner: Mutex::new(None),
+            active_count,
         })
     }
 
@@ -428,6 +454,49 @@ impl MockSession {
 
     pub fn closed_reason(&self) -> Option<Option<String>> {
         self.inner.lock().closed_reason.clone()
+    }
+
+    pub fn finished_reason(&self) -> Option<Option<String>> {
+        self.inner.lock().finished_reason.clone()
+    }
+
+    /// Test-only: simulate inbound `Frame::Finished` from the peer.
+    /// Marks `peer_finished` true and may trigger the rendezvous
+    /// finalize if local has already called `finished()`.
+    pub fn inject_peer_finished(&self) {
+        {
+            let mut inner = self.inner.lock();
+            inner.peer_finished = true;
+        }
+        self.maybe_finalize_paired();
+    }
+
+    /// Test-only: when both sides of a paired MockSession have
+    /// signalled `finished`, drive the velo-equivalent of
+    /// `sender.finalize()` on this side. Mirrors VeloSession's
+    /// `maybe_finalize`. Pushes a `Detached` lifecycle event so
+    /// callers' watchers fire.
+    fn maybe_finalize_paired(&self) {
+        let should_finalize = {
+            let mut inner = self.inner.lock();
+            if !(inner.local_finished && inner.peer_finished) {
+                return;
+            }
+            if inner.rendezvous_finalized {
+                return;
+            }
+            inner.rendezvous_finalized = true;
+            true
+        };
+        if should_finalize {
+            let mut inner = self.inner.lock();
+            inner
+                .lifecycle_state
+                .push(LifecycleEvent::Detached {
+                    reason: Some("rendezvous".to_string()),
+                });
+            inner.lifecycle_state.terminate();
+        }
     }
 
     pub async fn wait_pull_count(&self, n: usize) {
@@ -682,6 +751,34 @@ impl Session for MockSession {
         self.take_lifecycle_stream()
     }
 
+    fn finalize(&self, reason: Option<String>) {
+        let need_signal = {
+            let mut inner = self.inner.lock();
+            inner.finished_reason = Some(reason);
+            inner.finish_commits_called = true;
+            inner.finish_availability_called = true;
+            if !inner.commits_state.is_terminated() {
+                inner.commits_state.push(CommitDelta::Closed);
+                inner.commits_state.terminate();
+            }
+            if !inner.availability_state.is_terminated() {
+                inner.availability_state.push(AvailabilityDelta::Drained);
+                inner.availability_state.terminate();
+            }
+            let was_open = !inner.local_finished;
+            inner.local_finished = true;
+            was_open
+        };
+        // Paired mode: deliver Finished to partner so its
+        // peer_finished + maybe_finalize fire.
+        if need_signal {
+            if let Some(partner) = self.partner() {
+                partner.inject_peer_finished();
+            }
+        }
+        self.maybe_finalize_paired();
+    }
+
     fn close(&self, reason: Option<String>) {
         {
             let mut inner = self.inner.lock();
@@ -735,6 +832,14 @@ pub struct MockSessionFactory {
     /// previously-`open`ed session and cross-wires the new
     /// attach session with it.
     paired_registry: Option<Arc<DashMap<SessionId, Arc<MockSession>>>>,
+    /// Live session count. Each `MockSession` created via this
+    /// factory holds a clone and decrements on Drop. The
+    /// factory's own `last_opened` / `last_attached` Arcs
+    /// hold strong refs that must be dropped (or replaced) for
+    /// the count to reach zero — production callers don't
+    /// retain factory-side refs, but tests must clear them
+    /// (or drop the factory) to assert the gauge.
+    active_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockSessionFactory {
@@ -762,12 +867,14 @@ impl MockSessionFactory {
                 last_attached: Mutex::new(None),
                 attach_records: Mutex::new(Vec::new()),
                 paired_registry: Some(Arc::clone(&registry)),
+                active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }),
             Arc::new(Self {
                 last_opened: Mutex::new(None),
                 last_attached: Mutex::new(None),
                 attach_records: Mutex::new(Vec::new()),
                 paired_registry: Some(registry),
+                active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }),
         )
     }
@@ -800,6 +907,7 @@ impl Default for MockSessionFactory {
             last_attached: Mutex::new(None),
             attach_records: Mutex::new(Vec::new()),
             paired_registry: None,
+            active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
@@ -812,8 +920,17 @@ fn mock_endpoint() -> SessionEndpoint {
 }
 
 impl SessionFactory for MockSessionFactory {
+    fn active_session_count(&self) -> usize {
+        self.active_count.load(Ordering::Acquire)
+    }
+
     fn open(&self, session_id: SessionId) -> Result<Arc<dyn Session>> {
-        let session = MockSession::new(session_id, Some(mock_endpoint()));
+        let session = MockSession::new_with_peer(
+            session_id,
+            Some(mock_endpoint()),
+            None,
+            Some(Arc::clone(&self.active_count)),
+        );
         if let Some(registry) = &self.paired_registry {
             registry.insert(session_id, Arc::clone(&session));
         }
@@ -827,7 +944,12 @@ impl SessionFactory for MockSessionFactory {
         peer_instance_id: InstanceId,
         peer_endpoint: SessionEndpoint,
     ) -> BoxFuture<'static, Result<Arc<dyn Session>>> {
-        let session = MockSession::new_with_peer(session_id, None, Some(peer_instance_id));
+        let session = MockSession::new_with_peer(
+            session_id,
+            None,
+            Some(peer_instance_id),
+            Some(Arc::clone(&self.active_count)),
+        );
         if let Some(registry) = &self.paired_registry {
             if let Some(holder) = registry.get(&session_id).map(|e| Arc::clone(e.value())) {
                 session.pair_with(&holder);

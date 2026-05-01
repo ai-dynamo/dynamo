@@ -275,10 +275,22 @@ async fn cd_prefill_happy_path() -> Result<()> {
     assert_eq!(avails.len(), 1);
     assert_eq!(avails[0].len(), 2);
 
-    // request_finished: coordinator finishes streams + closes session.
+    // request_finished: prefill calls session.finalize()
+    // (cooperative — terminators + Frame::Finished). Session
+    // stays alive until decode also calls .finalize() at which
+    // point both sides reach the rendezvous and trigger velo
+    // wire finalize independently.
     let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    assert!(
+        session.closed_reason().is_none(),
+        "prefill must NOT call session.close() in cooperative path"
+    );
+    // Simulate decode also signalling finalize: in MockSession's
+    // paired mode this would deliver Frame::Finished; here we
+    // inject directly via the test scaffolding.
+    session.inject_peer_finished();
     wait_until(|| h.coordinator.active_count() == 0).await;
-    assert!(session.closed_reason().is_some());
 
     Ok(())
 }
@@ -359,6 +371,8 @@ async fn cd_prefill_multi_chunk_publish() -> Result<()> {
     assert_ne!(commits[0][0], commits[1][0]);
 
     let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    session.inject_peer_finished();
     wait_until(|| h.coordinator.active_count() == 0).await;
 
     Ok(())
@@ -581,11 +595,52 @@ async fn cd_prefill_payload_drop_does_not_close_session() -> Result<()> {
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].len(), 2);
 
-    // Only vLLM's `request_finished` closes the session.
+    // vLLM's `request_finished` triggers cooperative finalize
+    // (terminators + Frame::Finished). Decode is then simulated
+    // signalling its own finalize via inject_peer_finished; the
+    // rendezvous fires and the watcher evicts RequestState.
     let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    assert!(
+        session.closed_reason().is_none(),
+        "prefill on_request_finished must NOT call session.close()"
+    );
+    session.inject_peer_finished();
     wait_until(|| h.coordinator.active_count() == 0).await;
-    assert!(session.closed_reason().is_some());
 
+    Ok(())
+}
+
+/// Stage 1 verification: lifecycle watcher's watchdog evicts
+/// RequestState if no peer Detach arrives. Belt-and-suspenders
+/// against velo heartbeat misconfiguration.
+///
+/// Uses a manually shortened watchdog via direct test scaffolding
+/// — but since the production constant is 60s, this test is
+/// gated behind `ignore` to avoid slowing CI. Run manually with
+/// `cargo test -- --ignored cd_prefill_lifecycle_watchdog`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn cd_prefill_lifecycle_watchdog_evicts_state() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+    let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    // Do NOT inject Detach — let the 60s watchdog fire.
+    tokio::time::timeout(
+        Duration::from_secs(75),
+        wait_until(|| h.coordinator.active_count() == 0),
+    )
+    .await
+    .expect("watchdog should evict within 60s");
     Ok(())
 }
 

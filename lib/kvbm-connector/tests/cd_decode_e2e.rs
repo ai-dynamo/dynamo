@@ -261,7 +261,18 @@ async fn cd_decode_happy_path() -> Result<()> {
     wait_until(|| h.workers.completed_contains("req-1")).await;
     assert_eq!(h.wrapper.inflight_available(), usize::MAX);
     assert!(!h.wrapper.has_active_cd_request("req-1"));
-    assert!(session.closed_reason().is_some());
+    // Decode now signals cooperative finalize, NOT close().
+    // close() is reserved for the abort path; happy-path
+    // shutdown goes through finalize() and waits for the
+    // peer's symmetric finalize to fire the rendezvous.
+    assert!(
+        session.finished_reason().is_some(),
+        "decode coordinator must signal session.finalize() on cooperative end"
+    );
+    assert!(
+        session.closed_reason().is_none(),
+        "decode must NOT call session.close() on the happy path"
+    );
 
     Ok(())
 }
