@@ -154,6 +154,11 @@ known_third_party = ["vllm", "tensorrt_llm", "sglang", "aiconfigurator"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
+# DEBUG: dump all-threads tracebacks if any single test runs > 300s.
+# pytest-timeout's signal method silently fails to fire when the main thread
+# is blocked in a Rust FFI call; faulthandler_timeout runs in its own thread
+# and dumps regardless of GIL/FFI state.
+faulthandler_timeout = 300
 
 # NOTE
 # Keep these ignores in pytest collection to avoid duplicate-module collection
