@@ -562,6 +562,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
         };
 
         // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
@@ -582,6 +583,7 @@ mod tests {
         let Indexer::KvIndexer {
             primary,
             lower_tier,
+            ..
         } = &indexer
         else {
             unreachable!()
@@ -658,6 +660,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
         };
 
         indexer
@@ -677,6 +680,7 @@ mod tests {
         let Indexer::KvIndexer {
             primary,
             lower_tier,
+            ..
         } = &indexer
         else {
             unreachable!()

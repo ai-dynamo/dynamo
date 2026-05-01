@@ -38,6 +38,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
+    "router_predict_on_route",
+    "router_predicted_ttl_secs",
 )
 
 
@@ -64,6 +66,8 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    router_predict_on_route: bool = False
+    router_predicted_ttl_secs: float = 5.0
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -303,4 +307,31 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
             choices=["none", "hicache"],
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-predict-on-route",
+            env_var="DYN_ROUTER_PREDICT_ON_ROUTE",
+            default=False,
+            dest="router_predict_on_route",
+            help=(
+                "KV Router: Speculatively record a request's blocks at routing time "
+                "so sibling requests arriving before the engine emits a KV event still "
+                "see the prefix. Only takes effect with --router-kv-events; in "
+                "approximate mode (--no-router-kv-events) the primary indexer already "
+                "records on routing decisions and this flag is ignored."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--router-predicted-ttl-secs",
+            env_var="DYN_ROUTER_PREDICTED_TTL_SECS",
+            default=5.0,
+            help=(
+                "KV Router: TTL in seconds for entries in the --router-predict-on-route "
+                "side indexer (default: 5.0). Independent of --router-ttl-secs (which "
+                "covers the primary indexer's pure-approximate mode); kept short so "
+                "predictions the engine never confirms age out quickly."
+            ),
+            arg_type=float,
         )

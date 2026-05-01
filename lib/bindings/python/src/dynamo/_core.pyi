@@ -1266,6 +1266,10 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
+        use_remote_indexer: bool = False,
+        serve_indexer: bool = False,
+        router_predict_on_route: bool = False,
+        router_predicted_ttl_secs: float = 5.0,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1302,6 +1306,19 @@ class KvRouterConfig:
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+            use_remote_indexer: Query a remote KV indexer served from a worker component
+                instead of maintaining a local radix tree (default: False).
+            serve_indexer: Serve this router's local indexer from the worker component
+                for other routers/frontends in the same namespace (default: False).
+            router_predict_on_route: Speculatively record a request's blocks at routing
+                time into a side approximate indexer, so sibling requests in the same
+                batch co-locate before the engine emits a KV event (default: False).
+                Only takes effect when use_kv_events=True; the side indexer is queried
+                alongside the primary and find_matches returns the per-worker max
+                overlap.
+            router_predicted_ttl_secs: TTL in seconds for entries in the
+                predict-on-route side indexer (default: 5.0). Independent of
+                router_ttl_secs; kept short so unconfirmed predictions age out quickly.
         """
         ...
 
