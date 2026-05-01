@@ -25,23 +25,6 @@ pub struct AgentToolEventRelay {
 }
 
 impl AgentToolEventRelay {
-    pub fn new(
-        component: Component,
-        zmq_endpoint: String,
-        zmq_topic: Option<String>,
-        event_namespace: Option<String>,
-        event_topic: Option<String>,
-    ) -> Result<Self> {
-        let rt = component.drt().runtime().secondary();
-        rt.block_on(Self::start(
-            component,
-            zmq_endpoint,
-            zmq_topic,
-            event_namespace,
-            event_topic,
-        ))
-    }
-
     pub async fn start(
         component: Component,
         zmq_endpoint: String,
@@ -77,14 +60,13 @@ impl AgentToolEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
     ) {
-        let socket = match connect_sub_socket(&zmq_endpoint, zmq_topic.as_deref()).await {
+        let mut socket = match connect_sub_socket(&zmq_endpoint, zmq_topic.as_deref()).await {
             Ok(socket) => socket,
             Err(error) => {
                 tracing::error!(endpoint = %zmq_endpoint, error = %error, "agent tool relay: failed to connect");
                 return;
             }
         };
-        let mut socket = socket;
         tracing::info!(endpoint = %zmq_endpoint, "agent tool relay: connected");
 
         loop {

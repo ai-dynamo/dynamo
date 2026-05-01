@@ -87,22 +87,12 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
     drt: DistributedRuntime,
     local_model: &LocalModel,
 ) -> anyhow::Result<()> {
-    let policy = super::policy().clone();
+    let policy = super::policy();
     if policy.tool_events_zmq_endpoint.is_none() {
         return Ok(());
     }
 
-    start_tool_event_relay_from_policy(drt.clone(), local_model, &policy).await?;
-    if TOOL_EVENT_INGEST_STARTED.load(Ordering::Acquire) {
-        tracing::debug!("agent tool event ingest already started");
-        return Ok(());
-    }
-
-    let namespace_name = tool_events_namespace(local_model);
-    let namespace = drt.namespace(namespace_name.clone())?;
-    let mut subscriber = EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
-        .await?
-        .typed::<AgentTraceRecord>();
+    start_tool_event_relay_from_policy(drt.clone(), local_model, policy).await?;
 
     if TOOL_EVENT_INGEST_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -111,6 +101,22 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
         tracing::debug!("agent tool event ingest already started");
         return Ok(());
     }
+
+    let namespace_name = tool_events_namespace(local_model);
+    let mut subscriber = match async {
+        let namespace = drt.namespace(namespace_name.clone())?;
+        EventSubscriber::for_namespace(&namespace, DEFAULT_TOOL_EVENTS_TOPIC)
+            .await
+            .map(|sub| sub.typed::<AgentTraceRecord>())
+    }
+    .await
+    {
+        Ok(subscriber) => subscriber,
+        Err(error) => {
+            TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
 
     let shutdown = drt.child_token();
     drt.runtime().secondary().spawn(async move {
@@ -156,10 +162,6 @@ async fn start_tool_event_relay_from_policy(
     let Some(zmq_endpoint) = policy.tool_events_zmq_endpoint.clone() else {
         return Ok(());
     };
-    if TOOL_EVENT_RELAY_STARTED.load(Ordering::Acquire) {
-        tracing::debug!("agent tool event relay already started");
-        return Ok(());
-    }
     if TOOL_EVENT_RELAY_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -169,15 +171,18 @@ async fn start_tool_event_relay_from_policy(
     }
 
     let namespace_name = tool_events_namespace(local_model);
-    let namespace = drt.namespace(namespace_name.clone())?;
-    let component = namespace.component(local_model.endpoint_id().component.clone())?;
-    let relay = match AgentToolEventRelay::start(
-        component,
-        zmq_endpoint.clone(),
-        policy.tool_events_zmq_topic.clone(),
-        Some(namespace_name.clone()),
-        Some(DEFAULT_TOOL_EVENTS_TOPIC.to_string()),
-    )
+    let relay = match async {
+        let namespace = drt.namespace(namespace_name.clone())?;
+        let component = namespace.component(local_model.endpoint_id().component.clone())?;
+        AgentToolEventRelay::start(
+            component,
+            zmq_endpoint.clone(),
+            policy.tool_events_zmq_topic.clone(),
+            Some(namespace_name.clone()),
+            Some(DEFAULT_TOOL_EVENTS_TOPIC.to_string()),
+        )
+        .await
+    }
     .await
     {
         Ok(relay) => relay,
@@ -196,6 +201,7 @@ async fn start_tool_event_relay_from_policy(
         );
         shutdown.cancelled().await;
         relay.shutdown();
+        TOOL_EVENT_RELAY_STARTED.store(false, Ordering::Release);
         tracing::info!("agent tool event relay stopped");
     });
 

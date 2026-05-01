@@ -20,8 +20,7 @@ fn sanitize_finite(value: Option<f64>) -> Option<f64> {
     value.filter(|value| value.is_finite())
 }
 
-pub fn emit_request_end(agent_context: AgentContext, request: AgentRequestMetrics) {
-    let mut request = request;
+pub fn emit_request_end(agent_context: AgentContext, mut request: AgentRequestMetrics) {
     request.prefill_wait_time_ms = sanitize_finite(request.prefill_wait_time_ms);
     request.prefill_time_ms = sanitize_finite(request.prefill_time_ms);
     request.ttft_ms = sanitize_finite(request.ttft_ms);
