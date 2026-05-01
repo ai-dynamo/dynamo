@@ -24,14 +24,10 @@ Serves [deepseek-ai/DeepSeek-V4-Pro](https://huggingface.co/deepseek-ai/DeepSeek
 ## Quick Start
 
 ```bash
-# 1. Download model (~865GB)
-kubectl apply -f model-download.yaml
-kubectl wait --for=condition=complete job/download-dsv4-pro --timeout=3600s
-
-# 2. Deploy
+# 1. Deploy
 kubectl apply -f deploy.yaml
 
-# 3. Test
+# 2. Test
 kubectl port-forward svc/dsv4-pro-disagg-frontend 8000:8000 &
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -67,18 +63,7 @@ resources:
       networking.gke.io.networks/rdma-3: "1"
 ```
 
-**NATS workaround** — GCP clusters isolate `system-cpu` and `customer-gpu` pod networks. Deploy namespace-local NATS:
-
-```bash
-kubectl apply -f nats-local.yaml
-```
-
-Then add to `spec.envs`:
-
-```yaml
-- name: NATS_SERVER
-  value: "nats://nats-local.<your-namespace>.svc.cluster.local:4222"
-```
+**NATS workaround** — GCP clusters may isolate `system-cpu` and `customer-gpu` pod networks. If the dynamo-system NATS is unreachable, deploy a namespace-local NATS on a `customer-cpu` node and override `NATS_SERVER` in `spec.envs`.
 
 **Tolerations** — GCP GPU nodes have taints. Add to all services:
 
