@@ -8,9 +8,12 @@
 //! this type owns a bounded routing prefix tree that can answer shallow drained
 //! reads and route depth-boundary suffixes through explicit backend anchors.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[cfg(feature = "bench")]
@@ -29,6 +32,7 @@ use super::{
 use crate::protocols::*;
 
 type WorkerRoutingLookup = DashMap<ExternalSequenceBlockHash, BlockRoutingEntry, FxBuildHasher>;
+type DumpedBlockSet = FxHashSet<(WorkerWithDpRank, ExternalSequenceBlockHash)>;
 
 struct RoutingNode {
     key: Option<LocalBlockHash>,
@@ -423,6 +427,91 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         }
     }
 
+    fn dump_router_events(&self) -> (Vec<RouterEvent>, DumpedBlockSet) {
+        // TODO: Static shard routing treats the first structural child under a
+        // parent as special. This dump is replayable, but it does not yet make
+        // sibling traversal canonical by original creation order, so byte-stable
+        // dump -> replay -> dump comparisons are not guaranteed for siblings.
+        let mut events = Vec::new();
+        let mut dumped_blocks = FxHashSet::default();
+        let mut event_id = 0u64;
+        let mut queue = VecDeque::new();
+
+        for child in self.root.children.iter() {
+            queue.push_back((child.clone(), None, None::<FxHashSet<WorkerWithDpRank>>));
+        }
+
+        while let Some((node, parent_hash, parent_live_workers)) = queue.pop_front() {
+            let node_workers = Self::collect_live_workers(&node);
+            let live_workers = match parent_live_workers {
+                Some(parent_workers) => node_workers
+                    .intersection(&parent_workers)
+                    .copied()
+                    .collect::<FxHashSet<_>>(),
+                None => node_workers,
+            };
+            if live_workers.is_empty() {
+                continue;
+            }
+
+            let tokens_hash = node.key.expect("non-root routing node must have key");
+            let block_hash = node
+                .external_hash
+                .expect("non-root routing node must have external hash");
+            let block = KvCacheStoredBlockData {
+                tokens_hash,
+                block_hash,
+                mm_extra_info: None,
+            };
+
+            for worker in &live_workers {
+                events.push(RouterEvent::new(
+                    worker.worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            start_position: None,
+                            blocks: vec![block.clone()],
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                ));
+                dumped_blocks.insert((*worker, block_hash));
+                event_id += 1;
+            }
+
+            for child in node.children.iter() {
+                queue.push_back((child.clone(), Some(block_hash), Some(live_workers.clone())));
+            }
+        }
+
+        (events, dumped_blocks)
+    }
+
+    fn append_reachable_shard_events(
+        all_events: &mut Vec<RouterEvent>,
+        dumped_blocks: &mut DumpedBlockSet,
+        shard_events: Vec<RouterEvent>,
+    ) {
+        for event in shard_events {
+            let KvCacheEventData::Stored(store_data) = &event.event.data else {
+                all_events.push(event);
+                continue;
+            };
+            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+            if let Some(parent_hash) = store_data.parent_hash
+                && !dumped_blocks.contains(&(worker, parent_hash))
+            {
+                continue;
+            }
+            for block in &store_data.blocks {
+                dumped_blocks.insert((worker, block.block_hash));
+            }
+            all_events.push(event);
+        }
+    }
+
     async fn apply_stored(&self, event: RouterEvent) {
         let KvCacheEventData::Stored(store_data) = &event.event.data else {
             return;
@@ -675,9 +764,16 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        let mut all_events = Vec::new();
+        let (mut all_events, mut dumped_blocks) = self.dump_router_events();
         for shard in &self.shards {
-            all_events.extend(shard.dump_events().await?);
+            Self::append_reachable_shard_events(
+                &mut all_events,
+                &mut dumped_blocks,
+                shard.dump_events().await?,
+            );
+        }
+        for (idx, event) in all_events.iter_mut().enumerate() {
+            event.event.event_id = idx as u64;
         }
         Ok(all_events)
     }

@@ -1318,6 +1318,29 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
+        Self::append_dump_events_from_queue(&mut events, &mut event_id, queue);
+
+        let mut anchor_queue = VecDeque::new();
+        for anchor in self.anchor_nodes.iter() {
+            let anchor_id = *anchor.key();
+            let children = {
+                let anchor_guard = anchor.value().read();
+                anchor_guard.live_children()
+            };
+            for child_node in children {
+                anchor_queue.push_back((child_node, Some(anchor_id)));
+            }
+        }
+        Self::append_dump_events_from_queue(&mut events, &mut event_id, anchor_queue);
+
+        events
+    }
+
+    fn append_dump_events_from_queue(
+        events: &mut Vec<RouterEvent>,
+        event_id: &mut u64,
+        mut queue: VecDeque<(SharedNode, Option<ExternalSequenceBlockHash>)>,
+    ) {
         while let Some((start_node, parent_hash)) = queue.pop_front() {
             let mut merged_edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = Vec::new();
             let mut current = start_node;
@@ -1364,7 +1387,7 @@ impl ConcurrentRadixTreeCompressed {
                     events.push(RouterEvent::new(
                         worker.worker_id,
                         KvCacheEvent {
-                            event_id,
+                            event_id: *event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
                                 start_position: None,
@@ -1373,13 +1396,13 @@ impl ConcurrentRadixTreeCompressed {
                             dp_rank: worker.dp_rank,
                         },
                     ));
-                    event_id += 1;
+                    *event_id += 1;
                 }
                 for (&worker, &k) in &guard.worker_cutoffs {
                     events.push(RouterEvent::new(
                         worker.worker_id,
                         KvCacheEvent {
-                            event_id,
+                            event_id: *event_id,
                             data: KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash,
                                 start_position: None,
@@ -1388,7 +1411,7 @@ impl ConcurrentRadixTreeCompressed {
                             dp_rank: worker.dp_rank,
                         },
                     ));
-                    event_id += 1;
+                    *event_id += 1;
                 }
 
                 for child in live_children {
@@ -1399,8 +1422,6 @@ impl ConcurrentRadixTreeCompressed {
                 break;
             }
         }
-
-        events
     }
 }
 
