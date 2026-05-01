@@ -5,7 +5,7 @@ use std::future::Future;
 use std::ops::Range;
 use std::time::Duration;
 
-use dynamo_tokens::{SequenceHash, Token};
+use dynamo_tokens::{SequenceHash, Token, compute_hash_v2};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
@@ -20,14 +20,9 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
-/// Compute hash of data using XXH3 with the standard seed.
-pub fn compute_hash(data: &[u8]) -> u64 {
-    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
-}
-
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(compute_hash(data))
+    LocalBlockHash(compute_hash_v2(data, XXH3_SEED))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -156,7 +151,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
                     std::mem::size_of_val(&combined),
                 )
             };
-            compute_hash(bytes)
+            compute_hash_v2(bytes, XXH3_SEED)
         };
         #[cfg(not(target_endian = "little"))]
         let seq_hash = {

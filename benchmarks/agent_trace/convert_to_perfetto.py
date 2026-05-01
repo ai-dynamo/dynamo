@@ -55,13 +55,15 @@ def _iter_records(paths: list[Path]) -> Iterable[dict[str, Any]]:
                     yield record
 
 
+_TOOL_EVENT_TYPES = {"tool_start", "tool_end", "tool_error"}
+_SYNTHETIC_TOOL_DURATION_US = 1_000
+
+
 def _event_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
     event = record.get("event", record)
     if not isinstance(event, dict):
         return None
     if event.get("schema") != "dynamo.agent.trace.v1":
-        return None
-    if event.get("event_type") != "request_end":
         return None
     return event
 
@@ -145,6 +147,37 @@ def _flatten_args(
     if isinstance(worker, dict):
         for key, value in worker.items():
             args[f"worker.{key}"] = value
+
+    return {key: value for key, value in args.items() if value is not None}
+
+
+def _flatten_tool_args(
+    event: dict[str, Any],
+    agent_context: dict[str, Any],
+    tool: dict[str, Any],
+) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "workflow_type_id": agent_context.get("workflow_type_id"),
+        "workflow_id": agent_context.get("workflow_id"),
+        "program_id": agent_context.get("program_id"),
+        "parent_program_id": agent_context.get("parent_program_id"),
+        "event_type": event.get("event_type"),
+        "event_source": event.get("event_source"),
+        "event_time_unix_ms": event.get("event_time_unix_ms"),
+    }
+
+    for key in (
+        "tool_call_id",
+        "tool_class",
+        "status",
+        "duration_ms",
+        "output_tokens",
+        "output_bytes",
+        "tool_name_hash",
+        "error_type",
+    ):
+        if key in tool:
+            args[key] = tool[key]
 
     return {key: value for key, value in args.items() if value is not None}
 
@@ -294,6 +327,70 @@ def _bounded_stage_duration(
     return min(value_us, boundary_us - cursor_us)
 
 
+def _prepare_tool_items(tool_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    starts: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+
+    for record in sorted(tool_records, key=lambda item: item["event_time_us"]):
+        tool = record["tool"]
+        tool_call_id = _safe_label(tool.get("tool_call_id"), "unknown-tool-call")
+        key = (record["workflow_id"], record["program_id"], tool_call_id)
+        event_type = record["event_type"]
+
+        if event_type == "tool_start":
+            starts.setdefault(key, []).append(record)
+            continue
+
+        matched_start = None
+        start_stack = starts.get(key)
+        if start_stack:
+            matched_start = start_stack.pop()
+
+        event_time_us = record["event_time_us"]
+        duration_us = _ms_to_trace_us(tool.get("duration_ms"))
+        if duration_us is not None and duration_us > 0:
+            ts_us = max(0, event_time_us - duration_us)
+            dur_us = event_time_us - ts_us
+        elif (
+            matched_start is not None and event_time_us > matched_start["event_time_us"]
+        ):
+            ts_us = matched_start["event_time_us"]
+            dur_us = event_time_us - ts_us
+        else:
+            synthetic_ts_us = (
+                matched_start["event_time_us"]
+                if matched_start is not None
+                else event_time_us
+            )
+            synthetic_args = {
+                **record["args"],
+                "synthetic_duration": True,
+                "visual_duration_ms": _SYNTHETIC_TOOL_DURATION_US / 1000.0,
+            }
+            items.append(
+                {
+                    **record,
+                    "kind": "tool",
+                    "ts_us": synthetic_ts_us,
+                    "dur_us": _SYNTHETIC_TOOL_DURATION_US,
+                    "args": synthetic_args,
+                }
+            )
+            continue
+
+        items.append(
+            {**record, "kind": "tool", "ts_us": ts_us, "dur_us": max(1, dur_us)}
+        )
+
+    for start_stack in starts.values():
+        for record in start_stack:
+            items.append(
+                {**record, "kind": "tool_instant", "ts_us": record["event_time_us"]}
+            )
+
+    return items
+
+
 def convert_records(
     records: Iterable[dict[str, Any]],
     *,
@@ -302,6 +399,7 @@ def convert_records(
     separate_stage_tracks: bool = False,
 ) -> tuple[dict[str, Any], int]:
     prepared: list[dict[str, Any]] = []
+    tool_records: list[dict[str, Any]] = []
 
     for record in records:
         event = _event_from_record(record)
@@ -309,49 +407,125 @@ def convert_records(
             continue
 
         agent_context = event.get("agent_context")
-        request = event.get("request")
-        if not isinstance(agent_context, dict) or not isinstance(request, dict):
+        if not isinstance(agent_context, dict):
             continue
 
-        start_ms = _request_start_ms(event, request)
-        if start_ms is None:
-            continue
-        duration_ms = _request_duration_ms(event, request, start_ms)
-        ts_us = _ms_to_trace_us(start_ms)
-        dur_us = _ms_to_trace_us(duration_ms)
-        if ts_us is None or dur_us is None:
+        event_type = event.get("event_type")
+        workflow_id = _safe_label(agent_context.get("workflow_id"), "unknown-workflow")
+        program_id = _safe_label(agent_context.get("program_id"), "unknown-program")
+
+        if event_type == "request_end":
+            request = event.get("request")
+            if not isinstance(request, dict):
+                continue
+
+            start_ms = _request_start_ms(event, request)
+            if start_ms is None:
+                continue
+            duration_ms = _request_duration_ms(event, request, start_ms)
+            ts_us = _ms_to_trace_us(start_ms)
+            dur_us = _ms_to_trace_us(duration_ms)
+            if ts_us is None or dur_us is None:
+                continue
+
+            prepared.append(
+                {
+                    "kind": "request",
+                    "request": request,
+                    "args": _flatten_args(event, agent_context, request),
+                    "ts_us": ts_us,
+                    "dur_us": max(1, dur_us),
+                    "workflow_id": workflow_id,
+                    "program_id": program_id,
+                }
+            )
             continue
 
-        prepared.append(
-            {
-                "request": request,
-                "args": _flatten_args(event, agent_context, request),
-                "ts_us": ts_us,
-                "dur_us": max(1, dur_us),
-                "workflow_id": _safe_label(
-                    agent_context.get("workflow_id"), "unknown-workflow"
-                ),
-                "program_id": _safe_label(
-                    agent_context.get("program_id"), "unknown-program"
-                ),
-            }
-        )
+        if event_type in _TOOL_EVENT_TYPES:
+            tool = event.get("tool")
+            event_time_us = _ms_to_trace_us(event.get("event_time_unix_ms"))
+            if not isinstance(tool, dict) or event_time_us is None:
+                continue
+
+            tool_records.append(
+                {
+                    "tool": tool,
+                    "event_type": event_type,
+                    "args": _flatten_tool_args(event, agent_context, tool),
+                    "event_time_us": event_time_us,
+                    "workflow_id": workflow_id,
+                    "program_id": program_id,
+                }
+            )
+
+    prepared.extend(_prepare_tool_items(tool_records))
 
     tracks = TrackTable()
     trace_events: list[dict[str, Any]] = []
     converted = 0
 
-    for item in sorted(prepared, key=lambda item: item["ts_us"]):
-        request = item["request"]
+    for item in sorted(prepared, key=lambda item: (item["ts_us"], item["kind"])):
         args = item["args"]
         ts_us = item["ts_us"]
-        dur_us = item["dur_us"]
+        dur_us = item.get("dur_us", 1)
         lane = tracks.lane_for(
             item["workflow_id"],
             item["program_id"],
             start_us=ts_us,
             end_us=ts_us + dur_us,
         )
+
+        if item["kind"] == "tool":
+            tool = item["tool"]
+            tool_pid, tool_tid = tracks.track_for(
+                item["workflow_id"],
+                item["program_id"],
+                lane,
+                "tools",
+            )
+            event_type = item["event_type"]
+            trace_events.append(
+                _make_complete_event(
+                    name=("Tool error: " if event_type == "tool_error" else "Tool: ")
+                    + _safe_label(tool.get("tool_class"), "unknown-tool"),
+                    category="dynamo.agent.tool",
+                    pid=tool_pid,
+                    tid=tool_tid,
+                    ts_us=ts_us,
+                    dur_us=dur_us,
+                    args=args,
+                )
+            )
+            converted += 1
+            continue
+
+        if item["kind"] == "tool_instant":
+            tool = item["tool"]
+            tool_pid, tool_tid = tracks.track_for(
+                item["workflow_id"],
+                item["program_id"],
+                lane,
+                "tools",
+            )
+            trace_events.append(
+                _make_instant_event(
+                    name=(
+                        "Tool start: "
+                        if item["event_type"] == "tool_start"
+                        else "Tool: "
+                    )
+                    + _safe_label(tool.get("tool_class"), "unknown-tool"),
+                    category="dynamo.agent.tool.marker",
+                    pid=tool_pid,
+                    tid=tool_tid,
+                    ts_us=ts_us,
+                    args=args,
+                )
+            )
+            converted += 1
+            continue
+
+        request = item["request"]
         request_pid, request_tid = tracks.track_for(
             item["workflow_id"],
             item["program_id"],
@@ -363,7 +537,6 @@ def convert_records(
             if include_stages and separate_stage_tracks
             else (request_pid, request_tid)
         )
-
         trace_events.append(
             _make_complete_event(
                 name=(
@@ -558,7 +731,7 @@ def main() -> int:
             f.write("\n")
 
     print(
-        f"wrote {converted} request events from {len(input_paths)} input file(s) to {output}",
+        f"wrote {converted} trace events from {len(input_paths)} input file(s) to {output}",
         file=sys.stderr,
     )
     return 0
