@@ -142,6 +142,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
         # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
         # keep this as a multimodal serving smoke check, not a color oracle.
+        # The model also occasionally degenerates into newline-padded output
+        # (observed in CI: '\n\nWhat\n\n...' and '\n\n1') even with
+        # temperature=0; this is a known LLaVA-1.5-on-vLLM flake, so the
+        # payload retries the validation in-process (server stays up) before
+        # CI fails. See tests/README.md "Flaky Tests" — In-Process Query Retry.
         request_payloads=[
             make_image_payload(
                 [
@@ -154,7 +159,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "yellow",
                     "blue",
                     "orange",
-                ]
+                ],
+                retries=5,
             )
         ],
     ),

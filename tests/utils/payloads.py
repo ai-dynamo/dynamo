@@ -52,6 +52,12 @@ class BasePayload:
     system_ports: list[int] = field(default_factory=list)
     # When True, the HTTP request is made with stream=True (for SSE responses).
     http_stream: bool = False
+    # Validation-failure retries inside run_serve_deployment. ``0`` (default)
+    # disables retry — first validation failure surfaces immediately. Set >0
+    # only when the test target is non-deterministic and you've confirmed via
+    # tests/README.md "Flaky Tests" that retry is the right mitigation; the
+    # underlying flakiness still needs a tracking ticket.
+    retries: int = 0
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")

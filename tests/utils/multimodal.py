@@ -30,8 +30,16 @@ AUDIO_TEST_URL = (
 # ---------------------------------------------------------------------------
 
 
-def make_image_payload(expected_response: list[str]) -> ChatPayload:
-    """Standard image color-identification payload using MULTIMODAL_IMG_URL."""
+def make_image_payload(
+    expected_response: list[str], *, retries: int = 0
+) -> ChatPayload:
+    """Standard image color-identification payload using MULTIMODAL_IMG_URL.
+
+    ``retries`` controls in-process re-send on validation failure inside
+    ``run_serve_deployment`` — set >0 only for known-flaky multimodal
+    smoke checks (see tests/README.md "Flaky Tests"). The server stays
+    up across retries; only the request/response is re-issued.
+    """
     return chat_payload(
         [
             {
@@ -48,6 +56,7 @@ def make_image_payload(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,
+        retries=retries,
     )
 
 
