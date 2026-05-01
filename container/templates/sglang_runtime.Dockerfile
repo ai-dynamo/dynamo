@@ -85,7 +85,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends libjsoncpp25 && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip uninstall -y termplotlib
+RUN pip uninstall -y black termplotlib
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
