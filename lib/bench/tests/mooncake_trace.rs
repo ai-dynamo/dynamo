@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use common::{WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::KvIndexerMetrics;
+use dynamo_kv_router::indexer::pruning::PruneConfig;
+use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, TokensWithHashes, WorkerWithDpRank};
 use dynamo_mocker::loadgen::{SessionTrace, Trace, TurnTrace};
 use mooncake_shared::{
@@ -223,6 +224,34 @@ async fn assert_overlap_score_parity(
     Ok(())
 }
 
+fn approx_tokens(seed: u32, num_blocks: usize) -> Vec<u32> {
+    (0..num_blocks)
+        .flat_map(|block_idx| {
+            let token = seed + block_idx as u32;
+            (0..BLOCK_SIZE as usize).map(move |_| token)
+        })
+        .collect()
+}
+
+async fn route_approx_writes(
+    indexer: &(dyn KvIndexerInterface + Send + Sync),
+) -> anyhow::Result<()> {
+    let writes = [
+        (WorkerWithDpRank::new(0, 0), approx_tokens(10, 1)),
+        (WorkerWithDpRank::new(1, 0), approx_tokens(20, 2)),
+        (WorkerWithDpRank::new(0, 1), approx_tokens(30, 3)),
+    ];
+
+    for (worker, tokens) in writes {
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens, BLOCK_SIZE);
+        indexer
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .await?;
+    }
+
+    Ok(())
+}
+
 #[test]
 fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<()> {
     let mut file = NamedTempFile::new()?;
@@ -328,6 +357,46 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
         artifacts[0].requests[1].scheduled_ready_at_ms + 0.1 >= first_completion_ms + 5.0,
         "expected second request to wait for completion plus delay"
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Result<()> {
+    let ttl = Duration::from_millis(250);
+    let variants = [
+        MooncakeIndexerConfig::radix_tree(),
+        MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+    ];
+
+    for config in &variants {
+        let label = config.short_name();
+        let indexer = config.build_approximate_with_prune_config(
+            BLOCK_SIZE,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            PruneConfig { ttl },
+        )?;
+
+        route_approx_writes(indexer.as_ref()).await?;
+        indexer.flush().await;
+
+        assert!(
+            !indexer.dump_events().await?.is_empty(),
+            "{label} test setup should populate approximate blocks"
+        );
+
+        tokio::time::sleep(ttl + Duration::from_millis(100)).await;
+        indexer.flush().await;
+
+        assert!(
+            indexer.dump_events().await?.is_empty(),
+            "{label} should not dump any visible store events after TTL drain"
+        );
+
+        indexer.shutdown();
+    }
 
     Ok(())
 }
