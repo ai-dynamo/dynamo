@@ -1,16 +1,22 @@
-# DeepSeek-V4-Pro SGLang Disaggregated P/D on GCP GB200 (dynamo-gcp-dev-01)
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
-# Adapted from recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+# DeepSeek-V4-Pro SGLang Disaggregated P/D on GCP GB200
 #
 # Topology: 4 nodes total (ComputeDomain)
 #   prefill: 2 nodes × 4 GPUs = TP8
 #   decode:  2 nodes × 4 GPUs = TP8
 #
 # Prerequisites:
-#   - dynamo-platform HelmRelease applied (NATS + etcd in dynamo-system)
-#   - Model weights cached at /models/huggingface/hub/ on shared-model-cache PVC
-#   - hf-token-secret created in namespace
-#   - nvcrimagepullsecret created in namespace
+#   - dynamo-platform HelmRelease applied
+#   - Model weights cached on shared-model-cache PVC
+#   - hf-token-secret created: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#   - Namespace-local NATS deployed (see nats-local.yaml) — required on GCP
+#     because system NATS is unreachable from GPU pods
+#
+# GKE RDMA: Both decode and prefill pods require GKE multi-NIC RDMA annotations
+# for NIXL KV cache transfer. Without these, UCX rc transport has no IB devices.
 #
 # EAGLE disabled: crashes on long context (>18k) and tool calling on TP8
 # due to insufficient GPU memory headroom (4.23 GB/GPU with vs 7.75 without)
@@ -19,7 +25,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: dsv4-pro-disagg
-  namespace: kprashanth
+  namespace: <your-namespace>
 spec:
   backendFramework: sglang
   envs:
@@ -33,7 +39,11 @@ spec:
     - name: HF_HUB_OFFLINE
       value: "1"
     - name: NATS_SERVER
-      value: "nats://nats-local.kprashanth.svc.cluster.local:4222"
+      value: "nats://nats-local.<your-namespace>.svc.cluster.local:4222"
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
 
   pvcs:
     - name: shared-model-cache
@@ -88,9 +98,24 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 2
+      annotations:
+        networking.gke.io/default-interface: eth0
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"rdma0","network":"rdma-0"},
+            {"interfaceName":"rdma1","network":"rdma-1"},
+            {"interfaceName":"rdma2","network":"rdma-2"},
+            {"interfaceName":"rdma3","network":"rdma-3"}
+          ]
       resources:
         limits:
           gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       volumeMounts:
@@ -131,7 +156,8 @@ spec:
               --disable-flashinfer-autotune
               --dyn-tool-call-parser deepseek_v4
               --dyn-reasoning-parser deepseek_v4
-              --mem-fraction-static 0.82
+              --mem-fraction-static 0.75
+              --cuda-graph-max-bs 128
               --host 0.0.0.0
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
@@ -160,9 +186,13 @@ spec:
             - name: GLOO_SOCKET_IFNAME
               value: eth0
             - name: UCX_TLS
-              value: "cuda_ipc,cuda_copy,tcp"
-            - name: UCX_CUDA_IPC_ENABLE_MNNVL
-              value: "y"
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_IB_GID_INDEX
+              value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
             - name: UCX_LOG_LEVEL
               value: info
             - name: NIXL_LOG_LEVEL
@@ -188,9 +218,24 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 2
+      annotations:
+        networking.gke.io/default-interface: eth0
+        networking.gke.io/interfaces: |
+          [
+            {"interfaceName":"eth0","network":"default"},
+            {"interfaceName":"rdma0","network":"rdma-0"},
+            {"interfaceName":"rdma1","network":"rdma-1"},
+            {"interfaceName":"rdma2","network":"rdma-2"},
+            {"interfaceName":"rdma3","network":"rdma-3"}
+          ]
       resources:
         limits:
           gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       volumeMounts:
@@ -231,7 +276,8 @@ spec:
               --disable-flashinfer-autotune
               --dyn-tool-call-parser deepseek_v4
               --dyn-reasoning-parser deepseek_v4
-              --mem-fraction-static 0.82
+              --mem-fraction-static 0.75
+              --cuda-graph-max-bs 128
               --host 0.0.0.0
               --disaggregation-mode prefill
               --disaggregation-transfer-backend nixl
@@ -260,9 +306,13 @@ spec:
             - name: GLOO_SOCKET_IFNAME
               value: eth0
             - name: UCX_TLS
-              value: "cuda_ipc,cuda_copy,tcp"
-            - name: UCX_CUDA_IPC_ENABLE_MNNVL
-              value: "y"
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_IB_GID_INDEX
+              value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
             - name: UCX_LOG_LEVEL
               value: info
             - name: NIXL_LOG_LEVEL
@@ -288,7 +338,7 @@ apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
   name: dsv4-pro-compute-domain
-  namespace: kprashanth
+  namespace: <your-namespace>
 spec:
   channel:
     allocationMode: Single
@@ -300,7 +350,7 @@ apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
   name: dsv4-pro-compute-domain-channel
-  namespace: kprashanth
+  namespace: <your-namespace>
 spec:
   spec:
     devices:
