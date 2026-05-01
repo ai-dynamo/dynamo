@@ -1,7 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4-Pro SGLang Aggregated Serving on GB200
+#
+# Topology: 2 nodes x 4 GPUs = TP8 (NCCL over Socket)
+#
+# EAGLE disabled: crashes on long context (>18k) and tool calling on TP8
+
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-dsv4-pro-agg
+  namespace: <your-namespace>
 spec:
   envs:
     - name: HF_HOME
@@ -27,14 +37,8 @@ spec:
         - name: shared-model-cache
           mountPoint: /models
       extraPodSpec:
-        imagePullSecrets:
-        - name: nvcrimagepullsecret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-        tolerations:
-        - operator: Exists
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dtokarev:sglang-1.2.0-deepseek-v4-cuda13-dev.2-rc2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           imagePullPolicy: Always
           securityContext:
             runAsUser: 0
@@ -62,12 +66,8 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
-        imagePullSecrets:
-        - name: nvcrimagepullsecret
-        tolerations:
-        - operator: Exists
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dtokarev:sglang-1.2.0-deepseek-v4-cuda13-dev.2-rc2
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           imagePullPolicy: Always
           workingDir: /workspace
           command:

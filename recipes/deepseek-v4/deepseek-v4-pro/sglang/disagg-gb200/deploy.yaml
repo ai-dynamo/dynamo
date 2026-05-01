@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# DeepSeek-V4-Pro SGLang Disaggregated P/D on GCP GB200
+# DeepSeek-V4-Pro SGLang Disaggregated P/D on GB200
 #
 # Topology: 4 nodes total (ComputeDomain)
 #   prefill: 2 nodes × 4 GPUs = TP8
@@ -12,11 +12,9 @@
 #   - Model weights cached on shared-model-cache PVC
 #   - hf-token-secret created: kubectl create secret generic hf-token-secret \
 #       --from-literal=HF_TOKEN=<your-token> -n <namespace>
-#   - Namespace-local NATS deployed (see nats-local.yaml) — required on GCP
-#     because system NATS is unreachable from GPU pods
 #
-# GKE RDMA: Both decode and prefill pods require GKE multi-NIC RDMA annotations
-# for NIXL KV cache transfer. Without these, UCX rc transport has no IB devices.
+# RDMA: Disaggregated KV transfer requires RDMA networking for NIXL.
+# See README.md for cluster-specific RDMA configuration (GKE, EFA, IB).
 #
 # EAGLE disabled: crashes on long context (>18k) and tool calling on TP8
 # due to insufficient GPU memory headroom (4.23 GB/GPU with vs 7.75 without)
@@ -38,8 +36,6 @@ spec:
       value: /models
     - name: HF_HUB_OFFLINE
       value: "1"
-    - name: NATS_SERVER
-      value: "nats://nats-local.<your-namespace>.svc.cluster.local:4222"
     - name: GLOO_SOCKET_IFNAME
       value: eth0
     - name: NCCL_SOCKET_IFNAME
@@ -57,20 +53,6 @@ spec:
         - name: shared-model-cache
           mountPoint: /models
       extraPodSpec:
-        tolerations:
-          - key: dedicated
-            operator: Equal
-            value: user-workload
-            effect: NoExecute
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
-          - key: kubernetes.io/arch
-            operator: Equal
-            value: arm64
-            effect: NoSchedule
-        nodeSelector:
-          kubernetes.io/arch: arm64
         mainContainer:
           command:
             - python3
@@ -82,7 +64,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-          image: nvcr.io/nvidian/dynamo-dev/dtokarev:sglang-1.2.0-deepseek-v4-cuda13-dev.2-53af22f485af
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           imagePullPolicy: Always
           startupProbe:
             httpGet:
@@ -98,24 +80,9 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 2
-      annotations:
-        networking.gke.io/default-interface: eth0
-        networking.gke.io/interfaces: |
-          [
-            {"interfaceName":"eth0","network":"default"},
-            {"interfaceName":"rdma0","network":"rdma-0"},
-            {"interfaceName":"rdma1","network":"rdma-1"},
-            {"interfaceName":"rdma2","network":"rdma-2"},
-            {"interfaceName":"rdma3","network":"rdma-3"}
-          ]
       resources:
         limits:
           gpu: "4"
-          custom:
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       volumeMounts:
@@ -124,18 +91,6 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
-        tolerations:
-          - key: dedicated
-            operator: Equal
-            value: user-workload
-            effect: NoExecute
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
-          - key: kubernetes.io/arch
-            operator: Equal
-            value: arm64
-            effect: NoSchedule
         resourceClaims:
           - name: compute-domain-channel
             resourceClaimTemplateName: dsv4-pro-compute-domain-channel
@@ -183,8 +138,6 @@ spec:
               value: "1"
             - name: NCCL_STORE_TIMEOUT
               value: "7200"
-            - name: GLOO_SOCKET_IFNAME
-              value: eth0
             - name: UCX_TLS
               value: "cuda_ipc,cuda_copy,rc"
             - name: UCX_IB_GID_INDEX
@@ -193,11 +146,9 @@ spec:
               value: "600s"
             - name: UCX_KEEPALIVE_INTERVAL
               value: "300s"
-            - name: UCX_LOG_LEVEL
-              value: info
             - name: NIXL_LOG_LEVEL
               value: INFO
-          image: nvcr.io/nvidian/dynamo-dev/dtokarev:sglang-1.2.0-deepseek-v4-cuda13-dev.2-53af22f485af
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           imagePullPolicy: Always
           securityContext:
             capabilities:
@@ -218,24 +169,9 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 2
-      annotations:
-        networking.gke.io/default-interface: eth0
-        networking.gke.io/interfaces: |
-          [
-            {"interfaceName":"eth0","network":"default"},
-            {"interfaceName":"rdma0","network":"rdma-0"},
-            {"interfaceName":"rdma1","network":"rdma-1"},
-            {"interfaceName":"rdma2","network":"rdma-2"},
-            {"interfaceName":"rdma3","network":"rdma-3"}
-          ]
       resources:
         limits:
           gpu: "4"
-          custom:
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       volumeMounts:
@@ -244,18 +180,6 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
-        tolerations:
-          - key: dedicated
-            operator: Equal
-            value: user-workload
-            effect: NoExecute
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
-          - key: kubernetes.io/arch
-            operator: Equal
-            value: arm64
-            effect: NoSchedule
         resourceClaims:
           - name: compute-domain-channel
             resourceClaimTemplateName: dsv4-pro-compute-domain-channel
@@ -303,8 +227,6 @@ spec:
               value: "1"
             - name: NCCL_STORE_TIMEOUT
               value: "7200"
-            - name: GLOO_SOCKET_IFNAME
-              value: eth0
             - name: UCX_TLS
               value: "cuda_ipc,cuda_copy,rc"
             - name: UCX_IB_GID_INDEX
@@ -313,11 +235,9 @@ spec:
               value: "600s"
             - name: UCX_KEEPALIVE_INTERVAL
               value: "300s"
-            - name: UCX_LOG_LEVEL
-              value: info
             - name: NIXL_LOG_LEVEL
               value: INFO
-          image: nvcr.io/nvidian/dynamo-dev/dtokarev:sglang-1.2.0-deepseek-v4-cuda13-dev.2-53af22f485af
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           imagePullPolicy: Always
           securityContext:
             capabilities:
@@ -332,8 +252,6 @@ spec:
             timeoutSeconds: 5
           workingDir: /workspace/
 ---
-# ComputeDomain reserves 4 NVLink-connected nodes for the disagg deployment.
-# Decode claims the channel; prefill is co-scheduled by the DGD operator.
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:

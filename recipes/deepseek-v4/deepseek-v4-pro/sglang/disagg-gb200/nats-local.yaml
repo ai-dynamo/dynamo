@@ -1,11 +1,14 @@
-# Namespace-local NATS for GCP dynamo-gcp-dev-01
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Namespace-local NATS for GCP GCP clusters
 # Workaround: system NATS is on system-cpu nodes, unreachable from GPU pods.
 # This deploys NATS on customer-cpu nodes (same network segment as GPU pods).
 apiVersion: v1
 kind: Pod
 metadata:
   name: nats-local
-  namespace: kprashanth
+  namespace: <your-namespace>
   labels:
     app: nats-local
 spec:
@@ -44,7 +47,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: nats-local
-  namespace: kprashanth
+  namespace: <your-namespace>
 spec:
   selector:
     app: nats-local

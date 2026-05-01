@@ -1,7 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Download DeepSeek-V4-Pro to GCP shared-model-cache
 # Prereq: kubectl create secret generic hf-token-secret -n <your-namespace> \
 #   --from-literal=HF_TOKEN=<token> \
-#   --context=nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-01
+#   --context=<your-context>
 apiVersion: batch/v1
 kind: Job
 metadata:
