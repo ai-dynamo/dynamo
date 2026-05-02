@@ -352,10 +352,6 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
             let entry = scores.scores.entry(worker).or_insert(0);
             *entry = (*entry).max(shard_score);
         }
-        shard_scores
-            .tree_sizes
-            .retain(|worker, _| active.contains(worker));
-        scores.tree_sizes.extend(shard_scores.tree_sizes);
         Ok(scores)
     }
 

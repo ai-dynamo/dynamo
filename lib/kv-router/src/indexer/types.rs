@@ -165,7 +165,6 @@ pub struct IndexerQueryRequest {
 pub struct WireOverlapScores {
     pub scores: Vec<(WorkerWithDpRank, u32)>,
     pub frequencies: Vec<usize>,
-    pub tree_sizes: Vec<(WorkerWithDpRank, usize)>,
 }
 
 impl From<OverlapScores> for WireOverlapScores {
@@ -173,7 +172,6 @@ impl From<OverlapScores> for WireOverlapScores {
         Self {
             scores: s.scores.into_iter().collect(),
             frequencies: s.frequencies,
-            tree_sizes: s.tree_sizes.into_iter().collect(),
         }
     }
 }
@@ -183,7 +181,6 @@ impl From<WireOverlapScores> for OverlapScores {
         Self {
             scores: w.scores.into_iter().collect(),
             frequencies: w.frequencies,
-            tree_sizes: w.tree_sizes.into_iter().collect(),
         }
     }
 }

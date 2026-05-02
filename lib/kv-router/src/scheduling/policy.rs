@@ -159,7 +159,6 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,
             effective_cached_tokens,
-            tree_sizes: std::collections::HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -183,7 +182,6 @@ mod tests {
         OverlapScores {
             scores: map,
             frequencies: vec![],
-            tree_sizes: FxHashMap::default(),
         }
     }
 

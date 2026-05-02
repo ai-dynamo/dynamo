@@ -15,201 +15,13 @@ use super::positional::PositionalIndexer;
 use super::*;
 use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
-use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-/// Create a store event with proper sequence hashes computed from local hashes.
-fn make_store_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
-    make_store_event_with_dp_rank(worker_id, local_hashes, 0)
-}
-
-/// Create a store event with a specific dp_rank.
-fn make_store_event_with_dp_rank(
-    worker_id: u64,
-    local_hashes: &[u64],
-    dp_rank: u32,
-) -> RouterEvent {
-    make_store_event_full(worker_id, local_hashes, dp_rank, None, None)
-}
-
-/// Create a store event with parent hash for continuation sequences.
-/// `prefix_hashes` are the hashes of the prefix (to compute parent_hash).
-/// `local_hashes` are the new blocks being stored.
-fn make_store_event_with_parent(
-    worker_id: u64,
-    prefix_hashes: &[u64],
-    local_hashes: &[u64],
-) -> RouterEvent {
-    // Compute the parent hash from the prefix
-    let prefix_block_hashes: Vec<LocalBlockHash> =
-        prefix_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-    let prefix_seq_hashes = compute_seq_hash_for_block(&prefix_block_hashes);
-    let parent_hash = prefix_seq_hashes
-        .last()
-        .map(|&h| ExternalSequenceBlockHash(h));
-
-    // Compute the full sequence including prefix for proper seq_hash calculation
-    let full_hashes: Vec<u64> = prefix_hashes
-        .iter()
-        .chain(local_hashes.iter())
-        .copied()
-        .collect();
-    let full_block_hashes: Vec<LocalBlockHash> =
-        full_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-    let full_seq_hashes = compute_seq_hash_for_block(&full_block_hashes);
-
-    // Only include the new blocks (skip prefix)
-    let new_block_hashes: Vec<LocalBlockHash> =
-        local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-    let new_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
-
-    router_event(
-        worker_id,
-        0,
-        0,
-        KvCacheEventData::Stored(KvCacheStoreData {
-            parent_hash,
-            start_position: None,
-            blocks: stored_blocks_with_sequence_hashes(&new_block_hashes, new_seq_hashes),
-        }),
-    )
-}
-
-fn make_store_event_with_start_position(
-    worker_id: u64,
-    local_hashes: &[u64],
-    start_position: u32,
-) -> RouterEvent {
-    make_store_event_full(worker_id, local_hashes, 0, None, Some(start_position))
-}
-
-/// Create a store event with all options.
-fn make_store_event_full(
-    worker_id: u64,
-    local_hashes: &[u64],
-    dp_rank: u32,
-    parent_hash: Option<ExternalSequenceBlockHash>,
-    start_position: Option<u32>,
-) -> RouterEvent {
-    let local_block_hashes: Vec<LocalBlockHash> =
-        local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-    let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-    router_event(
-        worker_id,
-        0,
-        dp_rank,
-        KvCacheEventData::Stored(KvCacheStoreData {
-            parent_hash,
-            start_position,
-            blocks: stored_blocks_with_sequence_hashes(&local_block_hashes, &seq_hashes),
-        }),
-    )
-}
-
-/// Create a remove event for blocks with given local hashes.
-fn make_remove_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
-    make_remove_event_with_dp_rank(worker_id, local_hashes, 0)
-}
-
-/// Create a remove event with a specific dp_rank.
-fn make_remove_event_with_dp_rank(
-    worker_id: u64,
-    local_hashes: &[u64],
-    dp_rank: u32,
-) -> RouterEvent {
-    let local_block_hashes: Vec<LocalBlockHash> =
-        local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-    let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-    remove_event(
-        worker_id,
-        0,
-        dp_rank,
-        seq_hashes
-            .iter()
-            .map(|&h| ExternalSequenceBlockHash(h))
-            .collect(),
-    )
-}
-
-/// Create a remove event with parent hash for continuation sequences.
-/// `prefix_hashes` are the hashes of the prefix (to compute parent_hash and full seq context).
-/// `local_hashes` are the blocks being removed.
-fn make_remove_event_with_parent(
-    worker_id: u64,
-    prefix_hashes: &[u64],
-    local_hashes: &[u64],
-) -> RouterEvent {
-    let full_hashes: Vec<u64> = prefix_hashes
-        .iter()
-        .chain(local_hashes.iter())
-        .copied()
-        .collect();
-    let full_block_hashes: Vec<LocalBlockHash> =
-        full_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
-    let full_seq_hashes = compute_seq_hash_for_block(&full_block_hashes);
-
-    let suffix_seq_hashes = &full_seq_hashes[prefix_hashes.len()..];
-
-    remove_event(
-        worker_id,
-        0,
-        0,
-        suffix_seq_hashes
-            .iter()
-            .map(|&h| ExternalSequenceBlockHash(h))
-            .collect(),
-    )
-}
-
-/// Snapshot the tree state for deterministic comparison.
-/// Dumps all events, zeros out `event_id`, and sorts by `(worker_id, dp_rank, block_hash)`.
-async fn snapshot_tree(index: &dyn KvIndexerInterface) -> Vec<RouterEvent> {
-    let mut events = index.dump_events().await.unwrap();
-    for ev in &mut events {
-        ev.event.event_id = 0;
-    }
-    events.sort_by(|a, b| {
-        a.worker_id.cmp(&b.worker_id).then_with(|| {
-            a.event.dp_rank.cmp(&b.event.dp_rank).then_with(|| {
-                let hash_a = match &a.event.data {
-                    KvCacheEventData::Stored(s) => {
-                        s.blocks.first().map(|b| b.block_hash.0).unwrap_or(0)
-                    }
-                    KvCacheEventData::Removed(r) => {
-                        r.block_hashes.first().map(|h| h.0).unwrap_or(0)
-                    }
-                    KvCacheEventData::Cleared => 0,
-                };
-                let hash_b = match &b.event.data {
-                    KvCacheEventData::Stored(s) => {
-                        s.blocks.first().map(|b| b.block_hash.0).unwrap_or(0)
-                    }
-                    KvCacheEventData::Removed(r) => {
-                        r.block_hashes.first().map(|h| h.0).unwrap_or(0)
-                    }
-                    KvCacheEventData::Cleared => 0,
-                };
-                hash_a.cmp(&hash_b)
-            })
-        })
-    });
-    events
-}
-
-/// Create a clear event for a worker.
-fn make_clear_event(worker_id: u64) -> RouterEvent {
-    make_clear_event_with_dp_rank(worker_id, 0)
-}
-
-/// Create a clear event with a specific dp_rank.
-fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
-    router_event(worker_id, 0, dp_rank, KvCacheEventData::Cleared)
-}
+use crate::test_utils::{
+    assert_exact_scores, assert_no_scores, assert_score, flush_and_settle, make_clear_event,
+    make_clear_event_with_dp_rank, make_remove_event, make_remove_event_with_parent,
+    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent,
+    make_store_event_with_start_position, query_scores, remove_event, router_event,
+    snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
+};
 
 // ============================================================================
 // KvIndexerInterface tests - parametrized over all implementations
@@ -310,42 +122,96 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
     }
 }
 
-async fn flush_and_settle(index: &dyn KvIndexerInterface) {
-    index.flush().await;
+enum TreeSizeTestIndexer {
+    Single(RadixTree),
+    Concurrent(ThreadPoolIndexer<ConcurrentRadixTree>),
+    ConcurrentCompressed(ThreadPoolIndexer<ConcurrentRadixTreeCompressed>),
 }
 
-async fn query_scores(index: &dyn KvIndexerInterface, query: &[u64]) -> OverlapScores {
-    index
-        .find_matches(query.iter().copied().map(LocalBlockHash).collect())
-        .await
-        .unwrap()
-}
+impl TreeSizeTestIndexer {
+    fn new(variant: &str) -> Self {
+        match variant {
+            "single" => Self::Single(RadixTree::new()),
+            "concurrent" => {
+                Self::Concurrent(ThreadPoolIndexer::new(ConcurrentRadixTree::new(), 4, 4))
+            }
+            "concurrent_compressed" => Self::ConcurrentCompressed(ThreadPoolIndexer::new(
+                ConcurrentRadixTreeCompressed::new(),
+                4,
+                4,
+            )),
+            _ => panic!("Unknown tree-size test variant: {}", variant),
+        }
+    }
 
-async fn assert_score(
-    index: &dyn KvIndexerInterface,
-    query: &[u64],
-    worker: WorkerWithDpRank,
-    expected_score: u32,
-) {
-    let scores = query_scores(index, query).await;
-    assert_eq!(scores.scores.get(&worker), Some(&expected_score));
-}
+    async fn apply_event(&mut self, event: RouterEvent) {
+        match self {
+            Self::Single(index) => {
+                let _ = index.apply_event(event);
+            }
+            Self::Concurrent(index) => {
+                index.apply_event(event).await;
+            }
+            Self::ConcurrentCompressed(index) => {
+                index.apply_event(event).await;
+            }
+        }
+    }
 
-async fn assert_query_score_and_tree_size(
-    index: &dyn KvIndexerInterface,
-    query: &[u64],
-    worker: WorkerWithDpRank,
-    expected_score: u32,
-    expected_tree_size: usize,
-) {
-    let scores = query_scores(index, query).await;
-    assert_eq!(scores.scores.get(&worker), Some(&expected_score));
-    assert_eq!(scores.tree_sizes.get(&worker), Some(&expected_tree_size));
-}
+    async fn flush(&self) {
+        match self {
+            Self::Single(_) => {}
+            Self::Concurrent(index) => {
+                index.flush().await;
+            }
+            Self::ConcurrentCompressed(index) => {
+                index.flush().await;
+            }
+        }
+    }
 
-async fn assert_no_scores(index: &dyn KvIndexerInterface, query: &[u64]) {
-    let scores = query_scores(index, query).await;
-    assert!(scores.scores.is_empty());
+    fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        match self {
+            Self::Single(index) => index.tree_size_for_worker(worker),
+            Self::Concurrent(index) => index.backend().tree_size_for_worker(worker),
+            Self::ConcurrentCompressed(index) => index.backend().tree_size_for_worker(worker),
+        }
+    }
+
+    fn scores(&self, query: &[u64]) -> OverlapScores {
+        let query = query.iter().copied().map(LocalBlockHash).collect();
+        match self {
+            Self::Single(index) => index.find_matches(query, false),
+            Self::Concurrent(index) => index.backend().find_matches_impl(&query, false),
+            Self::ConcurrentCompressed(index) => index.backend().find_matches_impl(&query, false),
+        }
+    }
+
+    fn assert_score_and_tree_size(
+        &self,
+        query: &[u64],
+        worker: WorkerWithDpRank,
+        expected_score: u32,
+        expected_tree_size: usize,
+    ) {
+        let scores = self.scores(query);
+        assert_eq!(scores.scores.get(&worker), Some(&expected_score));
+        assert_eq!(
+            self.tree_size_for_worker(worker),
+            Some(expected_tree_size),
+            "internal tree-size accounting mismatch"
+        );
+    }
+
+    async fn snapshot_tree(&self) -> Vec<RouterEvent> {
+        match self {
+            Self::Single(index) => snapshot_events(index.dump_tree_as_events()),
+            Self::Concurrent(index) => snapshot_events(index.dump_events().await.unwrap()),
+            Self::ConcurrentCompressed(index) => {
+                snapshot_events(index.dump_events().await.unwrap())
+            }
+        }
+    }
 }
 
 async fn route_approx_tokens(
@@ -376,18 +242,6 @@ async fn assert_request_score(
 ) {
     let scores = request_scores(index, tokens).await;
     assert_eq!(scores.scores.get(&worker), Some(&expected_score));
-}
-
-async fn assert_exact_scores(
-    index: &dyn KvIndexerInterface,
-    query: &[u64],
-    expected_scores: &[(WorkerWithDpRank, u32)],
-) {
-    let scores = query_scores(index, query).await;
-    assert_eq!(scores.scores.len(), expected_scores.len());
-    for (worker, expected_score) in expected_scores {
-        assert_eq!(scores.scores.get(worker), Some(expected_score));
-    }
 }
 
 #[cfg(feature = "metrics")]
@@ -510,7 +364,7 @@ mod interface_tests {
     #[tokio::test]
     #[apply(tree_size_indexer_template)]
     async fn test_tree_size_accounting_stays_stable(variant: &str) {
-        let index = make_indexer(variant);
+        let mut index = TreeSizeTestIndexer::new(variant);
         let worker = WorkerWithDpRank::new(0, 0);
         let prefix_event = make_store_event(0, &[1, 2, 3]);
         let continuation_event = make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]);
@@ -526,165 +380,147 @@ mod interface_tests {
         // same stable baseline.
 
         index.apply_event(prefix_event.clone()).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
-        let prefix_snapshot = snapshot_tree(index.as_ref()).await;
+        index.assert_score_and_tree_size(&[1, 2, 3], worker, 3, 3);
+        let prefix_snapshot = index.snapshot_tree().await;
 
         index.apply_event(prefix_event).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
         assert_eq!(
             prefix_snapshot,
-            snapshot_tree(index.as_ref()).await,
+            index.snapshot_tree().await,
             "replaying the same store event should not change the tree structure"
         );
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+        index.assert_score_and_tree_size(&[1, 2, 3], worker, 3, 3);
 
         index.apply_event(continuation_event.clone()).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 5, 5).await;
-        let full_snapshot = snapshot_tree(index.as_ref()).await;
+        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 5, 5);
+        let full_snapshot = index.snapshot_tree().await;
 
         index.apply_event(continuation_event).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
         assert_eq!(
             full_snapshot,
-            snapshot_tree(index.as_ref()).await,
+            index.snapshot_tree().await,
             "replaying the same continuation store should not change the tree structure"
         );
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 5, 5).await;
+        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 5, 5);
 
         index.apply_event(continuation_remove.clone()).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 3, 3).await;
-        let trimmed_snapshot = snapshot_tree(index.as_ref()).await;
+        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 3, 3);
+        let trimmed_snapshot = index.snapshot_tree().await;
 
         index.apply_event(continuation_remove).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
         assert_eq!(
             trimmed_snapshot,
-            snapshot_tree(index.as_ref()).await,
+            index.snapshot_tree().await,
             "replaying the same remove event should not change the tree structure"
         );
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3, 4, 5], worker, 3, 3).await;
+        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 3, 3);
 
         index.apply_event(prefix_remove.clone()).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
-        let empty_scores = index
-            .find_matches(vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(3),
-                LocalBlockHash(4),
-                LocalBlockHash(5),
-            ])
-            .await
-            .unwrap();
+        let empty_scores = index.scores(&[1, 2, 3, 4, 5]);
         assert!(empty_scores.scores.is_empty());
-        assert!(snapshot_tree(index.as_ref()).await.is_empty());
+        assert_eq!(index.tree_size_for_worker(worker), Some(0));
+        assert!(index.snapshot_tree().await.is_empty());
 
         index.apply_event(prefix_remove).await;
-        flush_and_settle(index.as_ref()).await;
+        index.flush().await;
 
-        let duplicate_empty_scores = index
-            .find_matches(vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(3),
-                LocalBlockHash(4),
-                LocalBlockHash(5),
-            ])
-            .await
-            .unwrap();
+        let duplicate_empty_scores = index.scores(&[1, 2, 3, 4, 5]);
         assert!(duplicate_empty_scores.scores.is_empty());
-        assert!(snapshot_tree(index.as_ref()).await.is_empty());
+        assert_eq!(index.tree_size_for_worker(worker), Some(0));
+        assert!(index.snapshot_tree().await.is_empty());
     }
 
     #[tokio::test]
-    async fn test_concurrent_compressed_restore_after_mid_chain_remove_updates_tree_size() {
-        let index = make_indexer("concurrent_compressed");
-        let worker = WorkerWithDpRank::new(0, 0);
+    #[apply(indexer_template)]
+    async fn test_shared_prefix_branch_rejects_invalid_suffix_parent(variant: &str) {
+        let index = make_indexer(variant);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let worker2 = WorkerWithDpRank::new(2, 0);
 
-        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        index.apply_event(make_store_event(1, &[1, 2, 3])).await;
+        index.apply_event(make_store_event(2, &[1, 2, 3])).await;
         flush_and_settle(index.as_ref()).await;
 
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
-
         index
-            .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
+            .apply_event(make_store_event_with_parent(1, &[1, 2, 3], &[4, 5, 6]))
             .await;
         flush_and_settle(index.as_ref()).await;
 
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 1, 1).await;
+        let scores = query_scores(index.as_ref(), &[1, 2, 3, 4, 5, 6]).await;
+        assert_eq!(scores.scores.get(&worker1), Some(&6));
+        assert_eq!(scores.scores.get(&worker2), Some(&3));
 
         index
-            .apply_event(make_store_event_with_parent(0, &[1], &[2, 3]))
+            .apply_event(make_store_event_with_parent(2, &[1, 2, 3], &[7, 8]))
             .await;
         flush_and_settle(index.as_ref()).await;
 
-        assert_query_score_and_tree_size(index.as_ref(), &[1, 2, 3], worker, 3, 3).await;
+        let branch_scores = query_scores(index.as_ref(), &[1, 2, 3, 7, 8]).await;
+        assert_eq!(branch_scores.scores.get(&worker1), Some(&3));
+        assert_eq!(branch_scores.scores.get(&worker2), Some(&5));
+
+        let original_tail_scores = query_scores(index.as_ref(), &[1, 2, 3, 4, 5, 6]).await;
+        assert_eq!(original_tail_scores.scores.get(&worker1), Some(&6));
+        assert_eq!(original_tail_scores.scores.get(&worker2), Some(&3));
+
+        index
+            .apply_event(make_store_event_with_parent(
+                2,
+                &[1, 2, 3, 4, 5, 6],
+                &[9, 10],
+            ))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        let rejected_parent_scores = query_scores(index.as_ref(), &[1, 2, 3, 4, 5, 6, 9, 10]).await;
+        assert_eq!(rejected_parent_scores.scores.get(&worker1), Some(&6));
+        assert_eq!(rejected_parent_scores.scores.get(&worker2), Some(&3));
     }
 
     #[tokio::test]
-    async fn test_concurrent_compressed_partial_node_drops_unreachable_descendants() {
-        let index = make_indexer("concurrent_compressed");
+    #[apply(indexer_template)]
+    async fn test_prefix_suffix_reuse_then_tail_append(variant: &str) {
+        let index = make_indexer(variant);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let worker2 = WorkerWithDpRank::new(2, 0);
 
-        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
         index
-            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .apply_event(make_store_event(1, &[1, 2, 3, 4, 5, 6]))
+            .await;
+        index.apply_event(make_store_event(2, &[1, 2, 3])).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_score(index.as_ref(), &[1, 2, 3, 4, 5, 6], worker1, 6).await;
+        assert_score(index.as_ref(), &[1, 2, 3, 4, 5, 6], worker2, 3).await;
+
+        index
+            .apply_event(make_store_event_with_parent(2, &[1, 2, 3], &[4, 5, 6]))
+            .await;
+        index
+            .apply_event(make_store_event_with_parent(
+                2,
+                &[1, 2, 3, 4, 5, 6],
+                &[7, 8, 9],
+            ))
             .await;
         flush_and_settle(index.as_ref()).await;
 
-        index
-            .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
-            .await;
-        flush_and_settle(index.as_ref()).await;
-
-        assert_eq!(
-            snapshot_tree(index.as_ref()).await,
-            vec![make_store_event(0, &[1])]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_compressed_cleanup_prunes_dead_children_under_live_prefix() {
-        let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32);
-
-        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
-        index
-            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
-            .await;
-        index
-            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[6, 7]))
-            .await;
-        flush_and_settle(&index).await;
-
-        index
-            .apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]))
-            .await;
-        index
-            .apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[6, 7]))
-            .await;
-        flush_and_settle(&index).await;
-
-        let expected_snapshot = vec![make_store_event(0, &[1, 2, 3])];
-        assert_eq!(snapshot_tree(&index).await, expected_snapshot);
-        assert_eq!(index.backend().raw_child_edge_count(), 3);
-
-        index.backend().run_cleanup_for_test();
-
-        assert_eq!(index.backend().raw_child_edge_count(), 1);
-        assert_eq!(
-            snapshot_tree(&index).await,
-            vec![make_store_event(0, &[1, 2, 3])]
-        );
-        assert_score(&index, &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
+        assert_score(index.as_ref(), &[1, 2, 3, 4, 5, 6, 7, 8, 9], worker1, 6).await;
+        assert_score(index.as_ref(), &[1, 2, 3, 4, 5, 6, 7, 8, 9], worker2, 9).await;
     }
 
     #[tokio::test]

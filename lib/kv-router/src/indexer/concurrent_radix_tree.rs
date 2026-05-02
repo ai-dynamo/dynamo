@@ -220,13 +220,6 @@ impl ConcurrentRadixTree {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
             }
-            for worker in scores.scores.keys() {
-                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-                }
-            }
             return scores;
         }
 
@@ -285,15 +278,6 @@ impl ConcurrentRadixTree {
         // Record scores for workers that survived through the deepest matched level.
         for worker in &active {
             scores.scores.insert(*worker, matched_depth);
-        }
-
-        // Get tree sizes from lookup.
-        for worker in scores.scores.keys() {
-            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                scores
-                    .tree_sizes
-                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-            }
         }
 
         scores
@@ -581,6 +565,13 @@ impl ConcurrentRadixTree {
         worker_ids.sort_unstable();
         worker_ids.dedup();
         worker_ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.tree_sizes
+            .get(&worker)
+            .map(|size| size.load(Ordering::Relaxed))
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
