@@ -10992,6 +10992,24 @@ spec:
                           GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
                           When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
                         properties:
+                          artifactStorage:
+                            description: |-
+                              ArtifactStorage optionally moves GMS weight checkpoint artifacts to a
+                              separate PVC. Snapshot-agent completion sentinels remain on the snapshot
+                              PVC so restore/checkpoint barriers keep using the existing control path.
+                            properties:
+                              basePath:
+                                description: |-
+                                  BasePath is the mount path for the artifact PVC inside GMS saver/loader
+                                  containers. The operator resolves the final path as
+                                  <basePath>/<checkpointHash>/versions/<artifactVersion>.
+                                type: string
+                              pvcName:
+                                description: |-
+                                  PVCName is the persistent volume claim that stores GMS weight artifacts.
+                                  When omitted, GMS artifacts are stored on the snapshot PVC.
+                                type: string
+                            type: object
                           deviceClassName:
                             default: gpu.nvidia.com
                             description: DeviceClassName is the DRA DeviceClass to request GPUs from.

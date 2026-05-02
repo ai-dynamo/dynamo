@@ -32,6 +32,7 @@ DEFAULT_GMS_LOAD_COMPLETE_FILE = "gms-load-complete"
 GMS_LOAD_COMPLETE_FILE_ENV = "GMS_LOAD_COMPLETE_FILE"
 GMS_TRANSFER_BACKEND_ENV = "GMS_TRANSFER_BACKEND"
 GMS_POD_UID_ENV = "GMS_POD_UID"
+GMS_WEIGHTS_CHECKPOINT_DIR_ENV = "GMS_WEIGHTS_CHECKPOINT_DIR"
 
 
 def _load_device(
@@ -95,13 +96,14 @@ def _write_completion_sentinel(checkpoint_dir: str) -> None:
 
 
 def main() -> None:
-    checkpoint_dir = os.environ["GMS_CHECKPOINT_DIR"]
+    control_dir = os.environ["GMS_CHECKPOINT_DIR"]
+    checkpoint_dir = os.environ.get(GMS_WEIGHTS_CHECKPOINT_DIR_ENV, control_dir)
     max_workers = int(os.environ.get("GMS_LOAD_WORKERS", "8"))
     transfer_backend = os.environ.get(
         GMS_TRANSFER_BACKEND_ENV,
         DEFAULT_TRANSFER_BACKEND,
     )
-    _clear_completion_sentinel(checkpoint_dir)
+    _clear_completion_sentinel(control_dir)
     devices = list_devices()
 
     t0 = time.monotonic()
@@ -122,7 +124,7 @@ def main() -> None:
             logger.info("Device %d load complete", dev)
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
-    _write_completion_sentinel(checkpoint_dir)
+    _write_completion_sentinel(control_dir)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     while True:

@@ -202,30 +202,28 @@ func injectCheckpointIntoPodSpec(
 	}
 
 	EnsurePodInfoVolume(podSpec)
+	targetContainers := make([]*corev1.Container, 0, len(targets))
 	for _, name := range targets {
 		container := findPodSpecContainer(podSpec, name)
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
 		}
 		EnsurePodInfoMount(container)
+		targetContainers = append(targetContainers, container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
 		if len(info.RestoreTargetContainers) > 0 {
 			return fmt.Errorf("gpuMemoryService checkpoint restore is not supported with multiple restore targets")
 		}
-		info.GMSArtifactDir = ResolveGMSArtifactDir(storage)
+		gmsStorage, err := ResolveGMSCheckpointStorage(storage, info.GPUMemoryService)
+		if err != nil {
+			return err
+		}
+		info.GMSArtifactDir = gmsStorage.ControlDir
 		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
 			return nil
 		}
-		// GMS today is wired to a single main container. Multi-target
-		// (failover) support for GMS is tracked separately; stick to
-		// the legacy main-container path so single-engine GMS restore
-		// continues to work.
-		mainContainer, err := RequireMainContainer(podSpec)
-		if err != nil {
-			return fmt.Errorf("gpuMemoryService enabled: %w", err)
-		}
-		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
+		EnsureGMSRestoreSidecars(podSpec, targetContainers, gmsStorage)
 	}
 
 	return nil

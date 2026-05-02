@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -267,6 +268,46 @@ class _FakeCufileBindings:
         return min(size, 7)
 
 
+class _FakeCudaRuntime:
+    def __init__(self) -> None:
+        self.set_devices = []
+        self.registers = []
+        self.unregisters = []
+        self.created_streams = []
+        self.destroyed_streams = []
+        self.synchronized_streams = []
+        self.memcpy_calls = []
+
+    def set_device(self, device: int) -> None:
+        self.set_devices.append(device)
+
+    def host_register(self, ptr: int, size: int) -> None:
+        self.registers.append((ptr, size))
+
+    def host_unregister(self, ptr: int) -> None:
+        self.unregisters.append(ptr)
+
+    def create_stream(self):
+        stream = f"stream-{len(self.created_streams)}"
+        self.created_streams.append(stream)
+        return stream
+
+    def destroy_stream(self, stream) -> None:
+        self.destroyed_streams.append(stream)
+
+    def synchronize_stream(self, stream) -> None:
+        self.synchronized_streams.append(stream)
+
+    def memcpy_h2d_async(
+        self,
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream,
+    ) -> None:
+        self.memcpy_calls.append((dst_ptr, src_ptr, size, stream))
+
+
 def test_default_transfer_backend_copies_sources_to_gms_targets(monkeypatch):
     read_calls = []
     copied = []
@@ -394,6 +435,220 @@ def test_aio_transfer_backend_uses_aio_reader(monkeypatch):
     assert read_calls[0][3] == transfer.AIO_TRANSFER_BACKEND
     assert copied[0] == (0xCAFE, [32], [1], _FakeTorch.uint8, 3)
     assert isinstance(copied[1], _FakeSrc)
+
+
+def test_storage_client_stripes_shards_across_local_roots(tmp_path, monkeypatch):
+    output_dir = tmp_path / "manifest"
+    root0 = tmp_path / "nvme0"
+    root1 = tmp_path / "nvme1"
+
+    class _BytesTensor:
+        def __init__(self, value: int, size: int) -> None:
+            self._value = value
+            self._size = size
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self
+
+        def tofile(self, handle) -> None:
+            handle.write(bytes([self._value]) * self._size)
+
+    monkeypatch.setattr(
+        storage_client,
+        "_tensor_from_pointer",
+        lambda va, shape, *_: _BytesTensor(va, shape[0]),
+    )
+    monkeypatch.setattr(storage_client, "torch", SimpleNamespace(uint8="uint8"))
+
+    client = storage_client.GMSStorageClient(
+        str(output_dir),
+        socket_path="/tmp/fake.sock",
+        device=0,
+        shard_size_bytes=8,
+        shard_roots=[str(root0), str(root1)],
+    )
+    _, shard_dirs, use_absolute = client._prepare_output_dir()
+    entries = client._write_shards(
+        shard_dirs,
+        [
+            {"allocation_id": "a0", "size": 8, "aligned_size": 8, "tag": "weights"},
+            {"allocation_id": "a1", "size": 8, "aligned_size": 8, "tag": "weights"},
+            {"allocation_id": "a2", "size": 8, "aligned_size": 8, "tag": "weights"},
+        ],
+        [1, 2, 3],
+        max_workers=2,
+        use_absolute_shard_paths=use_absolute,
+    )
+
+    assert [entry.tensor_file for entry in entries] == [
+        str(root0 / "shards" / "shard_0000.bin"),
+        str(root1 / "shards" / "shard_0001.bin"),
+        str(root0 / "shards" / "shard_0002.bin"),
+    ]
+    assert (root0 / "shards" / "shard_0000.bin").read_bytes() == b"\x01" * 8
+    assert (root1 / "shards" / "shard_0001.bin").read_bytes() == b"\x02" * 8
+    assert (root0 / "shards" / "shard_0002.bin").read_bytes() == b"\x03" * 8
+
+
+def test_local_ssd_striped_backend_reads_one_task_per_root(tmp_path, monkeypatch):
+    root0 = tmp_path / "nvme0"
+    root1 = tmp_path / "nvme1"
+    for root in (root0, root1):
+        (root / "shards").mkdir(parents=True)
+    (root0 / "shards" / "shard_0000.bin").write_bytes(b"x" * 8)
+    (root1 / "shards" / "shard_0001.bin").write_bytes(b"y" * 8)
+
+    read_calls = []
+    copied = []
+
+    def fake_read_shard_streaming_to_queue(
+        abs_path,
+        sorted_entries,
+        work_q,
+        *,
+        pin_memory,
+        cancel_event,
+        os_module,
+        np_module,
+        torch_module,
+        logger,
+        stats,
+    ):
+        read_calls.append(abs_path)
+        for entry in sorted_entries:
+            work_q.put((entry, _FakeSrc()))
+        return len(sorted_entries)
+
+    def fake_tensor_from_pointer(va, shape, stride, dtype, device):
+        copied.append((va, shape, stride, dtype, device))
+        return _FakeDst(copied)
+
+    monkeypatch.setattr(transfer, "_get_numpy_module", lambda: object())
+    monkeypatch.setattr(
+        transfer,
+        "read_shard_streaming_to_queue",
+        fake_read_shard_streaming_to_queue,
+    )
+    backend = transfer.LocalSSDStripedTransferBackend(
+        device=3,
+        max_workers=2,
+        torch_module=_FakeTorch,
+        tensor_from_pointer=fake_tensor_from_pointer,
+        local_roots=[str(root0), str(root1)],
+    )
+    sources = [
+        transfer.FileTransferSource(
+            allocation_id="old-0",
+            file_path=str(root0 / "shards" / "shard_0000.bin"),
+            file_offset=0,
+            byte_count=8,
+        ),
+        transfer.FileTransferSource(
+            allocation_id="old-1",
+            file_path=str(root1 / "shards" / "shard_0001.bin"),
+            file_offset=0,
+            byte_count=8,
+        ),
+    ]
+    targets = {
+        "old-0": transfer.GMSTransferTarget(
+            allocation_id="old-0",
+            va=0x1000,
+            device=3,
+            byte_count=8,
+        ),
+        "old-1": transfer.GMSTransferTarget(
+            allocation_id="old-1",
+            va=0x2000,
+            device=3,
+            byte_count=8,
+        ),
+    }
+
+    session = backend.start_restore(sources)
+    try:
+        session.restore(targets)
+    finally:
+        session.close()
+
+    assert sorted(read_calls) == [
+        str(root0 / "shards" / "shard_0000.bin"),
+        str(root1 / "shards" / "shard_0001.bin"),
+    ]
+    copy_targets = [item for item in copied if isinstance(item, tuple)]
+    assert {call[0] for call in copy_targets} == {0x1000, 0x2000}
+
+
+def test_local_ssd_pinned_backend_reads_into_pinned_buffers(tmp_path, monkeypatch):
+    root0 = tmp_path / "nvme0"
+    root1 = tmp_path / "nvme1"
+    for root in (root0, root1):
+        (root / "shards").mkdir(parents=True)
+    (root0 / "shards" / "shard_0000.bin").write_bytes(b"a" * 16)
+    (root1 / "shards" / "shard_0001.bin").write_bytes(b"b" * 8)
+
+    cuda = _FakeCudaRuntime()
+    monkeypatch.setattr(transfer, "_load_cuda_runtime", lambda: cuda)
+    monkeypatch.setattr(
+        transfer,
+        "_open_read_fd",
+        lambda path: os.open(path, os.O_RDONLY),
+    )
+    monkeypatch.setattr(transfer, "_PINNED_COPY_CHUNK_SIZE", 8)
+    monkeypatch.setattr(transfer, "_PINNED_COPY_BUFFERS_PER_ROOT", 2)
+
+    backend = transfer.LocalSSDPinnedTransferBackend(
+        device=3,
+        max_workers=2,
+        local_roots=[str(root0), str(root1)],
+    )
+    sources = [
+        transfer.FileTransferSource(
+            allocation_id="old-0",
+            file_path=str(root0 / "shards" / "shard_0000.bin"),
+            file_offset=0,
+            byte_count=16,
+        ),
+        transfer.FileTransferSource(
+            allocation_id="old-1",
+            file_path=str(root1 / "shards" / "shard_0001.bin"),
+            file_offset=0,
+            byte_count=8,
+        ),
+    ]
+    targets = {
+        "old-0": transfer.GMSTransferTarget(
+            allocation_id="old-0",
+            va=0x1000,
+            device=3,
+            byte_count=16,
+        ),
+        "old-1": transfer.GMSTransferTarget(
+            allocation_id="old-1",
+            va=0x2000,
+            device=3,
+            byte_count=8,
+        ),
+    }
+
+    session = backend.start_restore(sources)
+    try:
+        session.restore(targets)
+    finally:
+        session.close()
+
+    assert cuda.set_devices == [3]
+    assert len(cuda.registers) == 4
+    assert sorted(cuda.unregisters) == sorted(ptr for ptr, _ in cuda.registers)
+    assert sorted(cuda.destroyed_streams) == sorted(cuda.created_streams)
+    assert sorted((dst, size) for dst, _src, size, _stream in cuda.memcpy_calls) == [
+        (0x1000, 8),
+        (0x1008, 8),
+        (0x2000, 8),
+    ]
 
 
 def test_cufile_gds_backend_reads_file_extent_to_target(tmp_path, monkeypatch):
