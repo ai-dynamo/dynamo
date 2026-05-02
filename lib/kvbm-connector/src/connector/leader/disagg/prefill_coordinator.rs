@@ -203,7 +203,7 @@ pub struct ConditionalDecodeG2Observer {
 }
 
 impl ConditionalDecodeG2Observer {
-    fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             pending: Mutex::new(HashMap::new()),
             coordinator: Mutex::new(Weak::new()),

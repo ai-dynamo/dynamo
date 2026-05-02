@@ -34,6 +34,9 @@
 //! during the migration; collapsing the status enums (if it makes
 //! sense) is deferred to Slice 4 cleanup.
 
+pub mod coordinator;
+pub use coordinator::ConditionalDisaggCoordinator;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

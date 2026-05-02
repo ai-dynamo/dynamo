@@ -14,9 +14,8 @@ use std::time::Duration;
 use anyhow::Result;
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
-use kvbm_connector::connector::leader::disagg::prefill_coordinator::{
-    PrefillCoordinatorImpl, PrefillStatus,
-};
+use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillStatus;
+use kvbm_connector::connector::leader::disagg::ConditionalDisaggCoordinator;
 use kvbm_connector::connector::leader::disagg::testing::{
     MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
     wait_until,
@@ -78,7 +77,7 @@ fn cd_transfer_params(
 
 struct TestHarness {
     wrapper: Arc<PrefillDisaggLeader>,
-    coordinator: Arc<PrefillCoordinatorImpl>,
+    coordinator: Arc<ConditionalDisaggCoordinator>,
     inner: Arc<MockInnerLeaderShim>,
     transport: Arc<MockCdBlockTransport>,
     workers: Arc<MockCdWorkerHook>,
@@ -152,7 +151,7 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
     let workers = MockCdWorkerHook::new();
     let factory = MockSessionFactory::new();
 
-    let coordinator = PrefillCoordinatorImpl::new_with_watchdog(
+    let coordinator = ConditionalDisaggCoordinator::new_with_watchdog(
         inner.clone(),
         transport.clone(),
         workers.clone(),
@@ -456,7 +455,7 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
     let transport = MockCdBlockTransport::new();
     let workers = MockCdWorkerHook::new();
     let factory = MockSessionFactory::new();
-    let coordinator = PrefillCoordinatorImpl::new(
+    let coordinator = ConditionalDisaggCoordinator::new(
         inner.clone(),
         transport.clone(),
         workers.clone(),
