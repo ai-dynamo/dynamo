@@ -134,6 +134,15 @@ struct RequestState {
     /// G1 destinations from USAA, stashed until pull/register
     /// pipeline completes so we can kick the G2→G1 onboard.
     pending_g1: Mutex<Option<Vec<BlockId>>>,
+    /// Full G1 destination window from USAA (entire prefill window
+    /// vLLM allocated, not the local-match prefix).  Captured once
+    /// on the first non-no-op USAA and held for the request's
+    /// lifetime so [`cleanup_failed_request`] can surface the full
+    /// window to `mark_failed_onboarding` — vLLM aborts every slot.
+    /// Stays `None` for pre-USAA failures; the worker handler still
+    /// pairs the request_id with `get_finished()` for empty block_ids
+    /// so vLLM moves the request out of `WAITING_FOR_REMOTE_KVS`.
+    g1_block_ids: Mutex<Option<Vec<BlockId>>>,
     /// All registered G2 blocks across chunks.
     registered_g2: Mutex<Vec<ImmutableBlock<G2>>>,
     /// Wrapper has called `on_request_finished`.
@@ -164,6 +173,7 @@ impl RequestState {
             computed_blocks_offset,
             session: Mutex::new(None),
             pending_g1: Mutex::new(None),
+            g1_block_ids: Mutex::new(None),
             registered_g2: Mutex::new(Vec::new()),
             request_finished_seen: AtomicBool::new(false),
             pulls_complete: AtomicBool::new(false),
@@ -856,6 +866,89 @@ impl PrefillCoordinatorImpl {
 
         Ok(())
     }
+
+    /// Surface a failed CD-bound prefill request to vLLM and tear
+    /// down its local state.
+    ///
+    /// **Idempotent.**  Returns early if state has already been
+    /// evicted (DashMap removal is the canonical "this request is
+    /// dead" marker).  Safe to call from multiple failure-detection
+    /// paths — `run_setup` Err today; lifecycle escalation and
+    /// offload-deadline timer in future slices — for the same
+    /// request.  Only the first call propagates.
+    ///
+    /// **Order matters** (per `cd-error-path-design.md` §3.2):
+    /// 1. `mark_failed_onboarding(rid, g1_or_empty)` — let the RPC
+    ///    complete before tearing the wire.  The worker handler
+    ///    pairs the request_id with `get_finished()` even for empty
+    ///    block_ids (per the worker-side fix), so pre-USAA failures
+    ///    still move the request out of `WAITING_FOR_REMOTE_KVS`.
+    /// 2. `session.close(reason)` — abort path; emits velo's wire
+    ///    finalize so the peer's lifecycle watcher sees `Detached`
+    ///    and reaches its own teardown without waiting on the
+    ///    cooperative rendezvous.
+    /// 3. Drop per-request state — drops the `ObserverHandle` (which
+    ///    evicts the residual entry from
+    ///    `ConditionalDecodeG2Observer::pending`) and the last
+    ///    session `Arc`.
+    ///
+    /// Pre-USAA failures see `g1_block_ids = None` here; documented
+    /// limitation per `cd-error-path-design.md` §6 Q2.
+    pub async fn cleanup_failed_request(
+        self: &Arc<Self>,
+        request_id: &str,
+        reason: String,
+    ) {
+        let state = match self.state_for(request_id) {
+            Some(s) => s,
+            None => {
+                tracing::debug!(
+                    request_id,
+                    "cleanup_failed_request: state already evicted; no-op"
+                );
+                return;
+            }
+        };
+
+        let g1_ids: Vec<BlockId> = state.g1_block_ids.lock().clone().unwrap_or_default();
+        let num_g1 = g1_ids.len();
+        let pre_usaa = num_g1 == 0;
+
+        crate::audit!(
+            "prefill_cleanup_failed_request",
+            role = "prefill",
+            request_id = %request_id,
+            num_g1 = num_g1,
+            pre_usaa = pre_usaa,
+            reason = %reason
+        );
+        tracing::warn!(
+            request_id,
+            num_g1,
+            pre_usaa,
+            reason = %reason,
+            "prefill cleanup_failed_request: surfacing to vLLM"
+        );
+
+        if let Err(err) = self
+            .worker_hook
+            .mark_failed_onboarding(request_id.to_string(), g1_ids)
+            .await
+        {
+            tracing::error!(
+                request_id,
+                error = %err,
+                "cleanup_failed_request: mark_failed_onboarding RPC failed; \
+                 vLLM will time out the request"
+            );
+        }
+
+        if let Some(session) = state.session.lock().clone() {
+            session.close(Some(reason));
+        }
+
+        self.states.remove(request_id);
+    }
 }
 
 impl PrefillCoordinator for PrefillCoordinatorImpl {
@@ -917,15 +1010,22 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
             num_sequence_hashes = params.sequence_hashes.len()
         );
         self.runtime.spawn(async move {
-            if let Err(err) = coord
+            let setup_result = coord
+                .clone()
                 .run_setup(request_id_owned.clone(), params_owned, state)
-                .await
-            {
+                .await;
+            if let Err(err) = setup_result {
                 tracing::error!(
                     request_id = request_id_owned,
                     error = %err,
-                    "prefill coordinator setup failed (error path is Phase A deferred work)"
+                    "prefill setup failed; surfacing to vLLM via cleanup_failed_request"
                 );
+                coord
+                    .cleanup_failed_request(
+                        &request_id_owned,
+                        format!("setup failed: {err}"),
+                    )
+                    .await;
             }
         });
 
@@ -981,6 +1081,20 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
             );
         }
 
+        // Stash the FULL G1 window for failure paths.  The local-
+        // match prefix below is what `kick_onboard` fills; the full
+        // window is what `cleanup_failed_request` reports to vLLM
+        // so every slot vLLM allocated for this request is marked
+        // failed.  Idempotent: subsequent USAAs for the same request
+        // either short-circuit above (post-onboard n=0 case) or hit
+        // the mismatch bail, so this only fires on the real USAA.
+        {
+            let mut stash = state.g1_block_ids.lock();
+            if stash.is_none() {
+                *stash = Some(block_ids.to_vec());
+            }
+        }
+
         // Slice the G1 destinations to the local-match prefix —
         // that's the subset kick_onboard fills via G2→G1 from
         // decode's forwarded blocks. The trailing slots are
@@ -1006,12 +1120,22 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
                 .ok_or_else(|| anyhow!("coordinator weak_self upgrade failed"))?;
             let request_id_owned = request_id.to_string();
             self.runtime.spawn(async move {
-                if let Err(err) = coord.kick_onboard(&request_id_owned, &state, g1_ids).await {
+                if let Err(err) = coord
+                    .clone()
+                    .kick_onboard(&request_id_owned, &state, g1_ids)
+                    .await
+                {
                     tracing::error!(
                         request_id = request_id_owned,
                         error = %err,
-                        "prefill onboard failed"
+                        "prefill onboard failed; surfacing to vLLM via cleanup_failed_request"
                     );
+                    coord
+                        .cleanup_failed_request(
+                            &request_id_owned,
+                            format!("kick_onboard failed: {err}"),
+                        )
+                        .await;
                 }
             });
         } else {

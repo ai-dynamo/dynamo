@@ -644,6 +644,124 @@ async fn cd_prefill_lifecycle_watchdog_evicts_state() -> Result<()> {
     Ok(())
 }
 
+/// Slice A — post-USAA failure surfaces the FULL G1 window to vLLM.
+///
+/// vLLM allocates G1 destinations for the entire prefill window
+/// (local_match + remote-computed); when prefill fails mid-pipeline
+/// after USAA has stashed those ids, every slot must be marked
+/// failed so the scheduler aborts the whole request rather than
+/// proceeding with partially-loaded blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_cleanup_post_usaa_surfaces_full_g1_window() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA stashes the full G1 window in RequestState.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    // Don't resolve onboard — induce a mid-flight failure path.
+    h.coordinator
+        .cleanup_failed_request("req-1", "induced post-USAA failure".to_string())
+        .await;
+
+    // mark_failed_onboarding fired with the FULL window so vLLM
+    // aborts every allocated slot.
+    let failed = h
+        .workers
+        .failed_for("req-1")
+        .expect("mark_failed_onboarding must fire");
+    assert_eq!(failed.request_id, "req-1");
+    assert_eq!(
+        failed.block_ids, h.g1_block_ids,
+        "must surface the full G1 window vLLM allocated, not the local-match prefix"
+    );
+
+    // State entry evicted from DashMap.  Observer residual cleanup
+    // is gated on dropping the LAST Arc<RequestState> — the
+    // pending kick_onboard task still holds one in this scenario,
+    // which is realistic (cleanup races mid-flight tasks).  Residual
+    // drops once the task drains; covered by the
+    // `observer_handle_drop_evicts_pending_entry` unit test.
+    assert_eq!(h.coordinator.active_count(), 0);
+
+    Ok(())
+}
+
+/// Slice A — pre-USAA failure surfaces the request_id with empty
+/// block_ids; the worker-side handler still pairs the request_id
+/// with `get_finished()`'s onboard set so vLLM moves the request
+/// out of `WAITING_FOR_REMOTE_KVS`. Documented limitation per
+/// `cd-error-path-design.md` §6 Q2: failed blocks cannot be
+/// reported because no G1 ids exist before USAA.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_cleanup_pre_usaa_surfaces_request_id_only() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    // No drive_setup, no USAA — state is installed but g1_block_ids
+    // is still None.  Simulate an early failure (e.g. attach error,
+    // peer-resolve error, hub queue dispatch error).
+    h.coordinator
+        .cleanup_failed_request("req-1", "induced pre-USAA failure".to_string())
+        .await;
+
+    let failed = h
+        .workers
+        .failed_for("req-1")
+        .expect("mark_failed_onboarding must fire even pre-USAA");
+    assert_eq!(failed.request_id, "req-1");
+    assert!(
+        failed.block_ids.is_empty(),
+        "pre-USAA failure has no G1 ids (worker handler pairs request_id regardless)"
+    );
+
+    assert_eq!(h.coordinator.active_count(), 0);
+
+    Ok(())
+}
+
+/// Slice A — cleanup is idempotent against state-already-evicted.
+/// Multiple failure-detection paths (run_setup Err, lifecycle
+/// escalation, deadline timer) may converge on the same request;
+/// only the first call propagates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_cleanup_is_idempotent() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    h.coordinator
+        .cleanup_failed_request("req-1", "first call".to_string())
+        .await;
+    h.coordinator
+        .cleanup_failed_request("req-1", "second call".to_string())
+        .await;
+
+    let failed_calls: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        failed_calls.len(),
+        1,
+        "cleanup must not double-fire mark_failed_onboarding"
+    );
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_used(h: &TestHarness) {
     let _ = (
