@@ -20,27 +20,17 @@
 //! plan §"Phase A error-path design (deferred)".
 
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
-use futures::StreamExt;
 use futures::future::BoxFuture;
 use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest, SessionId};
-use kvbm_engine::disagg::session::{LifecycleEvent, Session, SessionFactory};
+use kvbm_engine::disagg::session::{Session, SessionFactory};
 use kvbm_logical::blocks::ImmutableBlock;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-/// Defensive watchdog for the decode-side lifecycle watcher.
-/// In normal operation, the rendezvous-driven Detached
-/// arrives within a few ms of `process_finished_onboarding`
-/// (decode calls `session.finalize()`, prefill is already
-/// finalized or imminent). 60s is a well-padded fallback so
-/// session leaks are visible as evictions rather than as
-/// unbounded gauge drift.
-const LIFECYCLE_WATCHDOG: Duration = Duration::from_secs(60);
-
+use super::lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
 use super::queue::RemotePrefillQueue;
 use super::{ConditionalDisaggPolicy, PolicyInputs, PrefillSelection};
 use crate::{G2, InstanceId, SequenceHash};
@@ -205,143 +195,32 @@ impl RemotePrefillCoordinator {
         // out, evict the per-request state. The session Arc
         // held by the state map is the last strong ref; dropping
         // it lets the per-session sender task drain and exit.
-        let watcher_session = Arc::clone(&session);
-        let watcher_request_id = request_id.to_string();
-        let watcher_session_id = session_id;
+        //
+        // Outcome decision tree (see `LifecycleOutcome`):
+        //   - Detached / StreamEnded → cooperative; no sink call.
+        //   - Failed(reason)         → sink call with peer reason.
+        //   - WatchdogTimeout        → sink call with watchdog reason.
+        //
+        // The sink call must run BEFORE state-map eviction so the
+        // wrapper's `cleanup_failed_request` can read the session
+        // state if it needs to.
         let watcher_coord = Arc::clone(self);
-        let watchdog = LIFECYCLE_WATCHDOG;
-        self.tokio_handle.spawn(async move {
-            // Drive the lifecycle stream until a terminal event or
-            // the watchdog fires.  Capture which terminal we hit so
-            // we can decide whether to fire the failure sink.
-            //
-            // Outcome decision tree:
-            //   - LifecycleEvent::Detached → cooperative; no sink
-            //     call; just evict state map.
-            //   - LifecycleEvent::Failed   → call sink with the
-            //     peer's failure reason; evict state map.
-            //   - watchdog timeout         → call sink with a
-            //     "watchdog fired" reason; evict state map.
-            //   - lifecycle stream ended without terminal event →
-            //     treat as cooperative end-of-stream; no sink call.
-            //
-            // The sink call must run BEFORE state-map eviction so
-            // the wrapper's `cleanup_failed_request` can read the
-            // session state if it needs to.
-            #[derive(Debug)]
-            enum LifecycleResolution {
-                Detached,
-                Failed(String),
-                Watchdog,
-                StreamEnded,
-            }
-
-            let outcome = tokio::time::timeout(watchdog, async {
-                let mut lifecycle = watcher_session.lifecycle();
-                while let Some(event) = lifecycle.next().await {
-                    match event {
-                        LifecycleEvent::Detached { reason } => {
-                            crate::audit!(
-                                "decode_lifecycle_detached",
-                                role = "decode",
-                                request_id = %watcher_request_id,
-                                session_id = %watcher_session_id,
-                                reason = ?reason
-                            );
-                            return LifecycleResolution::Detached;
-                        }
-                        LifecycleEvent::Failed { reason } => {
-                            crate::audit!(
-                                "decode_lifecycle_failed",
-                                role = "decode",
-                                request_id = %watcher_request_id,
-                                session_id = %watcher_session_id,
-                                reason = %reason
-                            );
-                            return LifecycleResolution::Failed(reason);
-                        }
-                        LifecycleEvent::Attached { .. } => {}
-                    }
+        let watcher_request_id = request_id.to_string();
+        spawn_lifecycle_watcher(
+            &self.tokio_handle,
+            Arc::clone(&session),
+            "decode",
+            request_id.to_string(),
+            session_id.to_string(),
+            LIFECYCLE_WATCHDOG,
+            move |outcome| async move {
+                let failure_reason = decode_failure_reason(&outcome);
+                if let Some(reason) = failure_reason {
+                    invoke_failure_sink(&watcher_coord, &watcher_request_id, reason).await;
                 }
-                LifecycleResolution::StreamEnded
-            })
-            .await;
-
-            let resolution = match outcome {
-                Ok(r) => r,
-                Err(_) => {
-                    crate::audit!(
-                        "decode_lifecycle_watchdog_fired",
-                        role = "decode",
-                        request_id = %watcher_request_id,
-                        session_id = %watcher_session_id,
-                        watchdog_secs = watchdog.as_secs()
-                    );
-                    tracing::warn!(
-                        request_id = %watcher_request_id,
-                        session_id = %watcher_session_id,
-                        watchdog_secs = watchdog.as_secs(),
-                        "decode lifecycle watchdog fired without Detached; \
-                         evicting RemotePrefillState and notifying failure sink"
-                    );
-                    LifecycleResolution::Watchdog
-                }
-            };
-
-            // On terminal failure (Failed event or watchdog), invoke
-            // the wrapper's failure sink so vLLM gets
-            // `mark_failed_onboarding` and the request unblocks
-            // instead of hanging in `Onboarding` indefinitely.
-            let failure_reason: Option<String> = match &resolution {
-                LifecycleResolution::Detached | LifecycleResolution::StreamEnded => None,
-                LifecycleResolution::Failed(reason) => Some(reason.clone()),
-                LifecycleResolution::Watchdog => Some(format!(
-                    "decode lifecycle watchdog fired ({}s) without Detached or Failed",
-                    watchdog.as_secs()
-                )),
-            };
-
-            if let Some(reason) = failure_reason {
-                let sink_handle = watcher_coord.failure_sink.lock().clone();
-                if let Some(sink_weak) = sink_handle {
-                    if let Some(sink) = sink_weak.upgrade() {
-                        crate::audit!(
-                            "decode_failure_sink_invoked",
-                            role = "decode",
-                            request_id = %watcher_request_id,
-                            session_id = %watcher_session_id,
-                            reason = %reason
-                        );
-                        sink.on_session_failure(
-                            watcher_request_id.clone(),
-                            reason,
-                        )
-                        .await;
-                    } else {
-                        // Wrapper Arc has been dropped — nothing to
-                        // notify, fall through to state eviction.
-                        crate::audit!(
-                            "decode_failure_sink_unavailable",
-                            role = "decode",
-                            request_id = %watcher_request_id,
-                            session_id = %watcher_session_id,
-                            reason = "wrapper Arc dropped"
-                        );
-                    }
-                } else {
-                    // No sink installed (test / pre-Phase-A wiring).
-                    // Logged for parity with production audits.
-                    crate::audit!(
-                        "decode_failure_sink_unavailable",
-                        role = "decode",
-                        request_id = %watcher_request_id,
-                        session_id = %watcher_session_id,
-                        reason = "no failure sink installed"
-                    );
-                }
-            }
-            watcher_coord.states.remove(&watcher_request_id);
-        });
+                watcher_coord.states.remove(&watcher_request_id);
+            },
+        );
 
         let endpoint = session.endpoint();
         tracing::info!(?endpoint, "decode endpoint published; enqueueing remote prefill request");
@@ -436,4 +315,57 @@ impl RemotePrefillCoordinator {
             session.close(Some(reason));
         }
     }
+}
+
+/// Map a [`LifecycleOutcome`] to the failure-sink reason string the
+/// decode-side watcher should propagate to vLLM, or `None` for the
+/// cooperative paths (Detached / StreamEnded) where vLLM expects no
+/// failure signal.
+fn decode_failure_reason(outcome: &LifecycleOutcome) -> Option<String> {
+    match outcome {
+        LifecycleOutcome::Detached { .. } | LifecycleOutcome::StreamEnded => None,
+        LifecycleOutcome::Failed { reason } => Some(reason.clone()),
+        LifecycleOutcome::WatchdogTimeout { watchdog } => Some(format!(
+            "decode lifecycle watchdog fired ({}s) without Detached or Failed",
+            watchdog.as_secs()
+        )),
+    }
+}
+
+/// Invoke the wrapper's failure sink so vLLM gets
+/// `mark_failed_onboarding` and the request unblocks instead of
+/// hanging in `Onboarding`.  Audits the unavailable cases (no sink
+/// installed vs wrapper `Arc` dropped) for parity with prior inline
+/// behavior.
+async fn invoke_failure_sink(
+    coord: &Arc<RemotePrefillCoordinator>,
+    request_id: &str,
+    reason: String,
+) {
+    let sink_handle = coord.failure_sink.lock().clone();
+    let Some(sink_weak) = sink_handle else {
+        crate::audit!(
+            "decode_failure_sink_unavailable",
+            role = "decode",
+            request_id = %request_id,
+            reason = "no failure sink installed"
+        );
+        return;
+    };
+    let Some(sink) = sink_weak.upgrade() else {
+        crate::audit!(
+            "decode_failure_sink_unavailable",
+            role = "decode",
+            request_id = %request_id,
+            reason = "wrapper Arc dropped"
+        );
+        return;
+    };
+    crate::audit!(
+        "decode_failure_sink_invoked",
+        role = "decode",
+        request_id = %request_id,
+        reason = %reason
+    );
+    sink.on_session_failure(request_id.to_string(), reason).await;
 }

@@ -19,14 +19,16 @@
 //! leader's flow refactor) can share the timing + audit semantics
 //! without duplicating the watch loop.
 //!
-//! ### Why a helper, not a refactor of the existing call sites
+//! ### Audit event names
 //!
-//! The two existing call sites are stable — switching them to this
-//! helper changes audit-event ordering and (subtly) error semantics.
-//! The migration is intentionally split: introduce the helper now,
-//! keep both inline copies running, and swap them after the unified
-//! leader has soaked. See `/home/ryan/.claude/plans/cd-session-refactor.md`.
+//! The helper emits role-prefixed event names (`{role}_lifecycle_detached`,
+//! `{role}_lifecycle_failed`, `{role}_lifecycle_watchdog_fired`,
+//! `{role}_lifecycle_stream_ended`) so existing trace tooling that
+//! filters by role-tagged event names (e.g. `cd_unified_prefill_audit_equiv`'s
+//! `prefill_lifecycle_*` filter) keeps working unchanged after the
+//! migration.
 
+use std::future::Future;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -78,7 +80,7 @@ pub enum LifecycleOutcome {
 /// non-blocking.  Idempotent eviction is the caller's responsibility
 /// (e.g. `DashMap::remove` returning `None` on a missing entry is the
 /// expected pattern).
-pub fn spawn_lifecycle_watcher<F>(
+pub fn spawn_lifecycle_watcher<F, Fut>(
     runtime: &Handle,
     session: Arc<dyn Session>,
     audit_role: &'static str,
@@ -87,57 +89,73 @@ pub fn spawn_lifecycle_watcher<F>(
     watchdog: Duration,
     on_evict: F,
 ) where
-    F: FnOnce(LifecycleOutcome) + Send + 'static,
+    F: FnOnce(LifecycleOutcome) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     runtime.spawn(async move {
         let outcome = watch_until_terminal(&session, watchdog).await;
-        match &outcome {
-            LifecycleOutcome::Detached { reason } => {
-                crate::audit!(
-                    "lifecycle_detached",
-                    role = audit_role,
-                    request_id = %request_id,
-                    session_id = %session_id,
-                    reason = ?reason
-                );
-            }
-            LifecycleOutcome::Failed { reason } => {
-                crate::audit!(
-                    "lifecycle_failed",
-                    role = audit_role,
-                    request_id = %request_id,
-                    session_id = %session_id,
-                    reason = %reason
-                );
-            }
-            LifecycleOutcome::WatchdogTimeout { watchdog } => {
-                crate::audit!(
-                    "lifecycle_watchdog_fired",
-                    role = audit_role,
-                    request_id = %request_id,
-                    session_id = %session_id,
-                    watchdog_secs = watchdog.as_secs()
-                );
-                tracing::warn!(
-                    role = audit_role,
-                    request_id = %request_id,
-                    session_id = %session_id,
-                    watchdog_secs = watchdog.as_secs(),
-                    "lifecycle watchdog fired without Detached; \
-                     evicting per-request state (potential session leak signal)"
-                );
-            }
-            LifecycleOutcome::StreamEnded => {
-                crate::audit!(
-                    "lifecycle_stream_ended",
-                    role = audit_role,
-                    request_id = %request_id,
-                    session_id = %session_id
-                );
-            }
-        }
-        on_evict(outcome);
+        emit_outcome_audit(audit_role, &request_id, &session_id, &outcome);
+        on_evict(outcome).await;
     });
+}
+
+fn emit_outcome_audit(
+    audit_role: &'static str,
+    request_id: &str,
+    session_id: &str,
+    outcome: &LifecycleOutcome,
+) {
+    // Role-prefixed event names (e.g. `decode_lifecycle_detached`) so
+    // tooling that filters by role-tagged prefix keeps working unchanged.
+    match outcome {
+        LifecycleOutcome::Detached { reason } => {
+            let event = format!("{audit_role}_lifecycle_detached");
+            crate::audit!(
+                event,
+                role = audit_role,
+                request_id = %request_id,
+                session_id = %session_id,
+                reason = ?reason
+            );
+        }
+        LifecycleOutcome::Failed { reason } => {
+            let event = format!("{audit_role}_lifecycle_failed");
+            crate::audit!(
+                event,
+                role = audit_role,
+                request_id = %request_id,
+                session_id = %session_id,
+                reason = %reason
+            );
+        }
+        LifecycleOutcome::WatchdogTimeout { watchdog } => {
+            let event = format!("{audit_role}_lifecycle_watchdog_fired");
+            crate::audit!(
+                event,
+                role = audit_role,
+                request_id = %request_id,
+                session_id = %session_id,
+                watchdog_secs = watchdog.as_secs()
+            );
+            tracing::warn!(
+                role = audit_role,
+                request_id = %request_id,
+                session_id = %session_id,
+                watchdog_secs = watchdog.as_secs(),
+                "lifecycle watchdog fired without Detached; \
+                 evicting per-request state (potential session leak signal)"
+            );
+        }
+        LifecycleOutcome::StreamEnded => {
+            let event = format!("{audit_role}_lifecycle_stream_ended");
+            crate::audit!(
+                event,
+                role = audit_role,
+                request_id = %request_id,
+                session_id = %session_id
+            );
+        }
+    }
 }
 
 async fn watch_until_terminal(

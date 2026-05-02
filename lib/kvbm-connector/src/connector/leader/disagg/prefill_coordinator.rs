@@ -28,24 +28,16 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_disagg_protocol::RemotePrefillParams;
 use kvbm_engine::disagg::session::{
-    AvailabilityDelta, CommitDelta, CommittedBlock, LifecycleEvent, Session, SessionFactory,
+    AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
+use super::lifecycle::{LIFECYCLE_WATCHDOG, spawn_lifecycle_watcher};
+
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::{BlockId, G2, SequenceHash};
-
-/// Defensive timeout for the prefill-side lifecycle watcher.
-/// In normal operation, decode's hard close fires within
-/// milliseconds of `process_finished_onboarding`; with a velo
-/// heartbeat-detected detach worst case ~30s. 60s is a
-/// well-padded fallback so we evict `RequestState` (and its
-/// session Arc) even if both signals fail to arrive — preventing
-/// a slow leak that would only show up as a session-count
-/// drift over hours of traffic.
-const LIFECYCLE_WATCHDOG: Duration = Duration::from_secs(60);
 
 use super::peer_resolver::PeerResolver;
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
@@ -556,61 +548,21 @@ impl PrefillCoordinatorImpl {
         //   2. velo heartbeat surfaces a Detached/Failed event
         //   3. Watchdog fires (defensive — prevents leak if
         //      heartbeat is misconfigured or peer never detaches)
-        let watcher_session = Arc::clone(&session);
-        let watcher_request_id = request_id.clone();
-        let watcher_session_id = params.session_id;
         let watcher_coord = self.weak_self.clone();
-        let watchdog = self.lifecycle_watchdog;
-        self.runtime.spawn(async move {
-            let outcome = tokio::time::timeout(watchdog, async {
-                let mut lifecycle = watcher_session.lifecycle();
-                while let Some(event) = lifecycle.next().await {
-                    match event {
-                        LifecycleEvent::Detached { reason } => {
-                            crate::audit!(
-                                "prefill_lifecycle_detached",
-                                role = "prefill",
-                                request_id = %watcher_request_id,
-                                session_id = %watcher_session_id,
-                                reason = ?reason
-                            );
-                            return;
-                        }
-                        LifecycleEvent::Failed { reason } => {
-                            crate::audit!(
-                                "prefill_lifecycle_failed",
-                                role = "prefill",
-                                request_id = %watcher_request_id,
-                                session_id = %watcher_session_id,
-                                reason = %reason
-                            );
-                            return;
-                        }
-                        LifecycleEvent::Attached { .. } => {}
-                    }
+        let watcher_request_id = request_id.clone();
+        spawn_lifecycle_watcher(
+            &self.runtime,
+            Arc::clone(&session),
+            "prefill",
+            request_id.clone(),
+            params.session_id.to_string(),
+            self.lifecycle_watchdog,
+            move |_outcome| async move {
+                if let Some(coord) = watcher_coord.upgrade() {
+                    coord.states.remove(&watcher_request_id);
                 }
-            })
-            .await;
-            if outcome.is_err() {
-                crate::audit!(
-                    "prefill_lifecycle_watchdog_fired",
-                    role = "prefill",
-                    request_id = %watcher_request_id,
-                    session_id = %watcher_session_id,
-                    watchdog_secs = watchdog.as_secs()
-                );
-                tracing::warn!(
-                    request_id = %watcher_request_id,
-                    session_id = %watcher_session_id,
-                    watchdog_secs = watchdog.as_secs(),
-                    "prefill lifecycle watchdog fired without Detached; \
-                     evicting RequestState (potential session leak signal)"
-                );
-            }
-            if let Some(coord) = watcher_coord.upgrade() {
-                coord.states.remove(&watcher_request_id);
-            }
-        });
+            },
+        );
 
         tracing::info!("prefill run_setup: attached, draining commits");
 
