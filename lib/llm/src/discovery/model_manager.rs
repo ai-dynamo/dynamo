@@ -860,7 +860,9 @@ impl ModelManager {
     }
 
     /// Remove the prefill router activator for a (model, namespace) pair.
-    /// Called when a WorkerSet is removed to prevent stale activators.
+    /// Called when the prefill WorkerSet is removed: at that point both the
+    /// cached prefill endpoint (`PrefillReady`) and any pending handshake
+    /// (`DecodeWaiting`) are stale, so we drop everything for the key.
     pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
         let key = Self::model_namespace_key(model_name, namespace);
         if self.prefill_router_activators.remove(&key).is_some() {
@@ -868,6 +870,38 @@ impl ModelManager {
                 model_name = %model_name,
                 namespace = %namespace,
                 "Cleaned up prefill router activator for removed WorkerSet"
+            );
+        }
+    }
+
+    /// Remove a stale `DecodeWaiting(sender)` entry on decode WorkerSet teardown,
+    /// while preserving any `PrefillReady(endpoint)` cache.
+    ///
+    /// When a decode WorkerSet is torn down, the `DecodeWaiting` entry's sender
+    /// targets a `oneshot::Receiver` held by the now-dropped `PrefillRouter`. If
+    /// we leave it in the map:
+    ///   - the next decode rebuild's `register_prefill_router` finds the stale
+    ///     `DecodeWaiting`, hits the `Some(DecodeWaiting)` arm, and returns
+    ///     `None` — so the rebuilt WorkerSet has no `PrefillRouter` at all;
+    ///   - when prefill finally registers, `activate_prefill_router` wakes the
+    ///     orphaned receiver and activates a router that's about to be dropped,
+    ///     producing log lines that look like success while the rebuilt
+    ///     WorkerSet still has nothing.
+    ///
+    /// `PrefillReady` must be left intact — it's a cache of the prefill endpoint
+    /// that survives decode rebuilds (PR 8965's primary contribution).
+    pub fn remove_decode_prefill_waiter(&self, model_name: &str, namespace: &str) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        // Atomic remove-if-stale: only drop the entry if it's `DecodeWaiting`,
+        // leaving `PrefillReady` cache entries untouched.
+        let removed = self.prefill_router_activators.remove_if(&key, |_, v| {
+            matches!(v, PrefillActivationState::DecodeWaiting(_))
+        });
+        if removed.is_some() {
+            tracing::debug!(
+                model_name = %model_name,
+                namespace = %namespace,
+                "Removed stale DecodeWaiting activator on decode WorkerSet teardown"
             );
         }
     }
@@ -1213,6 +1247,44 @@ mod tests {
         let mm = ModelManager::new();
         // Should not panic
         mm.remove_prefill_activator("llama", "ns1");
+    }
+
+    // -- remove_decode_prefill_waiter tests (stale-DecodeWaiting cleanup) --
+
+    /// Decode WorkerSet teardown while still in DecodeWaiting must drop the
+    /// stale waiter so a subsequent decode rebuild can register fresh.
+    #[test]
+    fn test_remove_decode_prefill_waiter_clears_decodewaiting() {
+        let mm = ModelManager::new();
+
+        // Decode registers first → DecodeWaiting in map.
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        assert!(rx1.is_some());
+
+        // Decode WorkerSet is removed before prefill registers. Drop the
+        // receiver to mirror PrefillRouter being dropped along with the
+        // WorkerSet.
+        drop(rx1);
+
+        // Watcher's decode-teardown path calls this:
+        mm.remove_decode_prefill_waiter("llama", "ns1");
+
+        // Rebuild path: a new register_prefill_router must succeed.
+        let rx2 = mm.register_prefill_router("llama", "ns1");
+        assert!(
+            rx2.is_some(),
+            "after stale-DecodeWaiting cleanup, decode rebuild must get a fresh rx"
+        );
+    }
+
+    /// Removing the waiter when the activator is already empty must not panic.
+    #[test]
+    fn test_remove_decode_prefill_waiter_empty_noop() {
+        let mm = ModelManager::new();
+        mm.remove_decode_prefill_waiter("llama", "ns1");
+        // And the next register must still work.
+        let rx = mm.register_prefill_router("llama", "ns1");
+        assert!(rx.is_some());
     }
 
     #[test]

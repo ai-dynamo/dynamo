@@ -419,20 +419,21 @@ impl ModelWatcher {
                 );
             }
 
-            // Clear the activator state ONLY when the PREFILL component is gone.
-            // Decode-component removal must NOT invalidate the cached prefill
-            // endpoint: if all decode pods restart (e.g., canary livenessProbe
-            // kills two replicas in quick succession), the new decode WorkerSet
-            // built by the next handle_add must find PrefillReady (set by the
-            // prior activate_prefill_router persist step) so it can activate
-            // immediately. Clearing the activator here strands the new decode
-            // WorkerSet in DecodeWaiting forever, since prefill workers are
-            // still alive and never re-call activate_prefill_router.
+            // Activator-state cleanup depends on which component just went away.
             //
-            // When the removed component IS prefill: the cached endpoint is
-            // stale (prefill workers all gone) and must be cleared, plus we
-            // deactivate the decode-side router so requests fall back to
-            // aggregated mode (or fail cleanly with enforce_disagg).
+            // PREFILL teardown (cached endpoint is stale): drop everything for
+            // this key and deactivate the decode-side router so requests fall
+            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            //
+            // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
+            // valid for future decode rebuilds — that's PR 8965's primary
+            // contribution) but DO drop any stale `DecodeWaiting(sender)`. The
+            // sender pointed at a `oneshot::Receiver` held by the now-dropped
+            // PrefillRouter; leaving it in the map causes the next decode
+            // rebuild's `register_prefill_router` to find a stale `DecodeWaiting`,
+            // return `None`, and produce a WorkerSet with no PrefillRouter at
+            // all. See the stale-DecodeWaiting reproducer in
+            // `docs/pr-8965-stale-decodewaiting-reproducer.md`.
             if card.model_type.supports_prefill() {
                 if removed.is_some() {
                     self.manager
@@ -440,6 +441,9 @@ impl ModelWatcher {
                 }
                 self.manager
                     .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
+            } else if removed.is_some() {
+                self.manager
+                    .remove_decode_prefill_waiter(&model_name, worker_namespace);
             }
         }
 
