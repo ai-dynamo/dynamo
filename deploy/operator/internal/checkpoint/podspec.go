@@ -88,16 +88,33 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	return nil
 }
 
-func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
-	if podSpec == nil {
-		return nil, fmt.Errorf("pod spec is nil")
+// restoreTargetsOrDefault returns the restore target container list for a
+// given CheckpointInfo, defaulting to the single main container for
+// non-failover workloads. Callers are expected to have already confirmed
+// that the info is non-nil, enabled, and Ready.
+func restoreTargetsOrDefault(info *CheckpointInfo) []string {
+	if info != nil && len(info.RestoreTargetContainers) > 0 {
+		return info.RestoreTargetContainers
 	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i], nil
+	return []string{commonconsts.MainContainerName}
+}
+
+// resolvePodInfoContainer picks the container that should own the pod-info
+// downward-API mount. For pods with one restore target, that is the target
+// itself. For multi-target (failover) pods, we mount pod-info on every
+// target so each engine has the same downward-API view it would have if it
+// were the only workload container in the pod.
+func resolvePodInfoContainers(podSpec *corev1.PodSpec, targets []string) []*corev1.Container {
+	out := make([]*corev1.Container, 0, len(targets))
+	for _, name := range targets {
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				out = append(out, &podSpec.Containers[i])
+				break
+			}
 		}
 	}
-	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
+	return out
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -172,11 +189,19 @@ func injectCheckpointIntoPodSpec(
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
-	targets := info.RestoreTargetContainers
-	if len(targets) == 0 {
-		targets = []string{commonconsts.MainContainerName}
+	targets := restoreTargetsOrDefault(info)
+	// Every named target must exist in the pod spec. Catching this here
+	// gives a clearer error than the protocol layer's generic "not found".
+	podInfoContainers := resolvePodInfoContainers(podSpec, targets)
+	if len(podInfoContainers) != len(targets) {
+		return fmt.Errorf("checkpoint restore targets %v do not all exist in pod spec", targets)
 	}
-	annotations := map[string]string{
+	// The target-containers annotation lives on the parent pod metadata
+	// (which InjectCheckpointIntoPodSpec does not see directly). For the
+	// pod-spec shaping step we synthesize the target list inline so the
+	// protocol helper shapes every target; the pod-level annotation is
+	// stamped separately by ApplyRestorePodMetadata.
+	syntheticAnnotations := map[string]string{
 		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
 	}
 
@@ -193,7 +218,7 @@ func injectCheckpointIntoPodSpec(
 	}
 	if err := snapshotprotocol.PrepareRestorePodSpec(
 		podSpec,
-		annotations,
+		syntheticAnnotations,
 		storage,
 		seccompProfile,
 		info.Ready,
@@ -202,17 +227,10 @@ func injectCheckpointIntoPodSpec(
 	}
 
 	EnsurePodInfoVolume(podSpec)
-	for _, name := range targets {
-		container := findPodSpecContainer(podSpec, name)
-		if container == nil {
-			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
-		}
+	for _, container := range podInfoContainers {
 		EnsurePodInfoMount(container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		if len(info.RestoreTargetContainers) > 0 {
-			return fmt.Errorf("gpuMemoryService checkpoint restore is not supported with multiple restore targets")
-		}
 		gmsStorage, err := ResolveGMSCheckpointStorage(storage, info.GPUMemoryService)
 		if err != nil {
 			return err
@@ -221,24 +239,8 @@ func injectCheckpointIntoPodSpec(
 		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
 			return nil
 		}
-		mainContainer := findPodSpecContainer(podSpec, commonconsts.MainContainerName)
-		if mainContainer == nil {
-			return fmt.Errorf("gpuMemoryService enabled but no container named %q found in pod spec", commonconsts.MainContainerName)
-		}
-		EnsureGMSRestoreSidecars(podSpec, mainContainer, gmsStorage)
+		EnsureGMSRestoreSidecars(podSpec, podInfoContainers, gmsStorage)
 	}
 
-	return nil
-}
-
-func findPodSpecContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == name {
-			return &podSpec.Containers[i]
-		}
-	}
 	return nil
 }
