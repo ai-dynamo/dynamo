@@ -30,6 +30,11 @@ pub use dynamo::{
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
+///
+/// `tracing` subscriber is installed by `dynamo::add_to_module → logging::init()`
+/// downstream — see `src/dynamo/mod.rs:25-29`.  That one honors `RUST_LOG`,
+/// so setting `RUST_LOG=kvbm_audit=info` in the launch environment surfaces
+/// the `kvbm_audit` events on stderr (used by the `cd-audit-equiv-smoke` skill).
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

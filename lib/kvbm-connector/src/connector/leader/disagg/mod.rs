@@ -60,11 +60,13 @@
 pub mod conditional_leader;
 pub mod decode;
 pub mod decode_leader;
+pub mod lifecycle;
 pub mod peer_resolver;
 pub mod prefill_coordinator;
 pub mod prefill_leader;
 pub mod queue;
 pub mod transport;
+pub mod unified;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -81,8 +83,12 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
 pub use conditional_leader::{ConditionalDisaggLeader, register_with_hub};
-pub use decode::{BeginOutcome, RemotePrefillCoordinator, RemotePrefillState, RemotePrefillStatus};
+pub use decode::{
+    BeginOutcome, CdFailureSink, RemotePrefillCoordinator, RemotePrefillState,
+    RemotePrefillStatus,
+};
 pub use decode_leader::DecodeDisaggLeader;
+pub use lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
 pub use peer_resolver::{HubPeerResolver, PeerResolver};
 pub use prefill_coordinator::PrefillCoordinator;
 pub use prefill_leader::PrefillDisaggLeader;
@@ -91,6 +97,7 @@ pub use transport::{
     CdBlockTransport, CdWorkerHook, ConnectorLeaderShim, EngineCdBlockTransport, InnerLeaderShim,
     InnerLeaderWorkerHook,
 };
+pub use unified::{UnifiedDisaggLeader, UnifiedDisaggLeaderBuilder};
 
 /// Scheduler-facing connector leader API used by wrappers/compositions.
 ///

@@ -36,7 +36,7 @@ use slot::{MatchCheckOutcome, RequestSlot, TransactionState};
 
 pub use request::Request;
 pub use scheduler::{CachedRequestData, NewRequestData, SchedulerOutput};
-pub use slot::FinishedStatus;
+pub use slot::{CdOnboardingPayload, FinishedStatus};
 // SlotMatchSplit is defined further down in this file; re-exported here so
 // downstream code (e.g., the conditional-disagg `InnerLeaderShim` trait)
 // can name it.

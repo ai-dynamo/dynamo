@@ -696,8 +696,9 @@ impl ConnectorLeader {
                 AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggLeader,
                 ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim,
                 DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
-                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook,
+                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook, PrefillCoordinator,
                 PrefillDisaggLeader, RemotePrefillCoordinator, RemotePrefillQueue,
+                UnifiedDisaggLeader,
             };
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
@@ -735,9 +736,20 @@ impl ConnectorLeader {
                 tokio_handle.clone(),
             );
 
-            // Role-specific construction. Both arms produce
-            // Arc<dyn ConnectorLeaderApi>; the dispatcher wraps either.
-            let role_inner: Arc<dyn ConnectorLeaderApi> = match disagg_cfg.role {
+            // Construct the role-specific concrete leader (and, for
+            // prefill, its coordinator).  We hold concrete `Arc<...>`
+            // handles rather than `Arc<dyn ConnectorLeaderApi>` so
+            // either dispatcher (`ConditionalDisaggLeader` legacy or
+            // `UnifiedDisaggLeader` new) can wrap them.
+            enum RoleSpecific {
+                Decode(Arc<DecodeDisaggLeader>),
+                Prefill {
+                    leader: Arc<PrefillDisaggLeader>,
+                    coordinator: Arc<dyn PrefillCoordinator>,
+                },
+            }
+
+            let role_specific: RoleSpecific = match disagg_cfg.role {
                 DisaggregationRole::Decode => {
                     // Production policy: AlwaysRemote (every CD-eligible
                     // request goes remote). Threshold-based policies are
@@ -753,7 +765,7 @@ impl ConnectorLeader {
                         queue,
                         tokio_handle.clone(),
                     );
-                    DecodeDisaggLeader::from_parts(
+                    let decode = DecodeDisaggLeader::from_parts(
                         Arc::clone(&inner_shim),
                         &disagg_cfg,
                         coord,
@@ -763,7 +775,8 @@ impl ConnectorLeader {
                         Some(Arc::clone(&hub)),
                         Some(Arc::clone(&client)),
                         hub_velo_id,
-                    )
+                    );
+                    RoleSpecific::Decode(decode)
                 }
                 DisaggregationRole::Prefill => {
                     let peer_resolver = HubPeerResolver::new(
@@ -795,27 +808,93 @@ impl ConnectorLeader {
                         );
                     }
 
-                    PrefillDisaggLeader::from_parts(
+                    let coord_dyn: Arc<dyn PrefillCoordinator> = Arc::clone(&coord) as _;
+                    let leader = PrefillDisaggLeader::from_parts(
                         Arc::clone(&inner_shim),
-                        coord,
+                        Arc::clone(&coord_dyn),
                         Arc::clone(&worker_hook),
-                    )
+                    );
+                    RoleSpecific::Prefill {
+                        leader,
+                        coordinator: coord_dyn,
+                    }
                 }
             };
 
-            let dispatcher: Arc<dyn ConnectorLeaderApi> = ConditionalDisaggLeader::new(
-                disagg_cfg.role,
-                role_inner,
-                Some(hub),
-                Some(client),
-                hub_velo_id,
-            );
-            self.set_cd_api(dispatcher).context("install CD dispatcher")?;
+            // Select dispatcher implementation via env var.  Default
+            // is the legacy role-dispatching `ConditionalDisaggLeader`
+            // for safety during validation; setting
+            // `KVBM_DISAGG_LEADER=unified` swaps in the new
+            // `UnifiedDisaggLeader` (per-request dispatch on
+            // TransferParams) wrapping the same role-specific
+            // leaders.  Setting `=legacy` is equivalent to unset.
+            // Any other value logs a warning and falls back to legacy.
+            let leader_kind = std::env::var("KVBM_DISAGG_LEADER")
+                .ok()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "legacy".to_string());
 
-            tracing::info!(
-                role = ?disagg_cfg.role,
-                "Conditional-disagg dispatcher installed"
-            );
+            let dispatcher: Arc<dyn ConnectorLeaderApi> = match leader_kind.as_str() {
+                "unified" => {
+                    // Build UnifiedDisaggLeader wrapping whichever flow
+                    // the role match produced.  Today's hub plumbing
+                    // registers each instance under exactly one role,
+                    // so only one flow is wired per instance — but the
+                    // unified leader is forward-compatible with both.
+                    let mut builder = UnifiedDisaggLeader::builder(Arc::clone(&inner_shim))
+                        .with_hub(Arc::clone(&hub))
+                        .with_client(Arc::clone(&client));
+                    if let Some(id) = hub_velo_id {
+                        builder = builder.with_hub_velo_id(id);
+                    }
+                    let builder = match role_specific {
+                        RoleSpecific::Decode(decode) => builder.with_decode(decode),
+                        RoleSpecific::Prefill {
+                            leader,
+                            coordinator,
+                        } => builder.with_prefill(leader, coordinator),
+                    };
+                    let unified = builder
+                        .build()
+                        .context("build UnifiedDisaggLeader from role-specific flow")?;
+                    tracing::info!(
+                        role = ?disagg_cfg.role,
+                        leader_kind = "unified",
+                        "Conditional-disagg dispatcher installed (UnifiedDisaggLeader)"
+                    );
+                    unified
+                }
+                other => {
+                    if other != "legacy" {
+                        tracing::warn!(
+                            kvbm_disagg_leader = %other,
+                            "unrecognized KVBM_DISAGG_LEADER value; falling back to legacy"
+                        );
+                    }
+                    // Legacy path: wrap the role-specific concrete
+                    // leader as `Arc<dyn ConnectorLeaderApi>` and pass
+                    // it to `ConditionalDisaggLeader`.
+                    let role_inner: Arc<dyn ConnectorLeaderApi> = match role_specific {
+                        RoleSpecific::Decode(decode) => decode,
+                        RoleSpecific::Prefill { leader, .. } => leader,
+                    };
+                    let dispatcher = ConditionalDisaggLeader::new(
+                        disagg_cfg.role,
+                        role_inner,
+                        Some(Arc::clone(&hub)),
+                        Some(Arc::clone(&client)),
+                        hub_velo_id,
+                    );
+                    tracing::info!(
+                        role = ?disagg_cfg.role,
+                        leader_kind = "legacy",
+                        "Conditional-disagg dispatcher installed (ConditionalDisaggLeader)"
+                    );
+                    dispatcher
+                }
+            };
+
+            self.set_cd_api(dispatcher).context("install CD dispatcher")?;
         }
 
         Ok(())

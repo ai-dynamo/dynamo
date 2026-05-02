@@ -238,6 +238,23 @@ impl ConditionalDecodeG2Observer {
         self.pending.lock().remove(request_id);
     }
 
+    /// Whether the observer is still waiting for at least one hash
+    /// to be registered for `request_id`.  Returns `false` when the
+    /// entry is absent (already drained by full-match auto-remove,
+    /// untracked, or never tracked).  Used by
+    /// [`PrefillCoordinatorImpl::on_request_finished`] to defer
+    /// `session.finalize()` until the offload-pipeline observer
+    /// has published all expected output blocks — preventing the
+    /// race where `Drained` lands on the wire before the final
+    /// `Available` frame.
+    pub fn has_pending(&self, request_id: &str) -> bool {
+        self.pending
+            .lock()
+            .get(request_id)
+            .map(|hashes| !hashes.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Test accessor: snapshot of remaining hashes for `request_id`.
     #[cfg(any(test, feature = "testing"))]
     pub fn pending_for(&self, request_id: &str) -> Option<HashSet<SequenceHash>> {
@@ -1028,9 +1045,72 @@ impl PrefillCoordinator for PrefillCoordinatorImpl {
         // When decode also calls finalize, both sides
         // independently trigger velo's StreamSender::finalize and
         // the watcher cleans up.
-        if let Some(session) = state.session.lock().clone() {
-            session.finalize(Some("request_finished".to_string()));
-        }
+        //
+        // **Order-preservation gate**: `commit_output_blocks` from
+        // the offload-pipeline observer is a two-step sequence
+        // (`session.commit(hashes)` → `session.make_available(blocks)`).
+        // If `session.finalize()` lands BETWEEN those two calls, the
+        // terminator frames (`CommitsClosed` / `Drained` / `Finished`)
+        // are queued ahead of the `Available` frame on the wire.
+        // Decode's `run_remote_pipeline` then sees `Drained` before
+        // `Available` and bails with "availability drained with N of
+        // M filled" — the request is failed even though prefill
+        // produced the right block.
+        //
+        // To prevent the race, defer the finalize to a spawned task
+        // that polls the observer's per-request residual.  When the
+        // residual is empty (or the entry has been auto-removed),
+        // all expected outputs have been published and it is safe
+        // to emit the terminators.  A short watchdog bounds the
+        // wait so a stuck observer does not leak the session.
+        let session_opt = state.session.lock().clone();
+        let observer = Arc::clone(&self.observer);
+        let request_id_owned = request_id.to_string();
+        let runtime = self.runtime.clone();
+        runtime.spawn(async move {
+            // Watchdog: how long to wait for the observer's residual
+            // to drain before forcing finalize.  In production the
+            // residual drains within milliseconds of forward-pass
+            // completion — the offload pipeline runs synchronously
+            // with the worker step.  10s is well-padded; if it ever
+            // fires we have a bigger problem (offload stuck) and the
+            // session leak is acceptable to surface the issue.
+            const FINALIZE_WAIT: Duration = Duration::from_secs(10);
+            const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+            let deadline = tokio::time::Instant::now() + FINALIZE_WAIT;
+            let mut waited_for_observer = false;
+            while observer.has_pending(&request_id_owned) {
+                waited_for_observer = true;
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        request_id = %request_id_owned,
+                        wait_secs = FINALIZE_WAIT.as_secs(),
+                        "prefill on_request_finished: observer residual not drained \
+                         within watchdog; forcing session.finalize (peer may see \
+                         Drained before Available — KV load failure)"
+                    );
+                    crate::audit!(
+                        "prefill_finalize_observer_watchdog",
+                        role = "prefill",
+                        request_id = %request_id_owned,
+                        wait_secs = FINALIZE_WAIT.as_secs()
+                    );
+                    break;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            if waited_for_observer {
+                crate::audit!(
+                    "prefill_finalize_observer_drained",
+                    role = "prefill",
+                    request_id = %request_id_owned
+                );
+            }
+            if let Some(session) = session_opt {
+                session.finalize(Some("request_finished".to_string()));
+            }
+        });
 
         let mut status = state.status.lock();
         *status = PrefillStatus::Released;

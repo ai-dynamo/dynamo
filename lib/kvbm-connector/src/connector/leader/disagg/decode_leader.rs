@@ -47,9 +47,11 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 use crate::{G2, SequenceHash};
 
-use super::decode::RemotePrefillCoordinator;
+use super::decode::{CdFailureSink, RemotePrefillCoordinator};
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
+use futures::FutureExt;
+use futures::future::BoxFuture;
 
 // ============================================================================
 // Inflight token budget
@@ -258,7 +260,7 @@ impl DecodeDisaggLeader {
         hub_velo_id: Option<InstanceId>,
     ) -> Arc<Self> {
         let inflight_budget = InflightBudget::new(config.max_inflight_remote_prefill_tokens);
-        Arc::new_cyclic(|weak_self| Self {
+        let leader = Arc::new_cyclic(|weak_self| Self {
             inner,
             role: config.role,
             coordinator,
@@ -271,7 +273,17 @@ impl DecodeDisaggLeader {
             hub,
             hub_velo_id,
             weak_self: weak_self.clone(),
-        })
+        });
+        // Install the failure sink AFTER the leader Arc exists so
+        // the watchdog/Failed path can call back into the wrapper's
+        // `cleanup_failed_request` (which fires
+        // `worker_hook.mark_failed_onboarding`).  Without this,
+        // a failed peer would leave vLLM hanging in `Onboarding`
+        // until something else aborts the request.
+        let sink: Weak<dyn CdFailureSink> =
+            Arc::downgrade(&leader) as Weak<dyn CdFailureSink>;
+        leader.coordinator.install_failure_sink(sink);
+        leader
     }
 
     pub fn role(&self) -> DisaggregationRole {
@@ -1138,6 +1150,37 @@ impl DecodeDisaggLeader {
         self.coordinator.release(request_id);
     }
 
+}
+
+// ============================================================================
+// CdFailureSink — coordinator → wrapper failure callback
+// ============================================================================
+
+impl CdFailureSink for DecodeDisaggLeader {
+    fn on_session_failure(&self, request_id: String, reason: String) -> BoxFuture<'static, ()> {
+        // Mirror the synchronous failure paths in
+        // `commit_usaa1`'s spawned local-kick task and the
+        // `run_remote_pipeline` task: route to
+        // `cleanup_failed_request`, which gathers the unfilled G1
+        // ids and calls `worker_hook.mark_failed_onboarding` so
+        // vLLM unblocks the slot.
+        //
+        // Idempotent: cleanup is safe to call after the slot has
+        // already drained (DashMap removes are no-ops, and
+        // `mark_failed_onboarding` is only invoked when the
+        // wrapper actually has unfilled G1 ids).
+        let arc_self = match self.arc_self() {
+            Some(a) => a,
+            None => return async {}.boxed(),
+        };
+        async move {
+            arc_self.cleanup_failed_request(&request_id, reason).await;
+        }
+        .boxed()
+    }
+}
+
+impl DecodeDisaggLeader {
     fn prefill_unimplemented(&self, op: &str, request_id: Option<&str>) -> ! {
         tracing::error!(
             op,
