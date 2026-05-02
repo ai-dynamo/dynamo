@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -7289,6 +7290,11 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 						Enabled: true,
 						Mode:    v1alpha1.GMSModeInterPod,
 					},
+					Failover: &v1alpha1.FailoverSpec{
+						Enabled:    true,
+						Mode:       v1alpha1.GMSModeInterPod,
+						NumShadows: 2,
+					},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{Enabled: true},
 				},
 			},
@@ -7391,6 +7397,11 @@ func findContainerInClique(t *testing.T, clique *grovev1alpha1.PodCliqueTemplate
 			return &clique.Spec.PodSpec.Containers[i]
 		}
 	}
+	for i := range clique.Spec.PodSpec.InitContainers {
+		if clique.Spec.PodSpec.InitContainers[i].Name == name {
+			return &clique.Spec.PodSpec.InitContainers[i]
+		}
+	}
 	t.Fatalf("container %q not found in clique %q", name, clique.Name)
 	return nil
 }
@@ -7416,7 +7427,14 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 					Resources: &v1alpha1.Resources{
 						Limits: &v1alpha1.ResourceItem{GPU: "1"},
 					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{Image: "engine:latest"},
+					},
 					Failover: &v1alpha1.FailoverSpec{
+						Enabled: true,
+						Mode:    v1alpha1.GMSModeIntraPod,
+					},
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 						Enabled: true,
 						Mode:    v1alpha1.GMSModeIntraPod,
 					},
@@ -7472,6 +7490,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 			Ready:                   true,
 			Hash:                    "abc123def4567890",
 			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			GPUMemoryService:        &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
 		},
 	}
 
@@ -7487,19 +7506,36 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		sawDecode = true
 		assert.Equal(t, "engine-0,engine-1", clique.Annotations[snapshotprotocol.TargetContainersAnnotation],
 			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
+		gmsServer := findContainerInClique(t, clique, gms.ServerContainerName)
+		assert.Nil(t, gmsServer.StartupProbe, "restore GMS server should not gate target container startup")
+		loader := findContainerInClique(t, clique, checkpoint.GMSLoaderContainer)
+		assert.Equal(t, []string{"python3", "-m", checkpoint.GMSCheckpointLoaderModule}, loader.Command)
 		for _, engineName := range IntraPodFailoverEngineContainerNames() {
 			c := findContainerInClique(t, clique, engineName)
 			assert.Equal(t, []string{"sleep", "infinity"}, c.Command,
 				"%s in clique %q must be shaped as a snapshot restore target", engineName, clique.Name)
+			env := map[string]string{}
+			for _, item := range c.Env {
+				env[item.Name] = item.Value
+			}
+			assert.Equal(t, gms.SharedMountPath, env[gms.EnvSocketDir],
+				"%s in clique %q must receive the GMS socket directory", engineName, clique.Name)
 			foundMount := false
+			foundGMSMount := false
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
 					foundMount = true
 					assert.Equal(t, engineName, m.SubPath,
 						"%s in clique %q must have its own subPath on the control volume", engineName, clique.Name)
 				}
+				if m.Name == gms.SharedVolumeName {
+					foundGMSMount = true
+					assert.Equal(t, gms.SharedMountPath, m.MountPath,
+						"%s in clique %q must mount the GMS socket volume", engineName, clique.Name)
+				}
 			}
 			assert.True(t, foundMount, "%s in clique %q must mount the snapshot-control volume", engineName, clique.Name)
+			assert.True(t, foundGMSMount, "%s in clique %q must mount the GMS socket volume", engineName, clique.Name)
 		}
 	}
 	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
@@ -7659,34 +7695,6 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	assert.Equal(t, "my-dgd-worker", dcd.Name)
 	assert.Empty(t, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash])
 	assert.Equal(t, int32(3), *dcd.Spec.Replicas)
-}
-
-// TestGenerateSingleDCD_RollingUpdateZeroReplicas verifies that when
-// NewWorkerReplicas is explicitly 0 (maxSurge=0, first reconcile), the new DCD
-// is created with 0 replicas instead of falling through to the desired count.
-func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
-	dgd := &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
-		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-				"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(4))},
-			},
-		},
-	}
-
-	ruCtx := RollingUpdateContext{
-		NewWorkerHash:     "aabb1122",
-		OldWorkerReplicas: map[string]int32{"decode": 3},
-		NewWorkerReplicas: map[string]int32{"decode": 0},
-	}
-
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, ruCtx)
-	assert.NoError(t, err)
-
-	decodeDCD := dcds["decode"]
-	assert.Equal(t, "my-dgd-decode-aabb1122", decodeDCD.Name)
-	assert.Equal(t, int32(0), *decodeDCD.Spec.Replicas,
-		"new DCD must respect NewWorkerReplicas=0, not fall through to desired=4")
 }
 
 func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {

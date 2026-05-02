@@ -37,6 +37,11 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	// Snapshot-agent reads the restore target container list from the
+	// nvidia.com/snapshot-target-containers annotation. Default target is
+	// the main container; the failover path sets
+	// checkpointInfo.RestoreTargetContainers to engine-0/engine-1 so the
+	// agent restores the same checkpoint into both engines.
 	if !enabled {
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
@@ -61,29 +66,35 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 	}
 }
 
-func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
-	if podSpec == nil {
-		return nil, fmt.Errorf("pod spec is nil")
+// restoreTargetsOrDefault returns the restore target container list for a
+// given CheckpointInfo, defaulting to the single main container for
+// non-failover workloads. Callers are expected to have already confirmed
+// that the info is non-nil, enabled, and Ready.
+func restoreTargetsOrDefault(info *CheckpointInfo) []string {
+	if info != nil && len(info.RestoreTargetContainers) > 0 {
+		return info.RestoreTargetContainers
 	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i], nil
-		}
-	}
-	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
+	return []string{commonconsts.MainContainerName}
 }
 
-// InjectCheckpointIntoPodSpec mutates a worker pod spec for restore-from-checkpoint
-// once the referenced DynamoCheckpoint is Ready. It adds the snapshot-control
-// volume + mount, sets DYN_SNAPSHOT_CONTROL_DIR, attaches the checkpoint PVC,
-// applies the localhost seccomp profile (when seccompProfile is non-empty), and
-// — for GMS-enabled workloads — wires the GMS restore sidecars. No-ops when
-// checkpointInfo is nil, disabled, or not Ready (cold-start path).
-//
-// seccompProfile is the path passed to the localhost seccomp profile injection;
-// pass an empty string to skip seccomp injection (e.g. on OpenShift, or when
-// running a CRIU build with io_uring support). Callers typically obtain this
-// from operatorConfig.Checkpoint.EffectiveSeccompProfile().
+// resolvePodInfoContainer picks the container that should own the pod-info
+// downward-API mount. For pods with one restore target, that is the target
+// itself. For multi-target (failover) pods, we mount pod-info on every
+// target so each engine has the same downward-API view it would have if it
+// were the only workload container in the pod.
+func resolvePodInfoContainers(podSpec *corev1.PodSpec, targets []string) []*corev1.Container {
+	out := make([]*corev1.Container, 0, len(targets))
+	for _, name := range targets {
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				out = append(out, &podSpec.Containers[i])
+				break
+			}
+		}
+	}
+	return out
+}
+
 func InjectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -120,22 +131,18 @@ func InjectCheckpointIntoPodSpec(
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
-	targets := checkpointInfo.RestoreTargetContainers
-	if len(targets) == 0 {
-		targets = []string{commonconsts.MainContainerName}
-	}
-	podInfoContainers := make([]*corev1.Container, 0, len(targets))
-	for _, name := range targets {
-		for i := range podSpec.Containers {
-			if podSpec.Containers[i].Name == name {
-				podInfoContainers = append(podInfoContainers, &podSpec.Containers[i])
-				break
-			}
-		}
-	}
+	targets := restoreTargetsOrDefault(checkpointInfo)
+	// Every named target must exist in the pod spec. Catching this here
+	// gives a clearer error than the protocol layer's generic "not found".
+	podInfoContainers := resolvePodInfoContainers(podSpec, targets)
 	if len(podInfoContainers) != len(targets) {
 		return fmt.Errorf("checkpoint restore targets %v do not all exist in pod spec", targets)
 	}
+	// The target-containers annotation lives on the parent pod metadata
+	// (which InjectCheckpointIntoPodSpec does not see directly). For the
+	// pod-spec shaping step we synthesize the target list inline so the
+	// protocol helper shapes every target; the pod-level annotation is
+	// stamped separately by ApplyRestorePodMetadata.
 	syntheticAnnotations := map[string]string{
 		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
 	}
@@ -158,9 +165,6 @@ func InjectCheckpointIntoPodSpec(
 		EnsurePodInfoMount(c)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		if len(info.RestoreTargetContainers) > 0 {
-			return fmt.Errorf("gpuMemoryService checkpoint restore is not supported with multiple restore targets")
-		}
 		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
 			ctx,
 			reader,
@@ -179,25 +183,8 @@ func InjectCheckpointIntoPodSpec(
 		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
 			return nil
 		}
-		mainContainer := resolveMainContainer(podSpec)
-		if mainContainer == nil {
-			return fmt.Errorf("gpuMemoryService enabled but no container named %q found in pod spec", commonconsts.MainContainerName)
-		}
-		EnsureGMSRestoreSidecars(podSpec, mainContainer, gmsStorage)
+		EnsureGMSRestoreSidecars(podSpec, podInfoContainers, gmsStorage)
 	}
 
-	return nil
-}
-
-// resolveMainContainer finds the container named "main" in the pod spec.
-// ExtraPodSpec.PodSpec.Containers can inject user containers before the main
-// container (mergo merge happens before main is appended), so index 0 is
-// not guaranteed to be the main container here.
-func resolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
-	}
 	return nil
 }

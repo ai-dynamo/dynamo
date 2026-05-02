@@ -334,7 +334,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		gmsServer := findInitContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := findContainer(podSpec, GMSLoaderContainer)
@@ -369,6 +368,72 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", info.GMSArtifactDir)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
+	})
+
+	t.Run("ready gms failover checkpoint injects restore sidecars for every engine", func(t *testing.T) {
+		podSpec := &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "engine-0", Image: "engine:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+				{Name: "engine-1", Image: "engine:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+			},
+		}
+		info := &CheckpointInfo{
+			Enabled:                 true,
+			Ready:                   true,
+			Hash:                    testHash,
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
+			GPUMemoryService:        &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+
+		gmsServer := findInitContainer(podSpec, gms.ServerContainerName)
+		require.NotNil(t, gmsServer)
+		assert.Equal(t, "engine:latest", gmsServer.Image)
+		loader := findContainer(podSpec, GMSLoaderContainer)
+		require.NotNil(t, loader)
+		assert.Equal(t, "engine:latest", loader.Image)
+
+		serverCount := 0
+		loaderCount := 0
+		for _, container := range podSpec.InitContainers {
+			if container.Name == gms.ServerContainerName {
+				serverCount++
+			}
+		}
+		for _, container := range podSpec.Containers {
+			switch container.Name {
+			case gms.ServerContainerName:
+				serverCount++
+			case GMSLoaderContainer:
+				loaderCount++
+			}
+		}
+		assert.Equal(t, 1, serverCount)
+		assert.Equal(t, 1, loaderCount)
+
+		for _, name := range []string{"engine-0", "engine-1"} {
+			c := findContainer(podSpec, name)
+			require.NotNil(t, c)
+
+			mounts := map[string]string{}
+			subPaths := map[string]string{}
+			for _, mount := range c.VolumeMounts {
+				mounts[mount.Name] = mount.MountPath
+				subPaths[mount.Name] = mount.SubPath
+			}
+			assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName], "%s GMS socket mount", name)
+			assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mounts[snapshotprotocol.SnapshotControlVolumeName], "%s snapshot control mount", name)
+			assert.Equal(t, name, subPaths[snapshotprotocol.SnapshotControlVolumeName], "%s snapshot control subPath", name)
+
+			env := map[string]string{}
+			for _, item := range c.Env {
+				env[item.Name] = item.Value
+			}
+			assert.Equal(t, gms.SharedMountPath, env[gms.EnvSocketDir], "%s GMS socket env", name)
+		}
 	})
 
 	t.Run("ready gms checkpoint can use separate artifact storage", func(t *testing.T) {

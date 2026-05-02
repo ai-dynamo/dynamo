@@ -60,21 +60,33 @@ type GMSCheckpointStorage struct {
 // wait for its socket so restore and GMS load can start without kubelet gating.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
-	mainContainer *corev1.Container,
+	targetContainers []*corev1.Container,
 	storage GMSCheckpointStorage,
 ) {
-	if podSpec == nil || mainContainer == nil {
+	if podSpec == nil || len(targetContainers) == 0 {
 		return
 	}
 
+	var sidecarSource *corev1.Container
+	for _, targetContainer := range targetContainers {
+		if targetContainer == nil {
+			continue
+		}
+		if sidecarSource == nil {
+			sidecarSource = targetContainer
+		}
+		gms.EnsureSharedVolume(podSpec, targetContainer)
+	}
+	if sidecarSource == nil {
+		return
+	}
 	podSpec.InitContainers = removeGMSManagedContainers(podSpec.InitContainers, gms.ServerContainerName, GMSLoaderContainer)
-	gms.EnsureSharedVolume(podSpec, mainContainer)
 	ensureGMSCheckpointVolumes(podSpec, storage)
-	gms.EnsureServerSidecar(podSpec, mainContainer)
+	gms.EnsureServerSidecar(podSpec, sidecarSource)
 
-	loader := gms.Container(GMSLoaderContainer, GMSCheckpointLoaderModule, mainContainer.Image)
+	loader := gms.Container(GMSLoaderContainer, GMSCheckpointLoaderModule, sidecarSource.Image)
 	addGMSStorageMounts(&loader, storage)
-	addGMSLocalSSDVolumeMounts(&loader, mainContainer)
+	addGMSLocalSSDVolumeMounts(&loader, sidecarSource)
 	loader.Env = append(loader.Env,
 		corev1.EnvVar{Name: EnvCheckpointDir, Value: storage.ControlDir},
 		PodUIDEnvVar(),
@@ -82,7 +94,7 @@ func EnsureGMSRestoreSidecars(
 	if storage.ArtifactDir != storage.ControlDir {
 		loader.Env = append(loader.Env, corev1.EnvVar{Name: EnvWeightsCheckpointDir, Value: storage.ArtifactDir})
 	}
-	loader.Env = append(loader.Env, gmsCheckpointPassThroughEnvVars(mainContainer)...)
+	loader.Env = append(loader.Env, gmsCheckpointPassThroughEnvVars(sidecarSource)...)
 
 	podSpec.Containers = removeGMSManagedContainers(podSpec.Containers, gms.ServerContainerName, GMSLoaderContainer)
 	podSpec.Containers = append(podSpec.Containers, loader)
