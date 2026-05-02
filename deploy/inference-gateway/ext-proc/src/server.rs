@@ -108,24 +108,23 @@ impl RequestContext {
         if self.state == StreamState::RequestReceived
             && let Some(resp) = self.req_header_resp.take()
         {
-            if let Some(crate::proto::envoy::service::ext_proc::v3::processing_response::Response::RequestHeaders(ref hr)) = resp.response {
-                if let Some(ref common) = hr.response {
-                    if let Some(ref hm) = common.header_mutation {
+            if let Some(crate::proto::envoy::service::ext_proc::v3::processing_response::Response::RequestHeaders(ref hr)) = resp.response
+                && let Some(ref common) = hr.response
+                && let Some(ref hm) = common.header_mutation
+            {
+                tracing::info!(
+                    set_headers_count = hm.set_headers.len(),
+                    clear_route_cache = common.clear_route_cache,
+                    has_dynamic_metadata = resp.dynamic_metadata.is_some(),
+                    "[WIRE] Sending RequestHeaders response to Envoy"
+                );
+                for h in &hm.set_headers {
+                    if let Some(ref hv) = h.header {
                         tracing::info!(
-                            set_headers_count = hm.set_headers.len(),
-                            clear_route_cache = common.clear_route_cache,
-                            has_dynamic_metadata = resp.dynamic_metadata.is_some(),
-                            "[WIRE] Sending RequestHeaders response to Envoy"
+                            key = %hv.key,
+                            value = %String::from_utf8_lossy(&hv.raw_value),
+                            "[WIRE] set_header"
                         );
-                        for h in &hm.set_headers {
-                            if let Some(ref hv) = h.header {
-                                tracing::info!(
-                                    key = %hv.key,
-                                    value = %String::from_utf8_lossy(&hv.raw_value),
-                                    "[WIRE] set_header"
-                                );
-                            }
-                        }
                     }
                 }
             }

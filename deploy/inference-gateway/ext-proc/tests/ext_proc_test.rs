@@ -127,7 +127,6 @@ async fn test_ext_proc_disaggregated_routing() {
             ext_proc::HttpBody {
                 body: body.to_vec(),
                 end_of_stream: true,
-                ..Default::default()
             },
         )),
         ..Default::default()
