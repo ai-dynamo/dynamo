@@ -73,9 +73,22 @@ impl FinishedState {
         self.inner.lock().finished_offloading.insert(request_id);
     }
 
-    /// Mark block IDs as having failed onboarding.
-    pub fn mark_failed_onboarding(&self, block_ids: Vec<usize>) {
-        self.inner.lock().failed_onboarding.extend(block_ids);
+    /// Mark a request's onboarding as failed.
+    ///
+    /// vLLM's connector contract (`vllm/v1/kv_connector/v1/base.py`) requires
+    /// that the request_id appear in `get_finished()`'s `onboard` set in the
+    /// same forward pass that the failed block_ids are reported — otherwise
+    /// the scheduler treats the request as still-loading and never surfaces
+    /// the failure.  This method does both inserts under one lock acquisition
+    /// so the pairing cannot be split.
+    ///
+    /// `block_ids` may be empty (pre-USAA failure has no G1 destinations to
+    /// report); the request_id is still surfaced so vLLM can move the request
+    /// out of `WAITING_FOR_REMOTE_KVS`.
+    pub fn mark_failed_onboarding(&self, request_id: String, block_ids: Vec<usize>) {
+        let mut inner = self.inner.lock();
+        inner.finished_onboarding.insert(request_id);
+        inner.failed_onboarding.extend(block_ids);
     }
 
     /// Take and drain all finished request IDs.
@@ -356,8 +369,9 @@ impl WorkerState {
         self.finished_state.mark_offloading_complete(request_id);
     }
 
-    pub(crate) fn mark_failed_onboarding(&self, block_ids: Vec<usize>) {
-        self.finished_state.mark_failed_onboarding(block_ids);
+    pub(crate) fn mark_failed_onboarding(&self, request_id: String, block_ids: Vec<usize>) {
+        self.finished_state
+            .mark_failed_onboarding(request_id, block_ids);
     }
 }
 
@@ -369,7 +383,7 @@ mod tests {
     fn test_mark_failed_onboarding_adds_block_ids() {
         let state = FinishedState::default();
 
-        state.mark_failed_onboarding(vec![1, 2, 3]);
+        state.mark_failed_onboarding("req-1".to_string(), vec![1, 2, 3]);
 
         let failed = state.take_failed_onboarding();
         assert_eq!(failed.len(), 3);
@@ -382,7 +396,7 @@ mod tests {
     fn test_take_failed_onboarding_drains_set() {
         let state = FinishedState::default();
 
-        state.mark_failed_onboarding(vec![10, 20]);
+        state.mark_failed_onboarding("req-2".to_string(), vec![10, 20]);
 
         // First take should return the block IDs
         let first_take = state.take_failed_onboarding();
@@ -396,39 +410,58 @@ mod tests {
     }
 
     #[test]
-    fn test_failed_onboarding_before_complete() {
-        // Verifies that failed blocks can be marked before marking completion
-        // This matches the ordering guarantee in the implementation
+    fn test_mark_failed_onboarding_pairs_request_id_for_get_finished() {
+        // vLLM contract: a failed request's request_id must appear in
+        // get_finished()'s onboard set in the same pass the failed
+        // block_ids are reported — otherwise the scheduler thinks the
+        // request is still loading and won't process the failure.
         let state = FinishedState::default();
 
-        // First mark some blocks as failed
-        state.mark_failed_onboarding(vec![5, 6, 7]);
+        state.mark_failed_onboarding("req-failed".to_string(), vec![5, 6, 7]);
 
-        // Then mark onboarding as complete for a request
-        state.mark_onboarding_complete("req-123".to_string());
-
-        // Both should be retrievable
+        // failed_onboarding carries the block_ids
         let failed = state.take_failed_onboarding();
         assert_eq!(failed.len(), 3);
 
-        // take_finished returns (onboarding, offloading)
+        // finished_onboarding carries the request_id (drained by
+        // take_finished and exposed to vLLM via get_finished).
         let (offloading, onboarding) = state.take_finished().dissolve();
-        assert!(onboarding.contains("req-123"));
+        assert!(onboarding.contains("req-failed"));
         assert!(offloading.is_empty());
+    }
+
+    #[test]
+    fn test_mark_failed_onboarding_accepts_empty_block_ids() {
+        // Pre-USAA failures have no G1 destinations to report, but the
+        // request_id must still be surfaced so vLLM can move the
+        // request out of WAITING_FOR_REMOTE_KVS.
+        let state = FinishedState::default();
+
+        state.mark_failed_onboarding("req-pre-usaa".to_string(), vec![]);
+
+        let failed = state.take_failed_onboarding();
+        assert!(failed.is_empty());
+
+        let (_, onboarding) = state.take_finished().dissolve();
+        assert!(onboarding.contains("req-pre-usaa"));
     }
 
     #[test]
     fn test_mark_failed_onboarding_accumulates() {
         let state = FinishedState::default();
 
-        // Mark multiple batches of failed blocks
-        state.mark_failed_onboarding(vec![1, 2]);
-        state.mark_failed_onboarding(vec![3, 4, 5]);
+        // Mark multiple batches for distinct requests
+        state.mark_failed_onboarding("req-a".to_string(), vec![1, 2]);
+        state.mark_failed_onboarding("req-b".to_string(), vec![3, 4, 5]);
 
         let failed = state.take_failed_onboarding();
         assert_eq!(failed.len(), 5);
         for id in 1..=5 {
             assert!(failed.contains(&id));
         }
+
+        let (_, onboarding) = state.take_finished().dissolve();
+        assert!(onboarding.contains("req-a"));
+        assert!(onboarding.contains("req-b"));
     }
 }

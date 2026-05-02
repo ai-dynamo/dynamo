@@ -82,7 +82,7 @@ fn register_completion_handlers(messenger: &Arc<Messenger>, state: &Arc<WorkerSt
                 block_ids = ?msg.block_ids,
                 "Worker received failed onboard notification"
             );
-            state.mark_failed_onboarding(msg.block_ids);
+            state.mark_failed_onboarding(msg.request_id, msg.block_ids);
             Ok(())
         }
     })
