@@ -331,6 +331,21 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
 	ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Volumes = append(
+		ckpt.Spec.Job.PodTemplateSpec.Spec.Volumes,
+		corev1.Volume{Name: "nvme0", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		corev1.Volume{Name: "nvme1", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	)
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].VolumeMounts = append(
+		ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: "nvme0", MountPath: "/mnt/nvme0"},
+		corev1.VolumeMount{Name: "nvme1", MountPath: "/mnt/nvme1"},
+	)
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Env = append(
+		ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: checkpoint.EnvLocalSSDRoots, Value: "/mnt/nvme0/gms,/mnt/nvme1/gms"},
+		corev1.EnvVar{Name: checkpoint.EnvShardSizeBytes, Value: "1073741824"},
+	)
 	snapshotAgentDaemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "snapshot-agent",
@@ -369,7 +384,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
 	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
-	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, checkpoint.GMSSaverContainer)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
 
 	volNames := map[string]bool{}
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -391,21 +406,99 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
 	assert.Nil(t, weightsServer.StartupProbe)
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
-	assert.Nil(t, saver.RestartPolicy)
+	require.NotNil(t, saver.RestartPolicy)
+	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *saver.RestartPolicy)
 
 	saverMounts := map[string]string{}
 	for _, m := range saver.VolumeMounts {
 		saverMounts[m.Name] = m.MountPath
 	}
 	assert.Equal(t, "/checkpoints", saverMounts[snapshotprotocol.CheckpointVolumeName])
+	assert.Equal(t, "/mnt/nvme0", saverMounts["nvme0"])
+	assert.Equal(t, "/mnt/nvme1", saverMounts["nvme1"])
 
 	saverEnv := map[string]string{}
 	for _, env := range saver.Env {
 		saverEnv[env.Name] = env.Value
 	}
 	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
+	assert.Equal(t, "/mnt/nvme0/gms,/mnt/nvme1/gms", saverEnv[checkpoint.EnvLocalSSDRoots])
+	assert.Equal(t, "1073741824", saverEnv[checkpoint.EnvShardSizeBytes])
 	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", job.Spec.Template.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation])
 	assert.Equal(t, snapshotprotocol.GMSCompletionFileModePodUID, job.Spec.Template.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation])
+}
+
+func TestBuildCheckpointJobAddsGMSArtifactStorage(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+		Enabled: true,
+		ArtifactStorage: &nvidiacomv1alpha1.GMSArtifactStorageSpec{
+			PVCName:  "weights-pvc",
+			BasePath: "/gms-checkpoints",
+		},
+	}
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+	snapshotAgentDaemonSet := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-agent",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: snapshotprotocol.SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{{
+							Name:      snapshotprotocol.SnapshotAgentVolumeName,
+							MountPath: "/checkpoints",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: snapshotprotocol.SnapshotAgentVolumeName,
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "snapshot-pvc",
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+	reader := fake.NewClientBuilder().WithScheme(s).WithObjects(snapshotAgentDaemonSet).Build()
+
+	r := makeCheckpointReconciler(s, ckpt)
+	job, err := buildCheckpointJob(context.Background(), reader, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	volumes := map[string]string{}
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil {
+			volumes[volume.Name] = volume.PersistentVolumeClaim.ClaimName
+		}
+	}
+	assert.Equal(t, "snapshot-pvc", volumes[snapshotprotocol.CheckpointVolumeName])
+	assert.Equal(t, "weights-pvc", volumes[checkpoint.GMSArtifactVolume])
+
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
+	saverMounts := map[string]string{}
+	for _, mount := range saver.VolumeMounts {
+		saverMounts[mount.Name] = mount.MountPath
+	}
+	assert.Equal(t, "/checkpoints", saverMounts[snapshotprotocol.CheckpointVolumeName])
+	assert.Equal(t, "/gms-checkpoints", saverMounts[checkpoint.GMSArtifactVolume])
+
+	saverEnv := map[string]string{}
+	for _, env := range saver.Env {
+		saverEnv[env.Name] = env.Value
+	}
+	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv[checkpoint.EnvCheckpointDir])
+	assert.Equal(t, "/gms-checkpoints/"+testHash+"/versions/1", saverEnv[checkpoint.EnvWeightsCheckpointDir])
+	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", job.Spec.Template.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation])
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {

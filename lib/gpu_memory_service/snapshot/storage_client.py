@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from gpu_memory_service.snapshot.disk import (  # noqa: F401  re-exported for external callers
     ShardWriter as _ShardWriter,
@@ -42,6 +42,9 @@ from gpu_memory_service.snapshot.transfer import (
 )
 from gpu_memory_service.snapshot.transfer import (
     DEFAULT_TRANSFER_BACKEND as _DEFAULT_TRANSFER_BACKEND,
+)
+from gpu_memory_service.snapshot.transfer import (
+    LOCAL_SSD_STRIPED_TRANSFER_BACKEND as _LOCAL_SSD_STRIPED_TRANSFER_BACKEND,
 )
 from gpu_memory_service.snapshot.transfer import (
     GMSTransferTarget,
@@ -173,12 +176,16 @@ class GMSStorageClient:
         timeout_ms: Optional[int] = None,
         shard_size_bytes: int = 4 * 1024**3,
         transfer_backend: str = _DEFAULT_TRANSFER_BACKEND,
+        shard_roots: Optional[Sequence[str]] = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
         self._timeout_ms = timeout_ms
         self._shard_size = shard_size_bytes
         self._transfer_backend = transfer_backend
+        self._shard_roots = [
+            os.path.abspath(root) for root in (shard_roots or []) if str(root).strip()
+        ]
 
         if socket_path is None:
             from gpu_memory_service.common.utils import get_socket_path
@@ -189,7 +196,7 @@ class GMSStorageClient:
     def save(self, max_workers: int = 4) -> SaveManifest:
         """Connect to GMS in RO mode and save all allocations + metadata to disk."""
         self._validate_save_request()
-        output_dir, shards_dir = self._prepare_output_dir()
+        output_dir, shard_dirs, use_absolute_shard_paths = self._prepare_output_dir()
 
         mm = GMSClientMemoryManager(self._socket_path, device=self.device)
         try:
@@ -204,10 +211,11 @@ class GMSStorageClient:
             ]
             va_list = self._import_source_mappings(mm, allocations_info)
             entries = self._write_shards(
-                shards_dir,
+                shard_dirs,
                 allocations_info,
                 va_list,
                 max_workers=max_workers,
+                use_absolute_shard_paths=use_absolute_shard_paths,
             )
             metadata = self._save_metadata(mm)
         except Exception:
@@ -243,15 +251,17 @@ class GMSStorageClient:
                 "output_dir must be set to call save(); pass it to GMSStorageClient()"
             )
 
-    def _prepare_output_dir(self) -> Tuple[str, str]:
+    def _prepare_output_dir(self) -> Tuple[str, List[str], bool]:
         assert self.output_dir is not None
         os.makedirs(self.output_dir, exist_ok=True)
-        shards_dir = os.path.join(self.output_dir, "shards")
-        os.makedirs(shards_dir, exist_ok=True)
-        for name in os.listdir(shards_dir):
-            if name.startswith("shard_") and name.endswith(".bin"):
-                os.unlink(os.path.join(shards_dir, name))
-        return self.output_dir, shards_dir
+        shard_roots = self._shard_roots or [self.output_dir]
+        shard_dirs = [os.path.join(root, "shards") for root in shard_roots]
+        for shards_dir in shard_dirs:
+            os.makedirs(shards_dir, exist_ok=True)
+            for name in os.listdir(shards_dir):
+                if name.startswith("shard_") and name.endswith(".bin"):
+                    os.unlink(os.path.join(shards_dir, name))
+        return self.output_dir, shard_dirs, bool(self._shard_roots)
 
     def _import_source_mappings(
         self,
@@ -267,11 +277,12 @@ class GMSStorageClient:
 
     def _write_shards(
         self,
-        shards_dir: str,
+        shard_dirs: List[str],
         allocations_info: List[Dict[str, Any]],
         va_list: List[int],
         *,
         max_workers: int,
+        use_absolute_shard_paths: bool = False,
     ) -> List[AllocationEntry]:
         layout = _plan_shard_layout(allocations_info, self._shard_size)
         shard_groups: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
@@ -284,8 +295,10 @@ class GMSStorageClient:
             shard_idx: int, alloc_pairs: List[Tuple[int, int]]
         ) -> None:
             filename = f"shard_{shard_idx:04d}.bin"
+            shards_dir = shard_dirs[shard_idx % len(shard_dirs)]
             abs_path = os.path.join(shards_dir, filename)
             rel_path = os.path.join("shards", filename)
+            tensor_file = abs_path if use_absolute_shard_paths else rel_path
             with open(abs_path, "wb") as handle:
                 for index, byte_offset in alloc_pairs:
                     alloc = allocations_info[index]
@@ -303,7 +316,7 @@ class GMSStorageClient:
                         size=int(alloc["size"]),
                         aligned_size=aligned_size,
                         tag=str(alloc.get("tag", "default")),
-                        tensor_file=rel_path,
+                        tensor_file=tensor_file,
                         tensor_offset=byte_offset,
                     )
 
@@ -320,7 +333,11 @@ class GMSStorageClient:
             raise RuntimeError(
                 f"BUG: {missing} allocation(s) missing after shard writers completed"
             )
-        logger.info("Phase B complete: wrote %d shards", len(shard_groups))
+        logger.info(
+            "Phase B complete: wrote %d shards across %d shard root(s)",
+            len(shard_groups),
+            len(shard_dirs),
+        )
         return [entry for entry in entries if entry is not None]
 
     def _write_json(self, path: str, payload: Dict[str, Any]) -> None:
@@ -413,7 +430,11 @@ class GMSStorageClient:
     def _validate_load_request(self, transfer_backend: str) -> None:
         if not _GMS_CORE_IMPORTS_AVAILABLE:
             raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
-        cpu_staged_backends = {_DEFAULT_TRANSFER_BACKEND, _AIO_TRANSFER_BACKEND}
+        cpu_staged_backends = {
+            _DEFAULT_TRANSFER_BACKEND,
+            _AIO_TRANSFER_BACKEND,
+            _LOCAL_SSD_STRIPED_TRANSFER_BACKEND,
+        }
         if transfer_backend in cpu_staged_backends and not _GMS_IMPORTS_AVAILABLE:
             raise RuntimeError(
                 f"{transfer_backend} GMS transfer backend requires cuda-python and torch"

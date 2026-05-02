@@ -1584,8 +1584,12 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		if err != nil {
 			return nil, fmt.Errorf("failed to inject GMS restore loader for role %s: %w", p.r.Name, err)
 		}
-		p.checkpointInfo.GMSArtifactDir = checkpoint.ResolveGMSArtifactDir(storage)
-		injectInterPodGMSRestoreLoader(podSpec, storage)
+		gmsStorage, err := checkpoint.ResolveGMSCheckpointStorage(storage, p.checkpointInfo.GPUMemoryService)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve GMS checkpoint storage for role %s: %w", p.r.Name, err)
+		}
+		p.checkpointInfo.GMSArtifactDir = gmsStorage.ControlDir
+		injectInterPodGMSRestoreLoader(podSpec, gmsStorage)
 	}
 
 	// GMS weight-server pods are not a checkpoint/restore target: they run

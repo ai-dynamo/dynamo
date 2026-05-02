@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import logging
 import os
 import queue
@@ -40,14 +41,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TRANSFER_BACKEND = "default"
 AIO_TRANSFER_BACKEND = "aio"
+LOCAL_SSD_STRIPED_TRANSFER_BACKEND = "local-ssd-striped"
+LOCAL_SSD_PINNED_TRANSFER_BACKEND = "local-ssd-pinned"
 NIXL_GDS_TRANSFER_BACKEND = "nixl-gds"
 CUFILE_GDS_TRANSFER_BACKEND = "cufile-gds"
+GMS_LOCAL_SSD_ROOTS_ENV = "GMS_LOCAL_SSD_ROOTS"
 TRANSFER_BACKEND_CHOICES = (
     DEFAULT_TRANSFER_BACKEND,
     AIO_TRANSFER_BACKEND,
+    LOCAL_SSD_STRIPED_TRANSFER_BACKEND,
+    LOCAL_SSD_PINNED_TRANSFER_BACKEND,
     NIXL_GDS_TRANSFER_BACKEND,
     CUFILE_GDS_TRANSFER_BACKEND,
 )
+
+_PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
+_PINNED_COPY_BUFFERS_PER_ROOT = 2
 
 try:
     from nixl._api import nixl_agent, nixl_agent_config
@@ -147,6 +156,28 @@ def create_transfer_backend(
             torch_module=torch_module,
             tensor_from_pointer=tensor_from_pointer,
         )
+    if name == LOCAL_SSD_STRIPED_TRANSFER_BACKEND:
+        if torch_module is None or tensor_from_pointer is None:
+            raise RuntimeError(
+                "local-ssd-striped GMS transfer backend requires PyTorch tensor imports"
+            )
+        return LocalSSDStripedTransferBackend(
+            device=device,
+            max_workers=max_workers,
+            torch_module=torch_module,
+            tensor_from_pointer=tensor_from_pointer,
+            local_roots=_parse_local_ssd_roots(
+                os.environ.get(GMS_LOCAL_SSD_ROOTS_ENV, "")
+            ),
+        )
+    if name == LOCAL_SSD_PINNED_TRANSFER_BACKEND:
+        return LocalSSDPinnedTransferBackend(
+            device=device,
+            max_workers=max_workers,
+            local_roots=_parse_local_ssd_roots(
+                os.environ.get(GMS_LOCAL_SSD_ROOTS_ENV, "")
+            ),
+        )
     if name == NIXL_GDS_TRANSFER_BACKEND:
         return NixlGDSTransferBackend(device=device)
     if name == CUFILE_GDS_TRANSFER_BACKEND:
@@ -178,6 +209,41 @@ def _group_sources_by_path(
         groups[source.file_path].append(source)
     for grouped in groups.values():
         grouped.sort(key=lambda source: source.file_offset)
+    return dict(groups)
+
+
+def _parse_local_ssd_roots(value: str) -> List[str]:
+    return [os.path.abspath(part.strip()) for part in value.split(",") if part.strip()]
+
+
+def _match_local_root(file_path: str, local_roots: Sequence[str]) -> Optional[str]:
+    abs_path = os.path.abspath(file_path)
+    for root in local_roots:
+        try:
+            if os.path.commonpath([root, abs_path]) == root:
+                return root
+        except ValueError:
+            continue
+    return None
+
+
+def _group_sources_by_local_root(
+    sources: Sequence[FileTransferSource],
+    local_roots: Sequence[str],
+    backend_name: str,
+) -> Dict[str, List[Tuple[str, List[FileTransferSource]]]]:
+    groups_by_path = _group_sources_by_path(sources)
+    groups: Dict[str, List[Tuple[str, List[FileTransferSource]]]] = defaultdict(list)
+    for file_path, grouped_sources in groups_by_path.items():
+        root = _match_local_root(file_path, local_roots)
+        if root is None:
+            raise RuntimeError(
+                f"{backend_name} source path {file_path!r} is not under any "
+                f"{GMS_LOCAL_SSD_ROOTS_ENV} root: {list(local_roots)}"
+            )
+        groups[root].append((file_path, grouped_sources))
+    for grouped_paths in groups.values():
+        grouped_paths.sort(key=lambda item: item[0])
     return dict(groups)
 
 
@@ -522,6 +588,543 @@ class AioTransferBackend(DefaultTransferBackend):
             logger=logger,
             stats=ctx.stats,
         )
+
+
+class LocalSSDStripedTransferBackend(DefaultTransferBackend):
+    """CPU-staged restore path striped across host-local SSD roots.
+
+    The checkpoint manifest must point shard entries at absolute paths under
+    GMS_LOCAL_SSD_ROOTS. The backend runs one disk task per active SSD root so
+    each local device is read sequentially while all roots run in parallel.
+    """
+
+    name = LOCAL_SSD_STRIPED_TRANSFER_BACKEND
+
+    def __init__(
+        self,
+        *,
+        device: int,
+        max_workers: int,
+        torch_module: Any,
+        tensor_from_pointer: Any,
+        local_roots: Sequence[str],
+    ) -> None:
+        super().__init__(
+            device=device,
+            max_workers=max_workers,
+            torch_module=torch_module,
+            tensor_from_pointer=tensor_from_pointer,
+        )
+        self._local_roots = [
+            os.path.abspath(root) for root in local_roots if str(root).strip()
+        ]
+        if not self._local_roots:
+            raise RuntimeError(
+                f"{LOCAL_SSD_STRIPED_TRANSFER_BACKEND} requires "
+                f"{GMS_LOCAL_SSD_ROOTS_ENV}=<root0>,<root1>,..."
+            )
+
+    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+        root_groups = self._group_sources_by_local_root(sources)
+        worker_count = max(1, min(self._max_workers, len(root_groups) or 1))
+        if worker_count < len(root_groups):
+            logger.warning(
+                "%s has %d active SSD roots but only %d workers; "
+                "increase GMS_LOAD_WORKERS for full stripe parallelism",
+                self.name,
+                len(root_groups),
+                worker_count,
+            )
+        use_streams = bool(self._torch.cuda.is_available())
+        stats = _TransferStats(
+            backend_name=self.name,
+            total_bytes=sum(source.byte_count for source in sources),
+            worker_count=worker_count,
+            shard_count=sum(len(grouped) for grouped in root_groups.values()),
+        )
+        ctx = _DefaultRestoreContext.build(
+            worker_count,
+            device=self._device,
+            use_streams=use_streams,
+            torch_module=self._torch,
+            stats=stats,
+        )
+        copy_threads = self._start_copy_threads(ctx)
+        disk_pool = ThreadPoolExecutor(max_workers=worker_count)
+        disk_futures = {
+            disk_pool.submit(
+                self._read_local_root_to_queue,
+                root,
+                grouped_paths,
+                ctx,
+            ): root
+            for root, grouped_paths in root_groups.items()
+        }
+        return _DefaultTransferSession(
+            ctx=ctx,
+            disk_pool=disk_pool,
+            disk_futures=disk_futures,
+            copy_threads=copy_threads,
+            source_lengths={
+                source.allocation_id: source.byte_count for source in sources
+            },
+            torch_module=self._torch,
+            stats=stats,
+        )
+
+    def _group_sources_by_local_root(
+        self,
+        sources: Sequence[FileTransferSource],
+    ) -> Dict[str, List[Tuple[str, List[FileTransferSource]]]]:
+        return _group_sources_by_local_root(
+            sources,
+            self._local_roots,
+            self.name,
+        )
+
+    def _match_local_root(self, file_path: str) -> Optional[str]:
+        return _match_local_root(file_path, self._local_roots)
+
+    def _read_local_root_to_queue(
+        self,
+        root: str,
+        grouped_paths: List[Tuple[str, List[FileTransferSource]]],
+        ctx: _DefaultRestoreContext,
+    ) -> int:
+        t0 = time.monotonic()
+        total_entries = 0
+        try:
+            for file_path, grouped_sources in grouped_paths:
+                total_entries += self._read_sources_to_queue(
+                    file_path,
+                    grouped_sources,
+                    ctx,
+                )
+            return total_entries
+        finally:
+            logger.info(
+                "%s completed root=%s shards=%d entries=%d elapsed=%.3fs",
+                self.name,
+                root,
+                len(grouped_paths),
+                total_entries,
+                time.monotonic() - t0,
+            )
+
+
+class _CudaRuntime:
+    _CUDA_MEMCPY_HOST_TO_DEVICE = 1
+    _CUDA_STREAM_NON_BLOCKING = 1
+
+    def __init__(self) -> None:
+        self._lib = ctypes.CDLL("libcudart.so")
+        self._lib.cudaGetErrorString.argtypes = [ctypes.c_int]
+        self._lib.cudaGetErrorString.restype = ctypes.c_char_p
+        self._lib.cudaSetDevice.argtypes = [ctypes.c_int]
+        self._lib.cudaSetDevice.restype = ctypes.c_int
+        self._lib.cudaHostRegister.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint,
+        ]
+        self._lib.cudaHostRegister.restype = ctypes.c_int
+        self._lib.cudaHostUnregister.argtypes = [ctypes.c_void_p]
+        self._lib.cudaHostUnregister.restype = ctypes.c_int
+        self._lib.cudaStreamCreateWithFlags.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint,
+        ]
+        self._lib.cudaStreamCreateWithFlags.restype = ctypes.c_int
+        self._lib.cudaStreamDestroy.argtypes = [ctypes.c_void_p]
+        self._lib.cudaStreamDestroy.restype = ctypes.c_int
+        self._lib.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
+        self._lib.cudaStreamSynchronize.restype = ctypes.c_int
+        self._lib.cudaMemcpyAsync.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        self._lib.cudaMemcpyAsync.restype = ctypes.c_int
+
+    def _check(self, code: int, operation: str) -> None:
+        if code == 0:
+            return
+        message = self._lib.cudaGetErrorString(code)
+        if isinstance(message, bytes):
+            text = message.decode("utf-8", errors="replace")
+        else:
+            text = str(message)
+        raise RuntimeError(f"{operation} failed: {text} ({code})")
+
+    def set_device(self, device: int) -> None:
+        self._check(self._lib.cudaSetDevice(device), f"cudaSetDevice({device})")
+
+    def host_register(self, ptr: int, size: int) -> None:
+        self._check(
+            self._lib.cudaHostRegister(
+                ctypes.c_void_p(ptr),
+                ctypes.c_size_t(size),
+                ctypes.c_uint(0),
+            ),
+            "cudaHostRegister",
+        )
+
+    def host_unregister(self, ptr: int) -> None:
+        self._check(
+            self._lib.cudaHostUnregister(ctypes.c_void_p(ptr)),
+            "cudaHostUnregister",
+        )
+
+    def create_stream(self) -> ctypes.c_void_p:
+        stream = ctypes.c_void_p()
+        self._check(
+            self._lib.cudaStreamCreateWithFlags(
+                ctypes.byref(stream),
+                ctypes.c_uint(self._CUDA_STREAM_NON_BLOCKING),
+            ),
+            "cudaStreamCreateWithFlags",
+        )
+        return stream
+
+    def destroy_stream(self, stream: ctypes.c_void_p) -> None:
+        self._check(self._lib.cudaStreamDestroy(stream), "cudaStreamDestroy")
+
+    def synchronize_stream(self, stream: ctypes.c_void_p) -> None:
+        self._check(self._lib.cudaStreamSynchronize(stream), "cudaStreamSynchronize")
+
+    def memcpy_h2d_async(
+        self,
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream: ctypes.c_void_p,
+    ) -> None:
+        self._check(
+            self._lib.cudaMemcpyAsync(
+                ctypes.c_void_p(dst_ptr),
+                ctypes.c_void_p(src_ptr),
+                ctypes.c_size_t(size),
+                ctypes.c_int(self._CUDA_MEMCPY_HOST_TO_DEVICE),
+                stream,
+            ),
+            "cudaMemcpyAsync",
+        )
+
+
+def _load_cuda_runtime() -> _CudaRuntime:
+    return _CudaRuntime()
+
+
+def _allocate_aligned_numpy_buffer(size: int, np_module: Any) -> Tuple[Any, Any]:
+    alignment = 4096
+    raw = np_module.empty(size + alignment, dtype=np_module.uint8)
+    base = int(raw.ctypes.data)
+    offset = (-base) % alignment
+    return raw[offset : offset + size], raw
+
+
+def _open_read_fd(path: str) -> int:
+    odirect = getattr(os, "O_DIRECT", 0)
+    flags = os.O_RDONLY | odirect
+    try:
+        return os.open(path, flags)
+    except OSError as exc:
+        if odirect and exc.errno in {errno.EINVAL, errno.EOPNOTSUPP}:
+            logger.warning(
+                "O_DIRECT unavailable for %s; falling back to buffered reads",
+                path,
+            )
+            return os.open(path, os.O_RDONLY)
+        raise
+
+
+def _read_exact_into_buffer(
+    fd: int,
+    buf: memoryview,
+    file_offset: int,
+    size: int,
+    stats: Optional[_TransferStats],
+) -> None:
+    t0 = time.monotonic()
+    done = 0
+    while done < size:
+        read = os.preadv(fd, [buf[done:size]], file_offset + done)
+        if read == 0:
+            raise RuntimeError(f"short read at offset {file_offset + done}")
+        done += read
+    if stats is not None:
+        stats.record_read(time.monotonic() - t0, size)
+
+
+class _PinnedCopySlot:
+    def __init__(self, cuda: Any, np_module: Any, size: int) -> None:
+        self._cuda = cuda
+        self.array, self._raw = _allocate_aligned_numpy_buffer(size, np_module)
+        self.view = memoryview(self.array)
+        self.ptr = int(self.array.ctypes.data)
+        self.stream = cuda.create_stream()
+        self.busy = False
+        self.byte_count = 0
+        self._registered = False
+        try:
+            cuda.host_register(self.ptr, size)
+            self._registered = True
+        except Exception:
+            cuda.destroy_stream(self.stream)
+            raise
+
+    def wait(self, stats: Optional[_TransferStats]) -> None:
+        if not self.busy:
+            return
+        t0 = time.monotonic()
+        self._cuda.synchronize_stream(self.stream)
+        if stats is not None:
+            stats.record_copy(time.monotonic() - t0, self.byte_count)
+        self.busy = False
+        self.byte_count = 0
+
+    def close(self) -> None:
+        self.wait(None)
+        try:
+            if self._registered:
+                self._cuda.host_unregister(self.ptr)
+                self._registered = False
+        finally:
+            self._cuda.destroy_stream(self.stream)
+
+
+class LocalSSDPinnedTransferBackend:
+    """Same-node local SSD restore with reusable pinned host buffers.
+
+    This is still CPU-staged, but it avoids the default path's full-shard numpy
+    allocations, PyTorch tensor wrappers, and pageable H2D copies.
+    """
+
+    name = LOCAL_SSD_PINNED_TRANSFER_BACKEND
+
+    def __init__(
+        self,
+        *,
+        device: int,
+        max_workers: int,
+        local_roots: Sequence[str],
+    ) -> None:
+        self._device = device
+        self._max_workers = max(1, int(max_workers))
+        self._local_roots = [
+            os.path.abspath(root) for root in local_roots if str(root).strip()
+        ]
+        if not self._local_roots:
+            raise RuntimeError(
+                f"{LOCAL_SSD_PINNED_TRANSFER_BACKEND} requires "
+                f"{GMS_LOCAL_SSD_ROOTS_ENV}=<root0>,<root1>,..."
+            )
+        self._cuda = _load_cuda_runtime()
+        self._cuda.set_device(device)
+
+    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+        return _LocalSSDPinnedTransferSession(
+            cuda=self._cuda,
+            device=self._device,
+            max_workers=self._max_workers,
+            local_roots=self._local_roots,
+            sources=sources,
+        )
+
+    def close(self) -> None:
+        pass
+
+
+class _LocalSSDPinnedTransferSession:
+    def __init__(
+        self,
+        *,
+        cuda: Any,
+        device: int,
+        max_workers: int,
+        local_roots: Sequence[str],
+        sources: Sequence[FileTransferSource],
+    ) -> None:
+        self._cuda = cuda
+        self._device = device
+        self._max_workers = max(1, int(max_workers))
+        self._local_roots = list(local_roots)
+        self._sources = list(sources)
+        self._cancel_event = threading.Event()
+        self._active = True
+
+    def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
+        self._validate_targets(targets)
+        root_groups = _group_sources_by_local_root(
+            self._sources,
+            self._local_roots,
+            LOCAL_SSD_PINNED_TRANSFER_BACKEND,
+        )
+        if not root_groups:
+            self._active = False
+            return
+
+        worker_count = min(self._max_workers, len(root_groups))
+        if worker_count < len(root_groups):
+            logger.warning(
+                "%s has %d active SSD roots but only %d workers; "
+                "increase GMS_LOAD_WORKERS for full stripe parallelism",
+                LOCAL_SSD_PINNED_TRANSFER_BACKEND,
+                len(root_groups),
+                worker_count,
+            )
+
+        stats = _TransferStats(
+            backend_name=LOCAL_SSD_PINNED_TRANSFER_BACKEND,
+            total_bytes=sum(source.byte_count for source in self._sources),
+            worker_count=worker_count,
+            shard_count=sum(len(grouped) for grouped in root_groups.values()),
+        )
+        stats.record_mode("odirect-pinned-cudamemcpy")
+        transfer_t0 = time.monotonic()
+        try:
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                futures = {
+                    pool.submit(
+                        self._restore_root,
+                        root,
+                        grouped_paths,
+                        targets,
+                        stats,
+                    ): root
+                    for root, grouped_paths in root_groups.items()
+                }
+                for future in as_completed(futures):
+                    root = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        self._cancel_event.set()
+                        raise RuntimeError(
+                            f"{LOCAL_SSD_PINNED_TRANSFER_BACKEND} failed for "
+                            f"root {root}: {exc}"
+                        ) from exc
+        finally:
+            self._active = False
+            stats.record_transfer_wall(time.monotonic() - transfer_t0)
+            stats.log()
+
+    def close(self) -> None:
+        self._cancel_event.set()
+        self._active = False
+
+    def _validate_targets(self, targets: Mapping[str, GMSTransferTarget]) -> None:
+        for source in self._sources:
+            target = targets.get(source.allocation_id)
+            if target is None:
+                raise RuntimeError(
+                    f"Missing GMS transfer target for allocation {source.allocation_id}"
+                )
+            if target.byte_count != source.byte_count:
+                raise RuntimeError(
+                    f"GMS target size mismatch for allocation {source.allocation_id}: "
+                    f"source={source.byte_count} target={target.byte_count}"
+                )
+            if target.device != self._device:
+                raise RuntimeError(
+                    f"GMS target device mismatch for allocation {source.allocation_id}: "
+                    f"backend={self._device} target={target.device}"
+                )
+
+    def _restore_root(
+        self,
+        root: str,
+        grouped_paths: List[Tuple[str, List[FileTransferSource]]],
+        targets: Mapping[str, GMSTransferTarget],
+        stats: _TransferStats,
+    ) -> None:
+        np_module = _get_numpy_module()
+        slots: List[_PinnedCopySlot] = []
+        root_t0 = time.monotonic()
+        root_bytes = 0
+        next_slot = 0
+        try:
+            for _ in range(_PINNED_COPY_BUFFERS_PER_ROOT):
+                slots.append(
+                    _PinnedCopySlot(self._cuda, np_module, _PINNED_COPY_CHUNK_SIZE)
+                )
+            for file_path, sources in grouped_paths:
+                fd = _open_read_fd(file_path)
+                try:
+                    for source in sources:
+                        copied, next_slot = self._restore_source(
+                            fd,
+                            source,
+                            targets[source.allocation_id],
+                            slots,
+                            next_slot,
+                            stats,
+                        )
+                        root_bytes += copied
+                finally:
+                    os.close(fd)
+            for slot in slots:
+                slot.wait(stats)
+        finally:
+            for slot in slots:
+                try:
+                    slot.close()
+                except Exception:
+                    logger.warning(
+                        "failed to release pinned copy slot for %s",
+                        root,
+                        exc_info=True,
+                    )
+            elapsed = time.monotonic() - root_t0
+            stats.record_disk_task(elapsed)
+            throughput = root_bytes / elapsed / (1024**3) if elapsed > 0 else 0.0
+            logger.info(
+                "%s completed root=%s shards=%d bytes=%.2f GiB "
+                "elapsed=%.3fs bw=%.2f GiB/s",
+                LOCAL_SSD_PINNED_TRANSFER_BACKEND,
+                root,
+                len(grouped_paths),
+                root_bytes / (1024**3),
+                elapsed,
+                throughput,
+            )
+
+    def _restore_source(
+        self,
+        fd: int,
+        source: FileTransferSource,
+        target: GMSTransferTarget,
+        slots: List[_PinnedCopySlot],
+        next_slot: int,
+        stats: _TransferStats,
+    ) -> Tuple[int, int]:
+        done = 0
+        while done < source.byte_count:
+            if self._cancel_event.is_set():
+                raise CancelledError(f"{LOCAL_SSD_PINNED_TRANSFER_BACKEND} cancelled")
+            slot = slots[next_slot]
+            slot.wait(stats)
+            chunk_size = min(_PINNED_COPY_CHUNK_SIZE, source.byte_count - done)
+            _read_exact_into_buffer(
+                fd,
+                slot.view,
+                source.file_offset + done,
+                chunk_size,
+                stats,
+            )
+            self._cuda.memcpy_h2d_async(
+                target.va + done,
+                slot.ptr,
+                chunk_size,
+                slot.stream,
+            )
+            slot.busy = True
+            slot.byte_count = chunk_size
+            done += chunk_size
+            next_slot = (next_slot + 1) % len(slots)
+        return done, next_slot
 
 
 class _DefaultTransferSession:

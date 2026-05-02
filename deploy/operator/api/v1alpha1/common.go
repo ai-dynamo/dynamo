@@ -171,6 +171,19 @@ const (
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 
+// GMSArtifactStorageSpec configures where GMS checkpoint weight artifacts live.
+type GMSArtifactStorageSpec struct {
+	// PVCName is the persistent volume claim that stores GMS weight artifacts.
+	// When omitted, GMS artifacts are stored on the snapshot PVC.
+	// +optional
+	PVCName string `json:"pvcName,omitempty"`
+	// BasePath is the mount path for the artifact PVC inside GMS saver/loader
+	// containers. The operator resolves the final path as
+	// <basePath>/<checkpointHash>/versions/<artifactVersion>.
+	// +optional
+	BasePath string `json:"basePath,omitempty"`
+}
+
 // GPUMemoryServiceSpec configures GPU Memory Service (GMS) for a worker component.
 // In intraPod mode, the operator injects a GMS server sidecar in the workload pod.
 // In interPod mode, the operator creates a dedicated GMS weight-server pod per rank.
@@ -187,6 +200,11 @@ type GPUMemoryServiceSpec struct {
 	// +kubebuilder:default="gpu.nvidia.com"
 	// +optional
 	DeviceClassName string `json:"deviceClassName,omitempty"`
+	// ArtifactStorage optionally moves GMS weight checkpoint artifacts to a
+	// separate PVC. Snapshot-agent completion sentinels remain on the snapshot
+	// PVC so restore/checkpoint barriers keep using the existing control path.
+	// +optional
+	ArtifactStorage *GMSArtifactStorageSpec `json:"artifactStorage,omitempty"`
 }
 
 // FailoverSpec configures active-passive failover for a worker component.

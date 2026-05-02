@@ -143,12 +143,31 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	return podSpec
 }
 
-func injectInterPodGMSRestoreLoader(podSpec *corev1.PodSpec, storage snapshotprotocol.Storage) {
+func injectInterPodGMSRestoreLoader(podSpec *corev1.PodSpec, storage checkpoint.GMSCheckpointStorage) {
 	if podSpec == nil || len(podSpec.Containers) == 0 {
 		return
 	}
 	mainContainer := &podSpec.Containers[0]
-	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
+	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.Control.PVCName)
+	if storage.Artifacts.PVCName != storage.Control.PVCName || storage.Artifacts.BasePath != storage.Control.BasePath {
+		hasArtifactVolume := false
+		for _, volume := range podSpec.Volumes {
+			if volume.Name == checkpoint.GMSArtifactVolume {
+				hasArtifactVolume = true
+				break
+			}
+		}
+		if !hasArtifactVolume {
+			podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+				Name: checkpoint.GMSArtifactVolume,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: storage.Artifacts.PVCName,
+					},
+				},
+			})
+		}
+	}
 
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name == checkpoint.GMSLoaderContainer {
@@ -162,13 +181,17 @@ func injectInterPodGMSRestoreLoader(podSpec *corev1.PodSpec, storage snapshotpro
 		Command: []string{"python3", "-m", checkpoint.GMSCheckpointLoaderModule},
 		Env: []corev1.EnvVar{
 			{Name: gmsruntime.EnvSocketDir, Value: gmsSharedMountPath},
-			{Name: checkpoint.EnvCheckpointDir, Value: checkpoint.ResolveGMSArtifactDir(storage)},
+			{Name: checkpoint.EnvCheckpointDir, Value: storage.ControlDir},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: gmsSharedVolumeName, MountPath: gmsSharedMountPath},
-			{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath},
+			{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.Control.BasePath},
 		},
 		Resources: *mainContainer.Resources.DeepCopy(),
+	}
+	if storage.ArtifactDir != storage.ControlDir {
+		loader.Env = append(loader.Env, corev1.EnvVar{Name: checkpoint.EnvWeightsCheckpointDir, Value: storage.ArtifactDir})
+		loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: checkpoint.GMSArtifactVolume, MountPath: storage.Artifacts.BasePath})
 	}
 	podSpec.Containers = append(podSpec.Containers, loader)
 }

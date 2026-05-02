@@ -847,6 +847,23 @@ _Appears in:_
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables for the frontend sidecar.<br />These are merged with (and can override) the auto-generated Dynamo env vars. |  | Optional: \{\} <br /> |
 
 
+#### GMSArtifactStorageSpec
+
+
+
+GMSArtifactStorageSpec configures where GMS checkpoint weight artifacts live.
+
+
+
+_Appears in:_
+- [GPUMemoryServiceSpec](#gpumemoryservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pvcName` _string_ | PVCName is the persistent volume claim that stores GMS weight artifacts.<br />When omitted, GMS artifacts are stored on the snapshot PVC. |  | Optional: \{\} <br /> |
+| `basePath` _string_ | BasePath is the mount path for the artifact PVC inside GMS saver/loader<br />containers. The operator resolves the final path as<br /><basePath>/<checkpointHash>/versions/<artifactVersion>. |  | Optional: \{\} <br /> |
+
+
 #### GPUMemoryServiceMode
 
 _Underlying type:_ _string_
@@ -862,17 +879,16 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `intraPod` | GMSModeIntraPod runs GMS as a sidecar within the same pod.<br /> |
-| `interPod` | GMSModeInterPod runs GMS as a separate weight server pod and one or more<br />engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared<br />hostPath volume for UDS sockets. Only valid on FailoverSpec; the<br />GPUMemoryServiceSpec sidecar always runs in intraPod mode.<br /> |
+| `interPod` | GMSModeInterPod runs GMS as a separate weight server pod and one or more<br />engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared<br />hostPath volume for UDS sockets.<br /> |
 
 
 #### GPUMemoryServiceSpec
 
 
 
-GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
-via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
-(weights + kv_cache) and communicates with the main container over UDS sockets.
+GPUMemoryServiceSpec configures GPU Memory Service (GMS) for a worker component.
+In intraPod mode, the operator injects a GMS server sidecar in the workload pod.
+In interPod mode, the operator creates a dedicated GMS weight-server pod per rank.
 
 
 
@@ -886,6 +902,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled activates the GMS sidecar. GPU resources on the main container<br />are replaced with a DRA ResourceClaim for shared GPU access. |  |  |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
+| `artifactStorage` _[GMSArtifactStorageSpec](#gmsartifactstoragespec)_ | ArtifactStorage optionally moves GMS weight checkpoint artifacts to a<br />separate PVC. Snapshot-agent completion sentinels remain on the snapshot<br />PVC so restore/checkpoint barriers keep using the existing control path. |  | Optional: \{\} <br /> |
 
 
 #### IngressSpec
