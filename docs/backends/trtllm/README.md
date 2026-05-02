@@ -41,11 +41,11 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 
 | Container tag | Backend version | CUDA | Min NVIDIA driver |
 |---|---|---|---|
-| `tensorrtllm-runtime:1.0.1` | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | `580+` |
-| `vllm-runtime:1.0.1` | vLLM `v0.16.0` | `v12.9` | `575+` |
-| `vllm-runtime:1.0.1-cuda13` | vLLM `v0.16.0` | `v13.0` | `580+` |
-| `sglang-runtime:1.0.1` | SGLang `v0.5.9` | `v12.9` | `575+` |
-| `sglang-runtime:1.0.1-cuda13` | SGLang `v0.5.9` | `v13.0` | `580+` |
+| `tensorrtllm-runtime:1.0.2` | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | `580+` |
+| `vllm-runtime:1.0.2` | vLLM `v0.16.0` | `v12.9` | `575+` |
+| `vllm-runtime:1.0.2-cuda13` | vLLM `v0.16.0` | `v13.0` | `580+` |
+| `sglang-runtime:1.0.2` | SGLang `v0.5.9` | `v12.9` | `575+` |
+| `sglang-runtime:1.0.2-cuda13` | SGLang `v0.5.9` | `v13.0` | `580+` |
 
 Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-matrix.md#cuda-and-driver-requirements) and [`docs/reference/release-artifacts.md`](../../reference/release-artifacts.md). If those differ from the values above, the source-of-truth files win.
 
@@ -60,7 +60,7 @@ docker compose -f deploy/docker-compose.yml up -d
 **Step 2 (host terminal):** Pull and run the prebuilt container:
 
 ```bash
-DYNAMO_VERSION=1.0.0
+DYNAMO_VERSION=1.0.2
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
 docker run --gpus all -it --network host --ipc host \
   nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
@@ -98,9 +98,9 @@ Deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeployment`. B
 
 ```bash
 # yq
-yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.1", ":<your-tag>")' deploy.yaml
+yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.2", ":<your-tag>")' deploy.yaml
 # sed fallback
-sed -i.bak 's|:1\.0\.1|:<your-tag>|g' deploy.yaml
+sed -i.bak 's|:1\.0\.2|:<your-tag>|g' deploy.yaml
 ```
 
 For full Kubernetes deployment instructions, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).

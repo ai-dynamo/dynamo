@@ -17,7 +17,7 @@ SGLang supports multi-node TP via the native `--dist-init-addr`, `--node-rank`, 
 
 - Two or more nodes on the same low-latency network (IB or 100GbE+).
 - NCCL reachable between all nodes (firewall / security-group allows NCCL's port range).
-- Same container image on all nodes (`nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1` or pinned variant).
+- Same container image on all nodes (`nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2` or pinned variant).
 - HF_TOKEN set on **every** node if the model is gated.
 - Shared `HF_HOME` recommended to avoid per-node download of the same weights.
 

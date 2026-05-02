@@ -45,6 +45,6 @@ This is the symptom, not the cause — the cause is that the container image you
 **Fix:**
 
 - Check the minimum driver for the tag you pulled in the [Container / driver matrix](./README.md#container--driver-matrix).
-- Either upgrade the host driver, or pull a lower-CUDA variant (e.g. `vllm-runtime:1.0.1` on driver `575+` instead of `vllm-runtime:1.0.1-cuda13` on driver `580+`).
+- Either upgrade the host driver, or pull a lower-CUDA variant (e.g. `vllm-runtime:1.0.2` on driver `575+` instead of `vllm-runtime:1.0.2-cuda13` on driver `580+`).
 
 > The driver-mismatch error message itself is being improved — tracked as an engineering follow-up.
