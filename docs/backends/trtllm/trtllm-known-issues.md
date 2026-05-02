@@ -36,7 +36,7 @@ For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.y
 
 When the host NVIDIA driver is too old for the container's CUDA version, PyTorch surfaces the failure as:
 
-```
+```text
 RuntimeError: The NVIDIA driver on your system is too old (found version 570). Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx
 ```
 

@@ -13,8 +13,8 @@ Set these on every Dynamo process (frontend, router, workers) for metrics, trace
 |---|---|---|
 | `DYN_SYSTEM_PORT=8081` | Unified system port (metrics + health). | Yes for metrics. |
 | `OTEL_EXPORT_ENABLED=true` | Enable OpenTelemetry export. **Without this, traces and logs never leave the process** — Loki and Tempo will show nothing even if they are healthy. | Yes for traces/logs. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC/HTTP endpoint for traces (e.g. `http://tempo:4317`). | Yes for traces. |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP endpoint for logs (e.g. `http://loki-otlp:4317`). | Yes for logs. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces (e.g. `http://tempo:4317`). Must be a gRPC listener — Dynamo's exporter does not speak OTLP/HTTP, even though the OTel Collector also listens on `:4318`. | Yes for traces. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (e.g. `http://loki-otlp:4317`). Same gRPC-only constraint as the traces endpoint above. | Yes for logs. |
 | `DYN_LOGGING_JSONL=true` | Structured JSON log output (recommended for Loki). | Optional. |
 
 Source of truth: [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`.
