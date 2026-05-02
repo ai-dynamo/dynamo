@@ -737,6 +737,25 @@ impl EndpointPicker for Router {
                 })
         };
 
+        // Register the request with the router for bookkeeping (load tracking).
+        // Mirrors Go EPP's PreRequest() → CallAddRequest(requestID, tokenData, workerID, dpRank).
+        if !req.request_id.is_empty()
+            && let Err(e) = self
+                .add_request(
+                    &req.request_id,
+                    &tokens,
+                    decode_worker.worker_id,
+                    decode_worker.dp_rank,
+                )
+                .await
+        {
+            tracing::warn!(
+                request_id = %req.request_id,
+                error = %e,
+                "Failed to register request with router bookkeeping"
+            );
+        }
+
         // Build routing headers matching the Go EPP's disagg plugin:
         // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
         // x-prefill-dp-rank, x-dynamo-routing-mode
@@ -788,5 +807,18 @@ impl EndpointPicker for Router {
             headers,
             token_ids: Some(tokens),
         })
+    }
+
+    async fn on_request_complete(&self, request_id: &str) {
+        if request_id.is_empty() {
+            return;
+        }
+        if let Err(e) = self.free_request(request_id).await {
+            tracing::debug!(
+                request_id,
+                error = %e,
+                "Failed to free request from router bookkeeping"
+            );
+        }
     }
 }

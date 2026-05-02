@@ -243,6 +243,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         endpoints: &[Endpoint],
     ) -> Result<(), ExtProcError> {
         let req_info = RequestInfo {
+            request_id: ctx.request_id.clone(),
             headers: ctx.request_headers.clone(),
             body: vec![],
             model: String::new(),
@@ -277,6 +278,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         let candidate_subset = extract_candidate_subset(&ctx.request_metadata);
 
         let req_info = RequestInfo {
+            request_id: ctx.request_id.clone(),
             headers: ctx.request_headers.clone(),
             body: raw_body.to_vec(),
             model: model.clone(),
@@ -530,6 +532,12 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
             if let Err(e) = result {
                 let _ = tx.send(Err(e)).await;
+            }
+
+            // Notify the picker that this request is complete so it can
+            // free router bookkeeping state (mirrors Go EPP PostResponse).
+            if !ctx.request_id.is_empty() {
+                picker.on_request_complete(&ctx.request_id).await;
             }
         });
 

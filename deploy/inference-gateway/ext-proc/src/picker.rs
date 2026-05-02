@@ -34,6 +34,9 @@ impl Endpoint {
 /// Mirrors Go `epplight.RequestInfo`.
 #[derive(Debug, Clone)]
 pub struct RequestInfo {
+    /// Unique request ID (from `x-request-id` header or generated UUID).
+    /// Used for router bookkeeping (add_request / free_request).
+    pub request_id: String,
     /// HTTP request headers, preserved as ordered pairs so that repeated
     /// header keys (valid in HTTP) are not silently collapsed.
     pub headers: Vec<(String, String)>,
@@ -76,6 +79,11 @@ pub trait EndpointPicker: Send + Sync + 'static {
         req: &RequestInfo,
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError>;
+
+    /// Called when a request's response is fully complete (end-of-stream on
+    /// response body or trailers received). Allows the picker to free
+    /// bookkeeping state. Mirrors Go EPP's PostResponse → FreeRequest.
+    async fn on_request_complete(&self, _request_id: &str) {}
 }
 
 /// Error from an endpoint picker.
