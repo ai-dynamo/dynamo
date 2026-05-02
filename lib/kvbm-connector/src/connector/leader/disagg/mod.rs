@@ -58,6 +58,7 @@
 //! that side is wired in a follow-up.
 
 pub mod conditional_leader;
+pub mod coordinator;
 pub mod decode;
 pub mod decode_leader;
 pub mod lifecycle;
