@@ -345,14 +345,14 @@ class ActiveOperation(AbstractOperation):
 
         self._local_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._local_desc_tlist,
-            mem_type=str(self._local_device_kind),
+            mem_type=self._local_device_kind.nixl_mem_type,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created local NIXL transfer descriptors: {self._local_xfer_descs}"
         )
         self._remote_xfer_descs = self._connection._nixl.get_xfer_descs(
             descs=self._remote_desc_tlist,
-            mem_type=str(self._remote_device_kind),
+            mem_type=self._remote_device_kind.nixl_mem_type,
         )
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created remote NIXL transfer descriptors: {self._remote_xfer_descs}"
@@ -1163,7 +1163,7 @@ class Descriptor:
         if isinstance(self._data_ref, torch.Tensor):
             self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
-            mem_type = str(self._data_device.kind)
+            mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [
                 (self._data_ptr, self._data_size, self._data_device.id, mem_type)
             ]
@@ -1309,6 +1309,14 @@ class DeviceKind(IntEnum):
             return "cuda"
         else:
             return "<invalid>"
+
+    @property
+    def nixl_mem_type(self) -> str:
+        """Return the canonical NIXL segment name for this device kind."""
+        if self == DeviceKind.HOST:
+            return "DRAM"
+        else:
+            return "VRAM"
 
 
 class OperationKind(IntEnum):
