@@ -1276,8 +1276,16 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
-        matches!(tool_call_parser, Some("gemma4") | Some("gemma-4"))
-            || matches!(reasoning_parser, Some("gemma4") | Some("gemma-4"))
+        // gpt-oss / harmony parsers consume `<|channel|>analysis<|message|>...<|end|>`
+        // markers; without them the parser silently produces empty
+        // reasoning_content. Same shape as gemma4's `<|think|>` markers.
+        matches!(
+            tool_call_parser,
+            Some("gemma4") | Some("gemma-4") | Some("harmony")
+        ) || matches!(
+            reasoning_parser,
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss")
+        )
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.

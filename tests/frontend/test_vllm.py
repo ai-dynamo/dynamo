@@ -235,10 +235,12 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-# TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
-# TODO: re-enable GPU-parallel scheduling with profiled_vram_gib(20.4)
-# once this has a bounded --kv-bytes profile.
-@pytest.mark.timeout(300)  # 3x observed ~70s wall time, rounded up
+# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
+@pytest.mark.profiled_vram_gib(18.7)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_912_759_000
+)  # KV cache cap (2x safety over min=956_379_136)
+@pytest.mark.timeout(378)  # 6x observed 62.8s avg wall time
 @pytest.mark.post_merge
 def test_reasoning_effort(
     request, start_services: ServicePorts, predownload_models
