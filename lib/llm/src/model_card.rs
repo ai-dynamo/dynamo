@@ -203,7 +203,6 @@ struct BlobLock {
 
 impl BlobLock {
     async fn acquire(blob_path: &Path) -> anyhow::Result<Self> {
-        use std::os::fd::AsRawFd;
         let lock_path = blob_path.with_extension("lock");
         let file = tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
             let f = std::fs::OpenOptions::new()
@@ -212,19 +211,28 @@ impl BlobLock {
                 .write(true)
                 .open(&lock_path)
                 .with_context(|| format!("opening lock file {}", lock_path.display()))?;
-            // SAFETY: `f` is open and owned; `flock` is a stable syscall.
-            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                anyhow::bail!(
-                    "flock {} failed: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                );
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                // SAFETY: `f` is open and owned; `flock` is a stable syscall.
+                let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+                if rc != 0 {
+                    anyhow::bail!(
+                        "flock {} failed: {}",
+                        lock_path.display(),
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
+            // On non-Unix targets we currently rely on the per-call
+            // unique tmp + atomic rename to give intra-process safety;
+            // cross-process locking would need LockFileEx (winapi).
+            // The dynamo frontend ships on Linux; this path is for
+            // build-time portability only.
             Ok(f)
         })
         .await
-        .context("flock spawn_blocking task panicked")??;
+        .context("blob lock spawn_blocking task panicked")??;
         Ok(Self { _file: file })
     }
 }
@@ -934,7 +942,15 @@ impl ModelDeploymentCard {
         }
 
         // Pass 2: fetch + verify + cache + symlink.
-        let client = reqwest::Client::new();
+        // Bounded timeouts so a stalled metadata endpoint can't hang
+        // download_config indefinitely. 5 min total covers a 1 GiB
+        // file at slow speeds; realistic metadata files complete in
+        // seconds.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .context("building http client for metadata fetch")?;
         let mut fetched = 0usize;
         for (uri, expected, filename) in &entries {
             let blake3_hex = expected.checksum().hash();
