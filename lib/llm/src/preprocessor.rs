@@ -1817,6 +1817,7 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
@@ -1886,6 +1887,7 @@ mod tests {
         }
     }
 
+    /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_is_reasoning_disabled_by_request() {
         let thinking_true = {
