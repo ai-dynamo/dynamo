@@ -264,6 +264,12 @@ impl ConcurrentRadixTreeCompressed {
             .child_lookup_plan(cursor.last_ext_hash, first_local);
 
         let shape_version = match plan {
+            ParentChildPlan::Stale => {
+                return Ok(StoreInsertStep::RetryParent {
+                    parent: cursor.parent.clone(),
+                    parent_is_anchor: cursor.parent_is_anchor,
+                });
+            }
             ParentChildPlan::StaleParent { hash } => {
                 let wl = lookup.get_mut(&worker).unwrap();
                 let Some(resolved) = Self::resolve_lookup(wl, hash) else {
@@ -289,8 +295,9 @@ impl ConcurrentRadixTreeCompressed {
         if let Some(parent_hash) = cursor.last_ext_hash
             && !cursor.parent_is_anchor
         {
-            let edge_plan = cursor.parent.plan_store_parent_edge(parent_hash, remaining);
-            if let Some(edge_plan) = edge_plan {
+            // Parent hashes can point inside a compressed edge. Before attaching a
+            // child, try to reuse that existing suffix or split at the parent.
+            if let Some(edge_plan) = cursor.parent.plan_store_parent_edge(parent_hash, remaining) {
                 let edge_action = cursor
                     .parent
                     .apply_store_parent_edge_plan(worker, edge_plan, remaining);
@@ -326,6 +333,9 @@ impl ConcurrentRadixTreeCompressed {
         if let Some(parent_hash) = cursor.last_ext_hash
             && !cursor.parent_is_anchor
         {
+            // Keep the decode-extension happy path as a direct commit attempt:
+            // the node method revalidates the shape and appends only if the
+            // parent is still the covered tail leaf.
             match cursor.parent.try_extend_leaf_with_version(
                 worker,
                 parent_hash,
@@ -339,12 +349,11 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
-                    let extended_node = cursor.parent.clone();
                     return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
-                        &extended_node,
+                        cursor.parent,
                         cursor.num_blocks_added,
                         false,
                     )));
@@ -357,6 +366,8 @@ impl ConcurrentRadixTreeCompressed {
         if let Some(parent_hash) = cursor.last_ext_hash
             && !cursor.parent_is_anchor
         {
+            // Allocation can race with another writer leaving the parent
+            // extendable. Recheck extension once before publishing a child.
             match cursor.parent.try_extend_leaf_with_version(
                 worker,
                 parent_hash,
@@ -370,12 +381,11 @@ impl ConcurrentRadixTreeCompressed {
                     });
                 }
                 Some(true) => {
-                    let extended_node = cursor.parent.clone();
                     return Ok(StoreInsertStep::Done(Self::finish_with_lookup_update(
                         lookup,
                         worker,
                         remaining,
-                        &extended_node,
+                        cursor.parent,
                         cursor.num_blocks_added,
                         false,
                     )));
@@ -424,6 +434,9 @@ impl ConcurrentRadixTreeCompressed {
             );
 
             if scan.match_len < scan.edge_len {
+                // A partial match either means this worker only covers a prefix
+                // of the compressed edge, or the store diverges and must split
+                // the edge.
                 if scan.match_len == remaining.len() {
                     let Some(coverage_changed) = child.cover_prefix_for_worker_with_version(
                         worker,
@@ -453,6 +466,7 @@ impl ConcurrentRadixTreeCompressed {
 
                 let tail = &remaining[scan.match_len..];
                 debug_assert!(!tail.is_empty());
+
                 let tail_candidate = Arc::new(Node::from_blocks_for_worker(tail, worker));
                 let SplitStoreOutcome::Done { split, tail_node } = child.split_for_store_tail(
                     worker,
@@ -485,6 +499,9 @@ impl ConcurrentRadixTreeCompressed {
                 ));
             }
 
+            // The whole child edge matched. Mark this worker as covering it,
+            // update lookup for that edge, then continue with the unmatched
+            // suffix.
             let Some(promoted) = child.promote_to_full_with_version(worker, scan.shape_version)
             else {
                 continue;

@@ -15,6 +15,9 @@ use crate::protocols::*;
 mod node_state;
 use node_state::NodeState;
 
+type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
+const SHAPE_PLAN_RETRIES: usize = 4;
+
 pub(super) struct RemoveOutcome {
     pub(super) removed: usize,
     pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
@@ -41,7 +44,7 @@ pub(super) struct Node {
     shape_gate: RwLock<()>,
     shape_version: AtomicU64,
     state: RwLock<NodeState>,
-    children: DashMap<LocalBlockHash, SharedNode, FxBuildHasher>,
+    children: NodeChildren,
 }
 
 impl Node {
@@ -115,6 +118,82 @@ impl Node {
             state: RwLock::new(state),
             children: children_map,
         }
+    }
+
+    fn with_shape_plan<R>(
+        &self,
+        mut plan: impl FnMut(&NodeState, &NodeChildren, u64) -> R,
+    ) -> Option<R> {
+        for attempt in 0..SHAPE_PLAN_RETRIES {
+            let _gate = self.shape_gate.read();
+            let shape_version = self.shape_version.load(Ordering::Acquire);
+            let state = self.state.read();
+            let result = plan(&state, &self.children, shape_version);
+            drop(state);
+
+            if self.shape_version.load(Ordering::Acquire) == shape_version {
+                return Some(result);
+            }
+
+            if attempt > 1 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+
+        None
+    }
+
+    fn validate_shape_read<R>(&self, expected_version: u64, f: impl FnOnce() -> R) -> Option<R> {
+        let _gate = self.shape_gate.read();
+        if self.shape_version.load(Ordering::Acquire) != expected_version {
+            return None;
+        }
+        Some(f())
+    }
+
+    fn apply_metadata_update<R>(
+        &self,
+        expected_version: u64,
+        f: impl FnOnce(&mut NodeState) -> R,
+    ) -> Option<R> {
+        self.validate_shape_read(expected_version, || {
+            let mut state = self.state.write();
+            f(&mut state)
+        })
+    }
+
+    fn apply_child_update<R>(
+        &self,
+        expected_version: u64,
+        f: impl FnOnce(&NodeChildren) -> (R, bool),
+    ) -> Option<R> {
+        self.validate_shape_read(expected_version, || {
+            let (result, shape_changed) = f(&self.children);
+            if shape_changed {
+                self.shape_version.fetch_add(1, Ordering::Release);
+            }
+            result
+        })
+    }
+
+    fn apply_edge_shape_update<R>(
+        &self,
+        expected_version: u64,
+        f: impl FnOnce(&mut NodeState, &NodeChildren) -> (R, bool),
+    ) -> Option<R> {
+        let _gate = self.shape_gate.write();
+        if self.shape_version.load(Ordering::Acquire) != expected_version {
+            return None;
+        }
+
+        let mut state = self.state.write();
+        let (result, shape_changed) = f(&mut state, &self.children);
+        if shape_changed {
+            self.shape_version.fetch_add(1, Ordering::Release);
+        }
+        Some(result)
     }
 
     pub(super) fn take_children(&self) -> Vec<SharedNode> {
@@ -272,35 +351,36 @@ impl Node {
         parent_hash: ExternalSequenceBlockHash,
         blocks: &[KvCacheStoredBlockData],
     ) -> Option<ParentEdgePlan> {
-        let _gate = self.shape_gate.read();
-        let state = self.state.read();
-        let &parent_pos = state.edge_index.get(&parent_hash)?;
+        self.with_shape_plan(|state, children, shape_version| {
+            let &parent_pos = state.edge_index.get(&parent_hash)?;
 
-        let action = if state.tail_hash_is(parent_hash) {
-            ParentEdgePlanAction::InsertFromParent
-        } else if state.suffix_matches_store(parent_pos, blocks) {
-            ParentEdgePlanAction::ReuseExistingEdge {
-                cutoff: parent_pos + 1 + blocks.len(),
-            }
-        } else if self.children.is_empty() {
-            match state.store_starts_with_suffix(parent_pos, blocks) {
-                Some(append_start) => {
-                    ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start }
+            let action = if state.tail_hash_is(parent_hash) {
+                ParentEdgePlanAction::InsertFromParent
+            } else if state.suffix_matches_store(parent_pos, blocks) {
+                ParentEdgePlanAction::ReuseExistingEdge {
+                    cutoff: parent_pos + 1 + blocks.len(),
                 }
-                None => ParentEdgePlanAction::Split {
+            } else if children.is_empty() {
+                match state.store_starts_with_suffix(parent_pos, blocks) {
+                    Some(append_start) => {
+                        ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start }
+                    }
+                    None => ParentEdgePlanAction::Split {
+                        split_pos: parent_pos + 1,
+                    },
+                }
+            } else {
+                ParentEdgePlanAction::Split {
                     split_pos: parent_pos + 1,
-                },
-            }
-        } else {
-            ParentEdgePlanAction::Split {
-                split_pos: parent_pos + 1,
-            }
-        };
+                }
+            };
 
-        Some(ParentEdgePlan {
-            shape_version: self.shape_version.load(Ordering::Acquire),
-            action,
+            Some(ParentEdgePlan {
+                shape_version,
+                action,
+            })
         })
+        .flatten()
     }
 
     pub(super) fn apply_store_parent_edge_plan(
@@ -310,75 +390,71 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
     ) -> ParentEdgeAction {
         match plan.action {
-            ParentEdgePlanAction::InsertFromParent => {
-                let _gate = self.shape_gate.read();
-                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
-                    return ParentEdgeAction::Stale;
-                }
-                ParentEdgeAction::InsertFromParent(None)
-            }
-            ParentEdgePlanAction::ReuseExistingEdge { cutoff } => {
-                let _gate = self.shape_gate.read();
-                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
-                    return ParentEdgeAction::Stale;
-                }
-                ParentEdgeAction::ReuseExistingEdge {
-                    coverage_changed: self.state.write().cover_prefix_for_worker(worker, cutoff),
-                }
-            }
-            ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => {
-                let _gate = self.shape_gate.write();
-                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
-                    return ParentEdgeAction::Stale;
-                }
-                if self.children.is_empty() {
-                    self.state
-                        .write()
-                        .append_blocks_to_leaf(worker, &blocks[append_start..]);
-                    self.shape_version.fetch_add(1, Ordering::Release);
+            ParentEdgePlanAction::InsertFromParent => self
+                .validate_shape_read(plan.shape_version, || {
+                    ParentEdgeAction::InsertFromParent(None)
+                })
+                .unwrap_or(ParentEdgeAction::Stale),
+            ParentEdgePlanAction::ReuseExistingEdge { cutoff } => self
+                .apply_metadata_update(plan.shape_version, |state| {
                     ParentEdgeAction::ReuseExistingEdge {
-                        coverage_changed: true,
+                        coverage_changed: state.cover_prefix_for_worker(worker, cutoff),
                     }
-                } else {
-                    ParentEdgeAction::Stale
-                }
-            }
-            ParentEdgePlanAction::Split { split_pos } => {
-                let _gate = self.shape_gate.write();
-                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
-                    return ParentEdgeAction::Stale;
-                }
-                let split = {
-                    let mut state = self.state.write();
-                    self.split_at_locked(&mut state, split_pos)
-                };
-                self.shape_version.fetch_add(1, Ordering::Release);
-                ParentEdgeAction::InsertFromParent(Some(split))
-            }
+                })
+                .unwrap_or(ParentEdgeAction::Stale),
+            ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => self
+                .apply_edge_shape_update(plan.shape_version, |state, children| {
+                    if children.is_empty() {
+                        state.append_blocks_to_leaf(worker, &blocks[append_start..]);
+                        (
+                            ParentEdgeAction::ReuseExistingEdge {
+                                coverage_changed: true,
+                            },
+                            true,
+                        )
+                    } else {
+                        (ParentEdgeAction::Stale, false)
+                    }
+                })
+                .unwrap_or(ParentEdgeAction::Stale),
+            ParentEdgePlanAction::Split { split_pos } => self
+                .apply_edge_shape_update(plan.shape_version, |state, _children| {
+                    (
+                        ParentEdgeAction::InsertFromParent(Some(
+                            self.split_at_locked(state, split_pos),
+                        )),
+                        true,
+                    )
+                })
+                .unwrap_or(ParentEdgeAction::Stale),
         }
     }
 
     pub(super) fn scan_store_prefix(&self, blocks: &[KvCacheStoredBlockData]) -> ChildEdgeScan {
-        let _gate = self.shape_gate.read();
-        let state = self.state.read();
-        let mut match_len = 0;
-        let mut block_hash_mismatch = None;
+        loop {
+            if let Some(scan) = self.with_shape_plan(|state, _children, shape_version| {
+                let mut match_len = 0;
+                let mut block_hash_mismatch = None;
 
-        for (edge_elem, block) in state.edge.iter().zip(blocks.iter()) {
-            if edge_elem.0 != block.tokens_hash {
-                break;
-            }
-            if edge_elem.1 != block.block_hash && block_hash_mismatch.is_none() {
-                block_hash_mismatch = Some((block.block_hash, edge_elem.1));
-            }
-            match_len += 1;
-        }
+                for (edge_elem, block) in state.edge.iter().zip(blocks.iter()) {
+                    if edge_elem.0 != block.tokens_hash {
+                        break;
+                    }
+                    if edge_elem.1 != block.block_hash && block_hash_mismatch.is_none() {
+                        block_hash_mismatch = Some((block.block_hash, edge_elem.1));
+                    }
+                    match_len += 1;
+                }
 
-        ChildEdgeScan {
-            shape_version: self.shape_version.load(Ordering::Acquire),
-            edge_len: state.edge.len(),
-            match_len,
-            block_hash_mismatch,
+                ChildEdgeScan {
+                    shape_version,
+                    edge_len: state.edge.len(),
+                    match_len,
+                    block_hash_mismatch,
+                }
+            }) {
+                return scan;
+            }
         }
     }
 
@@ -388,11 +464,9 @@ impl Node {
         cutoff: usize,
         shape_version: u64,
     ) -> Option<bool> {
-        let _gate = self.shape_gate.read();
-        if self.shape_version.load(Ordering::Acquire) != shape_version {
-            return None;
-        }
-        Some(self.state.write().cover_prefix_for_worker(worker, cutoff))
+        self.apply_metadata_update(shape_version, |state| {
+            state.cover_prefix_for_worker(worker, cutoff)
+        })
     }
 
     pub(super) fn promote_to_full_with_version(
@@ -400,11 +474,7 @@ impl Node {
         worker: WorkerWithDpRank,
         shape_version: u64,
     ) -> Option<bool> {
-        let _gate = self.shape_gate.read();
-        if self.shape_version.load(Ordering::Acquire) != shape_version {
-            return None;
-        }
-        Some(self.state.write().promote_to_full(worker))
+        self.apply_metadata_update(shape_version, |state| state.promote_to_full(worker))
     }
 
     pub(super) fn split_for_store_tail(
@@ -415,21 +485,13 @@ impl Node {
         tail_node: SharedNode,
         shape_version: u64,
     ) -> SplitStoreOutcome {
-        let _gate = self.shape_gate.write();
-        if self.shape_version.load(Ordering::Acquire) != shape_version {
-            return SplitStoreOutcome::Stale;
-        }
-
-        let split = {
-            let mut state = self.state.write();
-            let split = self.split_at_locked(&mut state, split_pos);
+        self.apply_edge_shape_update(shape_version, |state, children| {
+            let split = self.split_at_locked(state, split_pos);
             state.promote_to_full(worker);
-            split
-        };
-        self.children.insert(tail_first_local, tail_node.clone());
-        self.shape_version.fetch_add(1, Ordering::Release);
-
-        SplitStoreOutcome::Done { split, tail_node }
+            children.insert(tail_first_local, tail_node.clone());
+            (SplitStoreOutcome::Done { split, tail_node }, true)
+        })
+        .unwrap_or(SplitStoreOutcome::Stale)
     }
 
     pub(super) fn try_extend_leaf_with_version(
@@ -439,26 +501,19 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
         shape_version: u64,
     ) -> Option<bool> {
-        let _gate = self.shape_gate.write();
-        if self.shape_version.load(Ordering::Acquire) != shape_version {
-            return None;
-        }
-        if blocks.is_empty() || !self.children.is_empty() {
-            return Some(false);
-        }
+        self.apply_edge_shape_update(shape_version, |state, children| {
+            if blocks.is_empty() || !children.is_empty() || state.edge.is_empty() {
+                return (false, false);
+            }
 
-        let mut state = self.state.write();
-        if state.edge.is_empty() {
-            return Some(false);
-        }
-        let old_len = state.edge.len();
-        if !state.tail_hash_is(parent_hash) || !state.covers_pos(worker, old_len - 1) {
-            return Some(false);
-        }
+            let old_len = state.edge.len();
+            if !state.tail_hash_is(parent_hash) || !state.covers_pos(worker, old_len - 1) {
+                return (false, false);
+            }
 
-        state.append_blocks_to_leaf(worker, blocks);
-        self.shape_version.fetch_add(1, Ordering::Release);
-        Some(true)
+            state.append_blocks_to_leaf(worker, blocks);
+            (true, true)
+        })
     }
 
     pub(super) fn child_lookup_plan(
@@ -466,26 +521,23 @@ impl Node {
         last_ext_hash: Option<ExternalSequenceBlockHash>,
         first_local: LocalBlockHash,
     ) -> ParentChildPlan {
-        let _gate = self.shape_gate.read();
-        let state = self.state.read();
-        if let Some(hash) = last_ext_hash
-            && !state.edge_index.contains_key(&hash)
-        {
-            return ParentChildPlan::StaleParent { hash };
-        }
-        drop(state);
+        self.with_shape_plan(|state, children, shape_version| {
+            if let Some(hash) = last_ext_hash
+                && !state.edge_index.contains_key(&hash)
+            {
+                return ParentChildPlan::StaleParent { hash };
+            }
 
-        if let Some(child) = self
-            .children
-            .get(&first_local)
-            .map(|entry| entry.value().clone())
-        {
-            return ParentChildPlan::Descend(child);
-        }
+            if let Some(child) = children
+                .get(&first_local)
+                .map(|entry| entry.value().clone())
+            {
+                return ParentChildPlan::Descend(child);
+            }
 
-        ParentChildPlan::MissingChild {
-            shape_version: self.shape_version.load(Ordering::Acquire),
-        }
+            ParentChildPlan::MissingChild { shape_version }
+        })
+        .unwrap_or(ParentChildPlan::Stale)
     }
 
     pub(super) fn insert_child_if_still_missing(
@@ -494,21 +546,18 @@ impl Node {
         child: SharedNode,
         shape_version: u64,
     ) -> InsertChildOutcome {
-        let _gate = self.shape_gate.read();
-        if self.shape_version.load(Ordering::Acquire) != shape_version {
-            return InsertChildOutcome::Stale;
-        }
-
-        match self.children.entry(first_local) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                InsertChildOutcome::Existing(entry.get().clone())
+        self.apply_child_update(shape_version, |children| {
+            match children.entry(first_local) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => {
+                    (InsertChildOutcome::Existing(entry.get().clone()), false)
+                }
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    entry.insert(child.clone());
+                    (InsertChildOutcome::Inserted(child), true)
+                }
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(child.clone());
-                self.shape_version.fetch_add(1, Ordering::Release);
-                InsertChildOutcome::Inserted(child)
-            }
-        }
+        })
+        .unwrap_or(InsertChildOutcome::Stale)
     }
 
     fn split_at_locked(&self, state: &mut NodeState, pos: usize) -> SplitLookupData {

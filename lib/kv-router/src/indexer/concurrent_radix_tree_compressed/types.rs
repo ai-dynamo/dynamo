@@ -148,6 +148,7 @@ pub(super) struct ChildEdgeScan {
 }
 
 pub(super) enum ParentChildPlan {
+    Stale,
     StaleParent { hash: ExternalSequenceBlockHash },
     Descend(SharedNode),
     MissingChild { shape_version: u64 },
