@@ -1,0 +1,66 @@
+// Renovate config: keeps the SMG chart pin in sync with upstream.
+//
+// Watches lightseekorg/smg git tags and opens a PR each time a new
+// release lands, bumping BOTH:
+//   1. ArgoCD `targetRevision` in deploy/production/gitops/apps/70-smg.yaml
+//   2. Image `tag` in deploy/production/addons/smg/values.yaml
+//
+// We treat SMG as a normal semver chart: minor and patch auto-merge once
+// CI passes; major releases stay open for human review (the SMG layer
+// owns auth + retry + circuit-breaker semantics that can shift across
+// majors).
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended", ":prHourlyLimitNone"],
+  packageRules: [
+    {
+      // SMG chart targetRevision in the ArgoCD Application
+      matchFileNames: ["deploy/production/gitops/apps/70-smg.yaml"],
+      matchPackageNames: ["lightseekorg/smg"],
+      datasourceTemplate: "github-tags",
+      groupName: "smg",
+      automerge: true,
+      automergeType: "pr",
+      matchUpdateTypes: ["minor", "patch"],
+    },
+    {
+      // SMG image tag in the addon values.yaml
+      matchFileNames: ["deploy/production/addons/smg/values.yaml"],
+      matchPackageNames: ["lightseekorg/smg"],
+      datasourceTemplate: "docker",
+      groupName: "smg",
+      automerge: true,
+      automergeType: "pr",
+      matchUpdateTypes: ["minor", "patch"],
+    },
+    {
+      matchPackageNames: ["lightseekorg/smg"],
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      labels: ["needs-human-review"],
+    },
+  ],
+  customManagers: [
+    {
+      // Match the targetRevision: vX.Y.Z line in 70-smg.yaml.
+      customType: "regex",
+      managerFilePatterns: ["deploy/production/gitops/apps/70-smg\\.yaml$"],
+      matchStrings: [
+        "repoURL:\\s*https://github\\.com/lightseekorg/smg\\.git\\s*\\n\\s*targetRevision:\\s*(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)",
+      ],
+      depNameTemplate: "lightseekorg/smg",
+      datasourceTemplate: "github-tags",
+    },
+    {
+      // Match the image tag in addons/smg/values.yaml.
+      customType: "regex",
+      managerFilePatterns: ["deploy/production/addons/smg/values\\.yaml$"],
+      matchStrings: [
+        "repository:\\s*lightseekorg/smg\\s*\\n\\s*tag:\\s*\"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\"",
+      ],
+      depNameTemplate: "lightseekorg/smg",
+      datasourceTemplate: "docker",
+      registryUrlTemplate: "https://ghcr.io",
+    },
+  ],
+}
