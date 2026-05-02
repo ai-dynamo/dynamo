@@ -307,6 +307,49 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
     }
 }
 
+/// Construct a stream chunk carrying one text delta per choice.
+fn mock_multi_choice_content_chunk(
+    choices: &[(u32, &str)],
+) -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        Role,
+    };
+
+    #[allow(deprecated)]
+    let choices = choices
+        .iter()
+        .map(|(index, content)| ChatChoiceStream {
+            index: *index,
+            delta: ChatCompletionStreamResponseDelta {
+                role: Some(Role::Assistant),
+                content: Some(ChatCompletionMessageContent::Text((*content).to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        })
+        .collect();
+
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+    }
+}
+
 /// Construct a terminal `finish_reason=Stop` chunk with no content.
 fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{
@@ -432,6 +475,64 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
 
     assert_eq!(reasoning, "");
     assert_eq!(content, "This is plain content");
+}
+
+/// Dynamo already represents streamed responses as `choices: Vec<_>`, so this
+/// test is not adding new `n > 1` behavior. It verifies that the Nemotron v3
+/// `force_nonempty_content=true` path does not use one shared strip buffer for
+/// all choices. Both choices receive a split `<think>` prefix (`"<thi"` then
+/// `"nk>..."`). If the helper keeps only one global buffer/decided flag, choice
+/// 0 can consume the prefix state and choice 1 can leak `<think>` or lose text.
+/// The expected behavior is that each `choice.index` strips its own leading
+/// prefix independently and returns only normal content.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_per_choice() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_multi_choice_content_chunk(&[(0, "<thi"), (1, "<thi")]),
+        mock_multi_choice_content_chunk(&[(0, "nk>First"), (1, "nk>Second")]),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut content_by_choice = BTreeMap::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(c) = &choice.delta.content {
+                content_by_choice
+                    .entry(choice.index)
+                    .or_insert_with(String::new)
+                    .push_str(get_text(c));
+            }
+            assert!(
+                choice.delta.reasoning_content.is_none(),
+                "reasoning_content must stay empty when force_nonempty_content=true"
+            );
+        }
+    }
+
+    assert_eq!(content_by_choice.get(&0).map(String::as_str), Some("First"));
+    assert_eq!(
+        content_by_choice.get(&1).map(String::as_str),
+        Some("Second")
+    );
 }
 
 /// Regression: MiniMax + tool_choice=required + SGLang guided decoding.

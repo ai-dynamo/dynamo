@@ -1465,6 +1465,11 @@ impl OpenAIPreprocessor {
             stream:
                 Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
             think_start_token: String,
+            choices: HashMap<u32, StripChoiceState>,
+        }
+
+        #[derive(Default)]
+        struct StripChoiceState {
             buffer: String,
             decided: bool,
         }
@@ -1472,14 +1477,14 @@ impl OpenAIPreprocessor {
         let state = StripReasoningStartState {
             stream: Box::pin(stream),
             think_start_token,
-            buffer: String::new(),
-            decided: false,
+            choices: HashMap::new(),
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
                 let processed_response = response.map_data(|mut data| {
                     for choice in data.inner.choices.iter_mut() {
+                        let choice_state = state.choices.entry(choice.index).or_default();
                         let text = match choice.delta.content.take() {
                             Some(ChatCompletionMessageContent::Text(text)) => text,
                             other => {
@@ -1488,26 +1493,26 @@ impl OpenAIPreprocessor {
                             }
                         };
 
-                        let output = if state.decided {
+                        let output = if choice_state.decided {
                             text
                         } else {
-                            state.buffer.push_str(&text);
-                            if state.think_start_token.starts_with(&state.buffer)
-                                && state.buffer.len() < state.think_start_token.len()
+                            choice_state.buffer.push_str(&text);
+                            if state.think_start_token.starts_with(&choice_state.buffer)
+                                && choice_state.buffer.len() < state.think_start_token.len()
                             {
                                 choice.delta.content = None;
                                 continue;
                             }
 
-                            state.decided = true;
-                            if state.buffer.starts_with(&state.think_start_token) {
-                                state.buffer[state.think_start_token.len()..].to_string()
+                            choice_state.decided = true;
+                            if choice_state.buffer.starts_with(&state.think_start_token) {
+                                choice_state.buffer[state.think_start_token.len()..].to_string()
                             } else {
-                                state.buffer.clone()
+                                choice_state.buffer.clone()
                             }
                         };
 
-                        state.buffer.clear();
+                        choice_state.buffer.clear();
                         choice.delta.content = if output.is_empty() {
                             None
                         } else {
