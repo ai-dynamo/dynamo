@@ -950,6 +950,8 @@ class Descriptor:
             self._data_size = data.numel() * data.element_size()
             if data.is_cuda:
                 self._data_device = Device((DeviceKind.CUDA, data.get_device()))
+            elif hasattr(data, "is_xpu") and data.is_xpu:
+                self._data_device = Device((DeviceKind.XPU, data.get_device()))
             self._data_ref = data
 
             logger.debug(
@@ -1161,7 +1163,16 @@ class Descriptor:
         self._connection = connection
 
         if isinstance(self._data_ref, torch.Tensor):
-            self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            if hasattr(self._data_ref, "is_xpu") and self._data_ref.is_xpu:
+                # XPU tensors: register via explicit pointer/size so NIXL maps
+                # them as device memory (ZE via UCX).
+                mem_type = "VRAM"
+                reg_list = [
+                    (self._data_ptr, self._data_size, self._data_device.id, mem_type)
+                ]
+                self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            else:
+                self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
             mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [
@@ -1245,12 +1256,17 @@ class Device:
                 device_id = (
                     0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
                 )
+            elif metadata.startswith("xpu"):
+                kind = DeviceKind.XPU
+                device_id = (
+                    0 if metadata.find(":") == -1 else int(metadata.split(":")[1])
+                )
             elif metadata.startswith("cpu") or metadata.startswith("host"):
                 kind = DeviceKind.HOST
                 device_id = 0
             else:
                 raise ValueError(
-                    "Argument `metadata` must be in the format 'cuda:<device_id>' or 'cpu'."
+                    "Argument `metadata` must be in the format 'cuda:<device_id>', 'xpu:<device_id>', or 'cpu'."
                 )
         else:
             raise TypeError(
@@ -1266,7 +1282,7 @@ class Device:
     def __str__(self) -> str:
         return (
             f"{self._kind}:{self._device_id}"
-            if self._kind is DeviceKind.CUDA
+            if self._kind in (DeviceKind.CUDA, DeviceKind.XPU)
             else f"{self._kind}"
         )
 
@@ -1302,11 +1318,18 @@ class DeviceKind(IntEnum):
     CUDA addressable device (GPU) memory.
     """
 
+    XPU = 3
+    """
+    Intel XPU (Level-Zero) device memory.
+    """
+
     def __str__(self) -> str:
         if self == DeviceKind.HOST:
             return "cpu"
         elif self == DeviceKind.CUDA:
             return "cuda"
+        elif self == DeviceKind.XPU:
+            return "xpu"
         else:
             return "<invalid>"
 
@@ -1315,6 +1338,8 @@ class DeviceKind(IntEnum):
         """Return the canonical NIXL segment name for this device kind."""
         if self == DeviceKind.HOST:
             return "DRAM"
+        elif self in (DeviceKind.CUDA, DeviceKind.XPU):
+            return "VRAM"
         else:
             return "VRAM"
 
@@ -1833,9 +1858,9 @@ class SerializedDescriptor(BaseModel):
         if not isinstance(v, str):
             raise TypeError("Argument `device` must be `str`.")
         v = v.strip().lower()
-        if not (v.startswith("cuda") or v == "cpu"):
+        if not (v.startswith("cuda") or v.startswith("xpu") or v == "cpu"):
             raise ValueError(
-                "Argument `device` must be one of 'cpu' or 'cuda:<device_id>'."
+                "Argument `device` must be one of 'cpu', 'cuda:<device_id>', or 'xpu:<device_id>'."
             )
         return v
 
