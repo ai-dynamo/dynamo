@@ -509,6 +509,7 @@ mod tests {
                 queue_depth: None,
                 worker: None,
             }),
+            tool: None,
         }
     }
 

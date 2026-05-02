@@ -36,19 +36,27 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	if !enabled {
+		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+		return
+	}
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 }
 
-// resolveMainContainer finds the container named "main" in the pod spec.
-// ExtraPodSpec.PodSpec.Containers can inject user containers before the main
-// container (mergo merge happens before main is appended), so index 0 is
-// not guaranteed to be the main container here.
-func resolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
+func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
+	if podSpec == nil {
+		return nil, fmt.Errorf("pod spec is nil")
+	}
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
+			return &podSpec.Containers[i], nil
 		}
 	}
-	return nil
+	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -83,19 +91,34 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	mainContainer := resolveMainContainer(podSpec)
-	if mainContainer == nil {
-		return fmt.Errorf("no container named %q found in pod spec", commonconsts.MainContainerName)
-	}
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
+	}
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	podInfoContainers := make([]*corev1.Container, 0, len(targets))
+	for _, name := range targets {
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				podInfoContainers = append(podInfoContainers, &podSpec.Containers[i])
+				break
+			}
+		}
+	}
+	if len(podInfoContainers) != len(targets) {
+		return fmt.Errorf("checkpoint restore targets %v do not all exist in pod spec", targets)
+	}
+	syntheticAnnotations := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
 	}
 	if err := snapshotprotocol.PrepareRestorePodSpecForCheckpoint(
 		ctx,
 		reader,
 		namespace,
 		podSpec,
-		mainContainer,
+		syntheticAnnotations,
 		info.Hash,
 		info.ArtifactVersion,
 		snapshotprotocol.DefaultSeccompLocalhostProfile,
@@ -105,8 +128,15 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	EnsurePodInfoVolume(podSpec)
-	EnsurePodInfoMount(mainContainer)
+	for _, c := range podInfoContainers {
+		EnsurePodInfoMount(c)
+	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+		// GMS restore is still single-main-container only.
+		mainContainer, err := RequireMainContainer(podSpec)
+		if err != nil {
+			return fmt.Errorf("gpuMemoryService enabled: %w", err)
+		}
 		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
 			ctx,
 			reader,

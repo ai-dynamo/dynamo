@@ -11,7 +11,6 @@
 # control plane goes over TCP (eth0); bulk KV flows over MNNVL/cuda_ipc.
 #
 # Prerequisites: DRA / ComputeDomain controller installed cluster-wide.
-# Image: replace `:my-tag` with a Dynamo + vLLM image (see ../container/README.md).
 # Weights: served from the `model-cache` PVC (see ../../model-cache/model-download.yaml).
 ---
 apiVersion: resource.nvidia.com/v1beta1
@@ -44,7 +43,7 @@ spec:
         size: 40Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -63,7 +62,7 @@ spec:
           - name: compute-domain-channel
             resourceClaimTemplateName: dsv4-pro-compute-domain-channel
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           # ~90 min budget for first launch (weights + autotune + cudagraph): 10 * 540 = 5400s.
           startupProbe:
@@ -177,7 +176,7 @@ spec:
           - name: compute-domain-channel
             resourceClaimTemplateName: dsv4-pro-compute-domain-channel
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           startupProbe:
             httpGet:
