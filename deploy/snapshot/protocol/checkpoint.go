@@ -59,7 +59,26 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer := &podTemplate.Spec.Containers[0]
+
+	// Checkpoint contract: exactly one target container per Job. The
+	// annotation is required — callers (the operator, snapshotctl) stamp
+	// nvidia.com/snapshot-target-containers before handing the template
+	// to us so there is no Containers[0]-vs-"main" ambiguity.
+	targets, err := TargetContainersFromAnnotations(podTemplate.Annotations, 1, 1)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	}
+	targetName := targets[0]
+	var targetContainer *corev1.Container
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == targetName {
+			targetContainer = &podTemplate.Spec.Containers[i]
+			break
+		}
+	}
+	if targetContainer == nil {
+		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from %s annotation)", targetName, TargetContainersAnnotation)
+	}
 
 	// Snapshot contract: control volume + ready-file readiness probe. The
 	// agent reads the pod's Ready condition before starting CRIU dump, so
@@ -67,8 +86,8 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	// $DYN_SNAPSHOT_CONTROL_DIR/ready-for-checkpoint. Any per-container
 	// liveness/startup probes are cleared — a checkpoint job runs to a
 	// quiesce-and-sit state, not a long-lived serving state.
-	EnsureControlVolume(&podTemplate.Spec, mainContainer)
-	mainContainer.ReadinessProbe = &corev1.Probe{
+	EnsureControlVolume(&podTemplate.Spec, targetContainer)
+	targetContainer.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{
 				Command: []string{"cat", filepath.Join(SnapshotControlMountPath, ReadyForCheckpointFile)},
@@ -76,16 +95,16 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		},
 		PeriodSeconds: 1,
 	}
-	mainContainer.LivenessProbe = nil
-	mainContainer.StartupProbe = nil
+	targetContainer.LivenessProbe = nil
+	targetContainer.StartupProbe = nil
 
 	if opts.WrapLaunchJob {
-		if len(mainContainer.Command) == 0 {
+		if len(targetContainer.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
-		mainContainer.Command, mainContainer.Args = wrapWithCudaCheckpointLaunchJob(
-			mainContainer.Command,
-			mainContainer.Args,
+		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
+			targetContainer.Command,
+			targetContainer.Args,
 		)
 	}
 

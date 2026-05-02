@@ -329,6 +329,11 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       gpu_test_timeout_minutes: 120
+      # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
+      # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
+      # currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   vllm-multi-gpu-test:

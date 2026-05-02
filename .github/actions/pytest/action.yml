@@ -39,6 +39,10 @@ inputs:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
     required: false
     default: 'auto'
+  max_vram_gib:
+    description: 'Per-test VRAM budget in GiB. When set together with parallel_mode!=none, runs GPU tests as VRAM-aware concurrent subprocesses via the orchestrator in tests/utils/pytest_parallel_gpu.py. Tests without @pytest.mark.profiled_vram_gib(N) are deselected by tests/conftest.py.'
+    required: false
+    default: ''
   dind_as_sidecar:
     description: 'dind runs as a sidecar container (true/false)'
     required: false
@@ -244,9 +248,22 @@ runs:
               ;;
           esac
 
-          # Construct final command with xdist parallelization (-n) and other options
-          # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # When max_vram_gib is set, the GPU-parallel orchestrator
+          # (tests/utils/pytest_parallel_gpu.py via tests/conftest.py) takes over
+          # parallelism. We pass `--max-vram-gib=N` plus `-n auto`; the conftest
+          # consumes both, disables xdist, and runs tests as VRAM-aware
+          # subprocesses. --dist=loadscope is omitted because xdist is bypassed.
+          VRAM_OPTS=""
+          if [[ -n "${{ inputs.max_vram_gib }}" ]]; then
+            VRAM_OPTS="--max-vram-gib=${{ inputs.max_vram_gib }}"
+            DIST_OPTS=""
+            echo "🧮 GPU-parallel mode: --max-vram-gib=${{ inputs.max_vram_gib }} (xdist replaced by VRAM-aware orchestrator)"
+          else
+            # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
+            DIST_OPTS="--dist=loadscope"
+          fi
+
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions

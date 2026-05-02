@@ -202,8 +202,12 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(16.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                6_473_647_000
+            ),  # KV cache cap (2x safety over min=3_236_823_040)
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[

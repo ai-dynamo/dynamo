@@ -27,10 +27,9 @@ const (
 	envCheckpointDir = "GMS_CHECKPOINT_DIR"
 )
 
-// EnsureGMSRestoreSidecars adds GMS server + loader containers to the pod spec
-// for a checkpoint restore. The server runs as a regular container (not init)
-// because the CRIU-restored main process already has GPU memory mapped and
-// all containers must start in parallel.
+// EnsureGMSRestoreSidecars appends restartable init sidecars for GMS restore.
+// The server must be ready before CRIU resumes the target process, while the
+// loader continues running alongside regular containers.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -40,15 +39,14 @@ func EnsureGMSRestoreSidecars(
 		return
 	}
 
-	// The DGD path adds the GMS server as an init sidecar (blocks until
-	// sockets are ready). For restore, move it to a regular container so
-	// all containers start in parallel.
-	for i := range podSpec.InitContainers {
-		if podSpec.InitContainers[i].Name == gms.ServerContainerName {
-			podSpec.InitContainers = append(podSpec.InitContainers[:i], podSpec.InitContainers[i+1:]...)
-			break
+	// Re-append restore sidecars in a deterministic order.
+	initContainers := podSpec.InitContainers[:0]
+	for _, container := range podSpec.InitContainers {
+		if container.Name != gms.ServerContainerName && container.Name != GMSLoaderContainer {
+			initContainers = append(initContainers, container)
 		}
 	}
+	podSpec.InitContainers = initContainers
 	gms.EnsureSharedVolume(podSpec, mainContainer)
 
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
