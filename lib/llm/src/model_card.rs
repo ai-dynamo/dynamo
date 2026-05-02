@@ -328,6 +328,151 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     })
 }
 
+/// Trust-boundary clamp on a worker's declared `CheckedFile.size`.
+/// Realistic metadata files top out near 20 MiB; 1 GiB bounds disk
+/// exhaustion from a compromised worker advertising `u64::MAX`. Also
+/// the fallback cap when `CheckedFile.size` is absent (legacy MDCs).
+const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Stage `uri` into `dest`, verifying staged bytes against `expected`
+/// before publishing. Schemes: `http(s)`, `file`, `hf`. Concurrent-safe
+/// via `BlobLock` + atomic rename.
+async fn resolve_uri(
+    client: &reqwest::Client,
+    uri: &str,
+    expected: &CheckedFile,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    // Tighten cap to declared size if present; otherwise the absolute
+    // ceiling. Either way `cap` is enforced uniformly across schemes
+    // so transport choice can't bypass the bound.
+    let cap = expected
+        .size()
+        .unwrap_or(ABSOLUTE_MAX_METADATA_BYTES)
+        .min(ABSOLUTE_MAX_METADATA_BYTES);
+
+    let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
+
+    let _blob_guard = BlobLock::acquire(dest).await?;
+
+    // A peer that held the lock before us may have populated `dest`
+    // already.
+    if dest.exists() {
+        return Ok(());
+    }
+
+    stage_and_rename(dest, |tmp| async move {
+        match parsed.scheme() {
+            "http" | "https" => stream_to_tmp(client, uri, &tmp, cap).await?,
+            "file" => {
+                let path = parsed
+                    .to_file_path()
+                    .map_err(|()| anyhow::anyhow!("invalid file:// uri: {uri}"))?;
+                copy_to_tmp(&path, &tmp, cap).await?;
+            }
+            "hf" => {
+                let (repo, filename) = parse_hf_uri(uri)?;
+                let snapshot = crate::hub::from_hf(&repo, /* ignore_weights = */ true)
+                    .await
+                    .with_context(|| format!("hub::from_hf({repo})"))?;
+                copy_to_tmp(&snapshot.join(&filename), &tmp, cap).await?;
+            }
+            scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
+        }
+
+        // Re-blake3 the staged bytes via the same `from_disk` path the
+        // worker used at registration so the comparison is bit-identical.
+        let actual = CheckedFile::from_disk(&tmp)?;
+        if actual.checksum() != expected.checksum() {
+            anyhow::bail!(
+                "checksum mismatch for {uri}: expected {}, got {}",
+                expected.checksum(),
+                actual.checksum()
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Stream HTTP body to `tmp`, capped at `cap` bytes. Pre-checks
+/// `Content-Length` if present; otherwise the post-write check
+/// catches overage.
+async fn stream_to_tmp(
+    client: &reqwest::Client,
+    uri: &str,
+    tmp: &Path,
+    cap: u64,
+) -> anyhow::Result<()> {
+    use futures::TryStreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::io::StreamReader;
+
+    let response = client
+        .get(uri)
+        .send()
+        .await
+        .with_context(|| format!("fetching {uri}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("fetching {uri} returned status {}", response.status());
+    }
+    if let Some(content_length) = response.content_length()
+        && content_length > cap
+    {
+        anyhow::bail!("{uri} reports {content_length} bytes, exceeds cap {cap}");
+    }
+
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    // `cap + 1` so a body of exactly `cap` passes but anything larger
+    // trips the `written > cap` check below.
+    let mut reader = StreamReader::new(stream).take(cap + 1);
+    let mut file = tokio::fs::File::create(tmp)
+        .await
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let written = tokio::io::copy(&mut reader, &mut file)
+        .await
+        .with_context(|| format!("streaming body from {uri} to {}", tmp.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("flushing {}", tmp.display()))?;
+    if written > cap {
+        anyhow::bail!("{uri} body exceeds cap {cap}");
+    }
+    Ok(())
+}
+
+async fn copy_to_tmp(src: &Path, tmp: &Path, cap: u64) -> anyhow::Result<()> {
+    let metadata = tokio::fs::metadata(src)
+        .await
+        .with_context(|| format!("reading metadata for {}", src.display()))?;
+    if metadata.len() > cap {
+        anyhow::bail!(
+            "{} is {} bytes, exceeds cap {}",
+            src.display(),
+            metadata.len(),
+            cap
+        );
+    }
+    tokio::fs::copy(src, tmp)
+        .await
+        .with_context(|| format!("copying {} -> {}", src.display(), tmp.display()))?;
+    Ok(())
+}
+
+/// Parse `hf://repo[@rev]/filename` into `(repo[@rev], filename)`.
+fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
+    let body = uri
+        .strip_prefix("hf://")
+        .with_context(|| format!("expected hf:// scheme, got: {uri}"))?;
+    let (repo, filename) = body
+        .rsplit_once('/')
+        .with_context(|| format!("hf:// uri must end in /filename, got: {uri}"))?;
+    if repo.is_empty() || filename.is_empty() {
+        anyhow::bail!("malformed hf:// uri: {uri}");
+    }
+    Ok((repo.to_string(), filename.to_string()))
+}
+
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
     match p {
         PromptFormatterArtifact::HfTokenizerConfigJson(cf)
@@ -1486,5 +1631,107 @@ mod tests {
             "Should contain tokenizer eos_token (248046 <|im_end|>)"
         );
         Ok(())
+    }
+
+    /// Build a `CheckedFile` for testing with the given uri + checksum + size.
+    fn test_cf(uri: &str, checksum_hex: &str, size: u64) -> super::CheckedFile {
+        let json = serde_json::json!({
+            "path": uri,
+            "checksum": format!("blake3:{checksum_hex}"),
+            "size": size,
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// blake3 mismatch errors and writes nothing.
+    #[tokio::test]
+    async fn resolve_uri_http_rejects_checksum_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        let body = b"hello world";
+        let _m = server
+            .mock("GET", "/file.txt")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let dir = std::env::temp_dir().join(format!("dynamo-mdc-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("file.txt");
+
+        let url = format!("{}/file.txt", server.url());
+        let expected = test_cf(
+            &url,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            body.len() as u64,
+        );
+        let result = super::resolve_uri(&reqwest::Client::new(), &url, &expected, &dest).await;
+
+        assert!(result.is_err(), "checksum mismatch must error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("checksum mismatch"),
+            "expected checksum-mismatch error, got: {msg}"
+        );
+        assert!(
+            !dest.exists(),
+            "no file should be written on checksum mismatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Oversize http body errors before the in-memory buffer can grow
+    /// past the expected size, so a misbehaving worker can't OOM the
+    /// frontend before blake3 verification fails.
+    #[tokio::test]
+    async fn resolve_uri_http_rejects_oversize_body() {
+        let mut server = mockito::Server::new_async().await;
+        let body = b"hello hello hello hello hello hello"; // 35 bytes
+        let _m = server
+            .mock("GET", "/big.txt")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let dir = std::env::temp_dir().join(format!("dynamo-mdc-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("big.txt");
+
+        let url = format!("{}/big.txt", server.url());
+        // Cap is 8 bytes (declared size); body is 35. We trip the
+        // size cap before reaching blake3 verification.
+        let expected = test_cf(
+            &url,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            8,
+        );
+        let result = super::resolve_uri(&reqwest::Client::new(), &url, &expected, &dest).await;
+
+        assert!(result.is_err(), "oversize body must error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("exceeds cap"),
+            "expected size-cap error, got: {msg}"
+        );
+        assert!(
+            !dest.exists(),
+            "no file should be written on size-cap rejection"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `parse_hf_uri` round-trip — `hf://repo/filename` parses into
+    /// `(repo, filename)` and rejects malformed inputs.
+    #[test]
+    fn parse_hf_uri_roundtrip() {
+        let (repo, filename) = super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/tokenizer.json").unwrap();
+        assert_eq!(repo, "Qwen/Qwen3-0.6B");
+        assert_eq!(filename, "tokenizer.json");
+
+        assert!(super::parse_hf_uri("hf://just-a-name").is_err());
+        assert!(super::parse_hf_uri("https://example.com/x").is_err());
     }
 }
