@@ -85,7 +85,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends libjsoncpp25 && \
     rm -rf /var/lib/apt/lists/*
 
-# Inherited from upstream sglang base image; unused at runtime
+# Do not remove — unused at runtime, removed for compliance reasons
 RUN pip uninstall -y black termplotlib
 
 # Copy tests, deploy and components for CI with correct ownership
