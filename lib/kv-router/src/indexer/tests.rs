@@ -627,12 +627,12 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        // Verify we can find matches for the last stored sequence
+        let worker = WorkerWithDpRank::new(9, 0);
         let last_seq: Vec<LocalBlockHash> = (1..=512u64)
             .map(|x| LocalBlockHash(x + (9 * 10000)))
             .collect();
         let scores = index.find_matches(last_seq).await.unwrap();
-        assert!(!scores.scores.is_empty());
+        assert_eq!(scores.scores.get(&worker), Some(&512));
     }
 
     #[tokio::test]
@@ -717,13 +717,6 @@ mod interface_tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_shutdown(variant: &str) {
-        let index = make_indexer(variant);
-        index.shutdown();
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
     async fn test_shutdown_idempotent(variant: &str) {
         let index = make_indexer(variant);
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -737,48 +730,34 @@ mod interface_tests {
     async fn test_find_matches_for_request(variant: &str) {
         let index = make_indexer(variant);
 
-        // Empty index should return no matches
-        let tokens = vec![1, 2, 3, 4];
+        let tokens: Vec<u32> = (1..=96).collect();
         let scores = index
             .find_matches_for_request(&tokens, None, None)
             .await
             .unwrap();
         assert!(scores.scores.is_empty());
 
-        // Store some data and verify we can find it via tokens
-        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
-
-        // Allow time for async processing
+        let block_hashes = compute_block_hash_for_seq(&tokens, 32, BlockHashOptions::default());
+        let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
+        index
+            .apply_event(router_event(
+                0,
+                0,
+                0,
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: stored_blocks_with_sequence_hashes(&block_hashes, &sequence_hashes),
+                }),
+            ))
+            .await;
         flush_and_settle(index.as_ref()).await;
 
-        // Note: find_matches_for_request computes block hashes from tokens,
-        // so we need tokens that hash to the same LocalBlockHash values.
-        // For this test, we just verify the method works without error.
         let scores = index
             .find_matches_for_request(&tokens, None, None)
             .await
             .unwrap();
-        // The tokens [1,2,3,4] won't match our stored [1,2,3] local hashes
-        // because find_matches_for_request computes different hashes from raw tokens
-        assert!(scores.scores.is_empty() || !scores.scores.is_empty());
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_process_routing_decision(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Create tokens with hashes
-        let tokens = vec![1u32, 2, 3, 4, 5, 6, 7, 8];
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens, 32);
-
-        let worker = WorkerWithDpRank::new(0, 0);
-
-        // Process routing decision - should not error
-        let result = index
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-            .await;
-        assert!(result.is_ok());
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)), Some(&3));
     }
 
     #[tokio::test]
@@ -1226,90 +1205,6 @@ mod lora_tests {
     use super::*;
     use rstest_reuse::apply;
 
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_lora_and_base_model_blocks_do_not_conflict(variant: &str) {
-        let index = make_indexer(variant);
-        let kv_block_size: u32 = 32;
-
-        // Same token sequence for both base model and LoRA adapter
-        let tokens: Vec<u32> = (0..kv_block_size * 3).collect();
-
-        let base_hashes =
-            compute_block_hash_for_seq(&tokens, kv_block_size, BlockHashOptions::default());
-        let lora_hashes = compute_block_hash_for_seq(
-            &tokens,
-            kv_block_size,
-            BlockHashOptions {
-                lora_name: Some("my-adapter"),
-                ..Default::default()
-            },
-        );
-
-        // Hashes must differ despite identical tokens
-        assert_ne!(
-            base_hashes, lora_hashes,
-            "Base and LoRA hashes must differ for the same tokens"
-        );
-
-        let base_seq = compute_seq_hash_for_block(&base_hashes);
-        let lora_seq = compute_seq_hash_for_block(&lora_hashes);
-
-        // Store base-model blocks on worker 0
-        let base_event = router_event(
-            0,
-            0,
-            0,
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                start_position: None,
-                blocks: stored_blocks_with_sequence_hashes(&base_hashes, &base_seq),
-            }),
-        );
-        index.apply_event(base_event).await;
-
-        // Store LoRA blocks on worker 1
-        let lora_event = router_event(
-            1,
-            0,
-            0,
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                start_position: None,
-                blocks: stored_blocks_with_sequence_hashes(&lora_hashes, &lora_seq),
-            }),
-        );
-        index.apply_event(lora_event).await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query with base-model hashes → only worker 0
-        let base_scores = index.find_matches(base_hashes.clone()).await.unwrap();
-        assert_eq!(
-            base_scores.scores.len(),
-            1,
-            "Only base-model worker should match"
-        );
-        assert_eq!(
-            *base_scores
-                .scores
-                .get(&WorkerWithDpRank::new(0, 0))
-                .unwrap(),
-            3
-        );
-
-        // Query with LoRA hashes → only worker 1
-        let lora_scores = index.find_matches(lora_hashes.clone()).await.unwrap();
-        assert_eq!(lora_scores.scores.len(), 1, "Only LoRA worker should match");
-        assert_eq!(
-            *lora_scores
-                .scores
-                .get(&WorkerWithDpRank::new(1, 0))
-                .unwrap(),
-            3
-        );
-    }
-
     /// Reproduces the "block_hash mismatch: sequence hashes should be uniform
     /// across workers" warning seen when the same prompt is sent to both a base
     /// model worker and a LoRA worker.
@@ -1393,6 +1288,11 @@ mod lora_tests {
                 .unwrap(),
             3
         );
+        assert!(
+            !base_scores
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
 
         // LoRA query finds only worker 1
         let lora_scores = index.find_matches(lora_local.clone()).await.unwrap();
@@ -1403,6 +1303,11 @@ mod lora_tests {
                 .get(&WorkerWithDpRank::new(1, 0))
                 .unwrap(),
             3
+        );
+        assert!(
+            !lora_scores
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
         );
     }
 
@@ -1713,95 +1618,35 @@ mod long_sequence_tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_long_sequence_exact_jump_size_boundaries(variant: &str) {
+    async fn test_long_sequence_jump_boundaries(variant: &str) {
         let index = make_indexer(variant);
+        let cases = [
+            (0, 1, 31),
+            (1, 101, 32),
+            (2, 201, 33),
+            (3, 301, 63),
+            (4, 401, 64),
+            (5, 501, 65),
+            (6, 601, 96),
+        ];
 
-        // Test sequences that align exactly with jump_size boundaries (32 for PositionalIndexer)
-        // This tests edge cases in the jump search algorithm
-
-        // Store sequence of exactly 32 blocks
-        let seq_32: Vec<u64> = (1..=32).collect();
-        index.apply_event(make_store_event(0, &seq_32)).await;
-
-        // Store sequence of exactly 64 blocks (2x jump_size)
-        let seq_64: Vec<u64> = (1001..=1064).collect();
-        index.apply_event(make_store_event(1, &seq_64)).await;
-
-        // Store sequence of exactly 96 blocks (3x jump_size)
-        let seq_96: Vec<u64> = (2001..=2096).collect();
-        index.apply_event(make_store_event(2, &seq_96)).await;
+        for (worker_id, start, len) in cases {
+            let sequence: Vec<u64> = (start..start + len).collect();
+            index
+                .apply_event(make_store_event(worker_id, &sequence))
+                .await;
+        }
 
         flush_and_settle(index.as_ref()).await;
 
-        // Verify all sequences match correctly
-        let query_32: Vec<LocalBlockHash> = seq_32.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_32).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            32
-        );
-
-        let query_64: Vec<LocalBlockHash> = seq_64.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_64).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
-            64
-        );
-
-        let query_96: Vec<LocalBlockHash> = seq_96.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_96).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
-            96
-        );
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_long_sequence_off_by_one_jump_boundaries(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Test sequences at jump_size +/- 1 boundaries to catch off-by-one errors
-        let seq_31: Vec<u64> = (1..=31).collect();
-        let seq_33: Vec<u64> = (101..=133).collect();
-        let seq_63: Vec<u64> = (201..=263).collect();
-        let seq_65: Vec<u64> = (301..=365).collect();
-
-        index.apply_event(make_store_event(0, &seq_31)).await;
-        index.apply_event(make_store_event(1, &seq_33)).await;
-        index.apply_event(make_store_event(2, &seq_63)).await;
-        index.apply_event(make_store_event(3, &seq_65)).await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Verify all sequences match correctly
-        let query_31: Vec<LocalBlockHash> = seq_31.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_31).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            31
-        );
-
-        let query_33: Vec<LocalBlockHash> = seq_33.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_33).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
-            33
-        );
-
-        let query_63: Vec<LocalBlockHash> = seq_63.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_63).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
-            63
-        );
-
-        let query_65: Vec<LocalBlockHash> = seq_65.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(query_65).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
-            65
-        );
+        for (worker_id, start, len) in cases {
+            let query: Vec<LocalBlockHash> = (start..start + len).map(LocalBlockHash).collect();
+            let scores = index.find_matches(query).await.unwrap();
+            assert_eq!(
+                scores.scores.get(&WorkerWithDpRank::new(worker_id, 0)),
+                Some(&(len as u32))
+            );
+        }
     }
 
     #[tokio::test]
@@ -2289,29 +2134,6 @@ mod metrics_tests {
 // LocalKvIndexer tests
 // ============================================================================
 
-fn make_local_indexer_with_events(ids: &[u64]) -> LocalKvIndexer {
-    let indexer = LocalKvIndexer::new(
-        CancellationToken::new(),
-        4,
-        Arc::new(KvIndexerMetrics::new_unregistered()),
-        32,
-    );
-    {
-        let mut buffer = indexer.event_buffer.lock().unwrap();
-        for &id in ids {
-            buffer.push_back(RouterEvent::new(
-                0,
-                KvCacheEvent {
-                    event_id: id,
-                    data: KvCacheEventData::Cleared,
-                    dp_rank: 0,
-                },
-            ));
-        }
-    }
-    indexer
-}
-
 mod local_indexer_tests {
     use super::*;
     use rstest_reuse::apply;
@@ -2361,57 +2183,6 @@ mod local_indexer_tests {
                 dp_rank: 0,
             },
         )
-    }
-
-    #[tokio::test]
-    async fn test_local_indexer_slice_within_range() {
-        let indexer = make_local_indexer_with_events(&[1, 2, 3, 4, 5]);
-
-        // Helper to extract events from response
-        let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
-            match resp {
-                WorkerKvQueryResponse::Events { events: e, .. } => e,
-                WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
-                _ => panic!("Unexpected response type"),
-            }
-        };
-
-        let extract_last_event_id = |resp: &WorkerKvQueryResponse| -> Option<u64> {
-            match resp {
-                WorkerKvQueryResponse::Events { last_event_id, .. } => Some(*last_event_id),
-                WorkerKvQueryResponse::TreeDump { last_event_id, .. } => Some(*last_event_id),
-                _ => None,
-            }
-        };
-
-        let get_ids = |events: Vec<RouterEvent>| -> Vec<u64> {
-            events.iter().map(|e| e.event.event_id).collect()
-        };
-
-        // Test get_events_in_id_range (buffer queries)
-        // Buffer hits now return the contiguous suffix through the buffered tail.
-        let result = indexer.get_events_in_id_range(Some(2), Some(4)).await;
-        let ids = get_ids(extract_events(result.clone()));
-        assert_eq!(ids, vec![2, 3, 4, 5]);
-        assert_eq!(extract_last_event_id(&result), Some(5));
-
-        let result = indexer.get_events_in_id_range(Some(2), Some(6)).await;
-        let ids = get_ids(extract_events(result.clone()));
-        assert_eq!(ids, vec![2, 3, 4, 5]); // clamp end to buffer max
-        assert_eq!(extract_last_event_id(&result), Some(5));
-
-        // start_id=0 is before buffer (first is 1), so should trigger tree dump
-        let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
-        assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
-
-        let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
-        let ids = get_ids(extract_events(result.clone()));
-        assert_eq!(ids, vec![3, 4, 5]);
-        assert_eq!(extract_last_event_id(&result), Some(5));
-
-        // Invalid range: end < start
-        let result = indexer.get_events_in_id_range(Some(5), Some(2)).await;
-        assert!(matches!(result, WorkerKvQueryResponse::InvalidRange { .. }));
     }
 
     #[tokio::test]
@@ -2479,7 +2250,7 @@ mod local_indexer_tests {
         let buffer_events = indexer.get_all_events_in_buffer();
         assert_eq!(get_ids(buffer_events), vec![10, 11, 12, 13, 14]);
 
-        // Buffer path tests
+        // Buffer hits return the contiguous suffix through the buffered tail.
         let result = indexer.get_events_in_id_range(Some(11), None).await;
         assert_eq!(
             get_ids(extract_events(result.clone())),
@@ -2501,13 +2272,41 @@ mod local_indexer_tests {
         );
         assert_eq!(extract_last_event_id(&result), Some(14));
 
+        let result = indexer.get_events_in_id_range(Some(11), Some(20)).await;
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
+
+        let result = indexer.get_events_in_id_range(Some(12), Some(12)).await;
+        assert_eq!(get_ids(extract_events(result.clone())), vec![12, 13, 14]);
+        assert_eq!(extract_last_event_id(&result), Some(14));
+
         // Tree dump path tests
         let result = indexer.get_events_in_id_range(None, None).await;
-        assert!(matches!(&result, WorkerKvQueryResponse::TreeDump { .. }));
-        assert_eq!(extract_events(result).len(), 10);
+        match result {
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id,
+            } => {
+                assert_eq!(events.len(), 10);
+                assert_eq!(last_event_id, 14);
+            }
+            other => panic!("Expected TreeDump, got: {other:?}"),
+        }
 
         let result = indexer.get_events_in_id_range(Some(7), None).await;
-        assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
+        match result {
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id,
+            } => {
+                assert_eq!(events.len(), 10);
+                assert_eq!(last_event_id, 14);
+            }
+            other => panic!("Expected TreeDump, got: {other:?}"),
+        }
 
         // Edge cases
         let result = indexer.get_events_in_id_range(Some(15), Some(10)).await;
@@ -2515,79 +2314,7 @@ mod local_indexer_tests {
 
         let result = indexer.get_events_in_id_range(Some(100), Some(200)).await;
         assert!(matches!(result, WorkerKvQueryResponse::TooNew { .. }));
-    }
 
-    #[tokio::test]
-    async fn test_tree_dump_includes_last_event_id() {
-        // Create indexer with small buffer (5 events max)
-        let indexer = LocalKvIndexer::new(
-            CancellationToken::new(),
-            4,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            5,
-        );
-
-        let make_event = |id: u64| {
-            RouterEvent::new(
-                0,
-                KvCacheEvent {
-                    event_id: id,
-                    data: KvCacheEventData::Stored(KvCacheStoreData {
-                        parent_hash: None,
-                        start_position: None,
-                        blocks: vec![KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(id * 100),
-                            tokens_hash: LocalBlockHash(id * 200),
-                            mm_extra_info: None,
-                        }],
-                    }),
-                    dp_rank: 0,
-                },
-            )
-        };
-
-        // Add 10 events (IDs 5-14), buffer keeps last 5: events 10-14
-        for id in 5..15 {
-            indexer
-                .apply_event_with_buffer(make_event(id))
-                .await
-                .unwrap();
-        }
-        indexer.flush().await;
-
-        // Request with start_id=None -> tree dump should include last_event_id=14
-        let result = indexer.get_events_in_id_range(None, None).await;
-        match result {
-            WorkerKvQueryResponse::TreeDump {
-                last_event_id,
-                events,
-            } => {
-                assert_eq!(
-                    last_event_id, 14,
-                    "last_event_id should be the buffer's newest event ID"
-                );
-                assert!(!events.is_empty(), "tree dump should contain events");
-            }
-            other => panic!("Expected TreeDump, got: {other:?}"),
-        }
-
-        // Request with start_id older than buffer -> tree dump should include last_event_id=14
-        let result = indexer.get_events_in_id_range(Some(7), None).await;
-        match result {
-            WorkerKvQueryResponse::TreeDump {
-                last_event_id,
-                events,
-            } => {
-                assert_eq!(
-                    last_event_id, 14,
-                    "last_event_id should be the buffer's newest event ID"
-                );
-                assert!(!events.is_empty(), "tree dump should contain events");
-            }
-            other => panic!("Expected TreeDump, got: {other:?}"),
-        }
-
-        // Empty buffer case: create a fresh indexer with no events
         let empty_indexer = LocalKvIndexer::new(
             CancellationToken::new(),
             4,
