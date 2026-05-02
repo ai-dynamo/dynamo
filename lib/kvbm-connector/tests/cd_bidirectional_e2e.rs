@@ -3,20 +3,16 @@
 
 //! Bidirectional conditional-disagg end-to-end test.
 //!
-//! Proves that a single instance can hold BOTH a `RemotePrefillCoordinator`
-//! (decode role) AND a `PrefillCoordinatorImpl` (prefill role) concurrently,
-//! driven against the same `MockInnerLeaderShim` / `MockCdBlockTransport` /
+//! Proves that a single instance can hold BOTH a decode-side and a
+//! prefill-side `ConditionalDisaggCoordinator` concurrently, driven
+//! against the same `MockInnerLeaderShim` / `MockCdBlockTransport` /
 //! `MockCdWorkerHook`.
-//!
-//! This is the empirical foundation for the R-B refactor: the rest of the
-//! refactor assumes this dual-role composition works correctly before
-//! collapsing the two wrappers into a single `UnifiedDisaggLeader`.
 //!
 //! # Instance layout
 //!
 //! Two instances, A and B, each wired with:
-//!   - one `DecodeDisaggLeader` (owns `RemotePrefillCoordinator`)
-//!   - one `PrefillDisaggLeader` (owns `PrefillCoordinatorImpl`)
+//!   - one `DecodeDisaggLeader` (owns a decode-side `ConditionalDisaggCoordinator`)
+//!   - one `PrefillDisaggLeader` (owns a prefill-side `ConditionalDisaggCoordinator`)
 //!   - shared `MockInnerLeaderShim`, `MockCdBlockTransport`, `MockCdWorkerHook`
 //!   - a `MockSessionFactory` paired via `make_paired()` with the other instance
 //!
@@ -35,12 +31,12 @@
 //!
 //! # Inflight-budget finding
 //!
-//! The inflight budget is a field of `DecodeDisaggLeader` only, consumed at
-//! `decode_leader.rs:418` via `self.inflight_budget.try_reserve(...)`.
-//! `PrefillCoordinatorImpl` (`prefill_coordinator.rs`) has no budget field.
-//! Therefore: when instance A acts as *prefill* for request Y, it does NOT
-//! consume from A's decode-side inflight budget. The two roles' budgets are
-//! fully independent by construction.
+//! The inflight budget is a field of `DecodeDisaggLeader` only, consumed
+//! via `self.inflight_budget.try_reserve(...)` at decode-side GNMT. The
+//! prefill side has no budget field. Therefore: when instance A acts as
+//! *prefill* for request Y, it does NOT consume from A's decode-side
+//! inflight budget. The two roles' budgets are fully independent by
+//! construction.
 //!
 //! # Token layout (per direction)
 //!
@@ -576,8 +572,8 @@ async fn bidirectional_sequential_same_instance() -> Result<()> {
 
     // Inflight budget: decode-A's budget was consumed by req-X but released
     // after completion. A's prefill role for req-Y never touched the decode
-    // budget — PrefillCoordinatorImpl has no InflightBudget field. Budget
-    // independence confirmed (see prefill_coordinator.rs and decode_leader.rs:418).
+    // budget — the prefill side has no InflightBudget field. Budget
+    // independence confirmed.
     assert_eq!(instance_a.decode_wrapper.inflight_available(), usize::MAX);
     assert_eq!(instance_b.decode_wrapper.inflight_available(), usize::MAX);
 
@@ -1021,9 +1017,9 @@ async fn bidirectional_concurrent_same_instance() -> Result<()> {
     assert_eq!(instance_b.decode_coord.active_count(), 0);
     assert_eq!(instance_b.prefill_coord.active_count(), 0);
 
-    // Inflight-budget independence: A's decode budget (consumed by req-X at
-    // decode_leader.rs:418) is fully independent of A's prefill coordinator
-    // (for req-Y). PrefillCoordinatorImpl has no InflightBudget field.
+    // Inflight-budget independence: A's decode budget (consumed by req-X
+    // at decode-side GNMT) is fully independent of A's prefill coordinator
+    // (for req-Y). The prefill side has no InflightBudget field.
     assert_eq!(instance_a.decode_wrapper.inflight_available(), usize::MAX);
     assert_eq!(instance_b.decode_wrapper.inflight_available(), usize::MAX);
 

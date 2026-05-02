@@ -620,8 +620,8 @@ async fn cd_prefill_payload_drop_does_not_close_session() -> Result<()> {
 /// against velo heartbeat misconfiguration.
 ///
 /// Uses an injected short watchdog (200ms) via
-/// [`PrefillCoordinatorImpl::new_with_watchdog`]; production is
-/// 60s and is preserved by [`PrefillCoordinatorImpl::new`].
+/// [`ConditionalDisaggCoordinator::new_with_watchdog`]; production is
+/// 60s and is preserved by [`ConditionalDisaggCoordinator::new`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cd_prefill_lifecycle_watchdog_evicts_state() -> Result<()> {
     let h = build_harness_with_watchdog(true, Duration::from_millis(200));

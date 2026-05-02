@@ -7,21 +7,13 @@
 //! Holds a `DashMap<String, Arc<CdRequest>>` keyed by `request_id`.  All
 //! requests are prefill-role in Slice 3; decode role will be added in Slice 4.
 //!
-//! ### Observer strategy (Slice 3)
+//! ### Observer strategy
 //!
-//! A fresh [`ConditionalDecodeG2Observer`] is created at construction time.
-//! Its internal `coordinator` field is left unwired (`Weak::new()`) because
-//! the observer's dispatch path calls `PrefillCoordinatorImpl::commit_output_blocks`,
-//! which is concretely typed.  Slice 3 tests call `commit_output_blocks` on
-//! the coordinator directly — the observer dispatch path is not exercised.
-//! Slice 5 will wire the observer to the new coordinator once the old
-//! coordinator type is retired.
-//!
-//! ### Decode role (future — Slice 4)
-//!
-//! Methods that branch on decode state currently `unreachable!()` — they are
-//! unreachable in Slice 3 because only prefill-classified requests are
-//! registered.  Do NOT call these paths with a decode-role `CdRequest`.
+//! A single [`ConditionalDecodeG2Observer`] is created at construction
+//! time and registered ONCE with the offload pipeline. The coordinator
+//! installs a type-erased commit closure that captures `Weak<Self>` and
+//! re-upgrades per call — decoupled from any concrete coordinator type
+//! so future coordinator variants can drive the same observer.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
@@ -42,11 +34,11 @@ use tokio::runtime::Handle;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::{BlockId, G2, InstanceId, SequenceHash};
 
-use super::super::decode::{BeginOutcome, CdFailureSink, DecodeCoordinator};
+use super::super::decode::{BeginOutcome, CdFailureSink};
 use super::super::lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
 use super::super::peer_resolver::PeerResolver;
 use super::super::prefill_coordinator::{
-    ConditionalDecodeG2Observer, ObserverHandle, PrefillCoordinator, PrefillStatus,
+    ConditionalDecodeG2Observer, ObserverHandle, PrefillStatus,
 };
 use super::super::queue::RemotePrefillQueue;
 use super::super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
@@ -57,12 +49,12 @@ use super::{CdRequest, CdRequestStatus, DecodeBits, PrefillBits};
 // ConditionalDisaggCoordinator
 // ============================================================================
 
-/// Unified per-request coordinator for conditional disaggregation (R-B).
+/// Unified per-request coordinator for conditional disaggregation.
 ///
-/// In Slice 3 only the **prefill role** is implemented.  Decode-role
-/// state will be added in Slice 4.  The struct layout and public API
-/// mirror `PrefillCoordinatorImpl` exactly so the test harness can swap
-/// `Arc<PrefillCoordinatorImpl>` → `Arc<ConditionalDisaggCoordinator>`.
+/// Holds per-request state for both decode-side and prefill-side flows
+/// keyed by `request_id`. Each role's per-side state is carried by the
+/// `CdRequestRole` enum on each `CdRequest`. Construct via [`Self::new`]
+/// (prefill-only) or [`Self::new_with_decode`] (full dual-role).
 pub struct ConditionalDisaggCoordinator {
     inner: Arc<dyn InnerLeaderShim>,
     transport: Arc<dyn CdBlockTransport>,
@@ -256,8 +248,7 @@ impl ConditionalDisaggCoordinator {
     }
 
     /// Commit forward-pass output blocks to the peer via the session's
-    /// commit + availability streams.  Semantics mirror
-    /// `PrefillCoordinatorImpl::commit_output_blocks` exactly.
+    /// commit + availability streams.
     pub fn commit_output_blocks(
         &self,
         request_id: &str,
@@ -763,22 +754,22 @@ impl ConditionalDisaggCoordinator {
 }
 
 // ============================================================================
-// DecodeCoordinator trait impl
+// Decode-role inherent methods
 // ============================================================================
 
-impl DecodeCoordinator for ConditionalDisaggCoordinator {
-    fn evaluate(&self, inputs: &PolicyInputs) -> PrefillSelection {
+impl ConditionalDisaggCoordinator {
+    pub fn evaluate(&self, inputs: &PolicyInputs) -> PrefillSelection {
         self.policy
             .as_ref()
             .expect("evaluate: ConditionalDisaggCoordinator not wired for decode role")
             .evaluate(inputs)
     }
 
-    fn install_failure_sink(&self, sink: Weak<dyn CdFailureSink>) {
+    pub fn install_failure_sink(&self, sink: Weak<dyn CdFailureSink>) {
         *self.failure_sink.lock() = Some(sink);
     }
 
-    fn begin_remote_prefill(
+    pub fn begin_remote_prefill(
         &self,
         request_id: &str,
         inputs: &PolicyInputs,
@@ -901,21 +892,13 @@ impl DecodeCoordinator for ConditionalDisaggCoordinator {
         })
     }
 
-    fn session_for(&self, request_id: &str) -> Option<Arc<dyn Session>> {
+    pub fn session_for(&self, request_id: &str) -> Option<Arc<dyn Session>> {
         self.states
             .get(request_id)
             .and_then(|e| e.value().session.lock().clone())
     }
 
-    fn status_for(&self, request_id: &str) -> Option<super::super::decode::RemotePrefillStatus> {
-        self.status_for_decode(request_id)
-    }
-
-    fn active_count(&self) -> usize {
-        self.states.len()
-    }
-
-    fn release(&self, request_id: &str) {
+    pub fn release(&self, request_id: &str) {
         if let Some(state) = self.states.get(request_id) {
             let session_opt = state.value().session.lock().clone();
             let mut status = state.value().status.lock();
@@ -930,7 +913,7 @@ impl DecodeCoordinator for ConditionalDisaggCoordinator {
         }
     }
 
-    fn mark_failed(&self, request_id: &str, reason: String) {
+    pub fn mark_failed(&self, request_id: &str, reason: String) {
         if let Some(state) = self.states.get(request_id) {
             let session_opt = state.value().session.lock().clone();
             let mut status = state.value().status.lock();
@@ -949,15 +932,11 @@ impl DecodeCoordinator for ConditionalDisaggCoordinator {
 }
 
 // ============================================================================
-// PrefillCoordinator trait impl
+// Prefill-role inherent methods
 // ============================================================================
 
-impl PrefillCoordinator for ConditionalDisaggCoordinator {
-    fn has_active_request(&self, request_id: &str) -> bool {
-        self.states.contains_key(request_id)
-    }
-
-    fn ensure_started(&self, request_id: &str, params: &RemotePrefillParams) -> Result<usize> {
+impl ConditionalDisaggCoordinator {
+    pub fn ensure_started(&self, request_id: &str, params: &RemotePrefillParams) -> Result<usize> {
         if let Some(state) = self.state_for(request_id) {
             let bits = state
                 .as_prefill()
@@ -1044,7 +1023,7 @@ impl PrefillCoordinator for ConditionalDisaggCoordinator {
         Ok(num_external_tokens)
     }
 
-    fn on_usaa(
+    pub fn on_usaa(
         &self,
         request_id: &str,
         block_ids: &[BlockId],
@@ -1057,7 +1036,7 @@ impl PrefillCoordinator for ConditionalDisaggCoordinator {
             .as_prefill()
             .expect("on_usaa: CdRequest must be prefill-role");
 
-        // Post-onboard follow-up USAAs are no-ops (mirrors PrefillCoordinatorImpl).
+        // Post-onboard follow-up USAAs are no-ops.
         if num_external_tokens == 0 && bits.num_external_tokens > 0 {
             return Ok(());
         }
@@ -1123,13 +1102,12 @@ impl PrefillCoordinator for ConditionalDisaggCoordinator {
         Ok(())
     }
 
-    fn observe_forward(&self, _request_id: &str, _meta: &KvConnectorMetadata) -> Result<()> {
-        // No-op: tracking established at ensure_started time (matches
-        // PrefillCoordinatorImpl::observe_forward semantics).
+    pub fn observe_forward(&self, _request_id: &str, _meta: &KvConnectorMetadata) -> Result<()> {
+        // No-op: tracking is established at ensure_started time.
         Ok(())
     }
 
-    fn on_request_finished(&self, request_id: &str) {
+    pub fn on_request_finished(&self, request_id: &str) {
         let Some(state) = self.state_for(request_id) else {
             return;
         };
@@ -1181,8 +1159,8 @@ impl PrefillCoordinator for ConditionalDisaggCoordinator {
             }
         });
 
-        // Mark the coarse status Released (mirrors PrefillCoordinatorImpl).
-        // Per-side PrefillStatus is also set to Released for consistency.
+        // Mark the coarse status Released; per-side PrefillStatus is
+        // also set to Released for consistency.
         *bits.status.lock() = PrefillStatus::Released;
         // Note: do NOT remove RequestState here — the lifecycle watcher
         // removes it on Detach or watchdog.

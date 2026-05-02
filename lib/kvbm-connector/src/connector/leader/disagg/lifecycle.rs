@@ -1,23 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared lifecycle-watcher helper for the conditional-disagg coordinators.
+//! Shared lifecycle-watcher helper for the conditional-disagg coordinator.
 //!
-//! Both [`super::decode::RemotePrefillCoordinator`] and
-//! [`super::prefill_coordinator::PrefillCoordinatorImpl`] spawn a near-
-//! identical tokio task per request:
+//! [`super::coordinator::ConditionalDisaggCoordinator`] spawns one tokio
+//! task per request that:
 //!
-//! 1. Subscribe to the session's [`LifecycleEvent`] stream.
-//! 2. Drive it to a terminal `Detached` / `Failed` (cooperative or
-//!    velo-heartbeat-driven), or fall back to a defensive watchdog.
-//! 3. Run an `on_evict` closure that drops the per-request state map
+//! 1. Subscribes to the session's [`LifecycleEvent`] stream.
+//! 2. Drives it to a terminal `Detached` / `Failed` (cooperative or
+//!    velo-heartbeat-driven), or falls back to a defensive watchdog.
+//! 3. Runs an `on_evict` closure that drops the per-request state map
 //!    entry — releasing the last `Arc<dyn Session>` strong ref so the
 //!    per-session sender task drains and exits.
 //!
-//! Today both coordinators inline that task. This helper consolidates
-//! the pattern so future coordinator code (and the upcoming unified
-//! leader's flow refactor) can share the timing + audit semantics
-//! without duplicating the watch loop.
+//! This helper consolidates the timing + audit semantics so the
+//! coordinator (and any future variants) does not have to duplicate the
+//! watch loop.
 //!
 //! ### Audit event names
 //!

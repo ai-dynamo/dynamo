@@ -47,7 +47,8 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 use crate::{G2, SequenceHash};
 
-use super::decode::{CdFailureSink, DecodeCoordinator};
+use super::decode::CdFailureSink;
+use super::coordinator::ConditionalDisaggCoordinator;
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
 use futures::FutureExt;
@@ -141,7 +142,7 @@ struct CdRequestStatePayload {
     request_id: String,
     reserved_tokens: usize,
     wrapper: Weak<DecodeDisaggLeader>,
-    coordinator: Weak<dyn DecodeCoordinator>,
+    coordinator: Weak<ConditionalDisaggCoordinator>,
 }
 
 impl std::fmt::Debug for CdRequestStatePayload {
@@ -221,7 +222,7 @@ impl CdRequestState {
 pub struct DecodeDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
     role: DisaggregationRole,
-    coordinator: Arc<dyn DecodeCoordinator>,
+    coordinator: Arc<ConditionalDisaggCoordinator>,
     transport: Arc<dyn CdBlockTransport>,
     worker_hook: Arc<dyn CdWorkerHook>,
     tokio_handle: tokio::runtime::Handle,
@@ -249,15 +250,11 @@ impl std::fmt::Debug for DecodeDisaggLeader {
 }
 
 impl DecodeDisaggLeader {
-    /// Construct a `DecodeDisaggLeader` with any type that implements
-    /// [`DecodeCoordinator`].  Accepts both [`RemotePrefillCoordinator`]
-    /// (legacy path) and [`super::coordinator::ConditionalDisaggCoordinator`]
-    /// (R-B Slice 4) without requiring an explicit coercion at the call
-    /// site.
-    pub fn from_parts<C: DecodeCoordinator + 'static>(
+    /// Construct a `DecodeDisaggLeader`.
+    pub fn from_parts(
         inner: Arc<dyn InnerLeaderShim>,
         config: &DisaggConfig,
-        coordinator: Arc<C>,
+        coordinator: Arc<ConditionalDisaggCoordinator>,
         transport: Arc<dyn CdBlockTransport>,
         worker_hook: Arc<dyn CdWorkerHook>,
         tokio_handle: tokio::runtime::Handle,
@@ -265,7 +262,6 @@ impl DecodeDisaggLeader {
         client: Option<Arc<ConditionalDisaggClient>>,
         hub_velo_id: Option<InstanceId>,
     ) -> Arc<Self> {
-        let coordinator: Arc<dyn DecodeCoordinator> = coordinator;
         let inflight_budget = InflightBudget::new(config.max_inflight_remote_prefill_tokens);
         let leader = Arc::new_cyclic(|weak_self| Self {
             inner,
@@ -313,7 +309,7 @@ impl DecodeDisaggLeader {
         self.hub_velo_id
     }
 
-    pub fn coordinator(&self) -> &Arc<dyn DecodeCoordinator> {
+    pub fn coordinator(&self) -> &Arc<ConditionalDisaggCoordinator> {
         &self.coordinator
     }
 
@@ -563,7 +559,7 @@ impl DecodeDisaggLeader {
                 // process_finished_onboarding takes the
                 // OnboardingState, the payload's Drop runs the
                 // canonical cleanup chain.
-                let coordinator_weak: Weak<dyn DecodeCoordinator> =
+                let coordinator_weak: Weak<ConditionalDisaggCoordinator> =
                     Arc::downgrade(&self.coordinator);
                 let payload = Box::new(CdRequestStatePayload {
                     request_id: request_id.to_string(),

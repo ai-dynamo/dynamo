@@ -1,24 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-request state for the unified conditional-disagg coordinator
-//! (R-B Slice 2).
+//! Per-request state for the unified conditional-disagg coordinator.
 //!
-//! Today the decode side ([`super::decode::RemotePrefillCoordinator`]
-//! + [`super::decode_leader::DecodeDisaggLeader`]) and the prefill
-//! side ([`super::prefill_coordinator::PrefillCoordinatorImpl`])
-//! each maintain their own per-request structs. The R-B refactor
-//! collapses them onto one [`CdRequest`] type whose role-conditional
-//! fields are carried by a [`CdRequestRole`] enum.
-//!
-//! ## Slice 2 status
-//!
-//! These types are introduced but **not yet wired**.  Slice 3
-//! (prefill flow) and Slice 4 (decode flow) plug the new
-//! [`super::coordinator::ConditionalDisaggCoordinator`] in against
-//! these types; Slice 5 retires the per-side types.  Until then the
-//! production hot path uses the existing per-side coordinators —
-//! consult `/home/ryan/.claude/plans/cd-unified-leader-rb.md` §5.
+//! Both the decode side ([`super::decode_leader::DecodeDisaggLeader`])
+//! and the prefill side ([`super::prefill_leader::PrefillDisaggLeader`])
+//! share a single [`CdRequest`] type whose role-conditional fields are
+//! carried by a [`CdRequestRole`] enum.
+//! [`super::coordinator::ConditionalDisaggCoordinator`] owns the
+//! `DashMap<String, Arc<CdRequest>>` and drives both sides.
 //!
 //! ## Field layout — what's shared vs role-conditional
 //!
@@ -93,9 +83,9 @@ pub enum CdRequestRole {
     Prefill(PrefillBits),
 }
 
-/// Decode-side state.  Mirrors the union of today's
-/// `RemotePrefillState` ([`super::decode::RemotePrefillState`]) and
-/// `CdRequestState` (private to `decode_leader.rs`).
+/// Decode-side state.  Holds everything the decode leader tracks
+/// per request: budget reservation, local-match block pins, remote
+/// pipeline completion, and failure reason.
 ///
 /// `reserved_tokens` is the count consumed from the
 /// `InflightBudget` at gnmt time; the budget release is the leader
@@ -121,9 +111,7 @@ pub struct DecodeBits {
     pub completed: AtomicBool,
 }
 
-/// Prefill-side state.  Mirrors today's
-/// `PrefillCoordinatorImpl::RequestState` field-for-field; the only
-/// move during R-B is the location, not the semantics.
+/// Prefill-side state.
 pub struct PrefillBits {
     pub num_external_tokens: usize,
     pub expected_hashes: Vec<SequenceHash>,

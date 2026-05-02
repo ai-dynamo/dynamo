@@ -52,22 +52,23 @@
 //!
 //! # Role dispatch
 //!
-//! The wrapper reads the manager role per call (no caching) so a future
-//! hub-controlled role-swap can change behavior on the next call without
-//! restructuring this API. The Prefill arm is currently `todo!()` until
-//! that side is wired in a follow-up.
+//! [`ConditionalDisaggLeader`] (in [`leader`]) holds the decode and
+//! prefill flow leaders as `Option<Arc<...>>` and dispatches per request
+//! by reading `TransferParams::remote_prefill` off the slot:
+//! `Some(..)` ⇒ prefill flow; `None` ⇒ decode flow. Each instance wires
+//! exactly one flow today (the kvbm-hub registers under a single role)
+//! but the leader is forward-compatible with both flows simultaneously.
 
-pub mod conditional_leader;
 pub mod coordinator;
 pub mod decode;
 pub mod decode_leader;
+pub mod leader;
 pub mod lifecycle;
 pub mod peer_resolver;
 pub mod prefill_coordinator;
 pub mod prefill_leader;
 pub mod queue;
 pub mod transport;
-pub mod unified;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -83,23 +84,18 @@ use crate::common::RequestMetadata;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
-pub use conditional_leader::{ConditionalDisaggLeader, register_with_hub};
+pub use leader::{ConditionalDisaggLeader, ConditionalDisaggLeaderBuilder, register_with_hub};
 pub use coordinator::ConditionalDisaggCoordinator;
-pub use decode::{
-    BeginOutcome, CdFailureSink, DecodeCoordinator, RemotePrefillCoordinator, RemotePrefillState,
-    RemotePrefillStatus,
-};
+pub use decode::{BeginOutcome, CdFailureSink, RemotePrefillStatus};
 pub use decode_leader::DecodeDisaggLeader;
 pub use lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
 pub use peer_resolver::{HubPeerResolver, PeerResolver};
-pub use prefill_coordinator::PrefillCoordinator;
 pub use prefill_leader::PrefillDisaggLeader;
 pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
 pub use transport::{
     CdBlockTransport, CdWorkerHook, ConnectorLeaderShim, EngineCdBlockTransport, InnerLeaderShim,
     InnerLeaderWorkerHook,
 };
-pub use unified::{UnifiedDisaggLeader, UnifiedDisaggLeaderBuilder};
 
 /// Scheduler-facing connector leader API used by wrappers/compositions.
 ///

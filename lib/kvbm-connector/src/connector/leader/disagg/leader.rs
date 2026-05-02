@@ -1,68 +1,44 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-request dispatching conditional-disagg leader.
+//! Conditional-disaggregation leader.
 //!
-//! Replaces the per-instance role dispatch in
-//! [`super::ConditionalDisaggLeader`] with a per-request rule:
+//! Per-request dispatching `ConnectorLeaderApi` impl. Dispatch rule:
 //!
 //! - Slot has `TransferParams::remote_prefill = Some(..)` → route to the
-//!   wired prefill flow (this instance is the puller; the request was
-//!   produced by a remote decode peer that already opened a session).
-//! - Slot has no `TransferParams` → route to the wired decode flow (this
-//!   instance is the initiator; the policy decides whether the request
-//!   actually goes remote).
-//! - Classified flow not wired → fall through to the inner leader
-//!   (matches today's prefill-side `non_cd` passthrough behavior).
+//!   wired prefill flow.
+//! - Slot has no `TransferParams` → route to the wired decode flow.
+//! - Classified flow not wired → fall through to the inner leader.
 //!
-//! The unified leader holds the existing role-specific leaders unchanged
-//! ([`super::DecodeDisaggLeader`] / [`super::PrefillDisaggLeader`]) and
-//! dispatches per-request.  Both can be wired simultaneously; today's
-//! production wiring sets exactly one because the kvbm-hub registers
-//! each instance under a single role and queue routing is single-role.
+//! Both flows can be wired simultaneously. Today's production wiring sets
+//! exactly one because the kvbm-hub registers each instance under a single
+//! role, but the leader is forward-compatible with both.
 //!
-//! ### Why this exists alongside [`super::ConditionalDisaggLeader`]
-//!
-//! The old [`super::ConditionalDisaggLeader`] is a role-dispatching
-//! wrapper that holds an `Arc<dyn ConnectorLeaderApi>` chosen at init
-//! time from `DisaggConfig::role`.  Its impl is a pure forward to the
-//! inner; it has no per-request logic.  The unified leader replaces
-//! that role wiring with TransferParams-based per-request dispatch,
-//! enabling future homogeneous (single-role-per-instance lifted)
-//! deployments.  The old type stays in place during validation; it
-//! will be removed once the unified leader has soaked.
-//!
-//! ### Audit semantics during transition
-//!
-//! When only one flow is wired (the production case during validation),
-//! audits emitted by the wrapped leader carry the same `role` tag as
-//! before — `role = "decode"` on a decode-only instance, `role =
-//! "prefill"` on a prefill-only instance.  When both flows are wired,
-//! per-request audits inside the leaders still tag accurately because
-//! each leader knows its own role; only `create_slot` /
-//! `update_connector_output` / `build_connector_meta` (which precede
-//! per-request classification or are per-tick) prefer the
-//! decode-or-prefill flow that is wired.
+//! Holds the existing role-specific helper leaders unchanged
+//! ([`super::DecodeDisaggLeader`] / [`super::PrefillDisaggLeader`]) as
+//! internal flow types.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use kvbm_hub::{ConditionalDisaggClient, HubClient};
-use velo::InstanceId;
+use anyhow::{Context, Result, anyhow};
+use kvbm_config::{DisaggConfig, DisaggregationRole};
+use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggRole, HubClient, HubClientBuilder};
+use url::Url;
+use velo::{InstanceId, Messenger};
 
 use crate::BlockId;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 
 use super::ConnectorLeaderApi;
+use super::coordinator::ConditionalDisaggCoordinator;
 use super::decode_leader::DecodeDisaggLeader;
-use super::prefill_coordinator::PrefillCoordinator;
 use super::prefill_leader::PrefillDisaggLeader;
 use super::transport::InnerLeaderShim;
 use crate::connector::leader::audit::audit_build_meta;
 
-/// Per-request classification used by [`UnifiedDisaggLeader`] to choose
+/// Per-request classification used by [`ConditionalDisaggLeader`] to choose
 /// which wired flow handles a given API call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestRole {
@@ -81,13 +57,13 @@ enum RequestRole {
 
 /// Per-request-dispatching conditional-disaggregation leader.
 ///
-/// Construct with [`UnifiedDisaggLeader::builder`].
+/// Construct with [`ConditionalDisaggLeader::builder`].
 ///
 /// ### Tick-level method semantics
 ///
 /// For methods that aren't scoped to a specific request id
 /// (`create_slot`, `build_connector_meta`, `update_connector_output`),
-/// the unified leader calls `inner.<method>` exactly once and applies
+/// the leader calls `inner.<method>` exactly once and applies
 /// each wired flow's decorator (audit emissions and, for prefill,
 /// the coordinator's `observe_forward`) on top.  This is the
 /// "decorator" model — flows observe a single canonical inner call
@@ -98,23 +74,23 @@ enum RequestRole {
 /// request via `slot_transfer_params` and dispatch to exactly the
 /// wrapped flow leader for that request's role; the flow leader
 /// drives its own inner call as today.
-pub struct UnifiedDisaggLeader {
+pub struct ConditionalDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
     decode: Option<Arc<DecodeDisaggLeader>>,
     prefill: Option<Arc<PrefillDisaggLeader>>,
     /// Prefill coordinator held independently of `prefill` so the
-    /// unified leader's `build_connector_meta` can invoke
+    /// leader's `build_connector_meta` can invoke
     /// `observe_forward` without going through the leader (which
     /// would call `inner.build_connector_meta` again).
-    prefill_coordinator: Option<Arc<dyn PrefillCoordinator>>,
+    prefill_coordinator: Option<Arc<ConditionalDisaggCoordinator>>,
     hub: Option<Arc<HubClient>>,
     client: Option<Arc<ConditionalDisaggClient>>,
     hub_velo_id: Option<InstanceId>,
 }
 
-impl std::fmt::Debug for UnifiedDisaggLeader {
+impl std::fmt::Debug for ConditionalDisaggLeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UnifiedDisaggLeader")
+        f.debug_struct("ConditionalDisaggLeader")
             .field("decode_wired", &self.decode.is_some())
             .field("prefill_wired", &self.prefill.is_some())
             .field("hub_velo_id", &self.hub_velo_id)
@@ -122,19 +98,19 @@ impl std::fmt::Debug for UnifiedDisaggLeader {
     }
 }
 
-/// Builder for [`UnifiedDisaggLeader`].  At least one flow must be set
+/// Builder for [`ConditionalDisaggLeader`].  At least one flow must be set
 /// before [`build`](Self::build).
-pub struct UnifiedDisaggLeaderBuilder {
+pub struct ConditionalDisaggLeaderBuilder {
     inner: Arc<dyn InnerLeaderShim>,
     decode: Option<Arc<DecodeDisaggLeader>>,
     prefill: Option<Arc<PrefillDisaggLeader>>,
-    prefill_coordinator: Option<Arc<dyn PrefillCoordinator>>,
+    prefill_coordinator: Option<Arc<ConditionalDisaggCoordinator>>,
     hub: Option<Arc<HubClient>>,
     client: Option<Arc<ConditionalDisaggClient>>,
     hub_velo_id: Option<InstanceId>,
 }
 
-impl UnifiedDisaggLeaderBuilder {
+impl ConditionalDisaggLeaderBuilder {
     pub fn with_decode(mut self, decode: Arc<DecodeDisaggLeader>) -> Self {
         self.decode = Some(decode);
         self
@@ -143,14 +119,14 @@ impl UnifiedDisaggLeaderBuilder {
     /// Wire the prefill flow.  Both the leader (for per-request
     /// dispatch in GNMT/USAA/request_finished) and its coordinator
     /// (for the tick-level `observe_forward` decorator on
-    /// `build_connector_meta`) are required so the unified leader
+    /// `build_connector_meta`) are required so the leader
     /// can run the prefill side without re-entering
     /// `PrefillDisaggLeader::build_connector_meta` (which would
     /// double-call inner).
     pub fn with_prefill(
         mut self,
         prefill: Arc<PrefillDisaggLeader>,
-        coordinator: Arc<dyn PrefillCoordinator>,
+        coordinator: Arc<ConditionalDisaggCoordinator>,
     ) -> Self {
         self.prefill = Some(prefill);
         self.prefill_coordinator = Some(coordinator);
@@ -172,10 +148,10 @@ impl UnifiedDisaggLeaderBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Arc<UnifiedDisaggLeader>> {
+    pub fn build(self) -> Result<Arc<ConditionalDisaggLeader>> {
         if self.decode.is_none() && self.prefill.is_none() {
             anyhow::bail!(
-                "UnifiedDisaggLeader requires at least one flow to be wired \
+                "ConditionalDisaggLeader requires at least one flow to be wired \
                  (call .with_decode(..) and/or .with_prefill(.., ..))"
             );
         }
@@ -185,7 +161,7 @@ impl UnifiedDisaggLeaderBuilder {
                  (internal invariant)"
             );
         }
-        Ok(Arc::new(UnifiedDisaggLeader {
+        Ok(Arc::new(ConditionalDisaggLeader {
             inner: self.inner,
             decode: self.decode,
             prefill: self.prefill,
@@ -197,12 +173,12 @@ impl UnifiedDisaggLeaderBuilder {
     }
 }
 
-impl UnifiedDisaggLeader {
+impl ConditionalDisaggLeader {
     /// Begin a new builder.  `inner` is the shared shim used for the
     /// classification lookup (`slot_transfer_params`) and for fall-through
     /// routing when neither flow is wired for a given request role.
-    pub fn builder(inner: Arc<dyn InnerLeaderShim>) -> UnifiedDisaggLeaderBuilder {
-        UnifiedDisaggLeaderBuilder {
+    pub fn builder(inner: Arc<dyn InnerLeaderShim>) -> ConditionalDisaggLeaderBuilder {
+        ConditionalDisaggLeaderBuilder {
             inner,
             decode: None,
             prefill: None,
@@ -276,7 +252,7 @@ impl UnifiedDisaggLeader {
     }
 }
 
-impl ConnectorLeaderApi for UnifiedDisaggLeader {
+impl ConnectorLeaderApi for ConditionalDisaggLeader {
     fn create_slot(&self, request: Request) -> Result<()> {
         // Decorator model: emit each wired flow's create_slot audit
         // (preserving its exact field shape — both flows happen to
@@ -470,6 +446,67 @@ impl ConnectorLeaderApi for UnifiedDisaggLeader {
     }
 }
 
+// ============================================================================
+// Hub registration
+// ============================================================================
+
+pub async fn register_with_hub(
+    config: &DisaggConfig,
+    messenger: Arc<Messenger>,
+) -> Result<(
+    Arc<HubClient>,
+    Arc<ConditionalDisaggClient>,
+    Option<InstanceId>,
+)> {
+    let hub = build_hub_client(&config.hub_url)?;
+
+    hub.register_handlers_messenger(&messenger)
+        .context("installing hub velo handlers on leader messenger")?;
+
+    let cd_role = role_to_hub(config.role);
+    let client =
+        ConditionalDisaggClient::with_messenger(Arc::clone(&hub), messenger.clone(), cd_role);
+
+    let peer_info = messenger.peer_info();
+    let hub_velo_id = client
+        .register(peer_info)
+        .await
+        .with_context(|| format!("registering with kvbm-hub at {}", config.hub_url))?;
+
+    tracing::info!(
+        role = ?config.role,
+        hub_url = %config.hub_url,
+        hub_velo_id = ?hub_velo_id,
+        "Registered with kvbm-hub"
+    );
+
+    Ok((hub, client, hub_velo_id))
+}
+
+fn role_to_hub(role: DisaggregationRole) -> ConditionalDisaggRole {
+    match role {
+        DisaggregationRole::Prefill => ConditionalDisaggRole::Prefill,
+        DisaggregationRole::Decode => ConditionalDisaggRole::Decode,
+    }
+}
+
+fn build_hub_client(hub_url: &str) -> Result<Arc<HubClient>> {
+    let url =
+        Url::parse(hub_url).with_context(|| format!("parsing disagg hub_url: {}", hub_url))?;
+    let scheme = url.scheme().to_string();
+    let host = match url.host_str() {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => return Err(anyhow!("disagg hub_url has no host: {}", hub_url)),
+    };
+    let discovery_port = url.port_or_known_default().unwrap_or(1337);
+
+    HubClientBuilder::new()
+        .scheme(scheme)
+        .host(host)
+        .discovery_port(discovery_port)
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,7 +556,7 @@ mod tests {
     #[test]
     fn builder_requires_at_least_one_flow() {
         let inner = MockInnerLeaderShim::new(TEST_BLOCK_SIZE, make_g2_manager());
-        let result = UnifiedDisaggLeader::builder(inner).build();
+        let result = ConditionalDisaggLeader::builder(inner).build();
         let err = result.expect_err("expected builder error with no flows wired");
         assert!(
             err.to_string().contains("at least one flow"),
@@ -531,10 +568,11 @@ mod tests {
     /// `classify`'s parameter-shape branches without standing up real
     /// `DecodeDisaggLeader` / `PrefillDisaggLeader` instances.  Real-flow
     /// routing (where `classify` returns `Decode` / `Prefill`) is
-    /// exercised by the integration test in
-    /// `tests/cd_unified_dispatch.rs`.
-    fn no_flows_leader(inner: Arc<dyn InnerLeaderShim>) -> UnifiedDisaggLeader {
-        UnifiedDisaggLeader {
+    /// exercised by the integration tests in `tests/cd_decode_e2e.rs`,
+    /// `tests/cd_prefill_e2e.rs`, `tests/cd_loopback.rs`, and
+    /// `tests/cd_bidirectional_e2e.rs`.
+    fn no_flows_leader(inner: Arc<dyn InnerLeaderShim>) -> ConditionalDisaggLeader {
+        ConditionalDisaggLeader {
             inner,
             decode: None,
             prefill: None,
@@ -591,14 +629,45 @@ mod tests {
         );
     }
 
-    // Single-flow and both-flows-wired routing matrix is exercised
-    // by the integration tests:
-    //   - tests/cd_unified_audit_equiv.rs           (decode-only)
-    //   - tests/cd_unified_prefill_audit_equiv.rs   (prefill-only)
-    //   - tests/cd_unified_both_wired.rs            (both wired)
-    //   - tests/cd_unified_dispatch.rs              (cross-shape)
-    // Constructing real `DecodeDisaggLeader` / `PrefillDisaggLeader`
-    // instances inside this unit-test module would duplicate those
-    // harnesses; the unit tests above focus narrowly on the
-    // no-flows-wired short-circuit.
+    // The unit tests above only cover the no-flows-wired
+    // short-circuit branch. The real-flow branches (decode-only,
+    // prefill-only, both-wired with `TransferParams`-based dispatch)
+    // are covered end-to-end by the audit-equiv smoke (live disagg
+    // R1+R2 against `kvbm-hub`); the per-request classify+dispatch
+    // is trivial enough that smoke is a sufficient gate.
+    //
+    // Integration tests `cd_decode_e2e.rs`, `cd_prefill_e2e.rs`,
+    // `cd_loopback.rs`, and `cd_bidirectional_e2e.rs` construct the
+    // inner `DecodeDisaggLeader` / `PrefillDisaggLeader` flow types
+    // directly (not via `ConditionalDisaggLeader`); they exercise
+    // inner-flow logic but not the classify+dispatch layer.
+
+    #[test]
+    fn role_maps_to_hub_role() {
+        assert_eq!(
+            role_to_hub(DisaggregationRole::Prefill),
+            ConditionalDisaggRole::Prefill
+        );
+        assert_eq!(
+            role_to_hub(DisaggregationRole::Decode),
+            ConditionalDisaggRole::Decode
+        );
+    }
+
+    #[test]
+    fn build_hub_client_accepts_explicit_port() {
+        let client = build_hub_client("http://127.0.0.1:1337").unwrap();
+        assert_eq!(client.config().discovery_url.port(), Some(1337));
+    }
+
+    #[test]
+    fn build_hub_client_rejects_malformed_url() {
+        assert!(build_hub_client("not a url").is_err());
+    }
+
+    #[test]
+    fn build_hub_client_defaults_control_port() {
+        let client = build_hub_client("http://127.0.0.1:1337").unwrap();
+        assert_eq!(client.config().control_url.port(), Some(8337));
+    }
 }

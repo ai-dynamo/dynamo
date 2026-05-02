@@ -21,7 +21,7 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 
 use super::ConnectorLeaderApi;
-use super::prefill_coordinator::PrefillCoordinator;
+use super::coordinator::ConditionalDisaggCoordinator;
 use super::transport::{CdWorkerHook, InnerLeaderShim};
 
 /// RAII payload installed on the prefill slot's `OnboardingState`
@@ -40,7 +40,7 @@ use super::transport::{CdWorkerHook, InnerLeaderShim};
 struct PrefillCdOnboardingPayload {
     request_id: String,
     #[allow(dead_code)]
-    coordinator: std::sync::Weak<dyn PrefillCoordinator>,
+    coordinator: std::sync::Weak<ConditionalDisaggCoordinator>,
 }
 
 impl std::fmt::Debug for PrefillCdOnboardingPayload {
@@ -72,7 +72,7 @@ impl Drop for PrefillCdOnboardingPayload {
 
 pub struct PrefillDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
-    coordinator: Arc<dyn PrefillCoordinator>,
+    coordinator: Arc<ConditionalDisaggCoordinator>,
     #[allow(dead_code)]
     worker_hook: Arc<dyn CdWorkerHook>,
 }
@@ -86,7 +86,7 @@ impl std::fmt::Debug for PrefillDisaggLeader {
 impl PrefillDisaggLeader {
     pub fn from_parts(
         inner: Arc<dyn InnerLeaderShim>,
-        coordinator: Arc<dyn PrefillCoordinator>,
+        coordinator: Arc<ConditionalDisaggCoordinator>,
         worker_hook: Arc<dyn CdWorkerHook>,
     ) -> Arc<Self> {
         Arc::new(Self {
