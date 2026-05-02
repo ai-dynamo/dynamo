@@ -194,6 +194,140 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+/// `flock(LOCK_EX)` on `<blob>.lock`. Per-open-file-description
+/// semantics serialize both intra- and inter-process callers, so a
+/// single layer covers both. Released when `_file` drops.
+struct BlobLock {
+    _file: std::fs::File,
+}
+
+impl BlobLock {
+    async fn acquire(blob_path: &Path) -> anyhow::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let lock_path = blob_path.with_extension("lock");
+        let file = tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .with_context(|| format!("opening lock file {}", lock_path.display()))?;
+            // SAFETY: `f` is open and owned; `flock` is a stable syscall.
+            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                anyhow::bail!(
+                    "flock {} failed: {}",
+                    lock_path.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+            Ok(f)
+        })
+        .await
+        .context("flock spawn_blocking task panicked")??;
+        Ok(Self { _file: file })
+    }
+}
+
+/// MDC cache: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`.
+/// The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/` and
+/// isolates worker sets that share a model name but publish different
+/// file content.
+fn mdc_cache_root() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".cache/dynamo/mdc")
+}
+
+fn mdc_blobs_dir() -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root().join("blobs");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating MDC blobs dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn mdc_slug_dir(slug: &Slug, mdcsum: &str) -> anyhow::Result<PathBuf> {
+    let dir = mdc_cache_root()
+        .join("by-slug")
+        .join(slug.to_string())
+        .join(mdcsum);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating MDC slug dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Per-call tmp path next to `dest`. pid + uuid suffix keeps tmps
+/// disjoint across concurrent callers so `rename(2)` is the only
+/// synchronization point — never `create(tmp)`.
+fn unique_tmp_path(dest: &Path) -> PathBuf {
+    let suffix = format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let name = dest
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut p = dest.to_path_buf();
+    p.set_file_name(format!("{name}.{suffix}"));
+    p
+}
+
+/// Atomic publish: stage via `f(&tmp)`, then `rename(tmp -> dest)`.
+/// Concurrent-safe because tmps are per-call (see [`unique_tmp_path`])
+/// and `rename(2)` is atomic + overwrites. Tmp is unlinked on any
+/// failure.
+async fn stage_and_rename<F, Fut>(dest: &Path, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let tmp = unique_tmp_path(dest);
+    if let Err(err) = f(tmp.clone()).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(err);
+    }
+    if let Err(err) = tokio::fs::rename(&tmp, dest).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        anyhow::bail!("renaming {} -> {}: {err}", tmp.display(), dest.display());
+    }
+    Ok(())
+}
+
+/// Sync sibling of [`stage_and_rename`] for cheap operations
+/// (e.g., creating a symlink).
+fn stage_and_rename_sync<F>(dest: &Path, f: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&Path) -> anyhow::Result<()>,
+{
+    let tmp = unique_tmp_path(dest);
+    if let Err(err) = f(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("renaming {} -> {}: {err}", tmp.display(), dest.display());
+    }
+    Ok(())
+}
+
+/// Concurrent-safe via [`stage_and_rename_sync`].
+fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
+    stage_and_rename_sync(link, |tmp| {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, tmp)
+            .with_context(|| format!("symlinking {} -> {}", tmp.display(), target.display()))?;
+        #[cfg(not(unix))]
+        std::fs::copy(target, tmp)
+            .map(|_| ())
+            .with_context(|| format!("copying {} -> {}", target.display(), tmp.display()))?;
+        Ok(())
+    })
+}
+
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
     match p {
         PromptFormatterArtifact::HfTokenizerConfigJson(cf)
