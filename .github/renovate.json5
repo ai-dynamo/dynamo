@@ -1,37 +1,66 @@
-// Renovate config: keeps the SMG chart pin in sync with upstream.
+// Renovate config for the production GitOps profile.
 //
-// Watches lightseekorg/smg git tags and opens a PR each time a new
-// release lands, bumping BOTH:
-//   1. ArgoCD `targetRevision` in deploy/production/gitops/apps/70-smg.yaml
-//   2. Image `tag` in deploy/production/addons/smg/values.yaml
+// Coverage:
+//   * All ArgoCD Applications under deploy/production/gitops/{apps,optional}/
+//     -- Renovate's native `argocd` manager bumps `targetRevision` on
+//     each Helm chart and git-sourced reference.
+//   * SMG-specific image tag in addons/smg/values.yaml (custom regex).
+//   * Sibling Postgres image tag in addons/smg-postgres/postgres.yaml
+//     (custom regex matching `image: postgres:X.Y-alpine`).
 //
-// We treat SMG as a normal semver chart: minor and patch auto-merge once
-// CI passes; major releases stay open for human review (the SMG layer
-// owns auth + retry + circuit-breaker semantics that can shift across
-// majors).
+// Update policy:
+//   * patch + minor -> auto-merge after CI passes (preferred per
+//     ai-blaise/dynamo-prod-k8s#1 follow-up: "automatic updating is
+//     preferred").
+//   * major -> open PR with `needs-human-review` label. Major bumps to
+//     SMG, the Dynamo platform chart, kube-prometheus-stack, and the
+//     GPU operator each carry contract changes that should be read
+//     deliberately, not auto-merged.
+//
+// Add a new addon? Renovate's argocd manager picks it up automatically
+// from the gitops/apps/ directory -- no config edit needed unless the
+// addon also pins something *outside* an ArgoCD Application (image tags
+// inside a values.yaml, for instance). For those, add a customManagers
+// entry following the SMG and Postgres patterns below.
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["config:recommended", ":prHourlyLimitNone"],
+
+  // Native argocd manager: walks YAML files looking for ArgoCD
+  // Application kinds and bumps targetRevision. Limit the search to
+  // the production GitOps tree so Renovate doesn't churn on docs or
+  // examples.
+  argocd: {
+    managerFilePatterns: [
+      "deploy/production/gitops/apps/.*\\.yaml$",
+      "deploy/production/gitops/optional/.*\\.yaml$",
+    ],
+  },
+
   packageRules: [
+    // Auto-merge ArgoCD-tracked chart bumps for patch + minor.
     {
-      // SMG chart targetRevision in the ArgoCD Application
-      matchFileNames: ["deploy/production/gitops/apps/70-smg.yaml"],
-      matchPackageNames: ["lightseekorg/smg"],
-      datasourceTemplate: "github-tags",
-      groupName: "smg",
+      matchManagers: ["argocd"],
+      matchUpdateTypes: ["patch", "minor"],
       automerge: true,
       automergeType: "pr",
-      matchUpdateTypes: ["minor", "patch"],
+      platformAutomerge: true,
     },
+    // Major chart bumps must be reviewed.
     {
-      // SMG image tag in the addon values.yaml
-      matchFileNames: ["deploy/production/addons/smg/values.yaml"],
+      matchManagers: ["argocd"],
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      labels: ["needs-human-review"],
+    },
+    // SMG image tag: same auto/manual split as the chart.
+    {
       matchPackageNames: ["lightseekorg/smg"],
-      datasourceTemplate: "docker",
+      matchUpdateTypes: ["patch", "minor"],
       groupName: "smg",
       automerge: true,
       automergeType: "pr",
-      matchUpdateTypes: ["minor", "patch"],
+      platformAutomerge: true,
     },
     {
       matchPackageNames: ["lightseekorg/smg"],
@@ -39,20 +68,26 @@
       automerge: false,
       labels: ["needs-human-review"],
     },
-  ],
-  customManagers: [
+    // Sibling Postgres for SMG history.
     {
-      // Match the targetRevision: vX.Y.Z line in 70-smg.yaml.
-      customType: "regex",
-      managerFilePatterns: ["deploy/production/gitops/apps/70-smg\\.yaml$"],
-      matchStrings: [
-        "repoURL:\\s*https://github\\.com/lightseekorg/smg\\.git\\s*\\n\\s*targetRevision:\\s*(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)",
-      ],
-      depNameTemplate: "lightseekorg/smg",
-      datasourceTemplate: "github-tags",
+      matchPackageNames: ["postgres"],
+      matchUpdateTypes: ["patch", "minor"],
+      groupName: "smg-postgres",
+      automerge: true,
+      automergeType: "pr",
+      platformAutomerge: true,
     },
     {
-      // Match the image tag in addons/smg/values.yaml.
+      matchPackageNames: ["postgres"],
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      labels: ["needs-human-review"],
+    },
+  ],
+
+  customManagers: [
+    // SMG router image tag pinned in the addon values.yaml.
+    {
       customType: "regex",
       managerFilePatterns: ["deploy/production/addons/smg/values\\.yaml$"],
       matchStrings: [
@@ -61,6 +96,18 @@
       depNameTemplate: "lightseekorg/smg",
       datasourceTemplate: "docker",
       registryUrlTemplate: "https://ghcr.io",
+    },
+    // Sibling Postgres image (postgres:X.Y-alpine) inside the
+    // hand-rolled StatefulSet for SMG's history backend.
+    {
+      customType: "regex",
+      managerFilePatterns: ["deploy/production/addons/smg-postgres/postgres\\.yaml$"],
+      matchStrings: [
+        "image:\\s*postgres:(?<currentValue>[0-9]+\\.[0-9]+)-alpine",
+      ],
+      depNameTemplate: "postgres",
+      datasourceTemplate: "docker",
+      versioningTemplate: "docker",
     },
   ],
 }

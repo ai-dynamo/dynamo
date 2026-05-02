@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mirror the cluster's HF token into the `smg` namespace so the SMG
+# router can download the tokenizer for the gated DeepSeek-V3.2-REAP
+# model. Uses the external-secrets-operator addon already in the
+# production profile (see addons/external-secrets/).
+#
+# The source secret is the same one consumed by the SGLang workers
+# in the dynamo-system namespace (envFromSecret: hf-token-secret in
+# examples/deepseek-v32-reap-sglang.yaml). We expose it under the env
+# var name HF_TOKEN that the SMG chart reads via router.extraEnv.
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: smg-hf-token
+  namespace: smg
+  labels:
+    app.kubernetes.io/name: smg-hf-token
+    app.kubernetes.io/part-of: dynamo-production
+spec:
+  refreshInterval: 1h
+  # Cluster store provisioned by addons/external-secrets/ — must exist
+  # at the time this ExternalSecret syncs. addons/clustersecretstore-aws.yaml
+  # in deploy/production/examples/ shows the AWS-backed pattern; on
+  # other backends adjust the storeRef accordingly.
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aws-secrets
+  target:
+    name: smg-hf-token
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: smg-hf-token
+          app.kubernetes.io/part-of: dynamo-production
+      data:
+        # Single env-var-shaped key the SMG router consumes.
+        HF_TOKEN: "{{ .token }}"
+  data:
+    # Pulls the same secret path the dynamo-system hf-token-secret uses;
+    # see addons/external-secrets/ wiring for the path convention. The
+    # secret is shared across namespaces so the workers and the SMG
+    # router stay in sync if the token is rotated.
+    - secretKey: token
+      remoteRef:
+        key: huggingface/token

@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Sibling Postgres for SMG's history backend. Sync-wave 6: lands
+# before SMG (wave 7) so the smg-postgres Service exists when the
+# router pod starts and tries to open its history connection pool.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: smg-postgres
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  project: dynamo-production
+  source:
+    repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
+    targetRevision: main
+    path: deploy/production/addons/smg-postgres
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: smg
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
