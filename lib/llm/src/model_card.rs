@@ -1763,4 +1763,86 @@ mod tests {
         assert!(super::parse_hf_uri("hf://just-a-name").is_err());
         assert!(super::parse_hf_uri("https://example.com/x").is_err());
     }
+
+    /// End-to-end: `download_config` on a local-mount MDC normalizes
+    /// every CheckedFile to `file://`, runs through `resolve_uri`,
+    /// blake3-verifies, populates the content-addressed cache, and
+    /// rewrites `cf.path` to the per-slug symlink dir.
+    ///
+    /// This is the "shared-mount legacy" path under the unified
+    /// pipeline — proves the file:// arm of `resolve_uri` works
+    /// end-to-end without network or mocker.
+    #[tokio::test]
+    #[serial_test::serial] // mutates $HOME
+    async fn download_config_pipelines_local_files_through_cache() -> anyhow::Result<()> {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+
+        let temp = tempfile::tempdir()?;
+        let home_override = temp.path().to_path_buf();
+
+        // serial_test guards $HOME mutation against parallel test runs;
+        // restore on drop is enough.
+        let prior_home = std::env::var_os("HOME");
+        // SAFETY: serial_test ensures no concurrent env access from
+        // other tests in this binary.
+        unsafe { std::env::set_var("HOME", &home_override) };
+        let result = run_pipeline_assertions(&fixture, &home_override).await;
+        match prior_home {
+            // SAFETY: same as above.
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        result
+    }
+
+    async fn run_pipeline_assertions(fixture: &Path, home: &Path) -> anyhow::Result<()> {
+        let mut mdc = super::ModelDeploymentCard::load_from_disk(fixture, None)?;
+        let slug = mdc.slug.clone();
+        let mdcsum = mdc.mdcsum().to_string();
+
+        mdc.download_config().await?;
+
+        let mdc_root = home.join(".cache/dynamo/mdc");
+        let blobs = mdc_root.join("blobs");
+        let snap = mdc_root
+            .join("by-slug")
+            .join(slug.to_string())
+            .join(&mdcsum);
+
+        assert!(blobs.is_dir(), "blobs dir was not created");
+        let blob_count = blobs.read_dir()?.count();
+        assert!(
+            blob_count > 0,
+            "expected at least one blob to be written, got {blob_count}"
+        );
+
+        assert!(snap.is_dir(), "by-slug snap dir was not created: {snap:?}");
+        let snap_count = snap.read_dir()?.count();
+        assert!(
+            snap_count > 0,
+            "expected at least one symlink in {snap:?}, got {snap_count}"
+        );
+
+        // Every populated CheckedFile's path was rewritten into the snap
+        // dir, and the symlink target resolves to a real blob file.
+        for cf in mdc.iter_metadata_files() {
+            let path = cf
+                .path()
+                .ok_or_else(|| anyhow::anyhow!("post-download cf should have a local path"))?;
+            assert!(
+                path.starts_with(&snap),
+                "cf.path not rewritten into snap dir: {} not under {}",
+                path.display(),
+                snap.display()
+            );
+            let resolved = std::fs::canonicalize(path)?;
+            assert!(
+                resolved.starts_with(&blobs),
+                "symlink should resolve to blobs/, got: {}",
+                resolved.display()
+            );
+        }
+        Ok(())
+    }
 }
