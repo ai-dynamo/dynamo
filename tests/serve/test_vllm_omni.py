@@ -191,6 +191,10 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
+    # died during handshake (exit code 143)" — the diffusion child process is
+    # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
+    # needs investigation of why StageDiffusionProc is dying.
     "omni_t2v": VLLMOmniConfig(
         name="omni_t2v",
         directory=vllm_dir,
