@@ -91,6 +91,10 @@ struct TestHarness {
 }
 
 fn build_harness(with_transfer_params: bool) -> TestHarness {
+    build_harness_with_watchdog(with_transfer_params, Duration::from_secs(60))
+}
+
+fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -> TestHarness {
     let g2_manager = build_g2_manager(64);
 
     let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
@@ -148,13 +152,14 @@ fn build_harness(with_transfer_params: bool) -> TestHarness {
     let workers = MockCdWorkerHook::new();
     let factory = MockSessionFactory::new();
 
-    let coordinator = PrefillCoordinatorImpl::new(
+    let coordinator = PrefillCoordinatorImpl::new_with_watchdog(
         inner.clone(),
         transport.clone(),
         workers.clone(),
         factory.clone(),
         Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
         tokio::runtime::Handle::current(),
+        watchdog,
     );
 
     let wrapper =
@@ -615,14 +620,12 @@ async fn cd_prefill_payload_drop_does_not_close_session() -> Result<()> {
 /// RequestState if no peer Detach arrives. Belt-and-suspenders
 /// against velo heartbeat misconfiguration.
 ///
-/// Uses a manually shortened watchdog via direct test scaffolding
-/// — but since the production constant is 60s, this test is
-/// gated behind `ignore` to avoid slowing CI. Run manually with
-/// `cargo test -- --ignored cd_prefill_lifecycle_watchdog`.
+/// Uses an injected short watchdog (200ms) via
+/// [`PrefillCoordinatorImpl::new_with_watchdog`]; production is
+/// 60s and is preserved by [`PrefillCoordinatorImpl::new`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn cd_prefill_lifecycle_watchdog_evicts_state() -> Result<()> {
-    let h = build_harness(true);
+    let h = build_harness_with_watchdog(true, Duration::from_millis(200));
     h.wrapper.create_slot(make_request())?;
     let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
     let session = drive_setup(&h).await;
@@ -634,13 +637,15 @@ async fn cd_prefill_lifecycle_watchdog_evicts_state() -> Result<()> {
     wait_until(|| h.workers.completed_contains("req-1")).await;
     let _ = h.wrapper.request_finished("req-1");
     wait_until(|| session.finished_reason().is_some()).await;
-    // Do NOT inject Detach — let the 60s watchdog fire.
+    // Do NOT inject Detach — let the watchdog fire.  At 200ms it
+    // is well under the 60s ignored ceiling but enough to prove
+    // the watchdog path runs without timing flakes.
     tokio::time::timeout(
-        Duration::from_secs(75),
+        Duration::from_secs(5),
         wait_until(|| h.coordinator.active_count() == 0),
     )
     .await
-    .expect("watchdog should evict within 60s");
+    .expect("watchdog should evict within 5s when set to 200ms");
     Ok(())
 }
 

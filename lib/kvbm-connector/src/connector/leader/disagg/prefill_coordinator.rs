@@ -367,6 +367,13 @@ pub struct PrefillCoordinatorImpl {
     /// Single observer instance, registered ONCE with the
     /// offload pipeline. Holds per-request residual state.
     observer: Arc<ConditionalDecodeG2Observer>,
+    /// Configurable lifecycle-watcher timeout.  Production callers
+    /// use [`PrefillCoordinatorImpl::new`] which defaults to
+    /// [`LIFECYCLE_WATCHDOG`] (60s).  Tests use
+    /// [`PrefillCoordinatorImpl::new_with_watchdog`] to inject a
+    /// short timeout that lets the watchdog-eviction path run in
+    /// CI without sleeping for a minute.
+    lifecycle_watchdog: Duration,
     weak_self: std::sync::Weak<Self>,
 }
 
@@ -379,6 +386,30 @@ impl PrefillCoordinatorImpl {
         peer_resolver: Arc<dyn PeerResolver>,
         runtime: Handle,
     ) -> Arc<Self> {
+        Self::new_with_watchdog(
+            inner,
+            transport,
+            worker_hook,
+            session_factory,
+            peer_resolver,
+            runtime,
+            LIFECYCLE_WATCHDOG,
+        )
+    }
+
+    /// Test-friendly constructor with an injectable lifecycle
+    /// watchdog.  Production callers use [`new`](Self::new) which
+    /// fixes the watchdog at [`LIFECYCLE_WATCHDOG`] (60s) so the
+    /// CD lifecycle behavior is uniform across deployments.
+    pub fn new_with_watchdog(
+        inner: Arc<dyn InnerLeaderShim>,
+        transport: Arc<dyn CdBlockTransport>,
+        worker_hook: Arc<dyn CdWorkerHook>,
+        session_factory: Arc<dyn SessionFactory>,
+        peer_resolver: Arc<dyn PeerResolver>,
+        runtime: Handle,
+        lifecycle_watchdog: Duration,
+    ) -> Arc<Self> {
         let observer = ConditionalDecodeG2Observer::new();
         let coord = Arc::new_cyclic(|weak_self| Self {
             inner,
@@ -390,6 +421,7 @@ impl PrefillCoordinatorImpl {
             runtime,
             states: DashMap::new(),
             observer: Arc::clone(&observer),
+            lifecycle_watchdog,
             weak_self: weak_self.clone(),
         });
         // Wire the weak coordinator back into the observer so
@@ -528,7 +560,7 @@ impl PrefillCoordinatorImpl {
         let watcher_request_id = request_id.clone();
         let watcher_session_id = params.session_id;
         let watcher_coord = self.weak_self.clone();
-        let watchdog = LIFECYCLE_WATCHDOG;
+        let watchdog = self.lifecycle_watchdog;
         self.runtime.spawn(async move {
             let outcome = tokio::time::timeout(watchdog, async {
                 let mut lifecycle = watcher_session.lifecycle();
