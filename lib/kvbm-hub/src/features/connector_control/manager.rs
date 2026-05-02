@@ -217,7 +217,7 @@ async fn proxy_unary(
 
     let send = velo
         .unary(handler)
-        .and_then(|b| Ok(b.raw_payload(payload).instance(instance_id)));
+        .map(|b| b.raw_payload(payload).instance(instance_id));
     let send = match send {
         Ok(s) => s,
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &format!("velo build: {e}")),

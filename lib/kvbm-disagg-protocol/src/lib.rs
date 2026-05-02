@@ -229,6 +229,7 @@ mod tests {
             initiator_instance_id: instance_id(),
             decode_endpoint: None,
             sequence_hashes: vec![SequenceHash::new(0, None, 0)],
+            num_computed_tokens: 0,
         });
 
         let encoded = serde_json::to_vec(&params).unwrap();
