@@ -113,7 +113,16 @@ impl NumaTopology {
 fn parse_cpulist(cpulist: &str) -> Result<Vec<usize>, String> {
     let mut cpus = Vec::new();
 
+    // Empty cpulist = memory-only NUMA node (no CPUs), valid on Grace/GB200
+    if cpulist.is_empty() {
+        return Ok(cpus);
+    }
+
     for part in cpulist.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
         if part.contains('-') {
             // Range: "0-15"
             let range: Vec<&str> = part.split('-').collect();
@@ -233,9 +242,23 @@ mod tests {
 
     #[test]
     fn test_parse_cpulist_empty() {
-        // Edge case: empty cpulist
-        let result = parse_cpulist("");
-        assert!(result.is_err() || result.unwrap().is_empty());
+        // Memory-only NUMA nodes have empty cpulist (e.g., GB200 nodes 2-33)
+        let cpus = parse_cpulist("").unwrap();
+        assert!(cpus.is_empty());
+    }
+
+    #[test]
+    fn test_parse_cpulist_gb200_grace() {
+        // GB200: 34 NUMA nodes, only node0 and node1 have CPUs
+        let cpus0 = parse_cpulist("0-71").unwrap();
+        assert_eq!(cpus0.len(), 72);
+
+        let cpus1 = parse_cpulist("72-143").unwrap();
+        assert_eq!(cpus1.len(), 72);
+
+        // Nodes 2-33: memory-only, empty cpulist
+        let cpus_empty = parse_cpulist("").unwrap();
+        assert!(cpus_empty.is_empty());
     }
 
     #[test]
