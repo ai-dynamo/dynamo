@@ -235,6 +235,10 @@ impl Checksum {
             algorithm,
         }
     }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
 }
 
 impl Serialize for Checksum {
@@ -378,5 +382,38 @@ mod tests {
         let expected =
             Checksum::blake3("62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2");
         assert_eq!(expected, *cf.checksum());
+        assert_eq!(Some(560), cf.size(), "TinyLlama config.json is 560 bytes");
+        assert_eq!(
+            "62bc124be974d3a25db05bedc99422660c26715e5bbda0b37d14bd84a0c65ab2",
+            cf.checksum().hash()
+        );
+    }
+
+    /// Old MDC bytes (no `size` field) deserialize cleanly with
+    /// `size = None`, preserving cross-version compat between a
+    /// pre-size worker and a post-size frontend.
+    #[test]
+    fn test_legacy_wire_format_omits_size() {
+        let legacy = r#"{"path":"/x/config.json","checksum":"blake3:abc"}"#;
+        let cf: CheckedFile = serde_json::from_str(legacy).unwrap();
+        assert_eq!(None, cf.size());
+        assert_eq!("/x/config.json", cf.path().unwrap().to_str().unwrap());
+    }
+
+    /// New-format CheckedFiles round-trip with the size field.
+    #[test]
+    fn test_new_wire_format_carries_size() {
+        let cf = CheckedFile {
+            path: Either::Left(PathBuf::from("/x/tokenizer.json")),
+            checksum: Checksum::blake3("abc"),
+            size: Some(12345),
+        };
+        let json = serde_json::to_string(&cf).unwrap();
+        assert!(
+            json.contains("\"size\":12345"),
+            "expected size field in serialization, got: {json}"
+        );
+        let back: CheckedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(Some(12345), back.size());
     }
 }
