@@ -877,14 +877,102 @@ impl ModelDeploymentCard {
         out
     }
 
-    /// Download the files this card needs to work: config.json, tokenizer.json, etc.
-    pub async fn download_config(&mut self) -> anyhow::Result<()> {
-        if self.has_local_files() {
-            tracing::trace!("All model config is local, not downloading");
-            return Ok(());
+    /// Resolve every populated metadata `CheckedFile` through the
+    /// content-addressed MDC cache, blake3-verifying every byte.
+    ///
+    /// Pass 1 — for each slot, normalize `cf.path()` to a URL form
+    /// (`file://` if it exists locally, `hf://<source_path>/<filename>`
+    /// otherwise, or unchanged if already a URL), then snapshot
+    /// `(uri, expected, filename)` for the async fetch loop.
+    /// Pass 2 — `resolve_uri` per slot if the blob isn't already
+    /// cached; symlink into `by-slug/<slug>/<mdcsum>/`.
+    /// Pass 3 — rewrite each `cf.path` to point at the cache symlink.
+    ///
+    /// Bypasses `update_dir` because its `is_custom` exclusion is for
+    /// the legacy `hub::from_hf` fall-through and would leave URLs in
+    /// the MDC for custom templates.
+    async fn resolve_metadata_files(&mut self) -> anyhow::Result<()> {
+        let source = self.source_path().to_string();
+        let mdcsum = self.mdcsum().to_string();
+        let blobs = mdc_blobs_dir()?;
+        let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
+
+        // Pass 1: normalize to URL form + snapshot for the async loop.
+        let mut entries: Vec<(String, CheckedFile, String)> = Vec::new();
+        for cf in self.iter_metadata_files_mut() {
+            if cf.url().is_none() {
+                let url = {
+                    let path = cf.path().context("CheckedFile has neither path nor url")?;
+                    let filename = path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .with_context(|| format!("no filename in path: {}", path.display()))?;
+                    if path.exists() {
+                        url::Url::from_file_path(std::fs::canonicalize(path)?).map_err(|()| {
+                            anyhow::anyhow!("invalid file path for url: {}", path.display())
+                        })?
+                    } else {
+                        url::Url::parse(&format!("hf://{source}/{filename}")).with_context(
+                            || {
+                                format!(
+                                    "synthesizing hf:// from source '{source}', filename '{filename}'"
+                                )
+                            },
+                        )?
+                    }
+                };
+                cf.move_to_url(url);
+            }
+            let url = cf.url().expect("set above").clone();
+            let filename = url
+                .path()
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .with_context(|| format!("no filename in url: {url}"))?
+                .to_string();
+            entries.push((url.to_string(), cf.clone(), filename));
         }
 
-        // For TensorBased models, config files are not used - they handle everything in the backend
+        // Pass 2: fetch + verify + cache + symlink.
+        let client = reqwest::Client::new();
+        let mut fetched = 0usize;
+        for (uri, expected, filename) in &entries {
+            let blake3_hex = expected.checksum().hash();
+            let blob = blobs.join(blake3_hex);
+            let cache_hit = blob.exists();
+            tracing::debug!(
+                filename = %filename,
+                uri = %uri,
+                cache_hit,
+                blake3 = %blake3_hex,
+                "resolving metadata file",
+            );
+            if !cache_hit {
+                resolve_uri(&client, uri, expected, &blob).await?;
+                fetched += 1;
+            }
+            symlink_force(&blob, &slug_dir.join(filename))?;
+        }
+        tracing::debug!(
+            display_name = %self.display_name,
+            artifact_count = entries.len(),
+            fetched,
+            cache_root = %mdc_cache_root().display(),
+            "resolved model metadata files",
+        );
+
+        // Pass 3: rewrite cf.path to the cache symlink so downstream
+        // tokenizer/config loaders read from a verified location.
+        for cf in self.iter_metadata_files_mut() {
+            cf.update_dir(&slug_dir);
+        }
+        Ok(())
+    }
+
+    /// Download the files this card needs to work: config.json, tokenizer.json, etc.
+    pub async fn download_config(&mut self) -> anyhow::Result<()> {
+        // TensorBased models don't use metadata files — backend handles
+        // everything.
         if self.model_type.supports_tensor() {
             tracing::debug!(
                 display_name = %self.display_name,
@@ -892,12 +980,10 @@ impl ModelDeploymentCard {
             );
             return Ok(());
         }
-
-        let ignore_weights = true;
-        let local_path = crate::hub::from_hf(self.source_path(), ignore_weights).await?;
-
-        self.update_dir(&local_path);
-        Ok(())
+        // Single resolve pipeline: every CheckedFile (URL or local
+        // path, existing or missing) flows through resolve_uri,
+        // blake3-verifies, lands in the MDC cache. No new/legacy split.
+        self.resolve_metadata_files().await
     }
 
     /// Re-write all the local disk paths as a URL. Do this before publishing the MDC.
@@ -966,63 +1052,6 @@ impl ModelDeploymentCard {
             }
         }
         Ok(())
-    }
-
-    /// Are all the files we need (tokenizer.json, etc) available locally?
-    fn has_local_files(&self) -> bool {
-        let has_model_info = self
-            .model_info
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_tokenizer = self
-            .tokenizer
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_prompt_formatter = self
-            .prompt_formatter
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_chat_template_file = self
-            .chat_template_file
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-        let has_gen_config = self
-            .gen_config
-            .as_ref()
-            .map(|p| p.is_local())
-            .unwrap_or(true);
-
-        has_model_info
-            && has_tokenizer
-            && has_prompt_formatter
-            && has_chat_template_file
-            && has_gen_config
-    }
-
-    /// Update the directory for files like tokenizer.json be in here.
-    fn update_dir(&mut self, dir: &Path) {
-        if let Some(model_info) = self.model_info.as_mut() {
-            model_info.update_dir(dir);
-        }
-        if let Some(tk) = self.tokenizer.as_mut() {
-            tk.update_dir(dir);
-        }
-        if let Some(pf) = self.prompt_formatter.as_mut() {
-            pf.update_dir(dir);
-        }
-        if let Some(gc) = self.gen_config.as_mut() {
-            gc.update_dir(dir);
-        }
-        // If it's a custom chat template we didn't download it, so leave the path untouched
-        if let Some(ct) = self.chat_template_file.as_mut()
-            && !ct.is_custom()
-        {
-            ct.update_dir(dir);
-        }
     }
 
     /// Creates a ModelDeploymentCard from a local directory path.
