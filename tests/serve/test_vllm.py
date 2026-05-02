@@ -89,6 +89,14 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             chat_payload(
                 "Can you write me a song?",
@@ -371,7 +379,10 @@ vllm_configs = {
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        # post_merge because needs real NIXL not stub
+        # post_merge-only: local pre-merge runs that compile outside docker
+        # can pick up NIXL stubs, which don't support the multimodal transfer
+        # path this case exercises. CI post_merge runs in a container with
+        # real NIXL, so keep this test there.
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
@@ -382,7 +393,7 @@ vllm_configs = {
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
-        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         script_args=[
             "--model",
             "Qwen/Qwen2-VL-2B-Instruct",
@@ -422,6 +433,7 @@ vllm_configs = {
         ],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=360,
         request_payloads=[
@@ -471,6 +483,7 @@ vllm_configs = {
             "--dyn-tool-call-parser",
             "hermes",
         ],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=600,
         request_payloads=[
@@ -717,6 +730,8 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(9.6)  # same Qwen3-VL-2B agg multimodal profile
+@pytest.mark.requested_vllm_kv_cache_bytes(922_354_000)
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,

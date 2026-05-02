@@ -25,6 +25,7 @@ type checkpointOptions struct {
 	Namespace                    string
 	KubeContext                  string
 	CheckpointID                 string
+	Container                    string
 	DisableCudaCheckpointJobFile bool
 	Timeout                      time.Duration
 }
@@ -65,11 +66,23 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		return nil, err
 	}
 
+	// Stamp (or validate) the required snapshot-target-containers annotation.
+	// Checkpoint contract: exactly one target container per Job.
+	targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1, 1)
+	if err != nil {
+		return nil, err
+	}
+	annotations := map[string]string{}
+	for k, v := range pod.Annotations {
+		annotations[k] = v
+	}
+	annotations[snapshotprotocol.TargetContainersAnnotation] = targetValue
+
 	checkpointJobName := pod.Name + "-checkpoint"
 	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
-			Annotations: pod.Annotations,
+			Annotations: annotations,
 		},
 		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotprotocol.CheckpointJobOptions{

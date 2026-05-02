@@ -295,7 +295,7 @@ impl ReasoningParser for GptOssReasoningParser {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test] // CASE.10, CASE.19
     fn test_gpt_oss_reasoning_parser() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
@@ -307,7 +307,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.8, CASE.10, CASE.19
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let chunks = vec![
@@ -331,7 +331,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.8, CASE.10, CASE.19
     fn test_gpt_oss_reasoning_parser_streaming_chunked() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let enc = get_harmony_encoding()
@@ -360,7 +360,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test] // CASE.8, CASE.10, CASE.19
     fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
         let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
         let enc = get_harmony_encoding()

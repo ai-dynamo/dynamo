@@ -30,10 +30,19 @@ inputs:
     default: 'true'
   hf_token:
     required: false
+  enable_coverage:
+    description: 'Enable coverage collection (true/false)'
+    required: false
+    type: string
+    default: 'false'
   parallel_mode:
     description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
     required: false
     default: 'auto'
+  max_vram_gib:
+    description: 'Per-test VRAM budget in GiB. When set together with parallel_mode!=none, runs GPU tests as VRAM-aware concurrent subprocesses via the orchestrator in tests/utils/pytest_parallel_gpu.py. Tests without @pytest.mark.profiled_vram_gib(N) are deselected by tests/conftest.py.'
+    required: false
+    default: ''
   dind_as_sidecar:
     description: 'dind runs as a sidecar container (true/false)'
     required: false
@@ -121,7 +130,17 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
+
+          # Add coverage flags if enabled
+          COVERAGE_FLAGS=""
+          COVERAGE_ENV=""
+          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+            echo "📊 Coverage collection enabled"
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
+            COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage --env PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src"
+          fi
+
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -150,9 +169,11 @@ runs:
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
+          --ulimit nofile=65536:65536 \
           --network host \
           --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
+          ${COVERAGE_ENV} \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -180,7 +201,7 @@ runs:
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
-        HF_HOME: /runner/_work/_temp
+        HF_HOME: /models
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         # Run pytest with detailed output and JUnit XML
@@ -192,7 +213,7 @@ runs:
         # Docker's default is 64MB, which is insufficient and causes segfaults.
         # Do NOT use --ipc=host here — it overrides --shm-size with the host's /dev/shm
         # (64MB in K8s pods by default), silently ignoring the size we set.
-        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864"
+        DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:65536"
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
@@ -227,9 +248,22 @@ runs:
               ;;
           esac
 
-          # Construct final command with xdist parallelization (-n) and other options
-          # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # When max_vram_gib is set, the GPU-parallel orchestrator
+          # (tests/utils/pytest_parallel_gpu.py via tests/conftest.py) takes over
+          # parallelism. We pass `--max-vram-gib=N` plus `-n auto`; the conftest
+          # consumes both, disables xdist, and runs tests as VRAM-aware
+          # subprocesses. --dist=loadscope is omitted because xdist is bypassed.
+          VRAM_OPTS=""
+          if [[ -n "${{ inputs.max_vram_gib }}" ]]; then
+            VRAM_OPTS="--max-vram-gib=${{ inputs.max_vram_gib }}"
+            DIST_OPTS=""
+            echo "🧮 GPU-parallel mode: --max-vram-gib=${{ inputs.max_vram_gib }} (xdist replaced by VRAM-aware orchestrator)"
+          else
+            # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
+            DIST_OPTS="--dist=loadscope"
+          fi
+
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -242,6 +276,8 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+        DOCKER_ENV_FLAGS+=(--env "HF_XET_HIGH_PERFORMANCE=1")
+        DOCKER_ENV_FLAGS+=(--env "HF_HOME=${HF_HOME}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
@@ -252,6 +288,7 @@ runs:
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+          -v "/models:${HF_HOME}" \
           ${{ inputs.image_tag }} \
           sh -c "umask 0022 && ${PYTEST_CMD}"
 
@@ -317,6 +354,15 @@ runs:
       with:
         name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        retention-days: 7
+
+    - name: Upload Coverage Data
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always() && inputs.enable_coverage == 'true'
+      with:
+        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/
+        include-hidden-files: true
         retention-days: 7
 
     - name: Upload Allure Results

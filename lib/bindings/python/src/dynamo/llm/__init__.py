@@ -8,6 +8,7 @@ import logging
 from dynamo._core import AicPerfConfig as AicPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
+from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
 from dynamo._core import FpmEventRelay as FpmEventRelay
 from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
@@ -60,6 +61,9 @@ def run_mocker_trace_replay(
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
     trace_block_size=512,
+    trace_format="mooncake",
+    trace_shared_prefix_ratio=0.0,
+    trace_num_prefix_groups=0,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -71,4 +75,7 @@ def run_mocker_trace_replay(
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
         trace_block_size=trace_block_size,
+        trace_format=trace_format,
+        trace_shared_prefix_ratio=trace_shared_prefix_ratio,
+        trace_num_prefix_groups=trace_num_prefix_groups,
     )

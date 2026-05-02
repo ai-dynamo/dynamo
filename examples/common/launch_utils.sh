@@ -75,9 +75,19 @@ wait_any_exit() {
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    wait -n
-    local _rc=$?
+    # Problem: a failing background child should propagate its non-zero
+    # exit code, but the script always exited 0. Two bash interactions
+    # colluded — `set -e` killed the script before `_rc` was captured,
+    # and the EXIT trap's `kill 0` looped SIGTERM back through the
+    # `trap 'exit 0' TERM INT` set above, zeroing the captured code.
+    #
+    # Fix: `wait -n || _rc=$?` quiets `set -e` for that one line, and
+    # re-arming the TERM/INT trap to `exit $_rc` after capture means the
+    # boomerang SIGTERM still ends with the right code.
+    local _rc=0
+    wait -n || _rc=$?
     echo "A background process exited with code $_rc"
+    trap "exit $_rc" TERM INT
     exit "$_rc"
 }
 

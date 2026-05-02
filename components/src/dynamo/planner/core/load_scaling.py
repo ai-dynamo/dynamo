@@ -143,24 +143,36 @@ class LoadScalingMixin:
             return None
 
         easy = self._config.optimization_target != "sla"
-        p_desired = (
-            (
+
+        # Sub-decisions may set self._diag_load_reason to an informative
+        # value (e.g. "insufficient_data") before returning None. The
+        # per-component aggregation below only emits {scale_up,
+        # scale_down, scale_down_capped_by_throughput, no_change}, which
+        # would silently overwrite them. Isolate each component's
+        # contribution so both can be restored in the no-scaling-needed
+        # branch; otherwise sequential sub-decision calls would clobber
+        # each other on the shared field.
+        p_reason: Optional[str] = None
+        p_desired: Optional[int] = None
+        if p_stats:
+            self._diag_load_reason = None
+            p_desired = (
                 self._prefill_easy_decision(p_stats, self._num_p_workers)
                 if easy
                 else self._prefill_load_decision(p_stats, self._num_p_workers)
             )
-            if p_stats
-            else None
-        )
-        d_desired = (
-            (
+            p_reason = self._diag_load_reason
+
+        d_reason: Optional[str] = None
+        d_desired: Optional[int] = None
+        if d_stats:
+            self._diag_load_reason = None
+            d_desired = (
                 self._decode_easy_decision(d_stats, self._num_d_workers)
                 if easy
                 else self._decode_load_decision(d_stats, self._num_d_workers)
             )
-            if d_stats
-            else None
-        )
+            d_reason = self._diag_load_reason
 
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
@@ -219,6 +231,20 @@ class LoadScalingMixin:
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
+            # Restore per-component sub-decision reasons that the
+            # aggregation step overwrote with "no_change", so operators
+            # can tell which side is stalled (e.g. prefill
+            # insufficient_data while decode is fine).
+            if p_reason is not None and p_reason != "no_change":
+                self._diag_load_reason_prefill = p_reason
+            if d_reason is not None and d_reason != "no_change":
+                self._diag_load_reason_decode = d_reason
+            # Aggregate reason: surface the most informative of the two
+            # so the non-per-component Enum/HTML view also reflects it.
+            for candidate in (p_reason, d_reason):
+                if candidate is not None and candidate != "no_change":
+                    self._diag_load_reason = candidate
+                    break
             return None
 
         logger.info(

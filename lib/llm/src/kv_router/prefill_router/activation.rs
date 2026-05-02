@@ -149,10 +149,9 @@ impl PrefillRouter {
             self.register_prefill_client(model_manager.as_ref(), &client);
 
             // Build the PushRouter for prefill with KV mode using the shared client
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
                 client,
                 RouterMode::KV,
-                None, // busy_threshold
                 None, // worker_monitor
             )
             .await?;
@@ -167,10 +166,9 @@ impl PrefillRouter {
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
                 client,
                 self.router_mode,
-                None, // busy_threshold
                 None, // worker_monitor
             )
             .await?;

@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.1.0](https://img.shields.io/badge/Version-1.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -97,10 +97,10 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.1.0 |
+| file://components/operator | dynamo-operator | 1.2.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.7 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.8 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -150,6 +150,11 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.dynamo.istio.gateway | string | `nil` | Istio gateway name for routing |
 | dynamo-operator.dynamo.ingressHostSuffix | string | `""` | Host suffix for generated ingress hostnames |
 | dynamo-operator.dynamo.virtualServiceSupportsHTTPS | bool | `false` | Whether VirtualServices should support HTTPS routing |
+| dynamo-operator.dynamo.serviceMesh.enabled | bool | `false` | Whether to enable service mesh resource generation for EPP |
+| dynamo-operator.dynamo.serviceMesh.provider | string | `"istio"` | Service mesh provider. Supported: "istio" |
+| dynamo-operator.dynamo.serviceMesh.istio | object | `{"insecureSkipVerify":true,"tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
+| dynamo-operator.dynamo.serviceMesh.istio.tlsMode | string | `"SIMPLE"` | TLS mode for DestinationRules: "SIMPLE", "DISABLE", "ISTIO_MUTUAL", "MUTUAL" |
+| dynamo-operator.dynamo.serviceMesh.istio.insecureSkipVerify | bool | `true` | Skip TLS certificate verification (for self-signed EPP certs) |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
@@ -164,7 +169,6 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
-| dynamo-operator.checkpoint.readyForCheckpointFilePath | string | `"/tmp/ready-for-checkpoint"` | Path written by worker when model is loaded and ready for checkpointing |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
@@ -208,6 +212,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | dynamo-platform | kai-scheduler | Grove |
 |-----------------|---------------|-------|
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
+| 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 
 After installing them separately, enable Dynamo integration:
 
