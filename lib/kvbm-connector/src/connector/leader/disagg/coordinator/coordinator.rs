@@ -31,9 +31,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
-use kvbm_disagg_protocol::RemotePrefillParams;
+use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillParams, RemotePrefillRequest};
 use kvbm_engine::disagg::session::{
-    AvailabilityDelta, CommitDelta, CommittedBlock, SessionFactory,
+    AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 use parking_lot::Mutex;
@@ -42,13 +42,16 @@ use tokio::runtime::Handle;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::{BlockId, G2, InstanceId, SequenceHash};
 
-use super::super::lifecycle::{LIFECYCLE_WATCHDOG, spawn_lifecycle_watcher};
+use super::super::decode::{BeginOutcome, CdFailureSink, DecodeCoordinator};
+use super::super::lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
 use super::super::peer_resolver::PeerResolver;
 use super::super::prefill_coordinator::{
     ConditionalDecodeG2Observer, ObserverHandle, PrefillCoordinator, PrefillStatus,
 };
+use super::super::queue::RemotePrefillQueue;
 use super::super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
-use super::{CdRequest, PrefillBits};
+use super::super::{ConditionalDisaggPolicy, PolicyInputs, PrefillSelection};
+use super::{CdRequest, CdRequestStatus, DecodeBits, PrefillBits};
 
 // ============================================================================
 // ConditionalDisaggCoordinator
@@ -74,10 +77,24 @@ pub struct ConditionalDisaggCoordinator {
     observer: Arc<ConditionalDecodeG2Observer>,
     lifecycle_watchdog: Duration,
     weak_self: Weak<Self>,
+
+    // ---- Decode-role additions (Slice 4) ----
+    /// Policy for decode's `evaluate()` call in GNMT.  `None` when the
+    /// coordinator is constructed without decode-role wiring (legacy
+    /// prefill-only path).
+    policy: Option<Arc<dyn ConditionalDisaggPolicy>>,
+    /// Queue for publishing `RemotePrefillRequest` to the prefill peer.
+    /// `None` when decode-role is not wired.
+    queue: Option<Arc<dyn RemotePrefillQueue>>,
+    /// Failure sink installed by the wrapper after construction.
+    failure_sink: Mutex<Option<Weak<dyn CdFailureSink>>>,
 }
 
 impl ConditionalDisaggCoordinator {
     /// Construct with the default production lifecycle watchdog (60s).
+    ///
+    /// This is the prefill-only constructor (no decode-role policy or queue).
+    /// Use [`new_with_decode`] to enable the decode role.
     pub fn new(
         inner: Arc<dyn InnerLeaderShim>,
         transport: Arc<dyn CdBlockTransport>,
@@ -109,11 +126,63 @@ impl ConditionalDisaggCoordinator {
         runtime: Handle,
         lifecycle_watchdog: Duration,
     ) -> Arc<Self> {
-        // Observer wired at construction.  Internal coordinator dispatch stays
-        // unwired (Weak::new) for Slice 3 — tests call commit_output_blocks
-        // directly.  Slice 5 will wire when the old coordinator retires.
+        Self::new_with_watchdog_and_decode(
+            inner,
+            transport,
+            worker_hook,
+            session_factory,
+            peer_resolver,
+            runtime,
+            lifecycle_watchdog,
+            None,
+            None,
+        )
+    }
+
+    /// Construct with both prefill and decode roles enabled (Slice 4).
+    pub fn new_with_decode(
+        inner: Arc<dyn InnerLeaderShim>,
+        transport: Arc<dyn CdBlockTransport>,
+        worker_hook: Arc<dyn CdWorkerHook>,
+        session_factory: Arc<dyn SessionFactory>,
+        peer_resolver: Arc<dyn PeerResolver>,
+        runtime: Handle,
+        policy: Arc<dyn ConditionalDisaggPolicy>,
+        queue: Arc<dyn RemotePrefillQueue>,
+    ) -> Arc<Self> {
+        Self::new_with_watchdog_and_decode(
+            inner,
+            transport,
+            worker_hook,
+            session_factory,
+            peer_resolver,
+            runtime,
+            LIFECYCLE_WATCHDOG,
+            Some(policy),
+            Some(queue),
+        )
+    }
+
+    /// Full constructor used by all public ctors.
+    fn new_with_watchdog_and_decode(
+        inner: Arc<dyn InnerLeaderShim>,
+        transport: Arc<dyn CdBlockTransport>,
+        worker_hook: Arc<dyn CdWorkerHook>,
+        session_factory: Arc<dyn SessionFactory>,
+        peer_resolver: Arc<dyn PeerResolver>,
+        runtime: Handle,
+        lifecycle_watchdog: Duration,
+        policy: Option<Arc<dyn ConditionalDisaggPolicy>>,
+        queue: Option<Arc<dyn RemotePrefillQueue>>,
+    ) -> Arc<Self> {
+        // Observer wired at construction.  Closure-based commit
+        // dispatch (set after `Arc::new_cyclic` produces the coord)
+        // forwards observer-matched blocks to
+        // `commit_output_blocks` — without this the offload pipeline
+        // observes G2 blocks but the prefill session never sees the
+        // commit, so decode bails on `commits Closed` short.
         let observer = ConditionalDecodeG2Observer::new();
-        Arc::new_cyclic(|weak_self| Self {
+        let coord = Arc::new_cyclic(|weak_self| Self {
             inner,
             transport,
             worker_hook,
@@ -122,10 +191,28 @@ impl ConditionalDisaggCoordinator {
             known_peers: dashmap::DashSet::new(),
             runtime,
             states: DashMap::new(),
-            observer,
+            observer: Arc::clone(&observer),
             lifecycle_watchdog,
             weak_self: weak_self.clone(),
-        })
+            policy,
+            queue,
+            failure_sink: Mutex::new(None),
+        });
+        let weak_coord = Arc::downgrade(&coord);
+        observer.install_commit_fn(Arc::new(
+            move |request_id: &str, blocks: Vec<ImmutableBlock<G2>>| {
+                if let Some(coord) = weak_coord.upgrade() {
+                    if let Err(err) = coord.commit_output_blocks(request_id, blocks) {
+                        tracing::error!(
+                            request_id,
+                            error = %err,
+                            "commit_output_blocks failed from observer"
+                        );
+                    }
+                }
+            },
+        ));
+        coord
     }
 
     /// Observer for registration with the offload pipeline.
@@ -582,6 +669,282 @@ impl ConditionalDisaggCoordinator {
             .await?;
 
         Ok(())
+    }
+}
+
+// ============================================================================
+// Decode-role public API (Slice 4)
+// ============================================================================
+
+impl ConditionalDisaggCoordinator {
+    /// Return the decode-role state for `request_id`, or `None` if absent or
+    /// not decode-role.  Used by decode-only tests that want concrete access.
+    pub fn state_for_decode(&self, request_id: &str) -> Option<Arc<CdRequest>> {
+        self.states.get(request_id).and_then(|e| {
+            let req = Arc::clone(e.value());
+            if req.as_decode().is_some() { Some(req) } else { None }
+        })
+    }
+
+    /// Coarse decode status, mapped from `CdRequestStatus` + `failure_reason`
+    /// to the `RemotePrefillStatus` shape tests use.
+    pub fn status_for_decode(&self, request_id: &str) -> Option<super::super::decode::RemotePrefillStatus> {
+        use super::super::decode::RemotePrefillStatus;
+        let state = self.state_for_decode(request_id)?;
+        let bits = state.as_decode().expect("state_for_decode filters to decode-role");
+        match *state.status.lock() {
+            CdRequestStatus::Released => {
+                if bits.failure_reason.lock().is_some() {
+                    Some(RemotePrefillStatus::Failed)
+                } else {
+                    Some(RemotePrefillStatus::Released)
+                }
+            }
+            CdRequestStatus::Active => Some(RemotePrefillStatus::Active),
+        }
+    }
+
+    /// Convenience wrapper for tests: the unfilled G1 block-ids for a
+    /// decode-role request (union of unfinished local+remote slices).
+    pub fn unfilled_g1_block_ids_for(&self, request_id: &str) -> Vec<BlockId> {
+        self.state_for_decode(request_id)
+            .map(|s| s.failed_g1_block_ids())
+            .unwrap_or_default()
+    }
+
+    /// Invoke the failure sink (if installed) with `reason`, then evict
+    /// the state entry.  Idempotent if state already evicted.
+    async fn invoke_decode_failure_sink_and_evict(
+        self: &Arc<Self>,
+        request_id: &str,
+        reason: String,
+    ) {
+        let sink_handle = self.failure_sink.lock().clone();
+        if let Some(sink_weak) = sink_handle {
+            if let Some(sink) = sink_weak.upgrade() {
+                crate::audit!(
+                    "decode_failure_sink_invoked",
+                    role = "decode",
+                    request_id = %request_id,
+                    reason = %reason
+                );
+                sink.on_session_failure(request_id.to_string(), reason).await;
+            } else {
+                crate::audit!(
+                    "decode_failure_sink_unavailable",
+                    role = "decode",
+                    request_id = %request_id,
+                    reason = "wrapper Arc dropped"
+                );
+            }
+        } else {
+            crate::audit!(
+                "decode_failure_sink_unavailable",
+                role = "decode",
+                request_id = %request_id,
+                reason = "no failure sink installed"
+            );
+        }
+        self.states.remove(request_id);
+    }
+
+    /// Map a [`LifecycleOutcome`] to a failure reason for the decode-side watcher,
+    /// or `None` for cooperative paths (Detached / StreamEnded).
+    fn decode_failure_reason(outcome: &LifecycleOutcome) -> Option<String> {
+        match outcome {
+            LifecycleOutcome::Detached { .. } | LifecycleOutcome::StreamEnded => None,
+            LifecycleOutcome::Failed { reason } => Some(reason.clone()),
+            LifecycleOutcome::WatchdogTimeout { watchdog } => Some(format!(
+                "decode lifecycle watchdog fired ({}s) without Detached or Failed",
+                watchdog.as_secs()
+            )),
+        }
+    }
+}
+
+// ============================================================================
+// DecodeCoordinator trait impl
+// ============================================================================
+
+impl DecodeCoordinator for ConditionalDisaggCoordinator {
+    fn evaluate(&self, inputs: &PolicyInputs) -> PrefillSelection {
+        self.policy
+            .as_ref()
+            .expect("evaluate: ConditionalDisaggCoordinator not wired for decode role")
+            .evaluate(inputs)
+    }
+
+    fn install_failure_sink(&self, sink: Weak<dyn CdFailureSink>) {
+        *self.failure_sink.lock() = Some(sink);
+    }
+
+    fn begin_remote_prefill(
+        &self,
+        request_id: &str,
+        inputs: &PolicyInputs,
+        initiator_instance_id: InstanceId,
+        local_match_g2: Vec<ImmutableBlock<G2>>,
+        prefill_token_ids: Vec<u32>,
+    ) -> Result<BeginOutcome> {
+        if self.states.contains_key(request_id) {
+            anyhow::bail!(
+                "begin_remote_prefill called twice for request_id={}",
+                request_id
+            );
+        }
+
+        let queue = self
+            .queue
+            .as_ref()
+            .expect("begin_remote_prefill: ConditionalDisaggCoordinator not wired for decode role")
+            .clone();
+
+        let local_match_hashes: Vec<SequenceHash> =
+            local_match_g2.iter().map(|b| b.sequence_hash()).collect();
+
+        let session_id = uuid::Uuid::new_v4();
+        let session = self.session_factory.open(session_id)?;
+
+        // Holder side: publish commit + availability, then close terminators.
+        session.commit(local_match_hashes.clone())?;
+        session.make_available(local_match_g2)?;
+        session.finish_commits()?;
+        session.finish_availability()?;
+
+        // Build DecodeBits — remote_slots / remote_slot_index are empty at
+        // this point; they get populated at USAA-1 in decode_leader.rs.
+        let bits = DecodeBits {
+            reserved_tokens: 0, // wrapper owns the budget; 0 here is a sentinel
+            failure_reason: Mutex::new(None),
+            local_match_g2_pins: Mutex::new(None),
+            local_match_g2_block_ids: Vec::new(),
+            local_match_g1_block_ids: Vec::new(),
+            local_onboard_complete: std::sync::atomic::AtomicBool::new(false),
+            remote_slots: Vec::new(),
+            remote_slot_index: HashMap::new(),
+            remote_pipeline_complete: std::sync::atomic::AtomicBool::new(false),
+            completed: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        let state = CdRequest::new_decode(
+            request_id.to_string(),
+            session_id,
+            initiator_instance_id,
+            bits,
+        );
+        *state.session.lock() = Some(Arc::clone(&session));
+        self.states.insert(request_id.to_string(), Arc::clone(&state));
+
+        // Spawn lifecycle watcher.
+        let watcher_coord = self.weak_self.clone();
+        let watcher_request_id = request_id.to_string();
+        spawn_lifecycle_watcher(
+            &self.runtime,
+            Arc::clone(&session),
+            "decode",
+            request_id.to_string(),
+            session_id.to_string(),
+            self.lifecycle_watchdog,
+            move |outcome| async move {
+                let failure_reason = Self::decode_failure_reason(&outcome);
+                if let Some(coord) = watcher_coord.upgrade() {
+                    if let Some(reason) = failure_reason {
+                        coord.invoke_decode_failure_sink_and_evict(&watcher_request_id, reason).await;
+                    } else {
+                        coord.states.remove(&watcher_request_id);
+                    }
+                }
+            },
+        );
+
+        let endpoint = session.endpoint();
+
+        let request = RemotePrefillRequest {
+            protocol_version: DISAGG_PROTOCOL_VERSION,
+            request_id: request_id.to_string(),
+            session_id,
+            initiator_instance_id,
+            decode_endpoint: endpoint,
+            sequence_hashes: local_match_hashes,
+            token_ids: prefill_token_ids,
+            num_computed_tokens: inputs.num_computed_tokens,
+        };
+
+        // Enqueue asynchronously so a slow queue doesn't block the sync caller.
+        let coord = self.weak_self.clone();
+        let request_id_owned = request_id.to_string();
+        self.runtime.spawn(async move {
+            match queue.enqueue(request).await {
+                Ok(()) => {
+                    tracing::info!(
+                        request_id = request_id_owned,
+                        "decode begin_remote_prefill: enqueue ok"
+                    );
+                }
+                Err(err) => {
+                    let reason = format!("remote prefill enqueue failed: {err}");
+                    tracing::error!(
+                        request_id = request_id_owned,
+                        error = %err,
+                        "decode begin_remote_prefill: enqueue failed"
+                    );
+                    if let Some(c) = coord.upgrade() {
+                        c.mark_failed(&request_id_owned, reason);
+                    }
+                }
+            }
+        });
+
+        Ok(BeginOutcome {
+            session_id,
+            session,
+        })
+    }
+
+    fn session_for(&self, request_id: &str) -> Option<Arc<dyn Session>> {
+        self.states
+            .get(request_id)
+            .and_then(|e| e.value().session.lock().clone())
+    }
+
+    fn status_for(&self, request_id: &str) -> Option<super::super::decode::RemotePrefillStatus> {
+        self.status_for_decode(request_id)
+    }
+
+    fn active_count(&self) -> usize {
+        self.states.len()
+    }
+
+    fn release(&self, request_id: &str) {
+        if let Some(state) = self.states.get(request_id) {
+            let session_opt = state.value().session.lock().clone();
+            let mut status = state.value().status.lock();
+            if *status != CdRequestStatus::Released {
+                *status = CdRequestStatus::Released;
+            }
+            drop(status);
+            drop(state);
+            if let Some(session) = session_opt {
+                session.finalize(Some("released".to_string()));
+            }
+        }
+    }
+
+    fn mark_failed(&self, request_id: &str, reason: String) {
+        if let Some(state) = self.states.get(request_id) {
+            let session_opt = state.value().session.lock().clone();
+            let mut status = state.value().status.lock();
+            *status = CdRequestStatus::Released;
+            drop(status);
+            // Stash failure reason in DecodeBits if available.
+            if let Some(bits) = state.value().as_decode() {
+                *bits.failure_reason.lock() = Some(reason.clone());
+            }
+            drop(state);
+            if let Some(session) = session_opt {
+                session.close(Some(reason));
+            }
+        }
     }
 }
 

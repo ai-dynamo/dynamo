@@ -37,7 +37,7 @@ use kvbm_connector::connector::leader::disagg::testing::{
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConnectorLeaderApi, DecodeDisaggLeader, RemotePrefillCoordinator,
+    AlwaysRemote, ConnectorLeaderApi, ConditionalDisaggCoordinator, DecodeDisaggLeader,
 };
 use kvbm_engine::disagg::session::{CommittedBlock, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
@@ -76,7 +76,7 @@ struct TestHarness {
     workers: Arc<MockCdWorkerHook>,
     factory: Arc<MockSessionFactory>,
     queue: Arc<InMemoryRemotePrefillQueue>,
-    coordinator: Arc<RemotePrefillCoordinator>,
+    coordinator: Arc<ConditionalDisaggCoordinator>,
     all_hashes: Vec<kvbm_logical::SequenceHash>,
     g1_block_ids: Vec<usize>,
 }
@@ -121,15 +121,19 @@ fn build_harness() -> TestHarness {
 
     let factory = MockSessionFactory::new();
     let queue = InMemoryRemotePrefillQueue::new();
-    let coordinator = RemotePrefillCoordinator::new(
-        Arc::new(AlwaysRemote),
-        factory.clone(),
-        queue.clone(),
-        tokio::runtime::Handle::current(),
-    );
-
     let transport = MockCdBlockTransport::new();
     let workers = MockCdWorkerHook::new();
+
+    let coordinator = ConditionalDisaggCoordinator::new_with_decode(
+        inner.clone(),
+        transport.clone(),
+        workers.clone(),
+        factory.clone(),
+        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
+        tokio::runtime::Handle::current(),
+        Arc::new(AlwaysRemote),
+        queue.clone(),
+    );
 
     let cfg = DisaggConfig {
         hub_url: "http://127.0.0.1:1337".to_string(),

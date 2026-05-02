@@ -47,7 +47,7 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 use crate::{G2, SequenceHash};
 
-use super::decode::{CdFailureSink, RemotePrefillCoordinator};
+use super::decode::{CdFailureSink, DecodeCoordinator};
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
 use futures::FutureExt;
@@ -141,7 +141,7 @@ struct CdRequestStatePayload {
     request_id: String,
     reserved_tokens: usize,
     wrapper: Weak<DecodeDisaggLeader>,
-    coordinator: Weak<RemotePrefillCoordinator>,
+    coordinator: Weak<dyn DecodeCoordinator>,
 }
 
 impl std::fmt::Debug for CdRequestStatePayload {
@@ -174,6 +174,7 @@ impl Drop for CdRequestStatePayload {
         }
     }
 }
+
 
 struct CdRequestState {
     reserved_tokens: usize,
@@ -220,7 +221,7 @@ impl CdRequestState {
 pub struct DecodeDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
     role: DisaggregationRole,
-    coordinator: Arc<RemotePrefillCoordinator>,
+    coordinator: Arc<dyn DecodeCoordinator>,
     transport: Arc<dyn CdBlockTransport>,
     worker_hook: Arc<dyn CdWorkerHook>,
     tokio_handle: tokio::runtime::Handle,
@@ -248,10 +249,15 @@ impl std::fmt::Debug for DecodeDisaggLeader {
 }
 
 impl DecodeDisaggLeader {
-    pub fn from_parts(
+    /// Construct a `DecodeDisaggLeader` with any type that implements
+    /// [`DecodeCoordinator`].  Accepts both [`RemotePrefillCoordinator`]
+    /// (legacy path) and [`super::coordinator::ConditionalDisaggCoordinator`]
+    /// (R-B Slice 4) without requiring an explicit coercion at the call
+    /// site.
+    pub fn from_parts<C: DecodeCoordinator + 'static>(
         inner: Arc<dyn InnerLeaderShim>,
         config: &DisaggConfig,
-        coordinator: Arc<RemotePrefillCoordinator>,
+        coordinator: Arc<C>,
         transport: Arc<dyn CdBlockTransport>,
         worker_hook: Arc<dyn CdWorkerHook>,
         tokio_handle: tokio::runtime::Handle,
@@ -259,6 +265,7 @@ impl DecodeDisaggLeader {
         client: Option<Arc<ConditionalDisaggClient>>,
         hub_velo_id: Option<InstanceId>,
     ) -> Arc<Self> {
+        let coordinator: Arc<dyn DecodeCoordinator> = coordinator;
         let inflight_budget = InflightBudget::new(config.max_inflight_remote_prefill_tokens);
         let leader = Arc::new_cyclic(|weak_self| Self {
             inner,
@@ -306,7 +313,7 @@ impl DecodeDisaggLeader {
         self.hub_velo_id
     }
 
-    pub fn coordinator(&self) -> &Arc<RemotePrefillCoordinator> {
+    pub fn coordinator(&self) -> &Arc<dyn DecodeCoordinator> {
         &self.coordinator
     }
 
@@ -556,11 +563,13 @@ impl DecodeDisaggLeader {
                 // process_finished_onboarding takes the
                 // OnboardingState, the payload's Drop runs the
                 // canonical cleanup chain.
+                let coordinator_weak: Weak<dyn DecodeCoordinator> =
+                    Arc::downgrade(&self.coordinator);
                 let payload = Box::new(CdRequestStatePayload {
                     request_id: request_id.to_string(),
                     reserved_tokens: full_block_external_tokens,
                     wrapper: self.weak_self.clone(),
-                    coordinator: Arc::downgrade(&self.coordinator),
+                    coordinator: coordinator_weak,
                 });
                 if let Err(err) =
                     self.inner.install_cd_onboarding_payload(request_id, payload)
@@ -803,8 +812,8 @@ impl DecodeDisaggLeader {
                 reason = "remote_slots_empty"
             );
         } else {
-            let session = match self.coordinator.state_for(request_id) {
-                Some(s) => Arc::clone(&s.lock().session),
+            let session = match self.coordinator.session_for(request_id) {
+                Some(s) => s,
                 None => {
                     anyhow::bail!("CD USAA-1: coordinator has no session for {}", request_id);
                 }

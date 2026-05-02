@@ -75,6 +75,36 @@ pub trait CdFailureSink: Send + Sync {
     fn on_session_failure(&self, request_id: String, reason: String) -> BoxFuture<'static, ()>;
 }
 
+/// Abstraction over the decode-side coordinator, allowing
+/// [`DecodeDisaggLeader`] to hold either the legacy
+/// [`RemotePrefillCoordinator`] or the new
+/// [`super::coordinator::ConditionalDisaggCoordinator`] (R-B Slice 4).
+///
+/// Only the methods `DecodeDisaggLeader` actually calls are exposed; the
+/// concrete types carry additional methods for tests that hold them by their
+/// concrete type.
+pub trait DecodeCoordinator: Send + Sync {
+    fn evaluate(&self, inputs: &super::PolicyInputs) -> super::PrefillSelection;
+    fn install_failure_sink(&self, sink: std::sync::Weak<dyn CdFailureSink>);
+    fn begin_remote_prefill(
+        &self,
+        request_id: &str,
+        inputs: &super::PolicyInputs,
+        initiator_instance_id: crate::InstanceId,
+        local_match_g2: Vec<kvbm_logical::blocks::ImmutableBlock<crate::G2>>,
+        prefill_token_ids: Vec<u32>,
+    ) -> anyhow::Result<BeginOutcome>;
+    /// Return the session for `request_id`, if any.  Used by
+    /// `decode_leader::commit_usaa1` to subscribe commits/availability.
+    fn session_for(&self, request_id: &str) -> Option<Arc<dyn kvbm_engine::disagg::session::Session>>;
+    fn status_for(&self, request_id: &str) -> Option<RemotePrefillStatus>;
+    fn active_count(&self) -> usize;
+    /// Cooperative end-of-request cleanup.
+    fn release(&self, request_id: &str);
+    /// Abort path: forcibly close the session.
+    fn mark_failed(&self, request_id: &str, reason: String);
+}
+
 pub struct RemotePrefillCoordinator {
     policy: Arc<dyn ConditionalDisaggPolicy>,
     session_factory: Arc<dyn SessionFactory>,
@@ -87,6 +117,9 @@ pub struct RemotePrefillCoordinator {
     /// `None`, the watchdog/Failed path is logged-only — matching
     /// the pre-fix behavior.
     failure_sink: Mutex<Option<Weak<dyn CdFailureSink>>>,
+    /// Cyclic weak reference for methods that need `Arc<Self>` from `&self`
+    /// (required for `DecodeCoordinator::begin_remote_prefill`'s `&self` signature).
+    weak_self: Weak<Self>,
 }
 
 impl RemotePrefillCoordinator {
@@ -96,13 +129,14 @@ impl RemotePrefillCoordinator {
         queue: Arc<dyn RemotePrefillQueue>,
         tokio_handle: Handle,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak_self| Self {
             policy,
             session_factory,
             queue,
             states: DashMap::new(),
             tokio_handle,
             failure_sink: Mutex::new(None),
+            weak_self: weak_self.clone(),
         })
     }
 
@@ -141,7 +175,7 @@ impl RemotePrefillCoordinator {
         skip(self, inputs, local_match_g2, prefill_token_ids)
     )]
     pub fn begin_remote_prefill(
-        self: &Arc<Self>,
+        &self,
         request_id: &str,
         inputs: &PolicyInputs,
         initiator_instance_id: InstanceId,
@@ -204,7 +238,7 @@ impl RemotePrefillCoordinator {
         // The sink call must run BEFORE state-map eviction so the
         // wrapper's `cleanup_failed_request` can read the session
         // state if it needs to.
-        let watcher_coord = Arc::clone(self);
+        let watcher_coord = self.weak_self.clone();
         let watcher_request_id = request_id.to_string();
         spawn_lifecycle_watcher(
             &self.tokio_handle,
@@ -215,10 +249,12 @@ impl RemotePrefillCoordinator {
             LIFECYCLE_WATCHDOG,
             move |outcome| async move {
                 let failure_reason = decode_failure_reason(&outcome);
-                if let Some(reason) = failure_reason {
-                    invoke_failure_sink(&watcher_coord, &watcher_request_id, reason).await;
+                if let Some(coord) = watcher_coord.upgrade() {
+                    if let Some(reason) = failure_reason {
+                        invoke_failure_sink(&coord, &watcher_request_id, reason).await;
+                    }
+                    coord.states.remove(&watcher_request_id);
                 }
-                watcher_coord.states.remove(&watcher_request_id);
             },
         );
 
@@ -240,7 +276,7 @@ impl RemotePrefillCoordinator {
         // the sync caller.  On failure, mark the request failed
         // — the wrapper's pull pipeline will surface this via
         // the session being closed.
-        let coord = Arc::clone(self);
+        let coord = self.weak_self.clone();
         let request_id_owned = request_id.to_string();
         let queue = Arc::clone(&self.queue);
         self.tokio_handle.spawn(async move {
@@ -259,7 +295,9 @@ impl RemotePrefillCoordinator {
                         error = %err,
                         "enqueue failed"
                     );
-                    coord.mark_failed(&request_id_owned, reason);
+                    if let Some(c) = coord.upgrade() {
+                        c.mark_failed(&request_id_owned, reason);
+                    }
                 }
             }
         });
@@ -314,6 +352,55 @@ impl RemotePrefillCoordinator {
             };
             session.close(Some(reason));
         }
+    }
+}
+
+impl DecodeCoordinator for RemotePrefillCoordinator {
+    fn evaluate(&self, inputs: &super::PolicyInputs) -> super::PrefillSelection {
+        self.policy.evaluate(inputs)
+    }
+
+    fn install_failure_sink(&self, sink: std::sync::Weak<dyn CdFailureSink>) {
+        *self.failure_sink.lock() = Some(sink);
+    }
+
+    fn begin_remote_prefill(
+        &self,
+        request_id: &str,
+        inputs: &super::PolicyInputs,
+        initiator_instance_id: crate::InstanceId,
+        local_match_g2: Vec<kvbm_logical::blocks::ImmutableBlock<crate::G2>>,
+        prefill_token_ids: Vec<u32>,
+    ) -> anyhow::Result<BeginOutcome> {
+        RemotePrefillCoordinator::begin_remote_prefill(
+            self,
+            request_id,
+            inputs,
+            initiator_instance_id,
+            local_match_g2,
+            prefill_token_ids,
+        )
+    }
+
+    fn session_for(&self, request_id: &str) -> Option<Arc<dyn kvbm_engine::disagg::session::Session>> {
+        self.state_for(request_id)
+            .map(|s| Arc::clone(&s.lock().session) as Arc<dyn kvbm_engine::disagg::session::Session>)
+    }
+
+    fn status_for(&self, request_id: &str) -> Option<RemotePrefillStatus> {
+        RemotePrefillCoordinator::status_for(self, request_id)
+    }
+
+    fn active_count(&self) -> usize {
+        RemotePrefillCoordinator::active_count(self)
+    }
+
+    fn release(&self, request_id: &str) {
+        RemotePrefillCoordinator::release(self, request_id)
+    }
+
+    fn mark_failed(&self, request_id: &str, reason: String) {
+        RemotePrefillCoordinator::mark_failed(self, request_id, reason)
     }
 }
 

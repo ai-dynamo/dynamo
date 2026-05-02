@@ -60,14 +60,13 @@ use anyhow::Result;
 use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
-use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillCoordinatorImpl;
 use kvbm_connector::connector::leader::disagg::testing::{
     InMemoryRemotePrefillQueue, MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim,
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConnectorLeaderApi, DecodeDisaggLeader, PrefillDisaggLeader,
-    RemotePrefillCoordinator,
+    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
+    PrefillDisaggLeader,
 };
 use kvbm_disagg_protocol::{
     DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
@@ -119,8 +118,8 @@ fn make_disagg_config() -> DisaggConfig {
 struct DualRoleInstance {
     decode_wrapper: Arc<DecodeDisaggLeader>,
     prefill_wrapper: Arc<PrefillDisaggLeader>,
-    decode_coord: Arc<RemotePrefillCoordinator>,
-    prefill_coord: Arc<PrefillCoordinatorImpl>,
+    decode_coord: Arc<ConditionalDisaggCoordinator>,
+    prefill_coord: Arc<ConditionalDisaggCoordinator>,
     inner: Arc<MockInnerLeaderShim>,
     transport: Arc<MockCdBlockTransport>,
     workers: Arc<MockCdWorkerHook>,
@@ -135,11 +134,15 @@ fn build_instance(factory: Arc<MockSessionFactory>) -> DualRoleInstance {
     let workers = MockCdWorkerHook::new();
     let queue = InMemoryRemotePrefillQueue::new();
 
-    let decode_coord = RemotePrefillCoordinator::new(
-        Arc::new(AlwaysRemote),
+    let decode_coord = ConditionalDisaggCoordinator::new_with_decode(
+        inner.clone(),
+        transport.clone(),
+        workers.clone(),
         factory.clone(),
-        queue.clone(),
+        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
         tokio::runtime::Handle::current(),
+        Arc::new(AlwaysRemote),
+        queue.clone(),
     );
 
     let decode_wrapper = DecodeDisaggLeader::from_parts(
@@ -154,7 +157,7 @@ fn build_instance(factory: Arc<MockSessionFactory>) -> DualRoleInstance {
         None,
     );
 
-    let prefill_coord = PrefillCoordinatorImpl::new(
+    let prefill_coord = ConditionalDisaggCoordinator::new(
         inner.clone(),
         transport.clone(),
         workers.clone(),

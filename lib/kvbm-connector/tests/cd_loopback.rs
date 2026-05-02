@@ -23,14 +23,13 @@ use anyhow::Result;
 use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
-use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillCoordinatorImpl;
 use kvbm_connector::connector::leader::disagg::testing::{
     InMemoryRemotePrefillQueue, MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim,
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConnectorLeaderApi, DecodeDisaggLeader, PrefillDisaggLeader,
-    RemotePrefillCoordinator,
+    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
+    PrefillDisaggLeader,
 };
 use kvbm_disagg_protocol::{
     DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
@@ -110,14 +109,18 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         },
     );
     let d_queue = InMemoryRemotePrefillQueue::new();
-    let d_coordinator = RemotePrefillCoordinator::new(
-        Arc::new(AlwaysRemote),
-        d_factory.clone(),
-        d_queue.clone(),
-        tokio::runtime::Handle::current(),
-    );
     let d_transport = MockCdBlockTransport::new();
     let d_workers = MockCdWorkerHook::new();
+    let d_coordinator = ConditionalDisaggCoordinator::new_with_decode(
+        d_inner.clone(),
+        d_transport.clone(),
+        d_workers.clone(),
+        d_factory.clone(),
+        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
+        tokio::runtime::Handle::current(),
+        Arc::new(AlwaysRemote),
+        d_queue.clone(),
+    );
     let d_cfg = DisaggConfig {
         hub_url: "http://127.0.0.1:1337".to_string(),
         role: DisaggregationRole::Decode,
@@ -143,7 +146,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
 
     let p_transport = MockCdBlockTransport::new();
     let p_workers = MockCdWorkerHook::new();
-    let p_coordinator = PrefillCoordinatorImpl::new(
+    let p_coordinator = ConditionalDisaggCoordinator::new(
         p_inner.clone(),
         p_transport.clone(),
         p_workers.clone(),

@@ -691,14 +691,12 @@ impl ConnectorLeader {
                 "Registering leader with kvbm-hub for conditional disaggregation"
             );
 
-            use super::disagg::prefill_coordinator::PrefillCoordinatorImpl;
             use super::disagg::{
-                AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggLeader,
-                ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim,
-                DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
+                AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggCoordinator,
+                ConditionalDisaggLeader, ConditionalDisaggPolicy, ConnectorLeaderApi,
+                ConnectorLeaderShim, DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
                 HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook, PrefillCoordinator,
-                PrefillDisaggLeader, RemotePrefillCoordinator, RemotePrefillQueue,
-                UnifiedDisaggLeader,
+                PrefillDisaggLeader, RemotePrefillQueue, UnifiedDisaggLeader,
             };
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
@@ -759,11 +757,19 @@ impl ConnectorLeader {
                     let policy: Arc<dyn ConditionalDisaggPolicy> = Arc::new(AlwaysRemote);
                     let queue: Arc<dyn RemotePrefillQueue> =
                         HubRemotePrefillQueue::new(Arc::clone(&client));
-                    let coord = RemotePrefillCoordinator::new(
-                        policy,
+                    let peer_resolver = HubPeerResolver::new(
+                        Arc::clone(&hub),
+                        self.runtime.messenger().clone(),
+                    );
+                    let coord = ConditionalDisaggCoordinator::new_with_decode(
+                        Arc::clone(&inner_shim),
+                        Arc::clone(&transport),
+                        Arc::clone(&worker_hook),
                         Arc::clone(&session_factory),
-                        queue,
+                        peer_resolver,
                         tokio_handle.clone(),
+                        policy,
+                        queue,
                     );
                     let decode = DecodeDisaggLeader::from_parts(
                         Arc::clone(&inner_shim),
@@ -783,7 +789,7 @@ impl ConnectorLeader {
                         Arc::clone(&hub),
                         self.runtime.messenger().clone(),
                     );
-                    let coord = PrefillCoordinatorImpl::new(
+                    let coord = ConditionalDisaggCoordinator::new(
                         Arc::clone(&inner_shim),
                         Arc::clone(&transport),
                         Arc::clone(&worker_hook),

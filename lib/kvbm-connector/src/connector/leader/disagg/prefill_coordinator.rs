@@ -192,26 +192,43 @@ impl RequestState {
 // the first iterator-ordered request claims. Document and revisit only
 // if production hits the case.
 
+/// Closure invoked by the observer once expected output blocks
+/// have been registered for a request.  Signature mirrors
+/// `commit_output_blocks(request_id, blocks)`.  Decoupled from any
+/// specific coordinator type so both legacy `PrefillCoordinatorImpl`
+/// and the new `ConditionalDisaggCoordinator` can drive the same
+/// observer.
+pub type CommitOutputBlocksFn =
+    dyn Fn(&str, Vec<ImmutableBlock<G2>>) + Send + Sync + 'static;
+
 pub struct ConditionalDecodeG2Observer {
     /// Per-request residual hashset: hashes we still expect to
     /// see registered for this request. Entries removed as
     /// matches land. Empty entry → dropped.
     pending: Mutex<HashMap<String, HashSet<SequenceHash>>>,
-    /// Weak so observer outlives drops cleanly without holding
-    /// the coordinator alive.
-    coordinator: Mutex<Weak<PrefillCoordinatorImpl>>,
+    /// Closure that forwards matched blocks to the coordinator's
+    /// `commit_output_blocks`.  Held as `Arc` so the closure can
+    /// capture the coord via `Weak<Self>` without forcing the
+    /// observer to know the coord's concrete type.  `None` until a
+    /// coordinator installs itself via [`install_commit_fn`].
+    commit_fn: Mutex<Option<Arc<CommitOutputBlocksFn>>>,
 }
 
 impl ConditionalDecodeG2Observer {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             pending: Mutex::new(HashMap::new()),
-            coordinator: Mutex::new(Weak::new()),
+            commit_fn: Mutex::new(None),
         })
     }
 
-    fn install_coordinator(&self, coord: Weak<PrefillCoordinatorImpl>) {
-        *self.coordinator.lock() = coord;
+    /// Install the coordinator's commit-output-blocks dispatcher.
+    /// Called by the coordinator's constructor (`Arc::new_cyclic`)
+    /// with a closure that captures `Weak<coord>` and re-upgrades
+    /// per call.  Idempotent — overwrites any prior installation
+    /// (production wiring sets it exactly once; tests may swap).
+    pub fn install_commit_fn(&self, f: Arc<CommitOutputBlocksFn>) {
+        *self.commit_fn.lock() = Some(f);
     }
 
     /// Track a request's expected output hashes; returns an RAII
@@ -307,16 +324,10 @@ impl ConditionalDecodeG2Observer {
             }
         }
 
-        let coord = self.coordinator.lock().upgrade();
-        if let Some(coord) = coord {
+        let dispatch = self.commit_fn.lock().clone();
+        if let Some(f) = dispatch {
             for (request_id, blocks) in by_request {
-                if let Err(err) = coord.commit_output_blocks(&request_id, blocks) {
-                    tracing::error!(
-                        request_id,
-                        error = %err,
-                        "commit_output_blocks failed from observer"
-                    );
-                }
+                f(&request_id, blocks);
             }
         }
     }
@@ -417,8 +428,24 @@ impl PrefillCoordinatorImpl {
             weak_self: weak_self.clone(),
         });
         // Wire the weak coordinator back into the observer so
-        // observe() can call commit_output_blocks.
-        observer.install_coordinator(Arc::downgrade(&coord));
+        // observe() can call commit_output_blocks.  Closure-based
+        // dispatch decouples the observer from this concrete coord
+        // type so the new ConditionalDisaggCoordinator can drive
+        // the same observer.
+        let weak_coord = Arc::downgrade(&coord);
+        observer.install_commit_fn(Arc::new(
+            move |request_id: &str, blocks: Vec<ImmutableBlock<G2>>| {
+                if let Some(coord) = weak_coord.upgrade() {
+                    if let Err(err) = coord.commit_output_blocks(request_id, blocks) {
+                        tracing::error!(
+                            request_id,
+                            error = %err,
+                            "commit_output_blocks failed from observer"
+                        );
+                    }
+                }
+            },
+        ));
         coord
     }
 

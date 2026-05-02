@@ -86,7 +86,7 @@ use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 pub use conditional_leader::{ConditionalDisaggLeader, register_with_hub};
 pub use coordinator::ConditionalDisaggCoordinator;
 pub use decode::{
-    BeginOutcome, CdFailureSink, RemotePrefillCoordinator, RemotePrefillState,
+    BeginOutcome, CdFailureSink, DecodeCoordinator, RemotePrefillCoordinator, RemotePrefillState,
     RemotePrefillStatus,
 };
 pub use decode_leader::DecodeDisaggLeader;
