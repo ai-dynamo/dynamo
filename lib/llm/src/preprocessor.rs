@@ -19,8 +19,9 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
@@ -797,9 +798,17 @@ impl OpenAIPreprocessor {
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
 
+        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
         // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
-            && !Self::is_reasoning_disabled_by_request(
+            && !reasoning_disabled_by_request
+            && !tool_choice_forces_guided_json;
+        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
+            && Self::should_strip_reasoning_start_when_disabled(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
             )
@@ -817,6 +826,11 @@ impl OpenAIPreprocessor {
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+            ))
+        } else if should_strip_disabled_reasoning_start {
+            Box::pin(Self::strip_leading_reasoning_start_from_stream(
+                stream,
+                "<think>".to_string(),
             ))
         } else {
             Box::pin(stream)
@@ -1299,7 +1313,7 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("nemotron_nano") | Some("nemotron3") => {
+            Some("nemotron_nano") | Some("nemotron3") | Some("nemotron_v3") => {
                 if let Some(args) = chat_template_args {
                     if let Some(enable_thinking) = args.get("enable_thinking")
                         && enable_thinking == &serde_json::Value::Bool(false)
@@ -1333,6 +1347,33 @@ impl OpenAIPreprocessor {
                     crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
                 {
                     return !enabled;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    // Motivation: vLLM's Nemotron v3 parser disables reasoning extraction for
+    // enable_thinking=false / force_nonempty_content=true, but still drops a
+    // leading <think> marker so it does not leak into user-visible content.
+    // This function checks if the reasoning parser is Nemotron v3 and if the
+    // chat template args contain enable_thinking=false or force_nonempty_content=true.
+    // If both are true, the function returns true, otherwise false.
+    fn should_strip_reasoning_start_when_disabled(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        match reasoning_parser {
+            Some("nemotron_nano") | Some("nemotron3") | Some("nemotron_v3") => {
+                if let Some(args) = chat_template_args {
+                    return matches!(
+                        args.get("enable_thinking"),
+                        Some(serde_json::Value::Bool(false))
+                    ) || matches!(
+                        args.get("force_nonempty_content"),
+                        Some(serde_json::Value::Bool(true))
+                    );
                 }
                 false
             }
@@ -1402,6 +1443,79 @@ impl OpenAIPreprocessor {
                     response
                 };
 
+                Some((processed_response, state))
+            } else {
+                None
+            }
+        })
+        .fuse()
+    }
+
+    // Motivation: when Nemotron reasoning is disabled by request flags, the
+    // backend may still emit a leading <think>. Buffer the initial stream
+    // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
+    fn strip_leading_reasoning_start_from_stream<S>(
+        stream: S,
+        think_start_token: String,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        struct StripReasoningStartState {
+            stream:
+                Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+            think_start_token: String,
+            buffer: String,
+            decided: bool,
+        }
+
+        let state = StripReasoningStartState {
+            stream: Box::pin(stream),
+            think_start_token,
+            buffer: String::new(),
+            decided: false,
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(response) = state.stream.next().await {
+                let processed_response = response.map_data(|mut data| {
+                    for choice in data.inner.choices.iter_mut() {
+                        let text = match choice.delta.content.take() {
+                            Some(ChatCompletionMessageContent::Text(text)) => text,
+                            other => {
+                                choice.delta.content = other;
+                                continue;
+                            }
+                        };
+
+                        let output = if state.decided {
+                            text
+                        } else {
+                            state.buffer.push_str(&text);
+                            if state.think_start_token.starts_with(&state.buffer)
+                                && state.buffer.len() < state.think_start_token.len()
+                            {
+                                choice.delta.content = None;
+                                continue;
+                            }
+
+                            state.decided = true;
+                            if state.buffer.starts_with(&state.think_start_token) {
+                                state.buffer[state.think_start_token.len()..].to_string()
+                            } else {
+                                state.buffer.clone()
+                            }
+                        };
+
+                        state.buffer.clear();
+                        choice.delta.content = if output.is_empty() {
+                            None
+                        } else {
+                            Some(ChatCompletionMessageContent::Text(output))
+                        };
+                    }
+                    Ok(data)
+                });
                 Some((processed_response, state))
             } else {
                 None
@@ -1879,6 +1993,14 @@ mod tests {
             );
             m
         };
+        let force_nonempty_content_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "force_nonempty_content".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            m
+        };
         let thinking_mode_chat = {
             let mut m = std::collections::HashMap::new();
             m.insert(
@@ -1996,6 +2118,24 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "nemotron_nano + empty args → enabled",
+            ),
+            (
+                Some("nemotron3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron3 + force_nonempty_content=true → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_v3 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron_v3 + force_nonempty_content=true → disabled",
             ),
             // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
             // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.

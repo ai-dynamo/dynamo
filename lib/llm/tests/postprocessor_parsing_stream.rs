@@ -342,6 +342,98 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
     }
 }
 
+/// vLLM parity: `chat_template_kwargs={"enable_thinking": false}` disables
+/// Nemotron v3 reasoning extraction. Plain backend text should remain normal
+/// content and must not be reclassified as `reasoning_content`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_enable_thinking_false_returns_content() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "enable_thinking": false
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("This is plain content")];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(reasoning, "");
+    assert_eq!(content, "This is plain content");
+}
+
+/// vLLM parity: `chat_template_kwargs={"force_nonempty_content": true}` turns
+/// a leading `<think>...` response into normal content instead of reasoning.
+/// Dynamo checks this in the postprocessor because request flags are applied
+/// before stream parsing, not inside the raw reasoning parser.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_token() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("<thi"),
+        mock_content_chunk("nk>This is plain content"),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(reasoning, "");
+    assert_eq!(content, "This is plain content");
+}
+
 /// Regression: MiniMax + tool_choice=required + SGLang guided decoding.
 ///
 /// The reasoning parser (minimax_append_think) synthesizes a `<think>` opener
