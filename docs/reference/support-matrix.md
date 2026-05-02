@@ -9,9 +9,9 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v1.1.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) -- SGLang `0.5.10.post1` | TensorRT-LLM `1.3.0rc11` | vLLM `0.19.0` | NIXL `1.0.1`
+**Latest stable release:** [v1.1.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) -- SGLang `0.5.10.post1` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc11` (NIXL `0.10.1`) | vLLM `0.19.0` (NIXL `0.10.1`)
 
-**Experimental release:** [v1.2.0-deepseek-v4-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* -- vLLM `0.20.0` | SGLang upstream `deepseek-v4-blackwell` preview | NIXL `1.0.1`
+**Experimental release:** [v1.2.0-deepseek-v4-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* -- vLLM `0.20.0` | SGLang upstream `deepseek-v4-blackwell` preview | NIXL `0.10.1`
 
 | Requirement | Supported |
 | :--- | :--- |
@@ -31,9 +31,9 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.20.0` | `1.0.1` |
-| **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.0` | `1.0.1` |
-| **v1.1.0** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `1.0.1` |
+| **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.20.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
+| **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.0` | `0.10.1` |
+| **v1.1.0** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.1.0-dev.3** *(experimental, partial)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
 | **v1.1.0-dev.2** *(experimental, partial)* | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
 | **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |

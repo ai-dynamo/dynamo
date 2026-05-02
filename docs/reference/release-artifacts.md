@@ -168,7 +168,7 @@ For a complete list of known issues, refer to the release notes for each version
 ## Release History
 
 - **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)*: DeepSeek-V4-Flash and V4-Pro on Blackwell. Ships `vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (vLLM `v0.20.0`) plus `sglang-runtime:1.2.0-deepseek-v4-{cuda12,cuda13}-dev.2` built on upstream `lmsysorg/sglang:deepseek-v4-blackwell`. No TensorRT-LLM container, no other component containers, no Helm charts, no wheels published. Snapshot dev build for early-access V4 support; not QA-gated.
-- **v1.1.0**: First post-v1.0.0 release. SGLang `v0.5.10.post1`, TRT-LLM `v1.3.0rc11`, vLLM `v0.19.0`, NIXL `v1.0.1`. Resilient standalone KV indexer with recovery, Anthropic `/v1/messages` production-grade, SGLang multimodal disaggregated serving with embedding transfer / embedding cache / device-aware EPD routing, Mocker as performance-modeling and offline-replay engine, Planner FPM consolidation. See [Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) for breaking changes.
+- **v1.1.0**: First post-v1.0.0 release. SGLang `v0.5.10.post1` (NIXL `v1.0.1`, from upstream `lmsysorg/sglang` image), TRT-LLM `v1.3.0rc11` (NIXL `v0.10.1`), vLLM `v0.19.0` (NIXL `v0.10.1`). Resilient standalone KV indexer with recovery, Anthropic `/v1/messages` production-grade, SGLang multimodal disaggregated serving with embedding transfer / embedding cache / device-aware EPD routing, Mocker as performance-modeling and offline-replay engine, Planner FPM consolidation. See [Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) for breaking changes.
 - **v1.1.0-dev.3** *(experimental, partial)*: Preview release on `release/1.1.0-dev.3`. Ships only `tensorrtllm-runtime:1.1.0-dev.3` (TRT-LLM `v1.3.0rc11`) plus `ai-dynamo` and `ai-dynamo-runtime` wheels. No vLLM/SGLang containers, no other component containers, no Helm charts published. Not recommended for production use.
 - **v1.1.0-dev.2** *(experimental, partial)*: Preview release. Ships `sglang-runtime:1.1.0-dev.2` (SGLang `v0.5.9`) and `tensorrtllm-runtime:1.1.0-dev.2` (TRT-LLM `v1.3.0rc9`) plus `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels. No vLLM container, no other component containers, no Helm charts published. Not recommended for production use.
 - **v1.1.0-dev.1** *(experimental)*: Preview release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1`, vLLM `v0.17.1`, NIXL `v0.10.1`. Not recommended for production use.
@@ -613,7 +613,7 @@ A GitHub or container tag `v1.1.0-dev.N` maps to a wheel version `1.1.0.devN` (f
 
 - **Branch:** [release/1.2.0-deepseek-v4-dev.2](https://github.com/ai-dynamo/dynamo/tree/release/1.2.0-deepseek-v4-dev.2)
 - **GitHub Tag:** [v1.2.0-deepseek-v4-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2)
-- **Backends:** vLLM `v0.20.0` (native DeepSeek-V4 support) | SGLang upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview | NIXL `v1.0.1`
+- **Backends:** vLLM `v0.20.0` (native DeepSeek-V4 support) | SGLang upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview | NIXL `v0.10.1`
 - **Coverage:** Partial -- DeepSeek-V4-Flash and V4-Pro only. vLLM and SGLang containers are published for Blackwell; no TensorRT-LLM container, no other component containers, no Helm charts, no wheels. Snapshot dev build for early-access V4 model support; not QA-gated.
 
 #### Container Images
