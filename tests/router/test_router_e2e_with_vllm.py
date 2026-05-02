@@ -487,10 +487,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
-@pytest.mark.requested_vllm_kv_cache_bytes(
-    331_801_000
-)  # KV cache cap (2x safety over min=165_900_288)
+# Temporarily omit profiled_vram_gib so this multi-worker router test runs in
+# the sequential GPU stage. Last parallel profile: profiled_vram_gib(6.9),
+# requested_vllm_kv_cache_bytes(331_801_000).
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
@@ -515,10 +514,9 @@ def test_vllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
-@pytest.mark.requested_vllm_kv_cache_bytes(
-    331_801_000
-)  # KV cache cap (2x safety over min=165_900_288)
+# Temporarily omit profiled_vram_gib so this multi-worker router test runs in
+# the sequential GPU stage. Last parallel profile: profiled_vram_gib(6.9),
+# requested_vllm_kv_cache_bytes(331_801_000).
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
@@ -543,10 +541,9 @@ def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
-@pytest.mark.requested_vllm_kv_cache_bytes(
-    331_801_000
-)  # KV cache cap (2x safety over min=165_900_288)
+# Temporarily omit profiled_vram_gib so this multi-worker router test runs in
+# the sequential GPU stage. Last parallel profile: profiled_vram_gib(6.9),
+# requested_vllm_kv_cache_bytes(331_801_000).
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
@@ -641,10 +638,9 @@ def test_router_decisions_vllm_disagg(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
-@pytest.mark.requested_vllm_kv_cache_bytes(
-    331_801_000
-)  # KV cache cap (2x safety over min=165_900_288)
+# Temporarily omit profiled_vram_gib so this multi-worker router test runs in
+# the sequential GPU stage. Last parallel profile: profiled_vram_gib(6.9),
+# requested_vllm_kv_cache_bytes(331_801_000).
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
