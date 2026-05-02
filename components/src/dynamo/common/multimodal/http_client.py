@@ -6,12 +6,6 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import asyncio
 import logging
@@ -22,7 +16,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Global HTTP client instance
+# The shared client has ``follow_redirects=False`` to prevent redirect-based
+# SSRF filter bypass. Callers must follow redirects manually via
+# :func:`dynamo.common.multimodal.url_validator.fetch_with_revalidation` so
+# that each hop is re-validated against the SSRF policy.
 _global_http_client: Optional[httpx.AsyncClient] = None
 _global_http_semaphore: Optional[asyncio.Semaphore] = None
 
@@ -38,14 +35,12 @@ def _env_int(name: str, default: int) -> int:
 
 
 def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
-    """
-    Get or create a shared HTTP client instance.
+    """Return a shared async HTTP client for media fetches.
 
-    Args:
-        timeout: Timeout for HTTP requests
-
-    Returns:
-        Shared HTTP client instance
+    The client intentionally disables automatic redirect following. Callers
+    that need to follow redirects must route the request through
+    :func:`fetch_with_revalidation`, which revalidates every redirect hop
+    against the SSRF policy.
 
     Pool sizing and per-field timeouts are configurable via environment
     variables so operators can tune without patching source:
@@ -73,7 +68,7 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
                 write=None,
                 pool=pool_timeout,
             ),
-            follow_redirects=True,
+            follow_redirects=False,
             limits=httpx.Limits(
                 max_keepalive_connections=max_keepalive,
                 max_connections=max_connections,
@@ -82,7 +77,7 @@ def get_http_client(timeout: float = 60.0) -> httpx.AsyncClient:
         logger.info(
             "Shared HTTP client initialized ("
             "connect=%ss, read=%ss, write=None, pool=%ss, "
-            "max_connections=%d, max_keepalive=%d, follow_redirects=True)",
+            "max_connections=%d, max_keepalive=%d, follow_redirects=False)",
             connect_timeout,
             read_timeout,
             pool_timeout,
