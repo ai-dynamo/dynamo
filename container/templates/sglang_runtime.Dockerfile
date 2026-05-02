@@ -85,6 +85,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends libjsoncpp25 && \
     rm -rf /var/lib/apt/lists/*
 
+# Do not remove — unused at runtime, removed for compliance reasons
+RUN pip uninstall -y black termplotlib
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
