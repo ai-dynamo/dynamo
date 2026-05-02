@@ -123,7 +123,7 @@ class _DeferredAbort:
           mid-flight) and shield the await. If a CancelledError reaches this
           coroutine — typically from _abort_monitor cleanup cancelling the
           monitor task — the engine.abort() call still runs to completion in
-          the background. This is the DYN-2880 fix.
+          the background.
         - First token NOT yet received: fire-and-forget the deferred waiter
           so abort() returns immediately. The caller (e.g. _monitor_abort)
           must not block waiting for an event that requires the engine to
