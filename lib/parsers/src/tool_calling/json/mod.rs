@@ -150,28 +150,25 @@ mod tests {
         );
     }
 
-    // Pin current Nemotron behavior when </TOOLCALL> is absent due to
-    // max_tokens / EOS truncation. The JSON-family parser today silently
-    // drops the in-flight call — the failure mode TEST_CASES.md flags.
-    // Promoting to recovery (matching Kimi K2's behavior)
-    // would be a parser change.
+    // Recovery for missing outer </TOOLCALL> (max_tokens / EOS truncation):
+    // when the inner JSON array is well-formed, treat EOF as the end token
+    // and extract the call rather than silently dropping it.
     #[test] // CASE.5 — nemotron_deci
-    fn test_parse_nemotron_deci_no_outer_close_silent_drop() {
+    fn test_parse_nemotron_deci_no_outer_close_recovers() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            allow_eof_recovery: true,
             ..Default::default()
         };
         // JSON array fully complete; only outer </TOOLCALL> missing.
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}}]"#;
 
-        let (calls, normal_text) = try_tool_call_parse_json(input, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "nemotron_deci today drops the in-flight call when </TOOLCALL> is missing"
-        );
-        assert_eq!(normal_text, Some(input.to_string()));
+        let (calls, _normal_text) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     // Verifies multi-call works correctly for nemotron_deci. The shared
@@ -197,28 +194,24 @@ mod tests {
         assert_eq!(normal_text, Some("".to_string()));
     }
 
-    // Pin current behavior when JSON args are truncated mid-value (e.g.
-    // max_tokens fires inside `"city":"NYC` with no closing quote). The
-    // outer </TOOLCALL> is also absent here — same shape as a real
-    // truncation. nemotron_deci silently drops the call today; the same
-    // class of bug as CASE.5. Distinct from existing fallback-to-string
-    // tests on other parsers, which exercise syntactically-bad-but-complete
-    // JSON, not truncation.
+    // Recovery for truncated JSON args (max_tokens fires inside
+    // `"city":"NYC` with no closing quote, brace, or array bracket). The
+    // base parser balances unclosed strings/braces and retries the parse,
+    // surfacing the call rather than silently dropping it.
     #[test] // CASE.4 — nemotron_deci
-    fn test_parse_nemotron_deci_truncated_json_silent_drop() {
+    fn test_parse_nemotron_deci_truncated_json_recovers() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            allow_eof_recovery: true,
             ..Default::default()
         };
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC</TOOLCALL>"#;
 
-        let (calls, normal_text) = try_tool_call_parse_json(input, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "nemotron_deci today drops calls with truncated JSON args"
-        );
-        assert_eq!(normal_text, Some(input.to_string()));
+        let (calls, _) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 }

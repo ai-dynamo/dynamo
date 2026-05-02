@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize},
+    },
     thread::JoinHandle,
 };
 
@@ -14,7 +18,9 @@ use tokio::sync::oneshot;
 use super::{
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
 };
+use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
+use dynamo_tokens::SequenceHash;
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
 ///
@@ -41,9 +47,9 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     backend: Arc<T>,
 
     /// Maps WorkerId to worker thread index for sticky routing.
-    worker_assignments: DashMap<WorkerId, usize, FxBuildHasher>,
+    worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
     /// Counter for round-robin assignment of new WorkerIds.
-    worker_assignment_count: AtomicUsize,
+    worker_assignment_count: Arc<AtomicUsize>,
 
     /// Channels to send tasks to worker threads (one per thread).
     /// Sending `WorkerTask::Terminate` signals the thread to shut down.
@@ -56,6 +62,15 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Handles to worker threads for joining on shutdown.
     thread_handles: Mutex<Vec<JoinHandle<()>>>,
+
+    /// Approximate-mode TTL pruning manager. None for normal event-driven mode.
+    prune_manager: Option<WorkerPruneManager>,
+
+    /// Cancellation token for the threaded prune pump.
+    prune_pump_cancel: Option<tokio_util::sync::CancellationToken>,
+
+    /// Synthetic event IDs for approximate store/remove events.
+    synthetic_event_id: Arc<AtomicU64>,
 }
 
 impl<T: SyncIndexer> ThreadPoolIndexer<T> {
@@ -99,12 +114,40 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> Self {
+        Self::new_with_metrics_and_pruning(backend, num_workers, kv_block_size, metrics, None)
+    }
+
+    pub fn new_with_pruning(
+        backend: T,
+        num_workers: usize,
+        kv_block_size: u32,
+        prune_config: PruneConfig,
+    ) -> Self {
+        Self::new_with_metrics_and_pruning(
+            backend,
+            num_workers,
+            kv_block_size,
+            None,
+            Some(prune_config),
+        )
+    }
+
+    pub fn new_with_metrics_and_pruning(
+        backend: T,
+        num_workers: usize,
+        kv_block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+        prune_config: Option<PruneConfig>,
+    ) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
         super::warn_on_unit_block_size("thread_pool", kv_block_size);
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
         let mut thread_handles = Vec::new();
+        let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
+        let worker_assignment_count = Arc::new(AtomicUsize::new(0));
+        let synthetic_event_id = Arc::new(AtomicU64::new(0));
         for _ in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
@@ -118,14 +161,32 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             thread_handles.push(handle);
         }
 
+        let prune_manager = prune_config.map(WorkerPruneManager::new);
+        let prune_pump_cancel = prune_manager.as_ref().map(|prune_manager| {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            Self::spawn_prune_pump(
+                prune_manager.clone(),
+                worker_event_senders.clone(),
+                Arc::clone(&worker_assignments),
+                Arc::clone(&worker_assignment_count),
+                num_workers,
+                Arc::clone(&synthetic_event_id),
+                cancel.clone(),
+            );
+            cancel
+        });
+
         Self {
             backend,
-            worker_assignments: DashMap::with_hasher(FxBuildHasher),
-            worker_assignment_count: AtomicUsize::new(0),
+            worker_assignments,
+            worker_assignment_count,
             worker_event_channels: worker_event_senders,
             num_workers,
             kv_block_size,
             thread_handles: Mutex::new(thread_handles),
+            prune_manager,
+            prune_pump_cancel,
+            synthetic_event_id,
         }
     }
 
@@ -160,6 +221,149 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         }
     }
 
+    fn get_or_assign_thread_idx(
+        worker_assignments: &DashMap<WorkerId, usize, FxBuildHasher>,
+        worker_assignment_count: &AtomicUsize,
+        worker_id: WorkerId,
+        num_workers: usize,
+    ) -> usize {
+        *worker_assignments.entry(worker_id).or_insert_with(|| {
+            let idx = worker_assignment_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            idx % num_workers
+        })
+    }
+
+    fn next_synthetic_event_id(synthetic_event_id: &AtomicU64) -> u64 {
+        synthetic_event_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn block_entries_for_hashes(
+        worker: WorkerWithDpRank,
+        sequence_hashes: &[SequenceHash],
+    ) -> Vec<BlockEntry> {
+        sequence_hashes
+            .iter()
+            .enumerate()
+            .map(|(idx, h)| BlockEntry {
+                key: ExternalSequenceBlockHash(*h),
+                worker,
+                seq_position: idx,
+            })
+            .collect()
+    }
+
+    fn stored_event_for_hashes(
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+        event_id: u64,
+    ) -> RouterEvent {
+        let blocks = local_hashes
+            .iter()
+            .zip(sequence_hashes.iter())
+            .map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                tokens_hash: *local_hash,
+                block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                mm_extra_info: None,
+            })
+            .collect();
+
+        RouterEvent::new(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank: worker.dp_rank,
+            },
+        )
+    }
+
+    fn enqueue_prune_removes(
+        worker_event_channels: &[flume::Sender<WorkerTask>],
+        worker_assignments: &DashMap<WorkerId, usize, FxBuildHasher>,
+        worker_assignment_count: &AtomicUsize,
+        num_workers: usize,
+        synthetic_event_id: &AtomicU64,
+        entries: Vec<BlockEntry>,
+    ) {
+        let mut by_worker: BTreeMap<WorkerWithDpRank, BTreeSet<ExternalSequenceBlockHash>> =
+            BTreeMap::new();
+        for entry in entries {
+            by_worker.entry(entry.worker).or_default().insert(entry.key);
+        }
+
+        for (worker, hashes) in by_worker {
+            let event_id = Self::next_synthetic_event_id(synthetic_event_id);
+            let event = RouterEvent::new(
+                worker.worker_id,
+                KvCacheEvent {
+                    event_id,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: hashes.into_iter().collect(),
+                    }),
+                    dp_rank: worker.dp_rank,
+                },
+            );
+            let thread_idx = Self::get_or_assign_thread_idx(
+                worker_assignments,
+                worker_assignment_count,
+                worker.worker_id,
+                num_workers,
+            );
+            if let Err(error) = worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
+                tracing::warn!(
+                    thread_idx,
+                    ?error,
+                    "Failed to enqueue approximate TTL remove event"
+                );
+            }
+        }
+    }
+
+    fn spawn_prune_pump(
+        prune_manager: WorkerPruneManager,
+        worker_event_channels: Vec<flume::Sender<WorkerTask>>,
+        worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
+        worker_assignment_count: Arc<AtomicUsize>,
+        num_workers: usize,
+        synthetic_event_id: Arc<AtomicU64>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut ready_rx = prune_manager.subscribe_ready();
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        changed = ready_rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                            loop {
+                                let entries = prune_manager.drain_pending_removes();
+                                if entries.is_empty() {
+                                    break;
+                                }
+                                Self::enqueue_prune_removes(
+                                    &worker_event_channels,
+                                    &worker_assignments,
+                                    &worker_assignment_count,
+                                    num_workers,
+                                    &synthetic_event_id,
+                                    entries,
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     fn maybe_enqueue_cleanup(&self, thread_idx: usize) {
         if !self.backend.try_schedule_cleanup() {
             return;
@@ -180,6 +384,13 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
 impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.prune_pump_cancel {
+            cancel.cancel();
+        }
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.shutdown();
+        }
+
         // Send Terminate to all worker threads so they exit their recv loops
         // and drop their Arc<T> clones. Then join the threads to ensure the
         // clones are actually dropped before the compiler drops `self.backend`.
@@ -232,12 +443,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let worker_id = event.worker_id;
 
         // Get or assign worker thread index using sticky round-robin
-        let thread_idx = *self.worker_assignments.entry(worker_id).or_insert_with(|| {
-            let idx = self
-                .worker_assignment_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            idx % self.num_workers
-        });
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
 
         // Send event to the assigned worker thread
         if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
@@ -253,6 +464,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker(worker_id);
+        }
+
         // Route to the worker's assigned thread (if any), otherwise broadcast
         // to all threads since dp_ranks may be spread across threads.
         let thread_idx = self.worker_assignments.get(&worker_id).map(|v| *v);
@@ -282,6 +497,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
+
         // Broadcast to all threads — the dp_rank may be on any thread.
         // Don't remove from worker_assignments since other dp_ranks may still exist.
         for channel in &self.worker_event_channels {
@@ -291,6 +510,13 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     fn shutdown(&self) {
+        if let Some(cancel) = &self.prune_pump_cancel {
+            cancel.cancel();
+        }
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.shutdown();
+        }
+
         // Send shutdown signal to all worker threads
         for channel in self.worker_event_channels.iter() {
             let _ = channel.send(WorkerTask::Terminate);
@@ -356,24 +582,78 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
 
     async fn process_routing_decision_for_request(
         &self,
-        _tokens_with_hashes: &mut TokensWithHashes,
-        _worker: WorkerWithDpRank,
+        tokens_with_hashes: &mut TokensWithHashes,
+        worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        // No-op: pruning not supported in ThreadPoolIndexer
+        let Some(prune_manager) = &self.prune_manager else {
+            // Approximate routing decisions are only recorded when explicitly enabled.
+            return Ok(());
+        };
+
+        tokens_with_hashes.get_or_compute_seq_hashes();
+        let local_hashes = tokens_with_hashes
+            .block_hashes()
+            .expect("block hashes missing after computing sequence hashes");
+        let sequence_hashes = tokens_with_hashes
+            .seq_hashes()
+            .expect("sequence hashes missing after computing sequence hashes");
+        let event_id = Self::next_synthetic_event_id(&self.synthetic_event_id);
+        let event = Self::stored_event_for_hashes(worker, local_hashes, sequence_hashes, event_id);
+        let prune_entries = Self::block_entries_for_hashes(worker, sequence_hashes);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker.worker_id,
+            self.num_workers,
+        );
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::EventWithAck {
+                event,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        let applied = resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        if applied {
+            prune_manager.insert_worker_block_entries(worker, prune_entries);
+        }
+
         Ok(())
     }
 
     async fn flush(&self) -> usize {
         let curr_size: usize = self.worker_event_channels.iter().map(|ch| ch.len()).sum();
-        let mut receivers = Vec::new();
-        for channel in &self.worker_event_channels {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
+        self.flush().await;
+
+        if let Some(prune_manager) = &self.prune_manager {
+            let entries = prune_manager.drain_due_and_pending(tokio::time::Instant::now());
+            Self::enqueue_prune_removes(
+                &self.worker_event_channels,
+                &self.worker_assignments,
+                &self.worker_assignment_count,
+                self.num_workers,
+                &self.synthetic_event_id,
+                entries,
+            );
+            self.flush().await;
+
+            let entries = prune_manager.drain_pending_removes();
+            let has_entries = !entries.is_empty();
+            Self::enqueue_prune_removes(
+                &self.worker_event_channels,
+                &self.worker_assignments,
+                &self.worker_assignment_count,
+                self.num_workers,
+                &self.synthetic_event_id,
+                entries,
+            );
+            if has_entries {
+                self.flush().await;
             }
-        }
-        for receiver in receivers {
-            let _ = receiver.await;
         }
         curr_size
     }

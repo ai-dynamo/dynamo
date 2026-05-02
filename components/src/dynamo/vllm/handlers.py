@@ -66,7 +66,11 @@ from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.model import (
+    ModelFamily,
+    construct_qwen_decode_mm_data,
+    resolve_model_family,
+)
 from .multimodal_utils.models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
@@ -2095,7 +2099,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         pre_rendered: Dict[str, Any] | None = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
-            if is_qwen_vl_model(self.config.model):
+            if resolve_model_family(self.config.model) is ModelFamily.QWEN_VL:
                 # Qwen VL needs embedding_params for mRoPE initialization.
                 if embedding_params is not None:
                     multi_modal_data = construct_qwen_decode_mm_data(
@@ -2385,7 +2389,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Cache Qwen VL grid parameters for computing image_grid_thw from
         # PIL images in the P/D path (no separate encode worker).
-        if is_qwen_vl_model(config.model):
+        if resolve_model_family(config.model) is ModelFamily.QWEN_VL:
             self._qwen_grid_params = load_qwen_grid_params(config.model)
             if self._qwen_grid_params is None and self.embedding_loader is None:
                 logger.error(
@@ -2552,7 +2556,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     ) -> Dict[str, Any] | None:
         # [gluo NOTE] there could be different model architectures that
         # need different embedding params, will add more logic if needed
-        if not is_qwen_vl_model(self.config.model):
+        if resolve_model_family(self.config.model) is not ModelFamily.QWEN_VL:
             # For non-qwen models, vLLM doesn't trigger mm preprocess so
             # decode worker only needs expanded prompt to properly fetch KV blocks
             # from prefill.

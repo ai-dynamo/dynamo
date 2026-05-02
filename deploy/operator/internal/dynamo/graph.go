@@ -1361,7 +1361,7 @@ func GenerateBasePodSpec(
 
 	// Clone main container into two engine containers (active + standby) for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
-	if isFailoverEnabled(component) {
+	if IsIntraPodFailoverEnabled(component) {
 		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
@@ -1565,7 +1565,8 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	if p.operatorConfig.Checkpoint.Enabled {
+	// GMS weight servers load weights fresh from disk and are not CRIU targets.
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 		); err != nil {
@@ -1644,7 +1645,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	if p.r.Role != RoleGMS {
+		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 

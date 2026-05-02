@@ -2084,6 +2084,7 @@ dependencies = [
  "image",
  "ipnet",
  "json-five",
+ "lru 0.12.5",
  "memfile",
  "minijinja",
  "minijinja-contrib",
