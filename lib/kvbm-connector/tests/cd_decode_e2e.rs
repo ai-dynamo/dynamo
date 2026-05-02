@@ -391,6 +391,55 @@ async fn cd_decode_unexpected_hash_panics() {
     panic!("availability carried hash should have panicked the spawned task");
 }
 
+/// Slice C — peer signals `Closed` on the commits stream before
+/// all expected remote hashes have arrived. Decode treats this as
+/// a protocol-level failure: prefill said "no more commits coming"
+/// while still owing decode block_ids that vLLM's G1 destinations
+/// depend on. `cleanup_failed_request` fires; vLLM aborts the
+/// remote slice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_commits_closed_short_fails_request() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let session = h.factory.last_opened().expect("session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+
+    // Commit only HALF the remote hashes, then immediately Close.
+    // run_remote_pipeline detects the deficit and bails before
+    // touching availability.
+    let remote = remote_hashes(&h);
+    assert!(remote.len() >= 2, "test assumes ≥2 remote hashes");
+    let half = remote.len() / 2;
+    session.inject_peer_commit(remote[..half].to_vec());
+    session.inject_peer_finish_commits();
+
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").unwrap();
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS + LOCAL_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "remote slice must be marked failed (local match was already onboarded)"
+    );
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();

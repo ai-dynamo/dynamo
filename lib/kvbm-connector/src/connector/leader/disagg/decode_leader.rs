@@ -846,12 +846,13 @@ impl DecodeDisaggLeader {
         state: Arc<CdRequestState>,
         session: Arc<dyn Session>,
     ) -> Result<()> {
-        // 1. Drain commits opportunistically — informational only.
-        //    Break as soon as we've seen all expected remote hashes
-        //    OR the peer signals Closed. The wrapper plans against
-        //    `expected_remote_hashes` from `slot_match_split`;
-        //    commits arrive on the wire as confirmation, not as
-        //    the source of truth.
+        // 1. Drain commits opportunistically. Break as soon as
+        //    we've seen all expected remote hashes; if peer signals
+        //    Closed before that, treat it as a protocol-level
+        //    failure — prefill said "no more commits coming" but
+        //    didn't deliver everything decode expected, so the
+        //    request is unrecoverable. Caller's spawn handler
+        //    routes the Err to `cleanup_failed_request` (#8 Slice C).
         let expected_count = state.remote_slots.len();
         let mut commit_seen: HashSet<SequenceHash> = HashSet::new();
         let mut commits = session.commits();
@@ -865,7 +866,25 @@ impl DecodeDisaggLeader {
                         break;
                     }
                 }
-                CommitDelta::Closed => break,
+                CommitDelta::Closed => {
+                    if commit_seen.len() < expected_count {
+                        crate::audit!(
+                            "decode_commits_closed_short",
+                            role = "decode",
+                            request_id,
+                            seen = commit_seen.len(),
+                            expected = expected_count
+                        );
+                        anyhow::bail!(
+                            "commits Closed before all expected hashes arrived for {} \
+                             (got {} of {})",
+                            request_id,
+                            commit_seen.len(),
+                            expected_count
+                        );
+                    }
+                    break;
+                }
             }
         }
         drop(commits);
