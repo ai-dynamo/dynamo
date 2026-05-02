@@ -35,7 +35,7 @@ SGLang supports multi-node TP via the native `--dist-init-addr`, `--node-rank`, 
 On **rank 0** (`host0`):
 
 ```bash
-python -m sglang.launch_server \
+python -m dynamo.sglang \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tp 16 \
   --nnodes 2 \
@@ -46,7 +46,7 @@ python -m sglang.launch_server \
 On **rank 1** (`host1`):
 
 ```bash
-python -m sglang.launch_server \
+python -m dynamo.sglang \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tp 16 \
   --nnodes 2 \
