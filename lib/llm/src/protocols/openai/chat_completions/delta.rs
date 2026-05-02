@@ -212,7 +212,8 @@ impl DeltaGenerator {
                     } else {
                         t.clone()
                     };
-                    let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
+                    let converted =
+                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: token_str.clone(),
                         logprob: lp,

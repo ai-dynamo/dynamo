@@ -517,7 +517,7 @@ pub struct OutputOptions {
     pub formatted_prompt: Option<bool>,
 
     /// When true, logprob token fields are returned as "token_id:<id>"
-    /// instead of the decoded text.  vLLM-specific extension for NeMo-RL.
+    /// instead of decoded text.
     pub return_tokens_as_token_ids: Option<bool>,
 }
 

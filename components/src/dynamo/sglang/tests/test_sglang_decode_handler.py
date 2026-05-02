@@ -113,6 +113,53 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     assert sampling_params["max_new_tokens"] == 8
 
 
+def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    kwargs = DecodeWorkerHandler._build_logprob_kwargs(
+        {"output_options": {"logprobs": 0}}
+    )
+
+    assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
+
+
+def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+
+    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
+        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
+
+
+def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+
+    kwargs = DecodeWorkerHandler._build_logprob_kwargs(
+        {"output_options": {"logprobs": 2}}
+    )
+
+    assert kwargs == {"return_logprob": True, "top_logprobs_num": 2}
+
+
+def test_extract_logprobs_formats_top_tokens_as_token_ids():
+    log_probs, top_logprobs, total = DecodeWorkerHandler._extract_logprobs(
+        {
+            "output_token_logprobs": [(-0.1, 101, "a")],
+            "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
+        },
+        0,
+        return_tokens_as_token_ids=True,
+    )
+
+    assert log_probs == [-0.1]
+    assert top_logprobs == [
+        [
+            {"rank": 1, "token_id": 101, "token": "token_id:101", "logprob": -0.1},
+            {"rank": 2, "token_id": 102, "token": "token_id:102", "logprob": -0.2},
+        ]
+    ]
+    assert total == 1
+
+
 @pytest.mark.asyncio
 async def test_process_token_stream_tracks_logprobs_per_choice_index():
     handler = _new_decode_handler()

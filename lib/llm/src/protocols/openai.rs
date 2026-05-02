@@ -20,7 +20,6 @@ pub mod images;
 pub mod models;
 pub mod nvext;
 pub mod responses;
-pub mod tokenization;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -237,6 +236,7 @@ pub(crate) fn convert_backend_top_logprobs(
     selected_token: &str,
     selected_token_id: TokenIdType,
     selected_logprob: f32,
+    return_tokens_as_token_ids: bool,
 ) -> Vec<dynamo_protocols::types::TopLogprobs> {
     let mut found_selected = false;
     let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
@@ -254,10 +254,15 @@ pub(crate) fn convert_backend_top_logprobs(
         .collect();
 
     if !found_selected {
+        let token = if return_tokens_as_token_ids {
+            format!("token_id:{}", selected_token_id)
+        } else {
+            selected_token.to_string()
+        };
         result.push(dynamo_protocols::types::TopLogprobs {
-            token: selected_token.to_string(),
+            bytes: token_to_utf8_bytes(&token),
+            token,
             logprob: selected_logprob,
-            bytes: token_to_utf8_bytes(selected_token),
         });
     }
     result

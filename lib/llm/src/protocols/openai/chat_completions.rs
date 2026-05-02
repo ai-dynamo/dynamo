@@ -60,8 +60,7 @@ pub struct NvCreateChatCompletionRequest {
     pub media_io_kwargs: Option<MediaDecoder>,
 
     /// When true, logprob token fields are returned as "token_id:<id>" instead
-    /// of the decoded text.  This is a vLLM-specific extension used by NeMo-RL
-    /// to extract per-token IDs for RL training.
+    /// of decoded text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 

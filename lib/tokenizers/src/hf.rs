@@ -27,7 +27,13 @@ impl HuggingFaceTokenizer {
 
 impl Encoder for HuggingFaceTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
-        self.encode_with_special_tokens(input, false)
+        // This self.tokenizer is the library
+        let encoding = self
+            .tokenizer
+            .encode(input, false)
+            .map_err(|err| Error::msg(format!("Error tokenizing input: {err}")))?;
+
+        Ok(Encoding::Hf(Box::new(encoding)))
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
@@ -43,20 +49,6 @@ impl Encoder for HuggingFaceTokenizer {
 
         Ok(encodings)
     }
-
-    fn encode_with_special_tokens(
-        &self,
-        input: &str,
-        add_special_tokens: bool,
-    ) -> Result<Encoding> {
-        // This self.tokenizer is the library
-        let encoding = self
-            .tokenizer
-            .encode(input, add_special_tokens)
-            .map_err(|err| Error::msg(format!("Error tokenizing input: {err}")))?;
-
-        Ok(Encoding::Hf(Box::new(encoding)))
-    }
 }
 
 impl Decoder for HuggingFaceTokenizer {
@@ -71,14 +63,7 @@ impl Decoder for HuggingFaceTokenizer {
     }
 }
 
-impl Tokenizer for HuggingFaceTokenizer {
-    fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
-        Ok(token_ids
-            .iter()
-            .map(|&id| self.tokenizer.id_to_token(id).unwrap_or_default())
-            .collect())
-    }
-}
+impl Tokenizer for HuggingFaceTokenizer {}
 
 impl From<HfTokenizer> for HuggingFaceTokenizer {
     fn from(tokenizer: HfTokenizer) -> Self {
