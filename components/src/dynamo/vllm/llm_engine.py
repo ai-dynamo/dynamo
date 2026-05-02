@@ -165,8 +165,17 @@ class VllmLLMEngine(LLMEngine):
             logger.debug("Aborted request %s", request_id)
 
     async def cleanup(self) -> None:
-        if self.engine_client is not None:
-            self.engine_client.shutdown()
-        if self._prometheus_temp_dir is not None:
-            self._prometheus_temp_dir.cleanup()
-        logger.info("vLLM engine shutdown")
+        try:
+            if self.engine_client is not None:
+                self.engine_client.shutdown()
+        finally:
+            self.engine_client = None
+            if self._prometheus_temp_dir is not None:
+                if (
+                    os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+                    == self._prometheus_temp_dir.name
+                ):
+                    os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+                self._prometheus_temp_dir.cleanup()
+                self._prometheus_temp_dir = None
+            logger.info("vLLM engine shutdown")

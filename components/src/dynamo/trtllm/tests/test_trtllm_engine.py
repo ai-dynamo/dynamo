@@ -32,6 +32,7 @@ _BASE_ARGV = [
 ]
 
 pytestmark = [
+    pytest.mark.asyncio(loop_scope="module"),
     pytest.mark.integration,
     pytest.mark.trtllm,
     pytest.mark.unified,
@@ -62,13 +63,13 @@ class _FakeContext:
         await asyncio.Event().wait()
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def started_engine():
     from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 
     engine, _ = await TrtllmLLMEngine.from_args(_BASE_ARGV)
-    engine_config = await engine.start()
     try:
+        engine_config = await engine.start()
         yield engine, engine_config
     finally:
         await engine.cleanup()
