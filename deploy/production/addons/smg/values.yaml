@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SMG (Shepherd Model Gateway) production overrides.
+#
+# Boundary contract — read this before changing routing fields:
+#
+#   client → SMG → Dynamo Frontend → SGLang prefill / decode → HiSparse / TurboQuant
+#       │      │           │                                       │
+#       │      │           └ KV-aware routing (Dynamo's own        │
+#       │      │             KV-event router, --router-mode kv)   │
+#       │      │                                                  └ kernel layer
+#       │      └ gateway concerns: model selection, retry,
+#       │        circuit breaker, OpenAI-compat surface,
+#       │        observability, history (when enabled)
+#       └ ChatCompletions request
+#
+# SMG MUST NOT do prefix-aware / cache-aware routing here. Dynamo Frontend's
+# KV router consumes the SGLang ZMQ kv-events stream from prefill+decode and
+# is the single owner of "which worker gets this prefix". If SMG also did
+# cache_aware here, the two prefix trees would disagree and you'd see worse
+# routing than either alone. Keep `policy: round_robin` with a single backend.
+
+global:
+  image:
+    registry: ghcr.io
+    repository: lightseekorg/smg
+    tag: "1.4.1"
+    pullPolicy: IfNotPresent
+
+router:
+  replicas: 1
+
+  # Defer prefix routing entirely to Dynamo Frontend.
+  policy: round_robin
+
+  # Single backend: the Dynamo Frontend Service deployed by the operator
+  # for the deepseek-v32-reap-sglang DynamoGraphDeployment. The Service
+  # name follows the operator convention <deployment-name>-frontend on
+  # port 8000 (matching --http-port in the example).
+  workerUrls:
+    - http://deepseek-v32-reap-sglang-frontend.dynamo-system.svc.cluster.local:8000
+
+  # No K8s service discovery — single, explicit backend.
+  serviceDiscovery:
+    enabled: false
+
+  # Model identity surfaced to clients via /v1/models. Must match the
+  # `--served-model-name` arg on the SGLang workers and the Dynamo
+  # Frontend's view, so SMG's tokenizer-aware features (when enabled
+  # via igw later) align with the engine.
+  model: BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+  # No tokenizerPath — round_robin doesn't tokenize. Future igw mode
+  # would fill this in.
+
+  # Request-handling sized for the disagg deployment's
+  # --max-running-requests=8 + 73K context budget.
+  maxPayloadSize: 536870912    # 512 MiB
+  requestTimeoutSecs: 1800     # match SGLang --watchdog-timeout
+  maxConcurrentRequests: -1
+  queueSize: 100
+  queueTimeoutSecs: 60
+
+  retry:
+    enabled: true
+    maxRetries: 3              # Dynamo handles its own internal retries; keep
+                               # SMG retries low to avoid amplification.
+    initialBackoffMs: 100
+    maxBackoffMs: 5000
+    backoffMultiplier: 2.0
+    jitterFactor: 0.2
+
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 10
+    successThreshold: 3
+    timeoutDurationSecs: 60
+    windowDurationSecs: 120
+
+  healthCheck:
+    enabled: true
+    failureThreshold: 3
+    successThreshold: 2
+    timeoutSecs: 5
+    intervalSecs: 30
+    endpoint: /health          # Dynamo Frontend exposes /health on 8000
+
+  port: 30000
+  service:
+    type: ClusterIP
+    port: 80
+
+  ingress:
+    enabled: false             # external exposure is handled at cluster
+                               # ingress level, not by SMG itself
+
+  metrics:
+    port: 29000
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      labels:
+        release: kube-prometheus-stack
+
+  tracing:
+    enabled: false             # OpenTelemetry collector exists in the
+                               # production profile; flip on once endpoint
+                               # is needed.
+
+  logging:
+    level: info
+    json: true                 # for fluentd/loki ingest
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
+  # Pin to the same node as the Dynamo Frontend so the SMG → Frontend
+  # hop stays intra-node (no cross-AZ TCP) on the single-node B200
+  # production target. Remove this when the cluster grows and the
+  # Frontend becomes multi-replica.
+  nodeSelector:
+    kubernetes.io/hostname: a4-us-001-rl9
+  tolerations:
+    - operator: Exists
+
+  podAnnotations:
+    ai-blaise.io/integration: smg-frontend-of-dynamo
+  podLabels:
+    app.kubernetes.io/part-of: dynamo-production
+
+  autoscaling:
+    enabled: false             # single-node target; no need yet
+
+# CRITICAL: keep workers empty. Inference workers are owned by the Dynamo
+# operator (deepseek-v32-reap-sglang DynamoGraphDeployment); SMG must not
+# spawn its own SGLang processes here or it will fight Dynamo for the
+# 4+4 GPU disaggregation.
+workers: []
+
+# History storage (audit trail) is off by default. Enable later by
+# pointing at the production Postgres or by flipping
+# postgresql.enabled=true in a follow-up commit.
+postgresql:
+  enabled: false
+redis:
+  enabled: false
