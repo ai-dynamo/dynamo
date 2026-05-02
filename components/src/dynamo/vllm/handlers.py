@@ -115,41 +115,29 @@ class _DeferredAbort:
             self._first_token_event.set()
 
     async def abort(self) -> None:
-        """Abort the request.
-
-        Two paths:
-        - First token already received: spawn _run_abort as a Task held by
-          self._abort_task (strong reference so the GC cannot collect it
-          mid-flight) and shield the await. If a CancelledError reaches this
-          coroutine — typically from _abort_monitor cleanup cancelling the
-          monitor task — the engine.abort() call still runs to completion in
-          the background.
-        - First token NOT yet received: fire-and-forget the deferred waiter
-          so abort() returns immediately. The caller (e.g. _monitor_abort)
-          must not block waiting for an event that requires the engine to
-          first produce output. close() cancels the waiter if generation
-          exits without ever producing output.
-        """
-        if self._first_token_received:
-            if self._abort_task is None:
+        """Abort the request. Creates a Task to hold a strong reference so the
+        engine abort cannot be dropped if this coroutine is concurrently
+        cancelled."""
+        if self._abort_task is None:
+            if self._first_token_received:
                 logger.debug(
                     f"Deferred abort: first token already received, "
                     f"aborting request {self._request_id} now"
                 )
                 self._abort_task = asyncio.create_task(self._run_abort())
-            try:
-                await asyncio.shield(self._abort_task)
-            except asyncio.CancelledError:
+            else:
                 logger.debug(
-                    f"Deferred abort: shielded from cancellation for request "
-                    f"{self._request_id}, abort continues in background"
+                    f"Deferred abort: first token not received for request "
+                    f"{self._request_id}, spawning background task"
                 )
-        elif self._abort_task is None:
+                self._abort_task = asyncio.create_task(self._wait_and_abort())
+        try:
+            await self._abort_task
+        except asyncio.CancelledError:
             logger.debug(
-                f"Deferred abort: first token not received for request "
-                f"{self._request_id}, spawning background task"
+                f"Deferred abort: shielded from cancellation for request "
+                f"{self._request_id}, abort continues in background"
             )
-            self._abort_task = asyncio.create_task(self._wait_and_abort())
 
     async def _run_abort(self) -> None:
         """Execute engine.abort() and emit the canonical completion log."""
