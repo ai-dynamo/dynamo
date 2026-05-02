@@ -15,7 +15,7 @@ impl ConcurrentRadixTreeCompressed {
         let mut event_id = 0u64;
         let mut queue = VecDeque::new();
 
-        for child_node in self.root.root_or_anchor_live_children() {
+        for child_node in self.root.live_children() {
             queue.push_back((child_node, None::<ExternalSequenceBlockHash>));
         }
 
@@ -24,7 +24,7 @@ impl ConcurrentRadixTreeCompressed {
         let mut anchor_queue = VecDeque::new();
         for anchor in self.anchor_nodes.iter() {
             let anchor_id = *anchor.key();
-            for child_node in anchor.value().root_or_anchor_live_children() {
+            for child_node in anchor.value().live_children() {
                 anchor_queue.push_back((child_node, Some(anchor_id)));
             }
         }

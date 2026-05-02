@@ -74,66 +74,13 @@ use crate::cleanup::{CleanupGuard, CleanupState};
 use crate::protocols::*;
 
 mod node;
+mod types;
 use node::*;
-
-/// Thread-safe shared reference to a Node.
-type SharedNode = Arc<Node>;
-
-/// Per-worker block-hash → node map.
-///
-/// Maps each `ExternalSequenceBlockHash` to the node whose `edge` contains it.
-/// Position within the edge is resolved via `Node::edge_index` (O(1)) rather than
-/// stored here, keeping the map compact and correct across concurrent splits.
-type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
-
-struct MatchWalkResult {
-    active: FxHashSet<WorkerWithDpRank>,
-    matched_depth: u32,
-    prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
-}
-
-// For short anchored reads this avoids a Vec allocation. For long suffixes,
-// materializing once is faster than paying virtual-index branching throughout
-// the radix walk.
-const MAX_NO_COPY_ANCHORED_SUFFIX_BLOCKS: usize = 32;
-
-trait HashSequence {
-    fn len(&self) -> usize;
-    fn at(&self, index: usize) -> LocalBlockHash;
-}
-
-struct SliceHashSequence<'a>(&'a [LocalBlockHash]);
-
-impl HashSequence for SliceHashSequence<'_> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn at(&self, index: usize) -> LocalBlockHash {
-        self.0[index]
-    }
-}
-
-struct AnchoredHashSequence<'a> {
-    head: LocalBlockHash,
-    tail: &'a [LocalBlockHash],
-}
-
-impl HashSequence for AnchoredHashSequence<'_> {
-    fn len(&self) -> usize {
-        self.tail.len() + 1
-    }
-
-    fn at(&self, index: usize) -> LocalBlockHash {
-        if index == 0 {
-            self.head
-        } else {
-            self.tail[index - 1]
-        }
-    }
-}
+use types::*;
 
 mod dump;
+mod matches;
+mod remove;
 mod store;
 mod sync_impl;
 
@@ -184,7 +131,7 @@ impl ConcurrentRadixTreeCompressed {
         let mut count = 0usize;
 
         while let Some(node) = queue.pop_front() {
-            let children = node.children_values();
+            let children = node.children_snapshot();
             count += children.len();
             queue.extend(children);
         }
@@ -193,41 +140,10 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     #[cfg(test)]
-    pub(crate) fn run_cleanup_for_test(&self) {
-        self.sweep_stale_children();
-    }
-
-    #[cfg(test)]
     pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.tree_sizes
             .get(&worker)
             .map(|size| size.load(Ordering::Relaxed))
-    }
-
-    fn sweep_stale_children(&self) {
-        let mut queue = VecDeque::from([self.root.clone()]);
-        let mut edges = Vec::new();
-
-        while let Some(parent) = queue.pop_front() {
-            for (key, child) in parent.children_entries() {
-                queue.push_back(child.clone());
-                edges.push(CleanupEdge {
-                    parent: Arc::downgrade(&parent),
-                    key,
-                    child: Arc::downgrade(&child),
-                });
-            }
-        }
-
-        for edge in edges.into_iter().rev() {
-            let Some(parent) = edge.parent.upgrade() else {
-                continue;
-            };
-            let Some(child) = edge.child.upgrade() else {
-                continue;
-            };
-            parent.remove_child_if_stale_leaf(edge.key, &child);
-        }
     }
 
     // ------------------------------------------------------------------
@@ -238,12 +154,12 @@ impl ConcurrentRadixTreeCompressed {
     /// Used to resolve stale lookup entries caused by cross-thread splits.
     fn find_in_subtree(start: &SharedNode, hash: ExternalSequenceBlockHash) -> Option<SharedNode> {
         let mut stack = Vec::new();
-        stack.extend(start.children_values());
+        stack.extend(start.children_snapshot());
         while let Some(node) = stack.pop() {
-            if node.contains_hash(hash) {
+            if node.contains_edge_hash(hash) {
                 return Some(node);
             }
-            stack.extend(node.children_values());
+            stack.extend(node.children_snapshot());
         }
         None
     }
@@ -257,7 +173,7 @@ impl ConcurrentRadixTreeCompressed {
         let node = worker_lookup.get(&hash)?.clone();
 
         // Fast path: hash is still in this node's edge_index.
-        if node.contains_hash(hash) {
+        if node.contains_edge_hash(hash) {
             return Some(node);
         }
 
@@ -274,7 +190,7 @@ impl ConcurrentRadixTreeCompressed {
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
         let node = self.anchor_nodes.get(&hash)?.clone();
-        node.promote_to_full(worker);
+        node.promote_worker_to_full_edge(worker);
         lookup.entry(worker).or_default().insert(hash, node.clone());
         Some(node)
     }
@@ -329,204 +245,6 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     // ------------------------------------------------------------------
-    // find_matches
-    // ------------------------------------------------------------------
-
-    /// Traverse the radix tree to find the best match for a given sequence of
-    /// [`LocalBlockHash`]es, returning both overlap scores and the last matched
-    /// `ExternalSequenceBlockHash` per worker (used for lower-tier continuation).
-    ///
-    /// Workers in `full_edge_workers` are tracked in the `active` set and continue
-    /// into children. Workers in `worker_cutoffs` are scored at the node where their
-    /// cutoff falls short and are never propagated into children.
-    pub fn find_match_details_impl(
-        &self,
-        sequence: &[LocalBlockHash],
-        early_exit: bool,
-    ) -> MatchDetails {
-        let next_child = if sequence.is_empty() {
-            None
-        } else {
-            self.root.first_child(sequence[0])
-        };
-        self.find_match_details_from_child(next_child, sequence, early_exit)
-    }
-
-    fn find_match_details_from_child(
-        &self,
-        next_child: Option<SharedNode>,
-        sequence: &[LocalBlockHash],
-        early_exit: bool,
-    ) -> MatchDetails {
-        self.find_match_details_from_child_seq(next_child, SliceHashSequence(sequence), early_exit)
-    }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    fn find_match_details_from_child_seq<S: HashSequence>(
-        &self,
-        next_child: Option<SharedNode>,
-        sequence: S,
-        early_exit: bool,
-    ) -> MatchDetails {
-        let mut details = MatchDetails::new();
-        if sequence.len() == 0 {
-            return details;
-        }
-
-        let walk_result = {
-            let MatchDetails {
-                overlap_scores: ref mut scores,
-                ref mut last_matched_hashes,
-            } = details;
-            Self::walk_match_path(
-                next_child,
-                &sequence,
-                early_exit,
-                scores,
-                Some(last_matched_hashes),
-            )
-        };
-
-        self.finalize_match_details(&mut details, walk_result);
-        details
-    }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    fn find_scores_from_child_seq<S: HashSequence>(
-        &self,
-        next_child: Option<SharedNode>,
-        sequence: S,
-        early_exit: bool,
-    ) -> OverlapScores {
-        let mut scores = OverlapScores::new();
-        if sequence.len() == 0 {
-            return scores;
-        }
-
-        let walk_result =
-            Self::walk_match_path(next_child, &sequence, early_exit, &mut scores, None);
-        Self::finalize_overlap_scores(&mut scores, &walk_result);
-        scores
-    }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    fn walk_match_path<S: HashSequence>(
-        mut next_child: Option<SharedNode>,
-        sequence: &S,
-        early_exit: bool,
-        scores: &mut OverlapScores,
-        mut last_matched_hashes: Option<
-            &mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
-        >,
-    ) -> MatchWalkResult {
-        let mut active: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
-        let mut active_count: usize = 0;
-        let mut matched_depth: u32 = 0;
-        let mut seq_pos: usize = 0;
-        let mut first_node = true;
-        // Last ExternalSequenceBlockHash from the previous fully-matched edge.
-        // Workers that drop at a node boundary (not present in the new node)
-        // were last matched at the end of the previous edge.
-        let mut prev_edge_last_hash: Option<ExternalSequenceBlockHash> = None;
-
-        loop {
-            if seq_pos >= sequence.len() {
-                break;
-            }
-            let child = match next_child.take() {
-                Some(c) => c,
-                None => break,
-            };
-
-            let outcome = child.find_match_step(FindStepInput {
-                sequence,
-                seq_pos,
-                first_node,
-                prev_depth: matched_depth,
-                prev_edge_last_hash,
-                active: &mut active,
-                active_count,
-                scores,
-                last_matched_hashes: last_matched_hashes.as_deref_mut(),
-            });
-            let edge_len = outcome.edge_len;
-            let edge_match_len = outcome.edge_match_len;
-            active_count = outcome.active_count;
-            next_child = outcome.next_child;
-            prev_edge_last_hash = outcome.prev_edge_last_hash;
-            if first_node {
-                first_node = false;
-            }
-
-            if active_count == 0 {
-                break;
-            }
-            matched_depth += edge_match_len as u32;
-            if edge_match_len < edge_len {
-                break;
-            }
-            seq_pos += edge_match_len;
-            if early_exit && active_count == 1 {
-                break;
-            }
-        }
-
-        MatchWalkResult {
-            active,
-            matched_depth,
-            prev_edge_last_hash,
-        }
-    }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    fn finalize_match_details(&self, details: &mut MatchDetails, walk_result: MatchWalkResult) {
-        Self::finalize_surviving_workers(
-            &mut details.overlap_scores.scores,
-            Some(&mut details.last_matched_hashes),
-            &walk_result,
-        );
-    }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    fn finalize_overlap_scores(scores: &mut OverlapScores, walk_result: &MatchWalkResult) {
-        Self::finalize_surviving_workers(&mut scores.scores, None, walk_result);
-    }
-
-    fn finalize_surviving_workers(
-        scores: &mut FxHashMap<WorkerWithDpRank, u32>,
-        last_matched_hashes: Option<&mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
-        walk_result: &MatchWalkResult,
-    ) {
-        match (walk_result.prev_edge_last_hash, last_matched_hashes) {
-            (Some(hash), Some(last_matched_hashes)) => {
-                for worker in &walk_result.active {
-                    scores.insert(*worker, walk_result.matched_depth);
-                    last_matched_hashes.insert(*worker, hash);
-                }
-            }
-            _ => {
-                for worker in &walk_result.active {
-                    scores.insert(*worker, walk_result.matched_depth);
-                }
-            }
-        }
-    }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    pub fn find_matches_impl(
-        &self,
-        sequence: &[LocalBlockHash],
-        early_exit: bool,
-    ) -> OverlapScores {
-        let next_child = if sequence.is_empty() {
-            None
-        } else {
-            self.root.first_child(sequence[0])
-        };
-        self.find_scores_from_child_seq(next_child, SliceHashSequence(sequence), early_exit)
-    }
-
-    // ------------------------------------------------------------------
     // apply_event dispatch
     // ------------------------------------------------------------------
 
@@ -553,176 +271,6 @@ impl ConcurrentRadixTreeCompressed {
                 Ok(())
             }
         }
-    }
-
-    // ------------------------------------------------------------------
-    // apply_removed
-    // ------------------------------------------------------------------
-
-    /// Apply a remove operation (eviction).
-    ///
-    /// For each evicted block hash, finds its position in the node via `edge_index` (O(1)).
-    /// Updates the worker's match index without splitting the tree:
-    /// - `pos >= current_cutoff`: no-op (already beyond coverage)
-    /// - `pos < current_cutoff`: `new_cutoff = pos`; moves worker to `worker_cutoffs`
-    ///   or removes entirely if `new_cutoff == 0`.
-    ///
-    /// Lookup entries for the newly uncovered suffix are removed eagerly so
-    /// later duplicate remove events fast-path through the missing-hash case.
-    fn apply_removed(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
-        op: KvCacheRemoveData,
-        id: u64,
-    ) -> Result<(), KvCacheEventError> {
-        if !lookup.contains_key(&worker) {
-            return Err(KvCacheEventError::BlockNotFound);
-        }
-
-        let mut total_removed = 0usize;
-
-        'outer: for block_hash in op.block_hashes {
-            let mut cur_node = {
-                let Some(wl) = lookup.get_mut(&worker) else {
-                    continue;
-                };
-                match Self::resolve_lookup(wl, block_hash) {
-                    Some(n) => n,
-                    None => {
-                        tracing::debug!(
-                            worker_id = worker.worker_id.to_string(),
-                            dp_rank = worker.dp_rank,
-                            id,
-                            block_hash = ?block_hash,
-                            "Block not found during remove; skipping"
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            loop {
-                match cur_node.remove_worker_for_hash(worker, block_hash) {
-                    Some(outcome) => {
-                        total_removed += outcome.removed;
-                        if let Some(wl) = lookup.get_mut(&worker) {
-                            for hash in outcome.stale_hashes {
-                                wl.remove(&hash);
-                            }
-                        }
-                        continue 'outer;
-                    }
-                    None => {
-                        // Hash was moved to a descendant by a concurrent split.
-                        match Self::find_in_subtree(&cur_node, block_hash) {
-                            Some(resolved) => {
-                                if let Some(wl) = lookup.get_mut(&worker) {
-                                    wl.insert(block_hash, resolved.clone());
-                                }
-                                cur_node = resolved;
-                                // Retry the inner loop with the resolved node.
-                            }
-                            None => {
-                                // Hash not found anywhere — evicted by a concurrent clear.
-                                tracing::debug!(
-                                    worker_id = worker.worker_id.to_string(),
-                                    dp_rank = worker.dp_rank,
-                                    id,
-                                    block_hash = ?block_hash,
-                                    "Block not found in subtree during remove; skipping"
-                                );
-                                if let Some(wl) = lookup.get_mut(&worker) {
-                                    wl.remove(&block_hash);
-                                }
-                                continue 'outer;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(total_removed))
-                })
-                .ok();
-            }
-            None => {
-                self.tree_sizes.insert(worker, AtomicUsize::new(0));
-            }
-        }
-
-        Ok(())
-    }
-
-    // ------------------------------------------------------------------
-    // Worker removal / clearing
-    // ------------------------------------------------------------------
-
-    fn remove_or_clear_worker_blocks(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-        keep_worker: bool,
-    ) {
-        let workers: Vec<WorkerWithDpRank> = lookup
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
-            .collect();
-
-        for worker in workers {
-            if let Some(worker_lookup) = lookup.remove(&worker) {
-                let mut seen = FxHashSet::<usize>::default();
-                for (_, node) in worker_lookup.into_iter() {
-                    let ptr = Arc::as_ptr(&node) as usize;
-                    if !seen.insert(ptr) {
-                        continue;
-                    }
-                    node.drop_worker(worker);
-                }
-
-                if keep_worker {
-                    lookup.insert(worker, FxHashMap::default());
-                    if let Some(size) = self.tree_sizes.get(&worker) {
-                        size.store(0, Ordering::Relaxed);
-                    }
-                } else {
-                    self.tree_sizes.remove(&worker);
-                }
-            }
-        }
-    }
-
-    fn remove_worker_dp_rank(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-    ) {
-        let key = WorkerWithDpRank { worker_id, dp_rank };
-        if let Some(worker_lookup) = lookup.remove(&key) {
-            let mut seen = FxHashSet::<usize>::default();
-            for (_, node) in worker_lookup.into_iter() {
-                let ptr = Arc::as_ptr(&node) as usize;
-                if !seen.insert(ptr) {
-                    continue;
-                }
-                node.drop_worker(key);
-            }
-            self.tree_sizes.remove(&key);
-        }
-    }
-
-    fn clear_all_blocks(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-    ) {
-        self.remove_or_clear_worker_blocks(lookup, worker_id, true);
     }
 
     // ------------------------------------------------------------------

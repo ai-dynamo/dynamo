@@ -8,8 +8,17 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::{HashSequence, SharedNode};
+use super::types::*;
 use crate::protocols::*;
+
+#[path = "node_state.rs"]
+mod node_state;
+use node_state::NodeState;
+
+pub(super) struct RemoveOutcome {
+    pub(super) removed: usize,
+    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
+}
 
 fn record_last_matched_hash(
     last_matched_hashes: &mut Option<&mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
@@ -35,20 +44,6 @@ pub(super) struct Node {
     children: DashMap<LocalBlockHash, SharedNode, FxBuildHasher>,
 }
 
-#[derive(Debug)]
-struct NodeState {
-    /// Compressed edge: sequence of `(LocalBlockHash, ExternalSequenceBlockHash)` pairs.
-    /// Empty for the root node; non-empty for all other nodes.
-    edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)>,
-    /// Reverse index: `ExternalSequenceBlockHash` -> position in `edge`.
-    edge_index: FxHashMap<ExternalSequenceBlockHash, usize>,
-    /// Workers with partial edge coverage. `worker_cutoffs[w] = k` means worker `w`
-    /// has cached `edge[0..k]`, where `0 < k < edge.len()`.
-    worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
-    /// Workers with full edge coverage (match index == edge.len()).
-    full_edge_workers: FxHashSet<WorkerWithDpRank>,
-}
-
 impl Node {
     pub(super) fn new() -> Self {
         Self::from_state_and_children(
@@ -72,7 +67,7 @@ impl Node {
             .iter()
             .map(|block| (block.tokens_hash, block.block_hash))
             .collect();
-        let edge_index = Self::edge_index_for(&edge);
+        let edge_index = NodeState::edge_index_for(&edge);
         let mut full_edge_workers = FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
         full_edge_workers.insert(worker);
 
@@ -92,7 +87,7 @@ impl Node {
         anchor_id: ExternalSequenceBlockHash,
     ) -> Self {
         let edge = vec![(anchor_local_hash, anchor_id)];
-        let edge_index = Self::edge_index_for(&edge);
+        let edge_index = NodeState::edge_index_for(&edge);
 
         Self::from_state_and_children(
             NodeState {
@@ -122,47 +117,6 @@ impl Node {
         }
     }
 
-    fn edge_index_for(
-        edge: &[(LocalBlockHash, ExternalSequenceBlockHash)],
-    ) -> FxHashMap<ExternalSequenceBlockHash, usize> {
-        let mut edge_index = FxHashMap::with_capacity_and_hasher(edge.len(), FxBuildHasher);
-        for (i, &(_, hash)) in edge.iter().enumerate() {
-            edge_index.insert(hash, i);
-        }
-        edge_index
-    }
-
-    #[inline]
-    fn shape_version(&self) -> u64 {
-        self.shape_version.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    fn has_shape_version(&self, shape_version: u64) -> bool {
-        self.shape_version() == shape_version
-    }
-
-    #[inline]
-    fn bump_shape_version(&self) {
-        self.shape_version.fetch_add(1, Ordering::Release);
-    }
-
-    pub(super) fn children_values(&self) -> Vec<SharedNode> {
-        let _gate = self.shape_gate.read();
-        self.children
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
-    }
-
-    pub(super) fn children_entries(&self) -> Vec<(LocalBlockHash, SharedNode)> {
-        let _gate = self.shape_gate.read();
-        self.children
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect()
-    }
-
     pub(super) fn take_children(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.write();
         let children: Vec<_> = self
@@ -172,24 +126,37 @@ impl Node {
             .collect();
         if !children.is_empty() {
             self.children.clear();
-            self.bump_shape_version();
+            self.shape_version.fetch_add(1, Ordering::Release);
         }
         children
     }
 
-    pub(super) fn first_child(&self, local_hash: LocalBlockHash) -> Option<SharedNode> {
+    pub(super) fn children_snapshot(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.read();
+        self.children
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
+        self.children
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
+    }
+
+    pub(super) fn child_snapshot(&self, local_hash: LocalBlockHash) -> Option<SharedNode> {
         self.children
             .get(&local_hash)
             .map(|entry| entry.value().clone())
     }
 
-    pub(super) fn contains_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
-        let _gate = self.shape_gate.read();
+    pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
         self.state.read().edge_index.contains_key(&hash)
     }
 
-    pub(super) fn promote_to_full(&self, worker: WorkerWithDpRank) -> bool {
+    pub(super) fn promote_worker_to_full_edge(&self, worker: WorkerWithDpRank) -> bool {
         let _gate = self.shape_gate.read();
         self.state.write().promote_to_full(worker)
     }
@@ -207,16 +174,8 @@ impl Node {
     fn clear_children_if_unreachable(&self, should_clear_children: bool) {
         if should_clear_children && !self.children.is_empty() {
             self.children.clear();
-            self.bump_shape_version();
+            self.shape_version.fetch_add(1, Ordering::Release);
         }
-    }
-
-    pub(super) fn has_any_workers(&self) -> bool {
-        self.state.read().has_any_workers()
-    }
-
-    pub(super) fn root_or_anchor_live_children(&self) -> Vec<SharedNode> {
-        self.live_children()
     }
 
     pub(super) fn live_children(&self) -> Vec<SharedNode> {
@@ -225,7 +184,8 @@ impl Node {
             .iter()
             .filter_map(|entry| {
                 let child = entry.value();
-                (child.has_any_workers() || !child.children.is_empty()).then(|| child.clone())
+                (child.state.read().has_any_workers() || !child.children.is_empty())
+                    .then(|| child.clone())
             })
             .collect()
     }
@@ -238,7 +198,8 @@ impl Node {
             .iter()
             .filter_map(|entry| {
                 let child = entry.value();
-                (child.has_any_workers() || !child.children.is_empty()).then(|| child.clone())
+                (child.state.read().has_any_workers() || !child.children.is_empty())
+                    .then(|| child.clone())
             })
             .collect();
 
@@ -337,7 +298,7 @@ impl Node {
         };
 
         Some(ParentEdgePlan {
-            shape_version: self.shape_version(),
+            shape_version: self.shape_version.load(Ordering::Acquire),
             action,
         })
     }
@@ -351,14 +312,14 @@ impl Node {
         match plan.action {
             ParentEdgePlanAction::InsertFromParent => {
                 let _gate = self.shape_gate.read();
-                if !self.has_shape_version(plan.shape_version) {
+                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
                     return ParentEdgeAction::Stale;
                 }
                 ParentEdgeAction::InsertFromParent(None)
             }
             ParentEdgePlanAction::ReuseExistingEdge { cutoff } => {
                 let _gate = self.shape_gate.read();
-                if !self.has_shape_version(plan.shape_version) {
+                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
                     return ParentEdgeAction::Stale;
                 }
                 ParentEdgeAction::ReuseExistingEdge {
@@ -367,14 +328,14 @@ impl Node {
             }
             ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => {
                 let _gate = self.shape_gate.write();
-                if !self.has_shape_version(plan.shape_version) {
+                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
                     return ParentEdgeAction::Stale;
                 }
                 if self.children.is_empty() {
                     self.state
                         .write()
                         .append_blocks_to_leaf(worker, &blocks[append_start..]);
-                    self.bump_shape_version();
+                    self.shape_version.fetch_add(1, Ordering::Release);
                     ParentEdgeAction::ReuseExistingEdge {
                         coverage_changed: true,
                     }
@@ -384,14 +345,14 @@ impl Node {
             }
             ParentEdgePlanAction::Split { split_pos } => {
                 let _gate = self.shape_gate.write();
-                if !self.has_shape_version(plan.shape_version) {
+                if self.shape_version.load(Ordering::Acquire) != plan.shape_version {
                     return ParentEdgeAction::Stale;
                 }
                 let split = {
                     let mut state = self.state.write();
                     self.split_at_locked(&mut state, split_pos)
                 };
-                self.bump_shape_version();
+                self.shape_version.fetch_add(1, Ordering::Release);
                 ParentEdgeAction::InsertFromParent(Some(split))
             }
         }
@@ -414,7 +375,7 @@ impl Node {
         }
 
         ChildEdgeScan {
-            shape_version: self.shape_version(),
+            shape_version: self.shape_version.load(Ordering::Acquire),
             edge_len: state.edge.len(),
             match_len,
             block_hash_mismatch,
@@ -428,7 +389,7 @@ impl Node {
         shape_version: u64,
     ) -> Option<bool> {
         let _gate = self.shape_gate.read();
-        if !self.has_shape_version(shape_version) {
+        if self.shape_version.load(Ordering::Acquire) != shape_version {
             return None;
         }
         Some(self.state.write().cover_prefix_for_worker(worker, cutoff))
@@ -440,7 +401,7 @@ impl Node {
         shape_version: u64,
     ) -> Option<bool> {
         let _gate = self.shape_gate.read();
-        if !self.has_shape_version(shape_version) {
+        if self.shape_version.load(Ordering::Acquire) != shape_version {
             return None;
         }
         Some(self.state.write().promote_to_full(worker))
@@ -455,7 +416,7 @@ impl Node {
         shape_version: u64,
     ) -> SplitStoreOutcome {
         let _gate = self.shape_gate.write();
-        if !self.has_shape_version(shape_version) {
+        if self.shape_version.load(Ordering::Acquire) != shape_version {
             return SplitStoreOutcome::Stale;
         }
 
@@ -466,7 +427,7 @@ impl Node {
             split
         };
         self.children.insert(tail_first_local, tail_node.clone());
-        self.bump_shape_version();
+        self.shape_version.fetch_add(1, Ordering::Release);
 
         SplitStoreOutcome::Done { split, tail_node }
     }
@@ -479,7 +440,7 @@ impl Node {
         shape_version: u64,
     ) -> Option<bool> {
         let _gate = self.shape_gate.write();
-        if !self.has_shape_version(shape_version) {
+        if self.shape_version.load(Ordering::Acquire) != shape_version {
             return None;
         }
         if blocks.is_empty() || !self.children.is_empty() {
@@ -496,7 +457,7 @@ impl Node {
         }
 
         state.append_blocks_to_leaf(worker, blocks);
-        self.bump_shape_version();
+        self.shape_version.fetch_add(1, Ordering::Release);
         Some(true)
     }
 
@@ -523,7 +484,7 @@ impl Node {
         }
 
         ParentChildPlan::MissingChild {
-            shape_version: self.shape_version(),
+            shape_version: self.shape_version.load(Ordering::Acquire),
         }
     }
 
@@ -534,7 +495,7 @@ impl Node {
         shape_version: u64,
     ) -> InsertChildOutcome {
         let _gate = self.shape_gate.read();
-        if !self.has_shape_version(shape_version) {
+        if self.shape_version.load(Ordering::Acquire) != shape_version {
             return InsertChildOutcome::Stale;
         }
 
@@ -544,7 +505,7 @@ impl Node {
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(child.clone());
-                self.bump_shape_version();
+                self.shape_version.fetch_add(1, Ordering::Release);
                 InsertChildOutcome::Inserted(child)
             }
         }
@@ -560,7 +521,7 @@ impl Node {
         let suffix_edge = state.edge.split_off(pos);
         let suffix_first_local = suffix_edge[0].0;
         let prefix_len = pos;
-        let suffix_edge_index = Self::edge_index_for(&suffix_edge);
+        let suffix_edge_index = NodeState::edge_index_for(&suffix_edge);
 
         for &(_, hash) in &suffix_edge {
             state.edge_index.remove(&hash);
@@ -630,7 +591,9 @@ impl Node {
         &self,
         mut input: FindStepInput<'_, S>,
     ) -> FindStepOutcome {
-        let _gate = self.shape_gate.read();
+        // NOTE: This read intentionally does not take shape_gate. A concurrent
+        // split can make the edge snapshot and child lookup come from adjacent
+        // tree shapes; find_matches tolerates that brief best-effort race.
         let state = self.state.read();
         let edge_len = state.edge.len();
         let walk_len = edge_len.min(input.sequence.len() - input.seq_pos);
@@ -740,7 +703,7 @@ impl Node {
         let Some(_child_gate) = child.shape_gate.try_write() else {
             return;
         };
-        if child.has_any_workers() || !child.children.is_empty() {
+        if child.state.read().has_any_workers() || !child.children.is_empty() {
             return;
         }
         if Arc::strong_count(child) != 2 {
@@ -748,301 +711,8 @@ impl Node {
         }
 
         self.children.remove(&key);
-        self.bump_shape_version();
+        self.shape_version.fetch_add(1, Ordering::Release);
     }
-}
-
-impl NodeState {
-    #[inline]
-    fn current_cutoff(&self, worker: WorkerWithDpRank) -> usize {
-        if self.full_edge_workers.contains(&worker) {
-            self.edge.len()
-        } else {
-            self.worker_cutoffs.get(&worker).copied().unwrap_or(0)
-        }
-    }
-
-    #[inline]
-    fn covers_pos(&self, worker: WorkerWithDpRank, pos: usize) -> bool {
-        self.full_edge_workers.contains(&worker)
-            || matches!(self.worker_cutoffs.get(&worker), Some(&cutoff) if pos < cutoff)
-    }
-
-    fn uncovered_suffix_hashes(&self, cutoff: usize) -> Vec<ExternalSequenceBlockHash> {
-        debug_assert!(cutoff <= self.edge.len());
-        self.edge[cutoff..].iter().map(|&(_, hash)| hash).collect()
-    }
-
-    #[inline]
-    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
-        self.full_edge_workers.remove(&worker);
-        self.worker_cutoffs.remove(&worker);
-    }
-
-    #[inline]
-    fn promote_to_full(&mut self, worker: WorkerWithDpRank) -> bool {
-        if !self.full_edge_workers.contains(&worker) {
-            self.worker_cutoffs.remove(&worker);
-            self.full_edge_workers.insert(worker);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn cover_prefix_for_worker(&mut self, worker: WorkerWithDpRank, cutoff: usize) -> bool {
-        debug_assert!(cutoff <= self.edge.len());
-        if cutoff == 0 {
-            return false;
-        }
-        if cutoff >= self.edge.len() {
-            return self.promote_to_full(worker);
-        }
-        if self.full_edge_workers.contains(&worker) {
-            return false;
-        }
-
-        match self.worker_cutoffs.get_mut(&worker) {
-            Some(existing) if *existing >= cutoff => false,
-            Some(existing) => {
-                *existing = cutoff;
-                true
-            }
-            None => {
-                self.worker_cutoffs.insert(worker, cutoff);
-                true
-            }
-        }
-    }
-
-    fn tail_hash_is(&self, hash: ExternalSequenceBlockHash) -> bool {
-        self.edge
-            .last()
-            .is_some_and(|&(_, edge_hash)| edge_hash == hash)
-    }
-
-    fn suffix_matches_store(&self, parent_pos: usize, blocks: &[KvCacheStoredBlockData]) -> bool {
-        let Some(suffix) = self.edge.get(parent_pos + 1..) else {
-            return false;
-        };
-        if blocks.len() > suffix.len() {
-            return false;
-        }
-        for (&(local_hash, block_hash), block) in suffix.iter().zip(blocks) {
-            if local_hash != block.tokens_hash || block_hash != block.block_hash {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    fn store_starts_with_suffix(
-        &self,
-        parent_pos: usize,
-        blocks: &[KvCacheStoredBlockData],
-    ) -> Option<usize> {
-        let suffix = self.edge.get(parent_pos + 1..)?;
-        if blocks.len() <= suffix.len() {
-            return None;
-        }
-        for (&(local_hash, block_hash), block) in suffix.iter().zip(blocks) {
-            if local_hash != block.tokens_hash || block_hash != block.block_hash {
-                return None;
-            }
-        }
-
-        Some(suffix.len())
-    }
-
-    fn append_blocks_to_leaf(
-        &mut self,
-        worker: WorkerWithDpRank,
-        blocks: &[KvCacheStoredBlockData],
-    ) {
-        debug_assert!(!blocks.is_empty());
-
-        let old_len = self.edge.len();
-        let downgraded_workers: Vec<WorkerWithDpRank> = self
-            .full_edge_workers
-            .iter()
-            .copied()
-            .filter(|&full_worker| full_worker != worker)
-            .collect();
-        for downgraded_worker in downgraded_workers {
-            self.full_edge_workers.remove(&downgraded_worker);
-            self.worker_cutoffs.insert(downgraded_worker, old_len);
-        }
-        self.promote_to_full(worker);
-
-        self.edge.reserve(blocks.len());
-        self.edge_index.reserve(blocks.len());
-        for (offset, block) in blocks.iter().enumerate() {
-            self.edge.push((block.tokens_hash, block.block_hash));
-            self.edge_index.insert(block.block_hash, old_len + offset);
-        }
-    }
-
-    fn remove_worker_at_pos(
-        &mut self,
-        worker: WorkerWithDpRank,
-        pos: usize,
-        removed_hash: ExternalSequenceBlockHash,
-    ) -> RemoveOutcome {
-        let current_cutoff = self.current_cutoff(worker);
-        if pos >= current_cutoff {
-            return RemoveOutcome {
-                removed: 0,
-                stale_hashes: vec![removed_hash],
-            };
-        }
-
-        let new_cutoff = pos;
-        let removed = current_cutoff - new_cutoff;
-        let stale_hashes = self.uncovered_suffix_hashes(new_cutoff);
-
-        if new_cutoff == 0 {
-            self.drop_worker(worker);
-        } else {
-            self.full_edge_workers.remove(&worker);
-            self.worker_cutoffs.insert(worker, new_cutoff);
-        }
-
-        RemoveOutcome {
-            removed,
-            stale_hashes,
-        }
-    }
-
-    fn has_any_workers(&self) -> bool {
-        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
-    }
-}
-
-pub(super) struct DumpNodeSnapshot {
-    pub(super) edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)>,
-    pub(super) full_edge_workers: Vec<WorkerWithDpRank>,
-    pub(super) worker_cutoffs: Vec<(WorkerWithDpRank, usize)>,
-    pub(super) live_children: Vec<SharedNode>,
-    pub(super) has_any_workers: bool,
-    pub(super) children_empty: bool,
-    pub(super) can_merge: bool,
-}
-
-pub(super) struct UncoveredParent {
-    pub(super) pos: usize,
-    pub(super) cutoff: usize,
-}
-
-pub(super) struct FindStepInput<'a, S: HashSequence> {
-    pub(super) sequence: &'a S,
-    pub(super) seq_pos: usize,
-    pub(super) first_node: bool,
-    pub(super) prev_depth: u32,
-    pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
-    pub(super) active: &'a mut FxHashSet<WorkerWithDpRank>,
-    pub(super) active_count: usize,
-    pub(super) scores: &'a mut OverlapScores,
-    pub(super) last_matched_hashes:
-        Option<&'a mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
-}
-
-pub(super) struct FindStepOutcome {
-    pub(super) edge_len: usize,
-    pub(super) edge_match_len: usize,
-    pub(super) active_count: usize,
-    pub(super) next_child: Option<SharedNode>,
-    pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
-}
-
-/// Data returned by a split for deferred lookup updates.
-pub(super) struct SplitLookupData {
-    pub(super) suffix: SharedNode,
-}
-
-pub(super) struct RemoveOutcome {
-    pub(super) removed: usize,
-    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
-pub(super) struct StoreInsertOutcome {
-    pub(super) num_blocks_added: usize,
-    pub(super) duplicate_store: bool,
-}
-
-pub(super) enum StoreParentResolution {
-    InsertFrom {
-        parent: SharedNode,
-        parent_is_anchor: bool,
-    },
-    ReusedExistingEdge {
-        node: SharedNode,
-        coverage_changed: bool,
-    },
-}
-
-pub(super) enum ParentEdgeAction {
-    Stale,
-    ReuseExistingEdge { coverage_changed: bool },
-    InsertFromParent(Option<SplitLookupData>),
-}
-
-pub(super) struct ParentEdgePlan {
-    pub(super) shape_version: u64,
-    pub(super) action: ParentEdgePlanAction,
-}
-
-pub(super) enum ParentEdgePlanAction {
-    InsertFromParent,
-    ReuseExistingEdge { cutoff: usize },
-    ReuseSuffixAndExtendLeaf { append_start: usize },
-    Split { split_pos: usize },
-}
-
-pub(super) struct ChildEdgeScan {
-    pub(super) shape_version: u64,
-    pub(super) edge_len: usize,
-    pub(super) match_len: usize,
-    pub(super) block_hash_mismatch: Option<(ExternalSequenceBlockHash, ExternalSequenceBlockHash)>,
-}
-
-pub(super) enum ParentChildPlan {
-    StaleParent { hash: ExternalSequenceBlockHash },
-    Descend(SharedNode),
-    MissingChild { shape_version: u64 },
-}
-
-pub(super) enum InsertChildOutcome {
-    Stale,
-    Existing(SharedNode),
-    Inserted(SharedNode),
-}
-
-pub(super) enum SplitStoreOutcome {
-    Stale,
-    Done {
-        split: SplitLookupData,
-        tail_node: SharedNode,
-    },
-}
-
-pub(super) enum StoreInsertStep {
-    RetryParent {
-        parent: SharedNode,
-        parent_is_anchor: bool,
-    },
-    Descend(SharedNode),
-    Done(StoreInsertOutcome),
-}
-
-pub(super) enum ChildInsertStep {
-    Descend {
-        edge_len: usize,
-        last_ext_hash: ExternalSequenceBlockHash,
-        num_blocks_added: usize,
-        duplicate_store: bool,
-    },
-    Done(StoreInsertOutcome),
 }
 
 pub(super) struct CleanupEdge {

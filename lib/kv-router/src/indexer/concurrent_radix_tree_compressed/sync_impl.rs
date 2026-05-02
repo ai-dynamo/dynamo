@@ -93,7 +93,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             entry.clone()
         };
 
-        anchor_node.promote_to_full(worker);
+        anchor_node.promote_worker_to_full_edge(worker);
         Ok(())
     }
 
@@ -110,7 +110,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             return Ok(OverlapScores::new());
         };
         let details = if suffix.len() <= MAX_NO_COPY_ANCHORED_SUFFIX_BLOCKS {
-            self.find_match_details_from_child_seq(
+            self.find_details_from_seq(
                 Some(anchor_node),
                 AnchoredHashSequence {
                     head: anchor.anchor_local_hash,
@@ -122,7 +122,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             let mut sequence = Vec::with_capacity(suffix.len() + 1);
             sequence.push(anchor.anchor_local_hash);
             sequence.extend_from_slice(suffix);
-            self.find_match_details_from_child(Some(anchor_node), &sequence, false)
+            self.find_details_from_seq(Some(anchor_node), SliceHashSequence(&sequence), false)
         };
         let mut scores = details.overlap_scores;
         let depth_adjustment = anchor.anchor_depth.saturating_sub(1) as u32;
