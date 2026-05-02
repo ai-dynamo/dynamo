@@ -84,6 +84,8 @@ pub struct AgentRequestMetrics {
     pub worker: Option<WorkerInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<AgentReplayMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_text: Option<AgentIoText>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +93,12 @@ pub struct AgentReplayMetrics {
     pub trace_block_size: usize,
     pub input_length: usize,
     pub input_sequence_hashes: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentIoText {
+    pub input: String,
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -133,4 +141,50 @@ pub enum AgentToolStatus {
     Error,
     #[serde(rename = "cancelled", alias = "timeout", alias = "canceled")]
     Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentIoText, AgentRequestMetrics};
+
+    fn minimal_request(io_text: Option<AgentIoText>) -> AgentRequestMetrics {
+        AgentRequestMetrics {
+            request_id: "req-1".to_string(),
+            x_request_id: None,
+            model: "test-model".to_string(),
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            request_received_ms: None,
+            prefill_wait_time_ms: None,
+            prefill_time_ms: None,
+            ttft_ms: None,
+            total_time_ms: None,
+            avg_itl_ms: None,
+            kv_hit_rate: None,
+            kv_transfer_estimated_latency_ms: None,
+            queue_depth: None,
+            worker: None,
+            replay: None,
+            io_text,
+        }
+    }
+
+    #[test]
+    fn request_metrics_omits_io_text_by_default() {
+        let json = serde_json::to_value(minimal_request(None)).unwrap();
+        assert!(json.get("io_text").is_none());
+    }
+
+    #[test]
+    fn request_metrics_serializes_io_text_when_present() {
+        let json = serde_json::to_value(minimal_request(Some(AgentIoText {
+            input: "rendered input".to_string(),
+            output: "decoded output".to_string(),
+        })))
+        .unwrap();
+
+        assert_eq!(json["io_text"]["input"], "rendered input");
+        assert_eq!(json["io_text"]["output"], "decoded output");
+    }
 }

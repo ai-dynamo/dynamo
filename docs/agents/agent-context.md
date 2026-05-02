@@ -74,6 +74,7 @@ Then start any Dynamo OpenAI-compatible backend.
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES` | No | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes. |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES` | No | unset | Optional `jsonl_gz` segment roll threshold in records. |
 | `DYN_AGENT_TRACE_REPLAY_HASHES` | No | enabled when tracing is enabled | Replay-oriented prompt block hashes are emitted by default in request records. Set to a falsey value such as `0`, `false`, `off`, or `no` to disable them. Hashes use the model deployment card's KV cache block size. |
+| `DYN_SAVE_IO_TEXT` | No | disabled | Debug-only switch that writes rendered input text and decoded output text into the same request trace record under `io_text`. This can include sensitive prompt/response content; leave it off outside local debugging. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | No | unset | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | No | unset | Optional ZMQ topic filter for harness tool events. |
 
@@ -352,12 +353,16 @@ Request records capture Dynamo-owned serving metrics:
 | `replay.trace_block_size` | KV cache block size from the model deployment card, used to derive replay hashes. |
 | `replay.input_length` | Prompt/input token count represented by the replay hashes. |
 | `replay.input_sequence_hashes` | Stable sequence-aware prompt block hashes. These are replay labels, not raw tokens and not compact Mooncake `hash_ids`. |
+| `io_text` | Optional debug payload emitted only when `DYN_SAVE_IO_TEXT` is truthy. |
+| `io_text.input` | Rendered input text sent through Dynamo preprocessing. |
+| `io_text.output` | Decoded output text observed from backend stream chunks. |
 
-Trace records do not include prompt/response content, raw token IDs, sampling
-parameters, finish reason, or error status. Replay hashes expose prompt prefix
-reuse structure without storing the prompt text. Use the audit sink for
-request/response payload capture and OpenTelemetry export for span-based
-observability.
+By default, trace records do not include prompt/response content, raw token IDs,
+sampling parameters, finish reason, or error status. Replay hashes expose prompt
+prefix reuse structure without storing the prompt text. `DYN_SAVE_IO_TEXT` is a
+local debug escape hatch for validating trace construction in the same JSONL
+record; the audit sink remains the path for full raw request/response payload
+capture, and OpenTelemetry export remains the path for span-based observability.
 
 Replay hashes describe the cumulative input presented to each LLM request. They
 do not by themselves declare cache movement, observed reuse, or that a prior

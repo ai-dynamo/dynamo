@@ -239,6 +239,30 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let (common_request, annotations, prompt_injected_reasoning, _) = self
+            .preprocess_request_inner(request, tracker, false)
+            .await?;
+        Ok((common_request, annotations, prompt_injected_reasoning))
+    }
+
+    async fn preprocess_request_inner<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        tracker: Option<&RequestTracker>,
+        capture_io_input_text: bool,
+    ) -> Result<(
+        PreprocessedRequest,
+        HashMap<String, String>,
+        bool,
+        Option<String>,
+    )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
@@ -258,6 +282,9 @@ impl OpenAIPreprocessor {
         let prompt_injected_reasoning = formatted_prompt
             .as_ref()
             .is_some_and(|p| p.trim_end().ends_with("<think>"));
+        let io_input_text = capture_io_input_text
+            .then(|| formatted_prompt.clone())
+            .flatten();
 
         let tokenize_start = Instant::now();
         let annotations = {
@@ -275,7 +302,12 @@ impl OpenAIPreprocessor {
             .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        Ok((
+            builder.build()?,
+            annotations,
+            prompt_injected_reasoning,
+            io_input_text,
+        ))
     }
 
     pub fn builder<
@@ -866,11 +898,12 @@ impl OpenAIPreprocessor {
         Ok(transformed_stream)
     }
 
-    pub fn transform_postprocessor_stream<S, Resp>(
+    pub(crate) fn transform_postprocessor_stream<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
+        io_text_capture: Option<crate::agents::trace::AgentIoTextCapture>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -889,6 +922,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
+            io_text_capture: Option<crate::agents::trace::AgentIoTextCapture>,
         }
 
         let state = State {
@@ -901,6 +935,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             finished: false,
             trace_tokens_enabled,
+            io_text_capture,
         };
 
         // transform the common response stream into a chat response stream
@@ -945,6 +980,12 @@ impl OpenAIPreprocessor {
                     } else {
                         (0, None)
                     };
+
+                    if let Some(capture) = inner.io_text_capture.as_ref()
+                        && let Some(text) = response.data.as_ref().and_then(|data| data.text.as_deref())
+                    {
+                        capture.append_output(text);
+                    }
 
                     let current_osl = inner.cumulative_output_tokens;
 
@@ -1461,13 +1502,18 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = response_generator.tracker();
+        let trace_policy = crate::agents::trace::policy();
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning) = self
-            .preprocess_request(&request, tracker.as_deref())
+        let (mut common_request, annotations, prompt_injected_reasoning, io_input_text) = self
+            .preprocess_request_inner(
+                &request,
+                tracker.as_deref(),
+                trace_policy.enabled && trace_policy.save_io_text,
+            )
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = if crate::agents::trace::is_enabled() {
+        let trace_state = if trace_policy.enabled {
             common_request.agent_context.clone().map(|agent_context| {
                 let request_model = common_request.model.clone();
                 let request_tracker = tracker.clone();
@@ -1483,17 +1529,23 @@ impl
                             .ok()
                             .map(|value| value.as_ref().clone())
                     });
+                let io_text_capture =
+                    io_input_text.map(crate::agents::trace::AgentIoTextCapture::new);
                 (
                     agent_context,
                     request_model,
                     request_tracker,
                     x_request_id,
                     replay_metrics,
+                    io_text_capture,
                 )
             })
         } else {
             None
         };
+        let io_text_capture = trace_state
+            .as_ref()
+            .and_then(|(_, _, _, _, _, capture)| capture.clone());
         let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
@@ -1528,6 +1580,7 @@ impl
             response_generator,
             context.clone(),
             trace_tokens_enabled,
+            io_text_capture.clone(),
         );
 
         let transformed_stream =
@@ -1572,6 +1625,7 @@ impl
             request_tracker,
             x_request_id,
             replay_metrics,
+            io_text_capture,
         )) = trace_state
         {
             let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
@@ -1590,6 +1644,7 @@ impl
                     request_tracker.as_deref(),
                 );
                 metrics.replay = replay_metrics;
+                metrics.io_text = io_text_capture.map(|capture| capture.snapshot());
                 crate::agents::trace::emit_request_end(agent_context, metrics);
             });
             stream
@@ -1695,6 +1750,7 @@ impl
             response_generator,
             context.clone(),
             false,
+            None,
         );
 
         // prepend the annotations to the response stream
