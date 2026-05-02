@@ -19,8 +19,7 @@ PROVIDED_CHAT_TEMPLATE=""
 
 # --single-gpu: Packs both workers (encode, PD) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
-# only has 1 GPU available. It uses lower mem-fraction-static values to share the GPU
-# and enables memory-saving options.
+# only has 1 GPU available. It enables memory-saving caps to share the GPU.
 SINGLE_GPU=false
 
 # Parse command line arguments
@@ -90,18 +89,19 @@ else
     _WORKER_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_WORKER_GPU"
 fi
 
-# GPU memory fractions for workers (used with --mem-fraction-static)
-DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-DYN_WORKER_GPU_MEM=${DYN_WORKER_GPU_MEM:-0.9}
-
+# Worker KV is sized by --max-total-tokens (build_sglang_gpu_mem_args reads
+# _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS), so this script is portable across
+# 24 / 48 / 80 GiB GPUs. No --mem-fraction-static — fractions don't translate.
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-ENCODE_EXTRA_ARGS=""
-WORKER_EXTRA_ARGS=""
+ENCODE_EXTRA_ARGS="$GPU_MEM_ARGS"
+WORKER_EXTRA_ARGS="$GPU_MEM_ARGS"
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    ENCODE_EXTRA_ARGS="--mem-fraction-static ${DYN_ENCODE_GPU_MEM}"
-    WORKER_EXTRA_ARGS="--mem-fraction-static ${DYN_WORKER_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096 $GPU_MEM_ARGS"
+    # Both workers share one GPU; cap activations tightly.
+    SHARED_CAPS="--max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS $SHARED_CAPS"
+    WORKER_EXTRA_ARGS="$WORKER_EXTRA_ARGS $SHARED_CAPS --delete-ckpt-after-loading"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
@@ -121,7 +121,7 @@ print_launch_banner --multimodal "Launching Multimodal E/PD ($GPU_LABEL)" "$MODE
 python3 -m dynamo.frontend &
 
 # run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
 
@@ -138,7 +138,7 @@ fi
 # causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
-echo "Starting PD worker on GPU $DYN_WORKER_GPU (GPU mem: $DYN_WORKER_GPU_MEM)..."
+echo "Starting PD worker on GPU $DYN_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --multimodal-worker \

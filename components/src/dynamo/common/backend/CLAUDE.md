@@ -62,10 +62,12 @@ from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
 `GenerateRequest` and `GenerateChunk` (`engine.py`) are `TypedDict`s that
 type the `generate()` signature.  `GenerateRequest` has `token_ids`
 (required) plus optional `sampling_options`, `stop_conditions`, and
-`output_options`.  `GenerateChunk` has `token_ids` (required) plus
-optional `finish_reason` and `completion_usage` (both required on the
-final chunk).  Engines may read/write additional keys — `TypedDict` does
-not reject extras at runtime.
+`output_options`.  `GenerateChunk` has `token_ids` and `index` (both
+required; use `index=0` for single-choice chunks), plus optional
+`finish_reason` and `completion_usage` (both required on the final chunk).
+Engines may read
+backend-specific request keys, but response chunk keys should be added to
+the shared contract before use.
 
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
