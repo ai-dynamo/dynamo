@@ -33,7 +33,7 @@ SCRIPT_MOUNTS="${LOG_DIR}:/logs,${MODEL_PATH}:/model,${SRTCTL_SOURCE}/configs:/c
 NGINX_MOUNTS="${LOG_DIR}:/logs"
 NSYS_DELAY_SECONDS=2100
 NSYS_DURATION_SECONDS=300
-NSYS_PREFIX_BASE="nsys profile --trace=cuda,nvtx,osrt,python-gil --python-sampling=true --python-sampling-frequency=100 --delay=${NSYS_DELAY_SECONDS} --duration=${NSYS_DURATION_SECONDS} --cuda-graph-trace=node --force-overwrite=true --trace-fork-before-exec=true"
+NSYS_PREFIX_BASE="nsys profile --sample=cpu --cpuctxsw=none --trace=nvtx,osrt,python-gil --python-sampling=true --python-sampling-frequency=100 --delay=${NSYS_DELAY_SECONDS} --duration=${NSYS_DURATION_SECONDS} --force-overwrite=true --trace-fork-before-exec=true"
 TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 && export NCCL_GRAPH_MIXING_SUPPORT=0 && export TLLM_LOG_LEVEL=INFO && export TRTLLM_ENABLE_PDL=1 && export TRTLLM_SERVER_DISABLE_GC=1 && export TRTLLM_WORKER_DISABLE_GC=1"
 
 # Dynamo ports
@@ -572,7 +572,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX0} && export CUDA_VISIBLE_DEVICES=0,1 && ${NSYS_PREFIX_BASE} --output /nsys-profile/prefill_0_${PREFILL_NODE_A}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX0} && export CUDA_VISIBLE_DEVICES=0,1 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX0_PID="${SRUN_PIDS[-1]}"
 
 start_bg srun \
@@ -587,7 +587,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX1} && export CUDA_VISIBLE_DEVICES=2,3 && ${NSYS_PREFIX_BASE} --output /nsys-profile/prefill_1_${PREFILL_NODE_A}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX1} && export CUDA_VISIBLE_DEVICES=2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX1_PID="${SRUN_PIDS[-1]}"
 
 start_bg srun \
@@ -602,7 +602,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX2} && export CUDA_VISIBLE_DEVICES=0,1 && ${NSYS_PREFIX_BASE} --output /nsys-profile/prefill_2_${PREFILL_NODE_B}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX2} && export CUDA_VISIBLE_DEVICES=0,1 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX2_PID="${SRUN_PIDS[-1]}"
 
 start_bg srun \
@@ -617,7 +617,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX3} && export CUDA_VISIBLE_DEVICES=2,3 && ${NSYS_PREFIX_BASE} --output /nsys-profile/prefill_3_${PREFILL_NODE_B}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX3} && export CUDA_VISIBLE_DEVICES=2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX3_PID="${SRUN_PIDS[-1]}"
 
 start_bg srun \
@@ -632,7 +632,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX4} && export CUDA_VISIBLE_DEVICES=0,1 && ${NSYS_PREFIX_BASE} --output /nsys-profile/prefill_4_${PREFILL_NODE_C}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX4} && export CUDA_VISIBLE_DEVICES=0,1 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX4_PID="${SRUN_PIDS[-1]}"
 
 start_bg srun \
@@ -647,7 +647,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX5} && export CUDA_VISIBLE_DEVICES=2,3 && ${NSYS_PREFIX_BASE} --output /nsys-profile/prefill_5_${PREFILL_NODE_C}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_CTX5} && export CUDA_VISIBLE_DEVICES=2,3 && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode prefill --extra-engine-args /logs/trtllm_prefill.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 CTX5_PID="${SRUN_PIDS[-1]}"
 
 echo "Starting decode worker (1x TP32/EP32 across 8 nodes)"
@@ -663,7 +663,7 @@ start_bg srun \
     --no-container-entrypoint \
     --no-container-mount-home \
     --container-mounts "${SCRIPT_MOUNTS}" \
-    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_GEN} && ${NSYS_PREFIX_BASE} --output /nsys-profile/decode_w0_node%q{SLURMD_NODENAME}_rank%q{SLURM_PROCID} trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode decode --extra-engine-args /logs/trtllm_decode.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
+    bash -c "${TRTLLM_COMMON_ENV} && ${DYNAMO_WORKER_ENV} && export DYN_SYSTEM_PORT=${DYN_SYS_PORT_GEN} && trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path /model --served-model-name ${MODEL_NAME} --disaggregation-mode decode --extra-engine-args /logs/trtllm_decode.yaml --request-plane ${DYNAMO_REQUEST_PLANE}"
 GEN_PID="${SRUN_PIDS[-1]}"
 
 for pid_name in CTX0_PID CTX1_PID CTX2_PID CTX3_PID CTX4_PID CTX5_PID GEN_PID; do
@@ -694,7 +694,7 @@ for ((i = 0; i < ${#FRONTEND_NODES[@]}; i++)); do
         --no-container-entrypoint \
         --no-container-mount-home \
         --container-mounts "${SCRIPT_MOUNTS}" \
-        bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_POOL_SIZE=${DYN_TCP_POOL_SIZE} && export DYN_LOG=info && ${NSYS_PREFIX_BASE} --output /nsys-profile/frontend_${FE_NODE}_${FE_PORT} python3 -m dynamo.frontend --http-port ${FE_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
+        bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_POOL_SIZE=${DYN_TCP_POOL_SIZE} && export DYN_ENABLE_RUST_NVTX=1 && export DYN_NVTX=1 && export DYN_LOG=info && ${NSYS_PREFIX_BASE} --output /nsys-profile/frontend_${FE_NODE}_${FE_PORT} python3 -m dynamo.frontend --http-port ${FE_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
     FRONTEND_PIDS+=("${SRUN_PIDS[-1]}")
 done
 
