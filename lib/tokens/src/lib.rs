@@ -328,156 +328,217 @@ pub(crate) fn compute_block_bytes_with_mm(
     out
 }
 
-/// Schema/version tag stamped into every canonically-constructed [`PositionalLineageHash`]
-/// (one whose `current` is reachable from `root_with_salt` followed by zero or more `extend`
-/// calls).
+/// Bit layout for the 32-bit extension word in [`PositionalLineageHash`]:
 ///
-/// `0x00` is reserved as a "zeroed/uninitialized" sentinel so a default-constructed
-/// PLH is detectably invalid; current canonical layout uses `0x01`.
-pub(crate) const PLH_SCHEMA_V1: u8 = 0x01;
+/// ```text
+///   bits  0..=19 (20 bits) position-in-blocks      (max 2^20 = 1,048,576)
+///   bits 20..=23 ( 4 bits) log2_block_size         (block_size in 2^0..=2^15)
+///   bits 24..=28 ( 5 bits) partition               (32 values, default 0)
+///   bit  29       ( 1 bit) synthetic flag
+///   bits 30..=31 ( 2 bits) version                 (V1 = 0b01)
+/// ```
+///
+/// Position lives at the bottom so [`PlhFlags::position`] is a single mask. Block_size
+/// and the higher fields are accessed less often.
+const POSITION_BITS: u32 = 20;
+const POSITION_MASK: u32 = (1u32 << POSITION_BITS) - 1;
+const LOG2_BS_SHIFT: u32 = 20;
+const LOG2_BS_BITS: u32 = 4;
+const LOG2_BS_MASK_RAW: u32 = (1u32 << LOG2_BS_BITS) - 1;
+const PARTITION_SHIFT: u32 = 24;
+const PARTITION_BITS: u32 = 5;
+const PARTITION_MASK_RAW: u32 = (1u32 << PARTITION_BITS) - 1;
+const SYNTHETIC_BIT: u32 = 1u32 << 29;
+const VERSION_SHIFT: u32 = 30;
+const VERSION_MASK_RAW: u32 = 0b11;
 
-/// Schema tag stamped into [`PositionalLineageHash`]es minted via
-/// [`PositionalLineageHash::synthetic_unique`]. Distinct from [`PLH_SCHEMA_V1`] so a
-/// downstream consumer can tell, from the flags alone, that a PLH was *not* produced by
-/// a real chain — useful for invariants ("no synthetic PLH should reach component X")
-/// and diagnostics. The high bit (`0x80`) is set so the value is also visually
-/// distinct from the V1 tag at a glance.
-pub(crate) const PLH_SCHEMA_SYNTHETIC: u8 = 0x80;
+/// Maximum encodable position-in-blocks (inclusive). Position-in-blocks must satisfy
+/// `position <= MAX_POSITION_IN_BLOCKS` to fit the 20-bit field.
+pub(crate) const MAX_POSITION_IN_BLOCKS: u32 = POSITION_MASK;
 
-/// Typed view of [`PositionalLineageHash`]'s 32-bit `flags` slot.
-///
-/// Bit layout (low → high):
-/// - bits  0..=3   `log2_block_size` (4 bits, fits `block_size` up to `2^15`)
-/// - bits  4..=11  `schema` (8 bits, [`PLH_SCHEMA_V1`] = `0x01`)
-/// - bits 12..=31  `feature_flags` (20 reserved bits)
-///
-/// Wrapping these bits in a newtype keeps the bit layout out of constructor call sites
-/// and makes future feature-flag additions a typed API change rather than a magic-number
-/// shift. The on-the-wire encoding is unchanged.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+/// Canonical version tag stamped into every PLH built via the production path
+/// ([`PositionalLineageHash::root_with_salt`] / [`Self::extend`] /
+/// [`Self::synthetic_unique`]). `0b00` is reserved as the zero/uninitialized sentinel
+/// so a default-constructed PLH is detectably invalid.
+pub(crate) const PLH_VERSION_V1: u32 = 0b01;
+
+/// Typed view of [`PositionalLineageHash`]'s 32-bit extension word. See module-level
+/// constants for the bit layout. Wrapping the bits in a newtype keeps shifts and masks
+/// out of constructor call sites and makes layout changes a typed API change rather
+/// than a magic-number diff.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]
 pub(crate) struct PlhFlags(u32);
 
 impl PlhFlags {
-    /// Builds a flags word from a power-of-two `block_size` (≤ `2^15`), a `schema`
-    /// version byte, and 20 reserved feature-flag bits (high bits truncated).
+    /// Pack a fully-specified V1 extension. Validates field ranges; panics on violation.
     ///
     /// # Panics
     ///
-    /// Panics if `block_size` is zero, not a power of two, or greater than `2^15`.
-    #[inline]
-    pub(crate) fn new(block_size: u32, schema: u8, feature_flags: u32) -> Self {
+    /// Panics if `block_size` is zero, not a power of two, or greater than `2^15`;
+    /// if `position > MAX_POSITION_IN_BLOCKS` (2^20 - 1); or if `partition >= 32`.
+    pub(crate) fn pack(block_size: u32, position: u32, partition: u8, synthetic: bool) -> Self {
         assert!(
             block_size > 0 && block_size.is_power_of_two() && block_size <= (1u32 << 15),
             "block_size must be a power of two in 1..=32768, got {block_size}",
         );
-        let log2_bs = block_size.trailing_zeros() & 0xF;
-        let schema_bits = (schema as u32) << 4;
-        let feature_bits = (feature_flags & 0x000F_FFFF) << 12;
-        Self(log2_bs | schema_bits | feature_bits)
+        assert!(
+            position <= MAX_POSITION_IN_BLOCKS,
+            "position {position} exceeds 20-bit cap (max {MAX_POSITION_IN_BLOCKS})",
+        );
+        assert!(
+            (partition as u32) < (1u32 << PARTITION_BITS),
+            "partition {partition} exceeds 5-bit cap (max 31)",
+        );
+        let log2_bs = block_size.trailing_zeros() & LOG2_BS_MASK_RAW;
+        let mut bits = position & POSITION_MASK;
+        bits |= log2_bs << LOG2_BS_SHIFT;
+        bits |= ((partition as u32) & PARTITION_MASK_RAW) << PARTITION_SHIFT;
+        if synthetic {
+            bits |= SYNTHETIC_BIT;
+        }
+        bits |= PLH_VERSION_V1 << VERSION_SHIFT;
+        Self(bits)
     }
 
-    /// Builds a flags word with the canonical schema and zero feature bits.
+    /// Build a V1 canonical-schema extension with default partition (0) and synthetic
+    /// (false) for the given `block_size` and `position`.
+    ///
+    /// # Panics
+    ///
+    /// See [`Self::pack`].
+    #[inline]
+    pub(crate) fn new(block_size: u32, position: u32) -> Self {
+        Self::pack(block_size, position, 0, false)
+    }
+
+    /// Build an extension at position 0 with default partition / non-synthetic.
     ///
     /// Tolerates non-power-of-two `block_size` for back-compat with `lib/kvbm-*` tests
     /// that pass arbitrary token-length values; the recorded `log2_block_size` falls
     /// back to the next-lower power of two in that case (the 4-bit field cannot
     /// represent the true value). Universal-hashing call-sites that need strict
-    /// validation should call [`Self::new`] directly.
+    /// validation should call [`Self::new`] / [`Self::pack`] directly.
     #[inline]
     pub(crate) fn for_block_size(block_size: u32) -> Self {
         let bs = block_size.max(1);
         let pow2 = if bs.is_power_of_two() {
             bs.min(1u32 << 15)
         } else {
-            // Round down to the nearest power of two; cap at 2^15.
             let log2_floor = (u32::BITS - 1 - bs.leading_zeros()).min(15);
             1u32 << log2_floor
         };
-        Self::new(pow2, PLH_SCHEMA_V1, 0)
+        Self::new(pow2, 0)
     }
 
-    /// Reconstructs a [`PlhFlags`] from a raw 32-bit value (deserialization path).
+    /// Reconstruct a [`PlhFlags`] from a raw 32-bit value (deserialization path).
     /// No validation; callers are responsible for ensuring the bits are meaningful.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn from_raw(raw: u32) -> Self {
         Self(raw)
+    }
+
+    /// Returns position-in-blocks. Single mask — this is the hot accessor.
+    #[inline]
+    pub(crate) fn position(self) -> u32 {
+        self.0 & POSITION_MASK
     }
 
     /// Returns the encoded `block_size` decoded from the 4-bit `log2_block_size`.
     #[inline]
     pub(crate) fn block_size(self) -> u32 {
-        1u32 << (self.0 & 0xF)
+        1u32 << ((self.0 >> LOG2_BS_SHIFT) & LOG2_BS_MASK_RAW)
     }
 
-    /// Returns the schema/version byte.
-    #[inline]
-    pub(crate) fn schema(self) -> u8 {
-        ((self.0 >> 4) & 0xFF) as u8
-    }
-
-    /// Returns the 20-bit reserved feature-flags region (right-shifted to bits 0..=19).
+    /// Returns the partition slot (5 bits, 0..=31).
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn feature_flags(self) -> u32 {
-        self.0 >> 12
+    pub(crate) fn partition(self) -> u8 {
+        ((self.0 >> PARTITION_SHIFT) & PARTITION_MASK_RAW) as u8
     }
 
-    /// Returns the raw 32-bit value.
+    /// Returns `true` if the synthetic flag bit is set.
+    #[inline]
+    pub(crate) fn is_synthetic(self) -> bool {
+        (self.0 & SYNTHETIC_BIT) != 0
+    }
+
+    /// Returns the 2-bit version field.
+    #[inline]
+    pub(crate) fn version(self) -> u8 {
+        ((self.0 >> VERSION_SHIFT) & VERSION_MASK_RAW) as u8
+    }
+
+    /// Returns the raw 32-bit extension word.
     #[inline]
     pub(crate) fn raw(self) -> u32 {
         self.0
     }
 
-    /// Returns `true` if the schema field matches the canonical [`PLH_SCHEMA_V1`].
+    /// Returns `true` if this extension is from the canonical chain path: version V1
+    /// and *not* synthetic.
     #[inline]
     pub(crate) fn is_canonical_schema(self) -> bool {
-        self.schema() == PLH_SCHEMA_V1
+        self.version() == (PLH_VERSION_V1 as u8) && !self.is_synthetic()
+    }
+
+    /// Returns a copy with `position` replaced (other bits preserved).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position > MAX_POSITION_IN_BLOCKS`.
+    #[inline]
+    pub(crate) fn with_position(self, position: u32) -> Self {
+        assert!(
+            position <= MAX_POSITION_IN_BLOCKS,
+            "position {position} exceeds 20-bit cap (max {MAX_POSITION_IN_BLOCKS})",
+        );
+        Self((self.0 & !POSITION_MASK) | (position & POSITION_MASK))
     }
 }
 
 impl std::fmt::Debug for PlhFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlhFlags")
+            .field("position", &self.position())
             .field("block_size", &self.block_size())
-            .field("schema", &self.schema())
-            .field(
-                "feature_flags",
-                &format_args!("0x{:05x}", self.feature_flags()),
-            )
+            .field("partition", &self.partition())
+            .field("synthetic", &self.is_synthetic())
+            .field("version", &self.version())
             .finish()
     }
 }
 
 /// A 24-byte positional lineage hash carrying full-width parent and current sequence
-/// hashes plus position and per-block metadata.
+/// hashes plus a packed 32-bit extension word holding position and per-block metadata.
 ///
-/// Layout (`#[repr(C)]`, naturally aligned):
+/// Layout (`#[repr(C)]`, naturally aligned; trailing 4 bytes are alignment padding):
 ///
 /// ```text
-///   off 0:  current  (u64)  — full chain hash for this block
-///   off 8:  parent   (u64)  — parent's chain hash (0 at position 0)
-///   off 16: position (u32)  — block index in the sequence
-///   off 20: flags    (u32)  — packed metadata, low → high:
-///             bits  0..=3   log2_block_size  (4 bits)
-///             bits  4..=11  schema           (8 bits, [`PLH_SCHEMA_V1`] = 0x01)
-///             bits 12..=31  reserved feature flags (20 bits)
+///   off 0:  current   (u64)  — full chain hash for this block
+///   off 8:  parent    (u64)  — parent's chain hash (0 at position 0)
+///   off 16: flags     (u32)  — packed extension, low → high:
+///             bits  0..=19  position-in-blocks  (20 bits, max 2^20-1)
+///             bits 20..=23  log2_block_size     (4 bits, block_size 2^0..=2^15)
+///             bits 24..=28  partition           (5 bits, 32 values)
+///             bit  29       synthetic flag
+///             bits 30..=31  version             ([`PLH_VERSION_V1`] = 0b01)
 /// ```
 ///
-/// `block_size` is required to be a power of two; `log2(block_size)` fits in 4 bits
-/// up through `2^15 = 32768`. Production cache-safety enforcement (16..=1024) lives in
-/// the salt layer ([`crate`]/`kv-hashing` `compute_salt_hash`); the PLH constructor
-/// only enforces the encodability invariant (power of two ≤ 2^15).
+/// `block_size` is required to be a power of two ≤ `2^15`; production cache-safety
+/// enforcement (16..=1024) lives in the salt layer ([`crate`]/`kv-hashing`
+/// `compute_salt_hash`). Position-in-blocks is capped at `2^20 - 1` ≈ 1M positions;
+/// at `block_size = 16` this gives the design-target ~`2^24` token coverage.
 ///
 /// PLH is self-contained for chain extension: a child PLH can be derived from a
 /// parent PLH plus the child's [`BlockHash`] alone (see [`Self::extend`]).
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PositionalLineageHash {
     current: u64,
     parent: u64,
-    position: u32,
     flags: PlhFlags,
 }
 
@@ -486,13 +547,18 @@ impl PositionalLineageHash {
     ///
     /// Intended for deserialization paths and tests that need to inject specific bit
     /// patterns. Callers are responsible for ensuring the resulting struct is meaningful.
+    ///
+    /// `position` and `flags` are merged: position is masked to its 20 bits and OR-ed
+    /// over the position region of `flags` (any position bits already set in `flags`
+    /// are overwritten). Other extension fields in `flags` are preserved as-is.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn from_raw_parts(current: u64, parent: u64, position: u32, flags: u32) -> Self {
+        let merged = (flags & !POSITION_MASK) | (position & POSITION_MASK);
         Self {
             current,
             parent,
-            position,
-            flags: PlhFlags::from_raw(flags),
+            flags: PlhFlags::from_raw(merged),
         }
     }
 
@@ -521,21 +587,18 @@ impl PositionalLineageHash {
         Self {
             current,
             parent: 0,
-            position: 0,
             flags: PlhFlags::for_block_size(block_size),
         }
     }
 
-    /// Mints a non-canonical PLH carrying a randomly-generated `current`,
-    /// `parent = 0`, and the [`PLH_SCHEMA_SYNTHETIC`] schema tag in flags
-    /// (instead of [`PLH_SCHEMA_V1`]). Two calls produce PLHs that compare
-    /// unequal with overwhelming probability.
+    /// Mints a non-canonical PLH carrying a randomly-generated `current`, `parent = 0`,
+    /// and the synthetic flag bit set in the extension. Two calls produce PLHs that
+    /// compare unequal with overwhelming probability.
     ///
-    /// **Not produced by any real chain.** This is deliberately *not*
-    /// `Self::new` — there is no public path to a PLH with caller-chosen
-    /// `current` / `parent` outside of [`Self::from_raw_parts`] (the serde
-    /// door). Use [`Self::is_synthetic`] / [`Self::is_canonical_schema`] to
-    /// detect.
+    /// **Not produced by any real chain.** This is deliberately *not* `Self::new` —
+    /// there is no public path to a PLH with caller-chosen `current` / `parent` outside
+    /// of [`Self::from_raw_parts`] (the serde door). Use [`Self::is_synthetic`] /
+    /// [`Self::is_canonical_schema`] to detect.
     ///
     /// Sole legitimate caller today: the mocker's prefix-caching-disabled
     /// path, where the kvbm-logical registry is still consulted for
@@ -553,17 +616,16 @@ impl PositionalLineageHash {
         Self {
             current,
             parent: 0,
-            position,
-            flags: PlhFlags::new(block_size, PLH_SCHEMA_SYNTHETIC, 0),
+            flags: PlhFlags::pack(block_size, position, 0, true),
         }
     }
 
     /// Returns `true` when this PLH was minted via [`Self::synthetic_unique`]
-    /// (its flags carry the [`PLH_SCHEMA_SYNTHETIC`] tag).
+    /// (its extension carries the synthetic flag bit).
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn is_synthetic(&self) -> bool {
-        self.schema() == PLH_SCHEMA_SYNTHETIC
+        self.flags.is_synthetic()
     }
 
     /// Extends this lineage by one block, producing the child PLH.
@@ -571,59 +633,61 @@ impl PositionalLineageHash {
     /// The chain recurrence is `xxh3([parent_seq_u64, child_local_block_hash], 0)`.
     /// Salt does not seed the per-step xxh3 — it was mixed into `current` at the root
     /// (via [`Self::root_with_salt`]) and propagates through every parent thereafter.
-    /// The child inherits this PLH's `flags` (and therefore `block_size`).
+    /// The child inherits this PLH's extension fields (block_size, partition,
+    /// synthetic, version) with the position bumped by one.
     ///
     /// # Panics
     ///
-    /// Panics if `self.position == u32::MAX`. Silently wrapping to 0 would corrupt
-    /// lineage identity — `position` is part of the PLH's identity surface and a
-    /// wrap collides chains across positional boundaries.
+    /// Panics if `self.position() == MAX_POSITION_IN_BLOCKS` (2^20 - 1). Silently
+    /// wrapping would corrupt lineage identity — position is part of the PLH's
+    /// identity surface and a wrap collides chains across positional boundaries.
     pub fn extend(&self, child_local_block_hash: LocalBlockHash) -> Self {
         let parent_seq = self.current;
         let child_seq = compute_hash_v2(cast_slice(&[parent_seq, child_local_block_hash]), 0);
-        let next_position = self
-            .position
-            .checked_add(1)
-            .expect("PositionalLineageHash::extend: position overflowed u32::MAX");
+        let cur_position = self.flags.position();
+        assert!(
+            cur_position < MAX_POSITION_IN_BLOCKS,
+            "PositionalLineageHash::extend: position overflowed 20-bit cap (max {MAX_POSITION_IN_BLOCKS})",
+        );
         Self {
             current: child_seq,
             parent: parent_seq,
-            position: next_position,
-            flags: self.flags,
+            flags: self.flags.with_position(cur_position + 1),
         }
     }
 
     /// Returns the block position.
     ///
     /// Returns `u64` for source compatibility with the pre-universal-hashing API used
-    /// by `lib/kvbm-*`. The internal storage is `u32`; this widens at the boundary.
+    /// by `lib/kvbm-*`. The native storage is `u32`; this widens at the boundary.
     /// Callers that want the native width can read [`Self::position_u32`].
     #[inline]
     pub fn position(&self) -> u64 {
-        self.position as u64
+        self.flags.position() as u64
     }
 
-    /// Returns the block position as `u32`, the native storage width.
+    /// Returns the block position as `u32`, the native storage width. Single mask —
+    /// hot path.
     #[inline]
     pub fn position_u32(&self) -> u32 {
-        self.position
+        self.flags.position()
     }
 
     /// Deprecated 3-arg constructor preserved for `lib/kvbm-*` source compatibility
     /// with the pre-universal-hashing API. New code should use [`Self::from_raw_parts`]
     /// or [`Self::root_with_salt`] / [`Self::extend`].
     ///
-    /// `parent` defaults to `0` when `None` (matching the root convention). The flags
-    /// word is built with the canonical schema and a default `block_size` of 16, which
-    /// matches what every existing call-site on `main` was implicitly assuming.
+    /// `parent` defaults to `0` when `None` (matching the root convention). The
+    /// extension is built with the canonical version and a default `block_size` of 16,
+    /// which matches what every existing call-site on `main` was implicitly assuming.
+    /// `position` is masked to 20 bits.
     #[deprecated(note = "use PositionalLineageHash::from_raw_parts, root_with_salt, or extend")]
     pub fn new(current: u64, parent: Option<u64>, position: u64) -> Self {
         const DEFAULT_BLOCK_SIZE: u32 = 16;
         Self {
             current,
             parent: parent.unwrap_or(0),
-            position: position as u32,
-            flags: PlhFlags::for_block_size(DEFAULT_BLOCK_SIZE),
+            flags: PlhFlags::new(DEFAULT_BLOCK_SIZE, (position as u32) & POSITION_MASK),
         }
     }
 
@@ -636,7 +700,7 @@ impl PositionalLineageHash {
     /// Returns the parent sequence hash, or `None` at the root (position 0 with zero parent).
     #[inline]
     pub fn parent_sequence_hash(&self) -> Option<SequenceHash> {
-        if self.position == 0 {
+        if self.flags.position() == 0 {
             None
         } else {
             Some(self.parent)
@@ -664,28 +728,29 @@ impl PositionalLineageHash {
         self.flags.block_size()
     }
 
-    /// Returns the schema/version tag encoded in `flags`.
+    /// Returns the partition slot (5 bits, 0..=31).
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn schema(&self) -> u8 {
-        self.flags.schema()
+    pub(crate) fn partition(&self) -> u8 {
+        self.flags.partition()
     }
 
-    /// Returns the reserved 20-bit feature-flags region of `flags`.
+    /// Returns the version field (2 bits). Canonical V1 = `0b01`.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn feature_flags(&self) -> u32 {
-        self.flags.feature_flags()
+    pub(crate) fn version(&self) -> u8 {
+        self.flags.version()
     }
 
-    /// Returns the raw 32-bit `flags` word.
+    /// Returns the raw 32-bit extension word.
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn flags_raw(&self) -> u32 {
         self.flags.raw()
     }
 
-    /// Returns `true` if the schema field matches the canonical [`PLH_SCHEMA_V1`].
+    /// Returns `true` if the extension is from the canonical chain path: version V1
+    /// and *not* synthetic.
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn is_canonical_schema(&self) -> bool {
@@ -705,15 +770,6 @@ impl PositionalLineageHash {
     #[inline]
     pub fn parent_hash_fragment(&self) -> u64 {
         self.parent
-    }
-
-    /// Returns this PLH's current sequence hash. The legacy "fragment for child
-    /// position" semantics (truncating to a child-mode-specific width) no longer
-    /// applies — the parent slot is always full width.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn parent_fragment_for_child_position(&self, _child_position: u32) -> u64 {
-        self.current
     }
 
     /// Deprecated alias for the current sequence hash, preserved for `lib/kvbm-*`
@@ -739,37 +795,51 @@ impl PositionalLineageHash {
 }
 
 // `Hash` is implemented manually so only the 64-bit `current` field is fed to the
-// hasher: `current` is already a hash. Combined with [`PositionalLineageHash`]'s
-// own [`std::hash::Hasher`] impl below, this lets `HashMap<PLH, V,
-// BuildHasherDefault<PLH>>` skip a redundant hash pass.
+// hasher: `current` is already a hash. Combined with [`PlhHasher`]'s passthrough
+// `Hasher` impl, this lets `HashMap<PositionalLineageHash, V,
+// BuildHasherDefault<PlhHasher>>` skip a redundant hash pass.
 impl std::hash::Hash for PositionalLineageHash {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         state.write_u64(self.current);
     }
 }
 
-// Passthrough hasher: `write` panics so any accidental fall-through to byte-by-byte
-// hashing (e.g. if the manual `Hash` impl above is changed) is loud, not silent.
-impl std::hash::Hasher for PositionalLineageHash {
+/// Passthrough hasher for [`PositionalLineageHash`]-keyed maps. The `Hash` impl on PLH
+/// feeds only the 64-bit `current` field; this hasher captures that one `write_u64`
+/// call and returns it verbatim from `finish`. Use as
+/// `HashMap<PositionalLineageHash, V, BuildHasherDefault<PlhHasher>>`.
+///
+/// Separated from the value type so [`PositionalLineageHash`] is not `Default` —
+/// PLHs must be constructed deliberately (root, extend, or the deprecated shim),
+/// not summoned out of zeroed memory.
+#[derive(Default)]
+pub struct PlhHasher {
+    state: u64,
+}
+
+// `write` panics so any accidental fall-through to byte-by-byte hashing (e.g. if the
+// manual `Hash` impl on PLH above is changed) is loud, not silent.
+impl std::hash::Hasher for PlhHasher {
     fn finish(&self) -> u64 {
-        self.current
+        self.state
     }
     fn write(&mut self, _bytes: &[u8]) {
-        unreachable!("PositionalLineageHash should only call write_u64");
+        unreachable!("PlhHasher should only call write_u64");
     }
     fn write_u64(&mut self, i: u64) {
-        self.current = i;
+        self.state = i;
     }
 }
 
 impl PositionalLineageHash {
     fn format_impl(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let position = self.flags.position();
         let current_b58 = bs58::encode(self.current.to_be_bytes()).into_string();
-        if self.position == 0 {
-            write!(f, "{}:{}", self.position, current_b58)
+        if position == 0 {
+            write!(f, "{}:{}", position, current_b58)
         } else {
             let parent_b58 = bs58::encode(self.parent.to_be_bytes()).into_string();
-            write!(f, "{}:{}:{}", self.position, current_b58, parent_b58)
+            write!(f, "{}:{}:{}", position, current_b58, parent_b58)
         }
     }
 }
@@ -1152,7 +1222,7 @@ impl TokenBlockChunk {
 /// for projection (the salt is preserved for accessor compatibility but does not
 /// participate in `local_block_hash` — it is mixed into the chain only at
 /// [`PositionalLineageHash::root_with_salt`]).
-#[derive(Debug, Clone, Default, PartialEq)] // PartialEq for tests
+#[derive(Debug, Clone, PartialEq)] // PartialEq for tests
 pub struct TokenBlock {
     tokens: Tokens,
     salt_hash: SaltHash,
@@ -2052,10 +2122,12 @@ mod tests {
         assert_eq!(plh.parent_sequence_hash(), Some(parent));
         assert_eq!(plh.parent_raw(), parent);
         assert_eq!(plh.block_size(), BS);
-        assert_eq!(plh.schema(), PLH_SCHEMA_V1);
+        assert_eq!(plh.version(), PLH_VERSION_V1 as u8);
+        assert!(!plh.is_synthetic());
+        assert_eq!(plh.partition(), 0);
 
-        // Parent is full-width — no truncation, regardless of position.
-        for pos in [0u32, 100, 1_000, 65_536, 1_000_000, 1u32 << 24, 1u32 << 30] {
+        // Parent is full-width — no truncation, regardless of position (within cap).
+        for pos in [0u32, 100, 1_000, 65_536, 1u32 << 19, MAX_POSITION_IN_BLOCKS] {
             let plh = PositionalLineageHash::from_raw_parts(
                 current,
                 parent,
@@ -2085,6 +2157,31 @@ mod tests {
     }
 
     #[test]
+    fn test_positional_lineage_hash_extension_round_trip() {
+        // partition + synthetic + version + position + block_size all round-trip.
+        let f = PlhFlags::pack(64, 12345, 17, true);
+        assert_eq!(f.block_size(), 64);
+        assert_eq!(f.position(), 12345);
+        assert_eq!(f.partition(), 17);
+        assert!(f.is_synthetic());
+        assert_eq!(f.version(), PLH_VERSION_V1 as u8);
+        assert!(!f.is_canonical_schema()); // synthetic disqualifies canonical.
+
+        // Reconstruct from raw — all fields preserved.
+        let g = PlhFlags::from_raw(f.raw());
+        assert_eq!(g, f);
+        assert_eq!(g.partition(), 17);
+        assert!(g.is_synthetic());
+
+        // with_position preserves other fields.
+        let h = f.with_position(0);
+        assert_eq!(h.position(), 0);
+        assert_eq!(h.block_size(), 64);
+        assert_eq!(h.partition(), 17);
+        assert!(h.is_synthetic());
+    }
+
+    #[test]
     fn test_positional_lineage_hash_block_size_round_trip() {
         let current = 0xAAAA_BBBB_CCCC_DDDDu64;
         for bs in [16u32, 32, 64, 128, 256, 512, 1024] {
@@ -2095,7 +2192,7 @@ mod tests {
                 PlhFlags::for_block_size(bs).raw(),
             );
             assert_eq!(plh.block_size(), bs, "round trip for bs={bs}");
-            // Round-trip via from_raw_parts preserves block_size and schema.
+            // Round-trip via from_raw_parts preserves block_size and version.
             let decoded = PositionalLineageHash::from_raw_parts(
                 plh.current_sequence_hash(),
                 plh.parent_raw(),
@@ -2104,46 +2201,68 @@ mod tests {
             );
             assert_eq!(decoded, plh);
             assert_eq!(decoded.block_size(), bs);
-            assert_eq!(decoded.schema(), PLH_SCHEMA_V1);
+            assert_eq!(decoded.version(), PLH_VERSION_V1 as u8);
         }
     }
 
     #[test]
     #[should_panic(expected = "block_size must be a power of two")]
     fn test_positional_lineage_hash_block_size_must_be_power_of_two() {
-        let _ = PlhFlags::new(24, PLH_SCHEMA_V1, 0);
+        let _ = PlhFlags::new(24, 0);
     }
 
     #[test]
     #[should_panic(expected = "block_size must be a power of two")]
     fn test_positional_lineage_hash_block_size_zero_rejected() {
-        let _ = PlhFlags::new(0, PLH_SCHEMA_V1, 0);
+        let _ = PlhFlags::new(0, 0);
     }
 
     #[test]
     #[should_panic(expected = "block_size must be a power of two")]
     fn test_positional_lineage_hash_block_size_too_large_rejected() {
         // 2^16 cannot be encoded in 4-bit log2 field.
-        let _ = PlhFlags::new(1u32 << 16, PLH_SCHEMA_V1, 0);
+        let _ = PlhFlags::new(1u32 << 16, 0);
     }
 
     #[test]
-    fn test_positional_lineage_hash_position_no_panic_past_legacy_limit() {
-        // The old layout panicked at 2^24; the flat layout must accept any u32.
+    #[should_panic(expected = "position")]
+    fn test_positional_lineage_hash_position_overflow_rejected_in_pack() {
+        // PlhFlags::pack rejects positions past the 20-bit cap.
+        let _ = PlhFlags::pack(16, MAX_POSITION_IN_BLOCKS + 1, 0, false);
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_position_max_fits() {
+        // 20-bit cap is the max encodable position.
         let plh = PositionalLineageHash::from_raw_parts(
             0xDEAD_BEEF,
             0xBADC0FFEE,
-            (1u32 << 24) + 1,
+            MAX_POSITION_IN_BLOCKS,
             PlhFlags::for_block_size(16).raw(),
         );
-        assert_eq!(plh.position_u32(), (1u32 << 24) + 1);
+        assert_eq!(plh.position_u32(), MAX_POSITION_IN_BLOCKS);
+        // from_raw_parts silently masks oversize positions to the 20-bit field
+        // (no validation; matches its raw-deserialization contract).
         let plh = PositionalLineageHash::from_raw_parts(
             0xDEAD_BEEF,
             0xBADC0FFEE,
-            u32::MAX,
+            MAX_POSITION_IN_BLOCKS + 1,
             PlhFlags::for_block_size(16).raw(),
         );
-        assert_eq!(plh.position_u32(), u32::MAX);
+        assert_eq!(plh.position_u32(), 0); // (MAX+1) & MASK == 0
+    }
+
+    #[test]
+    #[should_panic(expected = "position overflowed 20-bit cap")]
+    fn test_positional_lineage_hash_extend_panics_at_position_cap() {
+        // extend() must refuse to advance past the encodable cap.
+        let plh = PositionalLineageHash::from_raw_parts(
+            0xCAFEBABE,
+            0xDEADBEEF,
+            MAX_POSITION_IN_BLOCKS,
+            PlhFlags::for_block_size(16).raw(),
+        );
+        let _ = plh.extend(0xABAD_1DEA);
     }
 
     #[test]
@@ -2194,9 +2313,17 @@ mod tests {
             compute_hash_v2(cast_slice(&[plh0.current_sequence_hash(), lbh[1]]), 0),
         );
 
-        // Block size and flags propagate through extend.
+        // Block size, partition, synthetic, version propagate through extend.
+        // (flags_raw differs per block because position is now packed into flags.)
         assert_eq!(plh1.block_size(), BS);
-        assert_eq!(plh2.flags_raw(), plh0.flags_raw());
+        assert_eq!(plh2.block_size(), BS);
+        assert_eq!(plh2.partition(), plh0.partition());
+        assert_eq!(plh2.is_synthetic(), plh0.is_synthetic());
+        assert_eq!(plh2.version(), plh0.version());
+        // Position increments cleanly.
+        assert_eq!(plh0.position_u32(), 0);
+        assert_eq!(plh1.position_u32(), 1);
+        assert_eq!(plh2.position_u32(), 2);
 
         // Salt isolation: changing salt diverges the chain starting at the root, but
         // LocalBlockHash itself is unchanged (content-addressable).
@@ -2218,8 +2345,7 @@ mod tests {
         use std::collections::HashMap;
         use std::hash::{BuildHasherDefault, Hasher};
 
-        type PlhMap<V> =
-            HashMap<PositionalLineageHash, V, BuildHasherDefault<PositionalLineageHash>>;
+        type PlhMap<V> = HashMap<PositionalLineageHash, V, BuildHasherDefault<PlhHasher>>;
         let mut m: PlhMap<u32> = PlhMap::default();
         let plh = PositionalLineageHash::from_raw_parts(
             0xFEED_FACE_CAFE_BEEF,
@@ -2231,7 +2357,7 @@ mod tests {
         assert_eq!(m.get(&plh), Some(&42));
 
         // Hasher::finish reflects the most recent write_u64.
-        let mut h = PositionalLineageHash::default();
+        let mut h = PlhHasher::default();
         std::hash::Hasher::write_u64(&mut h, 0x1122_3344_5566_7788);
         assert_eq!(h.finish(), 0x1122_3344_5566_7788);
     }
@@ -2239,7 +2365,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "should only call write_u64")]
     fn test_positional_lineage_hash_hasher_write_panics() {
-        let mut h = PositionalLineageHash::default();
+        let mut h = PlhHasher::default();
         std::hash::Hasher::write(&mut h, &[0u8, 1, 2, 3]);
     }
 
