@@ -855,6 +855,13 @@ impl ModelDeploymentCard {
     /// Walk populated metadata `CheckedFile` slots in deterministic
     /// order: model_info, tokenizer, prompt_formatter,
     /// chat_template_file, gen_config.
+    ///
+    /// TODO(gh-8749): external preprocessors (vllm/sglang) read
+    /// `from_pretrained(slug_dir)` and may expect siblings outside the
+    /// typed slots — `preprocessor_config.json`, `special_tokens_map.json`,
+    /// `added_tokens.json`, etc. Add an `extra_files: Vec<CheckedFile>`
+    /// MDC field so the worker can advertise everything in its model dir
+    /// minus weights. Frontend pipeline is already generic over slot count.
     pub fn iter_metadata_files(&self) -> Vec<&CheckedFile> {
         let mut out: Vec<&CheckedFile> = Vec::with_capacity(5);
         if let Some(m) = self.model_info.as_ref() {
