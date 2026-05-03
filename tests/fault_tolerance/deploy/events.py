@@ -17,6 +17,7 @@ To create a custom event, subclass Event and implement execute() and description
 
 import asyncio
 import secrets
+from datetime import datetime, timezone
 
 __all__ = [
     "Event",
@@ -50,11 +51,15 @@ if TYPE_CHECKING:
 class Event(ABC):
     """Base class for scenario events.
 
-    Events have:
-    - execute(ctx): Perform the action
-    - stop(ctx): Optional cleanup, called after all events execute
-    - name: Event identifier (used to find related events)
-    - results: Optional results stored after execution
+    Authoring an event: subclass and implement ``execute(ctx)`` (and a
+    ``description`` property). Optionally override ``stop(ctx)`` for
+    cleanup. The framework calls ``timed_execute(ctx)`` which wraps the
+    subclass's ``execute`` with wall-clock timestamping so reports can
+    bucket aiperf records by event boundary.
+
+    Attributes set by the framework during execution:
+    - started_at / ended_at: UTC-aware wall-clock bracket populated by
+      ``timed_execute``. ``None`` until the event runs.
     """
 
     # Note: name and results are defined in subclasses since dataclasses
@@ -62,8 +67,18 @@ class Event(ABC):
 
     @abstractmethod
     async def execute(self, ctx: "ScenarioContext") -> None:
-        """Execute the event."""
+        """Subclass override — perform the event's action."""
         pass
+
+    async def timed_execute(self, ctx: "ScenarioContext") -> None:
+        """Framework entry point — runs ``execute`` and records the
+        wall-clock bracket on ``self.started_at``/``self.ended_at``.
+        """
+        self.started_at = datetime.now(timezone.utc)
+        try:
+            await self.execute(ctx)
+        finally:
+            self.ended_at = datetime.now(timezone.utc)
 
     async def stop(self, ctx: "ScenarioContext") -> None:
         """Optional stop/cleanup. Called after all events execute."""
@@ -240,8 +255,11 @@ class DeletePod(Event):
         for service_name, pods in service_pod_dict.items():
             for pod in pods:
                 ctx.logger.info(f"Deleting pod {pod.name} (service: {service_name})")
+                # Pod manifest (status/conditions/restartCount) and metrics
+                # endpoint scrape have to happen pre-delete; the PVC log
+                # tee already captures the container's stdout/stderr so we
+                # don't fetch kubectl logs here separately.
                 ctx.deployment._get_pod_manifest(pod, service_name, ".before_delete")
-                ctx.deployment._get_pod_logs(pod, service_name, ".before_delete")
                 await ctx.deployment._get_pod_metrics(
                     pod, service_name, ".before_delete"
                 )

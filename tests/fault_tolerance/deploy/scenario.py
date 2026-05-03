@@ -52,6 +52,10 @@ class ScenarioContext:
     namespace: str
     log_dir: str
     resource_history: list["ResourceSnapshot"] = field(default_factory=list)
+    # Snapshot of deployment-level metrics, captured before the deployment
+    # context exits so reports can still read them (they run after the
+    # deployment reference has been cleared).
+    startup_seconds: Optional[float] = None
 
 
 # =============================================================================
@@ -171,7 +175,10 @@ async def run_scenario(
             logger.info("=" * 60)
             for i, event in enumerate(events, 1):
                 logger.info(f"Event {i}/{len(events)}: {event.description}")
-                await event.execute(ctx)
+                # timed_execute wraps the subclass's execute() with
+                # started_at/ended_at timestamps so reports can bucket
+                # time-stamped data (e.g. aiperf records) by event boundary.
+                await event.timed_execute(ctx)
                 logger.info(f"Event {i} completed")
 
             # Stop all events (collects results from unfinished loads)
@@ -210,6 +217,10 @@ async def run_scenario(
                 logger.info(f"  Requests: {request_count}")
                 logger.info(f"  Errors: {error_count}")
                 logger.info(f"  Throughput: {throughput:.2f} req/s")
+
+    # Cache deployment-level data on ctx before clearing the reference,
+    # so reports (which run after __aexit__) can still see it.
+    ctx.startup_seconds = getattr(ctx.deployment, "startup_seconds", None)
 
     # Deployment context has exited - cleanup completed
     ctx.deployment = None  # Mark that deployment is no longer active

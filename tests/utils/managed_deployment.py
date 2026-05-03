@@ -284,6 +284,64 @@ class ServiceSpec:
             value_from={"fieldRef": {"fieldPath": "metadata.namespace"}},
         )
 
+    # ----- ported from _2 (full surface area) -----
+    def set_readiness_probe(
+        self,
+        period_seconds: int = 10,
+        initial_delay_seconds: int = 0,
+        timeout_seconds: int = 4,
+        failure_threshold: int = 3,
+        path: str = "/health",
+        port: int = 9090,
+    ):
+        """Set readiness probe configuration for this service.
+
+        Args:
+            period_seconds: How often to perform the probe (default: 10)
+            initial_delay_seconds: Delay before first probe (default: 0)
+            timeout_seconds: Probe timeout (default: 4)
+            failure_threshold: Failures before marking unready (default: 3)
+            path: HTTP path to probe (default: "/health")
+            port: Port to probe (default: 9090 for workers, use 8000 for frontend)
+        """
+        self._spec["readinessProbe"] = {
+            "httpGet": {
+                "path": path,
+                "port": port,
+            },
+            "periodSeconds": period_seconds,
+            "initialDelaySeconds": initial_delay_seconds,
+            "timeoutSeconds": timeout_seconds,
+            "failureThreshold": failure_threshold,
+        }
+
+    def set_termination_grace_period(self, seconds: int = 60):
+        """Set termination grace period for this service's pods.
+
+        Args:
+            seconds: Grace period in seconds (default: 60)
+        """
+        self._ensure_path("extraPodSpec")["terminationGracePeriodSeconds"] = seconds
+
+    def set_env_var(self, name: str, value: str):
+        """Set an environment variable on this service.
+
+        If the environment variable already exists, update its value.
+        Otherwise, add a new environment variable.
+
+        Args:
+            name: Name of the environment variable
+            value: Value of the environment variable
+        """
+        envs = self.envs or []
+        for env in envs:
+            if env.get("name") == name:
+                env["value"] = value
+                self.envs = envs
+                return
+        envs.append({"name": name, "value": value})
+        self.envs = envs
+
 
 class DeploymentSpec:
     def __init__(
@@ -310,6 +368,28 @@ class DeploymentSpec:
     def port(self) -> int:
         """Deployment port"""
         return self._port
+
+    @property
+    def frontend_service(self) -> "ServiceSpec":
+        """Return the first service whose componentType is ``frontend``."""
+        for service in self.services:
+            if service.component_type == "frontend":
+                return service
+        raise LookupError(
+            f"Deployment {self.name} has no service with componentType 'frontend'"
+        )
+
+    def get_in_cluster_frontend_url(self, namespace: str) -> str:
+        """Compute the in-cluster URL of the frontend service.
+
+        The DNS name follows the operator's service-naming convention
+        ``<deployment>-<service>.<namespace>.svc.cluster.local``.
+        """
+        return (
+            f"http://{self.name.lower()}-"
+            f"{self.frontend_service.name.lower()}."
+            f"{namespace.lower()}.svc.cluster.local:{self.port}"
+        )
 
     @property
     def system_port(self) -> int:
@@ -421,34 +501,6 @@ class DeploymentSpec:
 
         return {"jsonl_enabled": jsonl_enabled, "log_level": log_level}
 
-    def set_service_env_var(self, service_name: str, name: str, value: str):
-        """
-        Set an environment variable for a specific service
-        """
-        service = self.get_service(service_name)
-        envs = service.envs if service.envs is not None else []
-
-        # if env var already exists, update it
-        for env in envs:
-            if env["name"] == name:
-                env["value"] = value
-                service.envs = envs  # Save back to trigger the setter
-                return
-
-        # if env var does not exist, add it
-        envs.append({"name": name, "value": value})
-        service.envs = envs  # Save back to trigger the setter
-
-    def get_service_env_vars(self, service_name: str) -> list[dict]:
-        """
-        Get all environment variables for a specific service
-
-        Returns:
-            List of environment variable dicts (e.g., [{"name": "VAR", "value": "val"}])
-        """
-        service = self.get_service(service_name)
-        return service.envs
-
     @property
     def services(self) -> list[ServiceSpec]:
         """List of ServiceSpec objects"""
@@ -466,73 +518,13 @@ class DeploymentSpec:
     def spec(self):
         return self._deployment_spec
 
-    def add_arg_to_service(self, service_name: str, arg_name: str, arg_value: str):
-        """
-        Add or override a command-line argument for a specific service
-
-        Args:
-            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
-            arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
-            arg_value: Argument value (e.g., "1024")
-        """
-        service = self.get_service(service_name)
-        service_spec = service._spec
-
-        # Ensure args list exists
-        if "extraPodSpec" not in service_spec:
-            service_spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in service_spec["extraPodSpec"]:
-            service_spec["extraPodSpec"]["mainContainer"] = {}
-        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
-
-        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
-
-        # Convert to list if needed (sometimes it's a single string)
-        if isinstance(args_list, str):
-            import shlex
-
-            args_list = shlex.split(args_list)
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
-
-        # Find existing argument
-        arg_index = None
-        for i, arg in enumerate(args_list):
-            if arg == arg_name:
-                arg_index = i
-                break
-
-        if arg_index is not None:
-            # Argument found, check if it has a value
-            if arg_index + 1 < len(args_list) and not args_list[
-                arg_index + 1
-            ].startswith("-"):
-                # Has a value, replace it
-                args_list[arg_index + 1] = arg_value
-            else:
-                # No value after the argument, insert the value
-                args_list.insert(arg_index + 1, arg_value)
-        else:
-            # Add new argument
-            args_list.extend([arg_name, arg_value])
-
-    def get_service(self, service_name: str) -> ServiceSpec:
-        """
-        Get a specific service from the deployment spec
-        """
-        if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
-        return ServiceSpec(
-            service_name, self._deployment_spec["spec"]["services"][service_name]
-        )
-
     def set_service_replicas(self, service_name: str, replicas: int):
+        """Convenience wrapper around ``spec[name].replicas = N``.
+
+        Kept for legacy callers; new code should use the per-service form
+        directly so different workers can carry different replica counts.
         """
-        Set the number of replicas for a specific service
-        """
-        service = self.get_service(service_name)
-        service.replicas = replicas
+        self[service_name].replicas = replicas
 
     def save(self, out_file: str):
         """Save updated deployment to file"""
@@ -644,6 +636,8 @@ class DeploymentSpec:
         for service in target_services:
             service.enable_log_collection(container_log_dir, pvc_name)
 
+    # ----- ported from _2 (full surface area) -----
+
 
 class PodProcess:
     def __init__(self, pod: Pod, line: str):
@@ -737,6 +731,18 @@ class ManagedDeployment:
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
         self.log_dir = resolve_test_output_path(self.log_dir)
+        # Lifecycle bookkeeping for the log-collection PVC. Cleanup paths
+        # check these before doing work so a failed PVC create doesn't try
+        # to clean up something that was never made.
+        self._log_collection_pvc_created = False
+        self._log_collection_pvc_verified = False
+        # Mirror DeploymentSpec.enable_log_collection's container_log_dir so
+        # the extractor and per-pod log paths agree.
+        self.container_log_dir = "/tmp/service_logs"
+        # Initial deployment startup time (seconds). Populated by the first
+        # ``_wait_for_ready`` success in ``__aenter__``; ``None`` means we
+        # haven't reached Ready yet.
+        self.startup_seconds: Optional[float] = None
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client.
@@ -891,15 +897,22 @@ class ManagedDeployment:
                     observed_ready_condition_val == str(desired_ready_condition_val)
                     and observed_state_val == desired_state_val
                 ):
+                    elapsed = time.time() - start_time
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
-                    self._logger.info(
-                        f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
-                    )
+                    self._logger.info(f"Elapsed time: {elapsed:.1f}s / {timeout}s")
 
                     self._logger.info(
                         f"Deployment {self._deployment_name} has Ready condition {desired_ready_condition_val} and state {desired_state_val}"
                     )
+                    # Capture the FIRST observed ready elapsed-time as the
+                    # deployment's startup time. Later waits (e.g. after a
+                    # rolling-upgrade) leave this untouched.
+                    if (
+                        desired_ready_condition_val is True
+                        and getattr(self, "startup_seconds", None) is None
+                    ):
+                        self.startup_seconds = elapsed
                     return True
                 else:
                     if attempt % log_interval == 0:
@@ -1081,37 +1094,23 @@ class ManagedDeployment:
                 raise
 
     async def trigger_rolling_upgrade(self, service_names: list[str]):
-        """
-        Triggers a rolling update for a list of services
-        This is a dummy update - sets an env var on the service
-        """
+        """Trigger a rolling upgrade by stamping a unique env var on each
+        named service and then publishing the change via
+        :py:meth:`apply_service_changes`.
 
+        The env var is a no-op for the worker process; its purpose is to
+        change the pod template so the operator rolls the deployment.
+        """
         if not service_names:
             raise ValueError(
                 "service_names cannot be empty for trigger_rolling_upgrade"
             )
-
-        patch_body: dict[str, Any] = {"spec": {"services": {}}}
-
         for service_name in service_names:
-            self.deployment_spec.set_service_env_var(
-                service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
+            self.deployment_spec[service_name].set_env_var(
+                "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
             )
-
-            updated_envs = self.deployment_spec.get_service_env_vars(service_name)
-            patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
-
         try:
-            assert self._custom_api is not None, "Kubernetes API not initialized"
-            await self._custom_api.patch_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                name=self._deployment_name,
-                body=patch_body,
-                _content_type="application/merge-patch+json",
-            )
+            await self.apply_service_changes(service_names)
         except exceptions.ApiException as e:
             self._logger.info(
                 f"Failed to patch deployment {self._deployment_name}: {e}"
@@ -1250,8 +1249,14 @@ class ManagedDeployment:
                 f.write(content)
 
     async def _delete_deployment(self):
-        """
-        Delete the DynamoGraphDeployment CR.
+        """Delete the DynamoGraphDeployment CR and wait for it to fully drain.
+
+        Two-stage wait so a subsequent ``_create_deployment`` never races a
+        prior incarnation:
+          1. Wait for the CR itself to disappear from the API.
+          2. Wait for the pods labeled with this deployment to terminate.
+        Without this, leftover pods from a previous (especially failed) run
+        keep cycling alongside the new ones.
         """
         try:
             if self._deployment_name and self._custom_api is not None:
@@ -1265,6 +1270,158 @@ class ManagedDeployment:
         except exceptions.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
+
+        await self._wait_for_cr_deleted()
+        await self._wait_for_pods_terminated()
+
+    async def _scrub_namespace(self) -> None:
+        """Wipe prior-run artifacts from the test namespace.
+
+        Deletes every ``DynamoGraphDeployment`` in the namespace, the
+        log-collection PVCs left behind by past failed runs, and any
+        leftover ``load-*`` / ``pvc-extract-*`` / ``*-verify-*`` jobs.
+        Then waits for all pods labeled with this deployment to drain so
+        the new run starts on a clean slate.
+
+        Called from ``__aenter__`` so test authors don't have to remember
+        to scrub between runs — the framework guarantees a clean baseline.
+        """
+        if self._custom_api is None or self._core_api is None:
+            return
+
+        # 1. Delete all DynamoGraphDeployments in the namespace.
+        try:
+            cr_list = await self._custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="dynamographdeployments",
+            )
+            for item in cr_list.get("items", []):
+                name = item.get("metadata", {}).get("name")
+                if not name:
+                    continue
+                try:
+                    await self._custom_api.delete_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=name,
+                    )
+                    self._logger.info(f"scrub: deleted prior CR {name}")
+                except exceptions.ApiException as e:
+                    if e.status != 404:
+                        self._logger.debug(f"scrub: CR {name}: {e}")
+        except exceptions.ApiException as e:
+            self._logger.debug(f"scrub: list CRs failed: {e}")
+
+        # 2. Delete log-collection PVCs (labelled by enable_log_collection).
+        try:
+            pvcs = await self._core_api.list_namespaced_persistent_volume_claim(
+                namespace=self.namespace,
+                label_selector="purpose=log-collection",
+            )
+            for pvc in pvcs.items:
+                try:
+                    await self._core_api.delete_namespaced_persistent_volume_claim(
+                        name=pvc.metadata.name, namespace=self.namespace
+                    )
+                    self._logger.info(
+                        f"scrub: deleted prior log PVC {pvc.metadata.name}"
+                    )
+                except exceptions.ApiException as e:
+                    if e.status != 404:
+                        self._logger.debug(f"scrub: PVC {pvc.metadata.name}: {e}")
+        except exceptions.ApiException as e:
+            self._logger.debug(f"scrub: list PVCs failed: {e}")
+
+        # 3. Delete leftover jobs (load runners, log extractors, PVC-verify probes).
+        try:
+            batch_api = client.BatchV1Api()
+            jobs = await batch_api.list_namespaced_job(namespace=self.namespace)
+            stale_prefixes = ("load-", "pvc-extract-")
+            stale_substrs = ("-verify-",)
+            for job in jobs.items:
+                name = job.metadata.name
+                if not (
+                    any(name.startswith(p) for p in stale_prefixes)
+                    or any(s in name for s in stale_substrs)
+                ):
+                    continue
+                try:
+                    await batch_api.delete_namespaced_job(
+                        name=name,
+                        namespace=self.namespace,
+                        propagation_policy="Background",
+                    )
+                    self._logger.info(f"scrub: deleted prior job {name}")
+                except exceptions.ApiException as e:
+                    if e.status != 404:
+                        self._logger.debug(f"scrub: job {name}: {e}")
+        except exceptions.ApiException as e:
+            self._logger.debug(f"scrub: list jobs failed: {e}")
+
+        # 4. Wait for prior pods labeled with this deployment to drain.
+        await self._wait_for_pods_terminated()
+
+    async def _wait_for_cr_deleted(self, timeout: int = 120):
+        """Poll the apiserver until the CR returns 404."""
+        if not self._deployment_name or self._custom_api is None:
+            return
+        start = time.time()
+        while (time.time() - start) < timeout:
+            try:
+                await self._custom_api.get_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    name=self._deployment_name,
+                )
+                await asyncio.sleep(2)
+            except exceptions.ApiException as e:
+                if e.status == 404:
+                    return
+                raise
+        self._logger.warning(
+            f"CR {self._deployment_name} deletion timed out after {timeout}s"
+        )
+
+    async def _wait_for_pods_terminated(self, timeout: int = 120):
+        """Wait until no non-terminal pods remain for this deployment.
+
+        The operator's pods are labeled with ``nvidia.com/selector=<deployment>-<service>``
+        for each service; we walk every service and wait on each label set.
+        """
+        if self._core_api is None:
+            return
+        start = time.time()
+        services = [s.name for s in self.deployment_spec.services]
+        while (time.time() - start) < timeout:
+            still_running: list[str] = []
+            for service_name in services:
+                selector = f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+                try:
+                    pods = await self._core_api.list_namespaced_pod(
+                        namespace=self.namespace, label_selector=selector
+                    )
+                except exceptions.ApiException as e:
+                    self._logger.debug(f"list pods failed for {selector}: {e}")
+                    continue
+                for p in pods.items:
+                    if p.status.phase not in ("Succeeded", "Failed"):
+                        still_running.append(p.metadata.name)
+            if not still_running:
+                return
+            self._logger.info(
+                f"Waiting for {len(still_running)} prior pods to terminate: "
+                f"{still_running[:3]}{'…' if len(still_running) > 3 else ''}"
+            )
+            await asyncio.sleep(2)
+        self._logger.warning(
+            f"Pod termination timed out after {timeout}s — proceeding anyway"
+        )
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
@@ -1364,7 +1521,21 @@ class ManagedDeployment:
                     self._logger.debug(f"Error stopping port forward: {e}")
             self._active_port_forwards.clear()
         finally:
+            # Drain logs from PVC BEFORE deleting deployment + PVC, so we
+            # never lose a run's logs to a teardown race.
+            try:
+                await self._extract_logs_from_pvc()
+            except Exception as e:
+                self._logger.warning(f"log extraction failed: {e}")
+            try:
+                await self._cleanup_orphaned_jobs()
+            except Exception as e:
+                self._logger.warning(f"orphaned job cleanup failed: {e}")
             await self._delete_deployment()
+            try:
+                await self._cleanup_log_collection_pvc()
+            except Exception as e:
+                self._logger.warning(f"log PVC cleanup failed: {e}")
 
     async def __aenter__(self):
         try:
@@ -1374,11 +1545,21 @@ class ManagedDeployment:
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
 
-            # Run delete deployment and service restarts in parallel
-            tasks = [self._delete_deployment()]
+            # Scrub the namespace clean of any state left over from prior
+            # runs (failed-mid-test deployments, orphan PVCs, stale load
+            # jobs). Without this, residual pods can sit alongside the
+            # current run's pods and confuse readiness checks.
+            tasks = [self._scrub_namespace()]
             if not self.skip_service_restart:
                 tasks.extend([self._restart_etcd(), self._restart_nats()])
             await asyncio.gather(*tasks)
+
+            # Materialize the log-collection PVC declared by
+            # DeploymentSpec.enable_log_collection. The spec carries the PVC
+            # by reference (`create: false`) so the operator does not try to
+            # create it; ManagedDeployment owns its lifecycle so the PVC and
+            # the deployment go up and come down together.
+            await self._create_log_collection_pvc()
 
             await self._create_deployment()
             await self._wait_for_ready()
@@ -1390,6 +1571,540 @@ class ManagedDeployment:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._cleanup()
+
+    async def wait_for_ready(self, timeout: int = 1800, sleep=1, log_interval=60):
+        """Public alias used by events.WaitForRecovery and RollingUpgrade.
+
+        Same semantics as the private :py:meth:`_wait_for_ready` — waits for
+        the DynamoGraphDeployment to reach Ready=True / state=successful.
+        """
+        return await self._wait_for_ready(
+            timeout=timeout, sleep=sleep, log_interval=log_interval
+        )
+
+    def get_log_pvc_name(self) -> Optional[str]:
+        """Return the configured log-collection PVC name, or None if not enabled.
+
+        ManagedLoad uses this to mount the same PVC for storing aiperf
+        artifacts so a single download job can collect everything.
+        """
+        return getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+
+    async def apply_service_changes(self, service_names: list[str]):
+        """Push whatever in-memory mutations have been made on the named
+        services to the cluster, in a single merge-patch.
+
+        The caller mutates services via ``ServiceSpec`` setters (``image``,
+        ``replicas``, ``set_env_var``, ``set_arg``, …); this method then
+        publishes those changes. We push each service's full spec dict and
+        let the apiserver's merge-patch semantics overlay them on the CR —
+        unchanged fields on the server are preserved, mutated ones win.
+
+        Used by RollingUpgrade and any other event that needs the operator
+        to reconcile after spec edits.
+        """
+        if not service_names:
+            raise ValueError("service_names cannot be empty for apply_service_changes")
+        patch_body: dict = {"spec": {"services": {}}}
+        for service_name in service_names:
+            service = self.deployment_spec[service_name]
+            patch_body["spec"]["services"][service_name] = service._spec
+        assert self._custom_api is not None, "Kubernetes API not initialized"
+        try:
+            await self._custom_api.patch_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="dynamographdeployments",
+                name=self._deployment_name,
+                body=patch_body,
+                _content_type="application/merge-patch+json",
+            )
+        except exceptions.ApiException as e:
+            self._logger.info(
+                f"Failed to patch deployment {self._deployment_name}: {e}"
+            )
+            raise
+
+    def _get_pod_manifest(self, pod: Pod, service_name: str, suffix: str = ""):
+        """Save pod manifest YAML to log_dir/<service>/<pod>.yaml."""
+        directory = os.path.join(self.log_dir, service_name)
+        os.makedirs(directory, exist_ok=True)
+        try:
+            with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
+                f.write(pod.to_yaml())
+        except Exception as e:
+            self._logger.error(e)
+
+    async def _create_log_collection_pvc(self) -> Optional[str]:
+        """Create the RWX log-collection PVC referenced by DeploymentSpec.
+
+        No-op when the spec did not enable log collection. Recreates the PVC
+        on every run so log content from a previous run does not leak into
+        this one.
+
+        Returns the PVC name on success, or ``None`` when log collection is
+        not configured.
+        """
+        pvc_name = getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+        if not pvc_name:
+            return None
+        pvc_size = getattr(self.deployment_spec, "_log_collection_pvc_size", "1Gi")
+        storage_class = getattr(
+            self.deployment_spec, "_log_collection_storage_class", None
+        )
+
+        assert self._core_api is not None, "Kubernetes API not initialized"
+        self._logger.info(
+            f"Creating log-collection PVC {pvc_name} ({pvc_size}, "
+            f"sc={storage_class or 'cluster-default'}, RWX)"
+        )
+
+        # Delete any prior incarnation so this run starts clean.
+        try:
+            await self._core_api.read_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            await self._core_api.delete_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            await asyncio.sleep(2)
+        except exceptions.ApiException as e:
+            if e.status != 404:
+                raise
+
+        pvc_spec: dict = {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {
+                "name": pvc_name,
+                "namespace": self.namespace,
+                "labels": {
+                    "managed-by": "managed-deployment",
+                    "deployment": self.deployment_spec.name,
+                    "purpose": "log-collection",
+                },
+            },
+            "spec": {
+                "accessModes": ["ReadWriteMany"],
+                "resources": {"requests": {"storage": pvc_size}},
+            },
+        }
+        if storage_class:
+            pvc_spec["spec"]["storageClassName"] = storage_class
+
+        await self._core_api.create_namespaced_persistent_volume_claim(
+            namespace=self.namespace, body=pvc_spec
+        )
+        # Fast-fail if storage class doesn't actually deliver RWX — leaving
+        # this implicit means pods get stuck in Pending instead of giving us
+        # an actionable error here.
+        await self._verify_pvc_binding(pvc_name)
+        self._log_collection_pvc_created = True
+        return pvc_name
+
+    # ----- ported from _2 (full surface area) -----
+    def _load_template(self, template_name: str) -> str:
+        """Load a template file from the templates directory."""
+        template_dir = os.path.join(os.path.dirname(__file__), "templates")
+        template_path = os.path.join(template_dir, template_name)
+        with open(template_path, "r") as f:
+            return f.read()
+
+    async def _get_pod_metrics(
+        self, pod: Pod, service_name: str, suffix="", use_services_dir: bool = False
+    ):
+        """Fetch HTTP metrics. Async - needs exec for timestamp."""
+        if use_services_dir:
+            directory = os.path.join(self.log_dir, "services", service_name.lower())
+        else:
+            directory = os.path.join(self.log_dir, service_name)
+        os.makedirs(directory, exist_ok=True)
+
+        port = (
+            self.deployment_spec.port
+            if service_name == self.frontend_service_name
+            else self.deployment_spec.system_port
+        )
+
+        pf = self.port_forward(pod, port)
+        if not pf:
+            self._logger.error(f"Unable to get metrics for {service_name}")
+            return
+
+        content = None
+        try:
+            response = requests.get(
+                f"http://localhost:{pf.local_port}/metrics", timeout=30
+            )
+            content = response.text
+        except Exception as e:
+            self._logger.error(str(e))
+
+        if content:
+            timestamp = await self._get_container_timestamp(pod)
+            filename = f"{pod.name}_{timestamp}.metrics{suffix}.log"
+            with open(os.path.join(directory, filename), "w") as f:
+                f.write(content)
+
+    async def _exec_in_pod(
+        self, pod: Pod, command: List[str], timeout: float = 10.0
+    ) -> Any:
+        """Execute command in pod with timeout.
+
+        Args:
+            pod: The pod to execute the command in
+            command: Command as a list of strings
+            timeout: Timeout in seconds
+
+        Returns:
+            The exec result with stdout, stderr, and returncode
+        """
+        return await asyncio.wait_for(
+            asyncio.create_task(asyncio.to_thread(pod.exec, command)),
+            timeout=timeout,
+        )
+
+    async def _get_container_timestamp(self, pod: Pod) -> str:
+        """Read container start timestamp written by wrapper script.
+
+        The wrapper script writes the timestamp to /tmp/.{pod_name}.start_time
+        This ensures exact match with service log filenames.
+        """
+        try:
+            result = await self._exec_in_pod(
+                pod, ["cat", f"/tmp/.{pod.name}.start_time"], timeout=5.0
+            )
+            return result.stdout.decode().strip()
+        except Exception:
+            # Fallback if timestamp file doesn't exist
+            return str(int(time.time()))
+
+    async def download_volume_logs_now(self, local_output_dir=None):
+        """Download service logs from PVC immediately.
+
+        Creates a temporary extraction job, downloads logs, and cleans up.
+
+        Args:
+            local_output_dir: Local directory to save logs (defaults to log_dir/services_manual)
+
+        Returns:
+            dict: Extraction results
+        """
+        if local_output_dir is None:
+            local_output_dir = os.path.join(self.log_dir, "services_manual")
+
+        pvc_name = getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+        if not pvc_name:
+            return {"success": False, "error": "No PVC configured for log collection"}
+
+        from tests.utils.pvc_extractor import PvcExtractor
+
+        extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
+        await extractor.init()
+
+        return await extractor.extract(
+            pvc_name=pvc_name,
+            sub_path="service_logs",
+            container_path=self.container_log_dir,
+            file_patterns=["*.log"],
+            local_output_dir=local_output_dir,
+        )
+
+    async def _verify_pvc_binding(self, pvc_name: str, timeout: int = 60):
+        """Verify PVC can be bound by creating a dummy job that mounts it.
+
+        This ensures the storage class supports RWX before proceeding with deployment.
+        If the PVC can't be bound (e.g., storage class doesn't support RWX), this
+        will fail fast rather than leaving pods in Pending state.
+
+        Args:
+            pvc_name: Name of the PVC to verify
+            timeout: Maximum time to wait for binding in seconds
+
+        Raises:
+            RuntimeError: If PVC cannot be bound within timeout
+        """
+        job_name = f"{pvc_name}-verify-{secrets.token_hex(4)}"
+        storage_class = getattr(
+            self.deployment_spec, "_log_collection_storage_class", "unknown"
+        )
+        binding_issue_logged = False
+        self._logger.info(
+            f"Verifying PVC {pvc_name} can be bound (storage class: {storage_class})..."
+        )
+
+        # Create a minimal job that just mounts the PVC and exits
+        job_spec = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": job_name,
+                "namespace": self.namespace,
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "ttlSecondsAfterFinished": 60,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [
+                            {
+                                "name": "verify",
+                                "image": "busybox:1.35",
+                                "command": [
+                                    "sh",
+                                    "-c",
+                                    "echo 'PVC mounted successfully' && ls -la /mnt",
+                                ],
+                                "volumeMounts": [
+                                    {"name": "test-volume", "mountPath": "/mnt"}
+                                ],
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "test-volume",
+                                "persistentVolumeClaim": {"claimName": pvc_name},
+                            }
+                        ],
+                    }
+                },
+            },
+        }
+
+        batch_api = client.BatchV1Api()
+        job_created = False
+        verification_error = None
+
+        try:
+            # Create the verification job
+            await batch_api.create_namespaced_job(
+                namespace=self.namespace, body=job_spec
+            )
+            job_created = True
+            self._logger.info(f"Created PVC verification job: {job_name}")
+
+            # Wait for job to complete (pod started = PVC bound)
+            start_time = time.time()
+            while (time.time() - start_time) < timeout:
+                try:
+                    job = await batch_api.read_namespaced_job(
+                        name=job_name, namespace=self.namespace
+                    )
+
+                    # Check if job succeeded
+                    if job.status.succeeded and job.status.succeeded > 0:
+                        self._logger.info(
+                            f"PVC {pvc_name} verified - bound successfully"
+                        )
+                        self._log_collection_pvc_verified = True
+                        return
+
+                    # Check if job failed
+                    if job.status.failed and job.status.failed > 0:
+                        verification_error = RuntimeError(
+                            "PVC verification job failed - storage class may not support RWX"
+                        )
+                        break
+
+                    # Check pod status for more details
+                    pods = await self._core_api.list_namespaced_pod(
+                        namespace=self.namespace,
+                        label_selector=f"job-name={job_name}",
+                    )
+                    if pods.items:
+                        pod = pods.items[0]
+                        phase = pod.status.phase
+                        if phase == "Running" or phase == "Succeeded":
+                            self._logger.info(
+                                f"PVC {pvc_name} is binding (pod phase: {phase})"
+                            )
+                        elif phase == "Pending":
+                            # Check for PVC binding issues (only log once)
+                            if not binding_issue_logged:
+                                for condition in pod.status.conditions or []:
+                                    if (
+                                        condition.type == "PodScheduled"
+                                        and condition.status == "False"
+                                    ):
+                                        if (
+                                            "unbound"
+                                            in (condition.message or "").lower()
+                                        ):
+                                            self._logger.error(
+                                                f"PVC BINDING FAILED: {pvc_name} cannot be bound. "
+                                                f"Storage class '{storage_class}' likely does not support "
+                                                f"ReadWriteMany (RWX) access mode."
+                                            )
+                                            binding_issue_logged = True
+
+                except exceptions.ApiException as e:
+                    if e.status != 404:
+                        self._logger.warning(f"Error checking verification job: {e}")
+
+                await asyncio.sleep(2)
+            else:
+                # Timeout reached
+                verification_error = RuntimeError(
+                    f"PVC '{pvc_name}' failed to bind within {timeout}s.\n"
+                    f"Storage class '{storage_class}' does not support ReadWriteMany (RWX) access mode.\n"
+                    f"Multi-pod log collection requires RWX. Please use a different storage class."
+                )
+
+        except exceptions.ApiException as e:
+            self._logger.error(f"Failed to create PVC verification job: {e}")
+            raise
+
+        finally:
+            # Always cleanup the verification job and its pods
+            if job_created:
+                try:
+                    self._logger.info(f"Cleaning up PVC verification job: {job_name}")
+                    # Use Foreground propagation to ensure pods are deleted too
+                    await batch_api.delete_namespaced_job(
+                        name=job_name,
+                        namespace=self.namespace,
+                        body=client.V1DeleteOptions(propagation_policy="Foreground"),
+                    )
+                    # Wait briefly for cleanup to complete
+                    for _ in range(10):
+                        try:
+                            await batch_api.read_namespaced_job(
+                                name=job_name, namespace=self.namespace
+                            )
+                            await asyncio.sleep(1)
+                        except exceptions.ApiException as e:
+                            if e.status == 404:
+                                break
+                    self._logger.info(f"PVC verification job {job_name} cleaned up")
+                except Exception as cleanup_error:
+                    self._logger.warning(
+                        f"Failed to cleanup verification job {job_name}: {cleanup_error}"
+                    )
+
+        # Raise any verification error after cleanup
+        if verification_error:
+            raise verification_error
+
+    async def _cleanup_log_collection_pvc(self):
+        """
+        Clean up the log collection PVC if we created it.
+        """
+        if not self._log_collection_pvc_created:
+            return
+
+        pvc_name = getattr(
+            self.deployment_spec, "_log_collection_pvc_name", "dynamo-logs-pvc"
+        )
+
+        try:
+            await self._core_api.delete_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            self._logger.info(f"Cleaned up log collection PVC {pvc_name}")
+
+        except client.ApiException as e:
+            if e.status != 404:  # Not found is acceptable during cleanup
+                self._logger.warning(f"Failed to cleanup PVC {pvc_name}: {e}")
+
+    async def _cleanup_all_resources(self):
+        """
+        Comprehensive cleanup of all resources created by this deployment.
+
+        Order for volume log collection:
+        1. Delete deployment (pods exit gracefully, write final logs to PVC)
+        2. Wait for pods to terminate
+        3. Create download job to extract logs from PVC
+        4. Extract logs
+        5. Delete download job
+        6. Delete PVC
+        """
+        try:
+            # Delete the main deployment first (pods write final logs to PVC on exit)
+            self._logger.info("Deleting deployment...")
+            await self._delete_deployment()
+
+            # Wait for pods to terminate, then extract logs from PVC
+            self._logger.info("Waiting for pods to terminate...")
+            await self._wait_for_pods_terminated()
+            await self._extract_logs_from_pvc()
+            await self._cleanup_log_collection_pvc()
+
+            # Clean up any orphaned jobs related to this deployment
+            await self._cleanup_orphaned_jobs()
+
+        except Exception as e:
+            self._logger.warning(f"Error during comprehensive cleanup: {e}")
+
+    async def _extract_logs_from_pvc(self):
+        """Extract service logs from PVC using PvcExtractor."""
+        if not self._log_collection_pvc_verified:
+            self._logger.info(
+                "Skipping log extraction - PVC was not successfully bound"
+            )
+            return
+
+        try:
+            from tests.utils.pvc_extractor import PvcExtractor
+
+            pvc_name = getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+            if not pvc_name:
+                self._logger.warning("No PVC name found for log extraction")
+                return
+
+            services_dir = os.path.join(self.log_dir, "services")
+            os.makedirs(services_dir, exist_ok=True)
+
+            extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
+            await extractor.init()
+
+            result = await extractor.extract(
+                pvc_name=pvc_name,
+                sub_path="service_logs",
+                container_path=self.container_log_dir,
+                file_patterns=["*.log"],
+                local_output_dir=services_dir,
+            )
+
+            if result.get("success"):
+                self._logger.info(
+                    f"Extracted {result.get('file_count', 0)} log files to {services_dir}"
+                )
+            else:
+                self._logger.warning(
+                    f"Log extraction failed: {result.get('error', 'Unknown error')}"
+                )
+
+        except Exception as e:
+            self._logger.warning(f"Error extracting logs from PVC: {e}")
+
+    async def _cleanup_orphaned_jobs(self):
+        """Clean up any jobs that might be left behind."""
+        try:
+            # Get all jobs in the namespace that are related to this deployment
+            batch_api = client.BatchV1Api()
+            jobs = await batch_api.list_namespaced_job(
+                namespace=self.namespace,
+                label_selector=f"deployment={self.deployment_spec.name}",
+            )
+
+            for job in jobs.items:
+                job_name = job.metadata.name
+                try:
+                    # Delete the job with cascade to clean up pods
+                    await batch_api.delete_namespaced_job(
+                        name=job_name,
+                        namespace=self.namespace,
+                        body=client.V1DeleteOptions(propagation_policy="Background"),
+                    )
+                    self._logger.info(f"Cleaned up orphaned job: {job_name}")
+                except client.ApiException as e:
+                    if e.status != 404:
+                        self._logger.warning(f"Failed to cleanup job {job_name}: {e}")
+
+        except Exception as e:
+            self._logger.warning(f"Error cleaning up orphaned jobs: {e}")
 
 
 class ManagedDGDR:
