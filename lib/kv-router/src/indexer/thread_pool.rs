@@ -204,6 +204,27 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Arc::clone(&self.backend)
     }
 
+    /// Enqueue a structural anchor on the same worker queue used by normal
+    /// events for this worker. Branch-sharded routing uses this to preserve
+    /// Anchor-before-Stored ordering for the dependent suffix on that queue.
+    pub(crate) fn enqueue_anchor(
+        &self,
+        worker: WorkerWithDpRank,
+        anchor: super::AnchorTask,
+    ) -> Result<(), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker.worker_id,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Anchor { worker, anchor })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
+    }
+
     /// Wait until all previously queued worker tasks have completed.
     ///
     /// Used primarily for testing and benchmarking to ensure writes are visible
@@ -656,6 +677,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             }
         }
         curr_size
+    }
+
+    fn timing_report(&self) -> String {
+        self.backend.timing_report()
     }
 
     fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {

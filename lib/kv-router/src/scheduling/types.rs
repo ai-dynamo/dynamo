@@ -53,9 +53,6 @@ pub struct SchedulingRequest {
     pub tier_overlap_blocks: TierOverlapBlocks,
     pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
     pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-    /// Per-worker tree size, used only for tie-breaking when multiple workers
-    /// produce the same logit at temperature=0.
-    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
     pub decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
     pub prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     pub track_prefill_tokens: bool,

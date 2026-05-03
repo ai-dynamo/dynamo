@@ -263,13 +263,7 @@ impl LowerTierIndexer {
                     return Err(KvCacheEventError::BlockNotFound);
                 };
 
-                let remove_edge = match self.edges.get_mut(&key) {
-                    Some(mut edge) => edge.remove(worker),
-                    None => false,
-                };
-                if remove_edge {
-                    self.edges.remove(&key);
-                }
+                self.remove_worker_from_edge(key, worker);
             }
 
             worker_map.is_empty()
@@ -304,13 +298,15 @@ impl LowerTierIndexer {
         };
 
         for (_, key) in worker_map {
-            let remove_edge = match self.edges.get_mut(&key) {
-                Some(mut edge) => edge.remove(worker),
-                None => false,
-            };
-            if remove_edge {
-                self.edges.remove(&key);
-            }
+            self.remove_worker_from_edge(key, worker);
+        }
+    }
+
+    fn remove_worker_from_edge(&self, key: TransitionKey, worker: WorkerWithDpRank) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut edge) = self.edges.entry(key)
+            && edge.get_mut().remove(worker)
+        {
+            edge.remove();
         }
     }
 
@@ -521,6 +517,11 @@ impl SyncIndexer for LowerTierIndexer {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
                     let _ = resp.send(applied);
+                }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_worker(&mut worker_blocks, worker_id);
