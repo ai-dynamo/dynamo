@@ -10,6 +10,19 @@ use derive_getters::Dissolve;
 use std::ops::Range;
 
 pub mod blocks;
+mod radix;
+pub use radix::PositionalRadixTree;
+
+/// Trait for hashes that include position information.
+///
+/// Re-exposed so external crates (e.g. `kvbm-logical`'s `BlockRegistry`) can
+/// key a [`PositionalRadixTree`] by [`PositionalLineageHash`] without having
+/// to duplicate this trait. `PositionalSequenceHash` (which previously also
+/// implemented this trait) is gone in the universal-hashing rewrite.
+pub trait PositionalHash {
+    /// Returns the position associated with the hash.
+    fn position(&self) -> u64;
+}
 
 /// A token is represented as a 32-bit unsigned integer.
 pub type Token = u32;
@@ -680,15 +693,18 @@ impl PositionalLineageHash {
         self.flags.position()
     }
 
-    /// Deprecated 3-arg constructor preserved for `lib/kvbm-*` source compatibility
-    /// with the pre-universal-hashing API. New code should use [`Self::from_raw_parts`]
-    /// or [`Self::root_with_salt`] / [`Self::extend`].
+    /// Temporary back-compat 3-arg constructor preserved for `lib/kvbm-*` source
+    /// compatibility with the pre-universal-hashing API. New code should use
+    /// [`Self::from_raw_parts`] or [`Self::root_with_salt`] / [`Self::extend`].
     ///
     /// `parent` defaults to `0` when `None` (matching the root convention). The
     /// extension is built with the canonical version and a default `block_size` of 16,
     /// which matches what every existing call-site on `main` was implicitly assuming.
     /// `position` is masked to 20 bits.
-    #[deprecated(note = "use PositionalLineageHash::from_raw_parts, root_with_salt, or extend")]
+    ///
+    /// Will be `#[deprecated]` once kvbm-* call sites migrate to the
+    /// [`Self::from_raw_parts`] / [`Self::root_with_salt`] / [`Self::extend`]
+    /// constructors.
     pub fn new(current: u64, parent: Option<u64>, position: u64) -> Self {
         const DEFAULT_BLOCK_SIZE: u32 = 16;
         Self {
@@ -779,11 +795,13 @@ impl PositionalLineageHash {
         self.parent
     }
 
-    /// Deprecated alias for the current sequence hash, preserved for `lib/kvbm-*`
-    /// source compatibility with the pre-universal-hashing API. Returns
-    /// [`Self::current_sequence_hash`] (full u64 — the legacy mode-specific
-    /// truncation no longer applies).
-    #[deprecated(note = "use current_sequence_hash()")]
+    /// Compatibility alias for [`Self::current_sequence_hash`], preserved for
+    /// `lib/kvbm-*` source compatibility with the pre-universal-hashing API.
+    /// Returns the full `u64` (the legacy mode-specific truncation no longer
+    /// applies — the value is identical to [`Self::current_sequence_hash`]).
+    ///
+    /// Will be `#[deprecated]` once kvbm-* call sites migrate to
+    /// [`Self::current_sequence_hash`].
     #[inline]
     pub fn current_hash_fragment(&self) -> u64 {
         self.current
@@ -863,6 +881,12 @@ impl std::fmt::Display for PositionalLineageHash {
     }
 }
 
+impl PositionalHash for PositionalLineageHash {
+    fn position(&self) -> u64 {
+        Self::position(self)
+    }
+}
+
 impl std::cmp::PartialOrd for PositionalLineageHash {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -870,9 +894,9 @@ impl std::cmp::PartialOrd for PositionalLineageHash {
 }
 
 impl std::cmp::Ord for PositionalLineageHash {
-    /// Lexicographic order: [`Self::position`], then [`Self::current_hash_fragment`],
-    /// then the raw `(current, parent, flags)` tuple so the order is total and
-    /// consistent with [`Eq`].
+    /// Lexicographic order: [`Self::position`], then
+    /// [`Self::current_sequence_hash`], then the raw `(current, parent, flags)`
+    /// tuple so the order is total and consistent with [`Eq`].
     ///
     /// # Panics
     ///
@@ -904,12 +928,10 @@ impl std::cmp::Ord for PositionalLineageHash {
         self.position()
             .cmp(&other.position())
             .then_with(|| {
-                self.current_hash_fragment()
-                    .cmp(&other.current_hash_fragment())
+                self.current_sequence_hash()
+                    .cmp(&other.current_sequence_hash())
             })
-            .then_with(|| {
-                (self.current, self.parent, s).cmp(&(other.current, other.parent, o))
-            })
+            .then_with(|| (self.current, self.parent, s).cmp(&(other.current, other.parent, o)))
     }
 }
 
@@ -1365,7 +1387,7 @@ impl TokenBlock {
 
     /// Returns the position of this block in the sequence.
     pub fn position(&self) -> u64 {
-        self.plh.position() as u64
+        self.plh.position()
     }
 }
 
@@ -2159,7 +2181,6 @@ mod tests {
         let alt_root = PositionalLineageHash::root_with_salt(lbh1, alt, TEST_BLOCK_SIZE);
         assert_ne!(alt_root.current_sequence_hash(), seq_hash_1_4());
     }
-
 
     #[test]
     fn test_positional_lineage_hash_flat_layout() {
@@ -3097,7 +3118,6 @@ mod tests {
         assert_eq!(remaining.len(), 6);
     }
 
-
     // === PositionalLineageHash Additional Tests ===
 
     #[test]
@@ -3167,18 +3187,17 @@ mod tests {
         assert_ne!(plh.as_u128(), plh3.as_u128());
     }
 
-    // The four ord-tests below use the [`PositionalLineageHash::new`] deprecated
+    // The four ord-tests below use the back-compat [`PositionalLineageHash::new`]
     // shim (fixed `block_size=16`, partition=0, V1, non-synthetic) — that keeps
     // every PLH in the same regime, so the cross-regime panic in `Ord::cmp`
-    // does not fire. `#[allow(deprecated)]` suppresses the shim's warning.
+    // does not fire.
 
     #[test]
-    #[allow(deprecated)]
     fn test_positional_lineage_hash_ord_by_position_then_current_fragment() {
         let at_5_low = PositionalLineageHash::new(0x10, Some(0x1111), 5);
         let at_5_high = PositionalLineageHash::new(0x20, Some(0x1111), 5);
         assert!(
-            at_5_low.current_hash_fragment() < at_5_high.current_hash_fragment(),
+            at_5_low.current_sequence_hash() < at_5_high.current_sequence_hash(),
             "test assumes distinct current fragments at the same position"
         );
         assert!(at_5_low < at_5_high);
@@ -3190,7 +3209,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_positional_lineage_hash_ord_tiebreak_parent_via_raw_fields() {
         let same_pos_same_current = PositionalLineageHash::new(0x1234, Some(0x100), 10);
         let same_pos_same_current_other_parent =
@@ -3201,8 +3219,8 @@ mod tests {
             same_pos_same_current_other_parent.position()
         );
         assert_eq!(
-            same_pos_same_current.current_hash_fragment(),
-            same_pos_same_current_other_parent.current_hash_fragment()
+            same_pos_same_current.current_sequence_hash(),
+            same_pos_same_current_other_parent.current_sequence_hash()
         );
         assert_ne!(same_pos_same_current, same_pos_same_current_other_parent);
         assert_ne!(
@@ -3212,7 +3230,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_positional_lineage_hash_vec_sort_matches_ord() {
         let a = PositionalLineageHash::new(0x30, None, 0);
         let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
@@ -3223,7 +3240,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_positional_lineage_hash_itertools_sorted() {
         use itertools::Itertools;
 
