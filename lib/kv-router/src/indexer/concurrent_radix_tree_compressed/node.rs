@@ -43,10 +43,9 @@ fn record_last_matched_hash(
 pub(super) struct Node {
     shape_gate: RwLock<()>,
     shape_version: AtomicU64,
-    /// Sticky marker for nodes that have ever published children.
-    /// Once true, this node is treated as internal even if cleanup removes all
-    /// physical children later.
-    ever_childful: AtomicBool,
+    /// Sticky logical-internal marker. Once true, this node is treated as
+    /// internal even if cleanup removes all physical children later.
+    internal: AtomicBool,
     state: RwLock<NodeState>,
     children: NodeChildren,
 }
@@ -111,7 +110,7 @@ impl Node {
         state: NodeState,
         children: FxHashMap<LocalBlockHash, SharedNode>,
     ) -> Self {
-        let ever_childful = !children.is_empty();
+        let internal = !children.is_empty();
         let children_map = DashMap::with_hasher(FxBuildHasher);
         for (key, child) in children {
             children_map.insert(key, child);
@@ -120,7 +119,7 @@ impl Node {
         Self {
             shape_gate: RwLock::new(()),
             shape_version: AtomicU64::new(0),
-            ever_childful: AtomicBool::new(ever_childful),
+            internal: AtomicBool::new(internal),
             state: RwLock::new(state),
             children: children_map,
         }
@@ -381,7 +380,7 @@ impl Node {
                 ParentEdgePlanAction::ReuseExistingEdge {
                     cutoff: parent_pos + 1 + blocks.len(),
                 }
-            } else if !self.ever_childful.load(Ordering::Acquire) {
+            } else if !self.internal.load(Ordering::Acquire) {
                 match state.store_starts_with_suffix(parent_pos, blocks) {
                     Some(append_start) => {
                         ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start }
@@ -425,7 +424,7 @@ impl Node {
                 .unwrap_or(ParentEdgeAction::Stale),
             ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => self
                 .apply_edge_shape_update(plan.shape_version, |state, _children| {
-                    if !self.ever_childful.load(Ordering::Acquire) {
+                    if !self.internal.load(Ordering::Acquire) {
                         state.append_blocks_to_leaf(worker, &blocks[append_start..]);
                         (
                             ParentEdgeAction::ReuseExistingEdge {
@@ -523,10 +522,7 @@ impl Node {
         shape_version: u64,
     ) -> Option<bool> {
         self.apply_edge_shape_update(shape_version, |state, _children| {
-            if self.ever_childful.load(Ordering::Acquire)
-                || blocks.is_empty()
-                || state.edge.is_empty()
-            {
+            if self.internal.load(Ordering::Acquire) || blocks.is_empty() || state.edge.is_empty() {
                 return (false, false);
             }
 
@@ -577,7 +573,7 @@ impl Node {
                 }
                 dashmap::mapref::entry::Entry::Vacant(entry) => {
                     entry.insert(child.clone());
-                    self.ever_childful.store(true, Ordering::Release);
+                    self.internal.store(true, Ordering::Release);
                     (InsertChildOutcome::Inserted(child), true)
                 }
             }
@@ -641,7 +637,7 @@ impl Node {
             suffix_children,
         ));
         self.children.insert(suffix_first_local, suffix.clone());
-        self.ever_childful.store(true, Ordering::Release);
+        self.internal.store(true, Ordering::Release);
 
         SplitLookupData { suffix }
     }
