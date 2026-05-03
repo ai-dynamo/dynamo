@@ -204,13 +204,12 @@ impl ConcurrentRadixTreeCompressed {
     /// Search a node's subtree for the node whose edge contains `hash`.
     /// Used to resolve stale lookup entries caused by cross-thread splits.
     fn find_in_subtree(start: &SharedNode, hash: ExternalSequenceBlockHash) -> Option<SharedNode> {
-        let mut stack = Vec::new();
-        stack.extend(start.children_snapshot());
-        while let Some(node) = stack.pop() {
+        let mut queue = VecDeque::from(start.children_snapshot());
+        while let Some(node) = queue.pop_front() {
             if node.contains_edge_hash(hash) {
                 return Some(node);
             }
-            stack.extend(node.children_snapshot());
+            queue.extend(node.children_snapshot());
         }
         None
     }
