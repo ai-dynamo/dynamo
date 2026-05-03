@@ -51,6 +51,13 @@ fn assert_edge_lengths(index: &ConcurrentRadixTreeCompressed, expected: &[usize]
     assert_eq!(index.edge_lengths_for_test(), expected.to_vec());
 }
 
+fn edge_topology(edge: &[u64], children: Vec<EdgeTopologyForTest>) -> EdgeTopologyForTest {
+    EdgeTopologyForTest {
+        edge: edge.to_vec(),
+        children,
+    }
+}
+
 fn race_two_events(
     index: Arc<ConcurrentRadixTreeCompressed>,
     mut left_lookup: DirectLookup,
@@ -494,6 +501,68 @@ mod structural_tests {
         assert_eq!(snapshot_tree(&index).await, expected);
     }
 
+    #[test]
+    fn test_internal_split_reparents_existing_children_to_suffix() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker1 = worker(1);
+        let worker2 = worker(2);
+        let worker3 = worker(3);
+        let mut lookup1 = direct_lookup();
+        let mut lookup2 = direct_lookup();
+        let mut lookup3 = direct_lookup();
+
+        apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 3, 4]));
+        apply_direct(&index, &mut lookup2, make_store_event(2, &[1, 2, 3, 4]));
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup2,
+            make_store_event_with_parent(2, &[1, 2, 3, 4], &[7, 8]),
+        );
+
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2, 3, 4],
+                vec![
+                    edge_topology(&[5, 6], vec![]),
+                    edge_topology(&[7, 8], vec![]),
+                ],
+            )],
+        );
+
+        apply_direct(&index, &mut lookup3, make_store_event(3, &[1, 2, 3, 4]));
+        apply_direct(
+            &index,
+            &mut lookup3,
+            make_store_event_with_parent(3, &[1, 2], &[9]),
+        );
+
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2],
+                vec![
+                    edge_topology(
+                        &[3, 4],
+                        vec![
+                            edge_topology(&[5, 6], vec![]),
+                            edge_topology(&[7, 8], vec![]),
+                        ],
+                    ),
+                    edge_topology(&[9], vec![]),
+                ],
+            )],
+        );
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker2, 6);
+        assert_direct_score(&index, &[1, 2, 9], worker3, 3);
+    }
+
     #[tokio::test]
     async fn test_reuses_prefix_suffix_and_extends_to_nine() {
         let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32);
@@ -661,5 +730,38 @@ mod remove_cleanup_tests {
             vec![make_store_event(0, &[1, 2, 3])]
         );
         assert_score(&index, &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_does_not_reopen_internal_node_for_extension() {
+        let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[6, 7]))
+            .await;
+        flush_and_settle(&index).await;
+
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[6, 7]))
+            .await;
+        flush_and_settle(&index).await;
+        index.backend().run_cleanup_for_test();
+
+        assert_edge_lengths(index.backend(), &[3]);
+
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[8, 9]))
+            .await;
+        flush_and_settle(&index).await;
+
+        assert_edge_lengths(index.backend(), &[2, 3]);
+        assert_score(&index, &[1, 2, 3, 8, 9], WorkerWithDpRank::new(0, 0), 5).await;
     }
 }

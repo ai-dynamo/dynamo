@@ -97,6 +97,13 @@ pub struct ConcurrentRadixTreeCompressed {
     cleanup: CleanupState,
 }
 
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct EdgeTopologyForTest {
+    pub(crate) edge: Vec<u64>,
+    pub(crate) children: Vec<EdgeTopologyForTest>,
+}
+
 impl Default for ConcurrentRadixTreeCompressed {
     fn default() -> Self {
         Self::new()
@@ -154,6 +161,33 @@ impl ConcurrentRadixTreeCompressed {
 
         lengths.sort_unstable();
         lengths
+    }
+
+    #[cfg(test)]
+    fn edge_topology_node_for_test(node: &SharedNode) -> EdgeTopologyForTest {
+        let mut children: Vec<_> = node
+            .children_snapshot()
+            .iter()
+            .map(Self::edge_topology_node_for_test)
+            .collect();
+        children.sort_by(|left, right| left.edge.cmp(&right.edge));
+
+        EdgeTopologyForTest {
+            edge: node.edge_local_hashes_for_test(),
+            children,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn edge_topology_for_test(&self) -> Vec<EdgeTopologyForTest> {
+        let mut children: Vec<_> = self
+            .root
+            .children_snapshot()
+            .iter()
+            .map(Self::edge_topology_node_for_test)
+            .collect();
+        children.sort_by(|left, right| left.edge.cmp(&right.edge));
+        children
     }
 
     #[cfg(test)]

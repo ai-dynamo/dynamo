@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use dashmap::DashMap;
@@ -43,6 +43,10 @@ fn record_last_matched_hash(
 pub(super) struct Node {
     shape_gate: RwLock<()>,
     shape_version: AtomicU64,
+    /// Sticky marker for nodes that have ever published children.
+    /// Once true, this node is treated as internal even if cleanup removes all
+    /// physical children later.
+    ever_childful: AtomicBool,
     state: RwLock<NodeState>,
     children: NodeChildren,
 }
@@ -107,6 +111,7 @@ impl Node {
         state: NodeState,
         children: FxHashMap<LocalBlockHash, SharedNode>,
     ) -> Self {
+        let ever_childful = !children.is_empty();
         let children_map = DashMap::with_hasher(FxBuildHasher);
         for (key, child) in children {
             children_map.insert(key, child);
@@ -115,6 +120,7 @@ impl Node {
         Self {
             shape_gate: RwLock::new(()),
             shape_version: AtomicU64::new(0),
+            ever_childful: AtomicBool::new(ever_childful),
             state: RwLock::new(state),
             children: children_map,
         }
@@ -240,6 +246,16 @@ impl Node {
         self.state.read().edge.len()
     }
 
+    #[cfg(test)]
+    pub(super) fn edge_local_hashes_for_test(&self) -> Vec<u64> {
+        self.state
+            .read()
+            .edge
+            .iter()
+            .map(|&(local_hash, _)| local_hash.0)
+            .collect()
+    }
+
     pub(super) fn promote_worker_to_full_edge(&self, worker: WorkerWithDpRank) -> bool {
         let _gate = self.shape_gate.read();
         self.state.write().promote_to_full(worker)
@@ -356,7 +372,7 @@ impl Node {
         parent_hash: ExternalSequenceBlockHash,
         blocks: &[KvCacheStoredBlockData],
     ) -> Option<ParentEdgePlan> {
-        self.with_shape_plan(|state, children, shape_version| {
+        self.with_shape_plan(|state, _children, shape_version| {
             let &parent_pos = state.edge_index.get(&parent_hash)?;
 
             let action = if state.tail_hash_is(parent_hash) {
@@ -365,7 +381,7 @@ impl Node {
                 ParentEdgePlanAction::ReuseExistingEdge {
                     cutoff: parent_pos + 1 + blocks.len(),
                 }
-            } else if children.is_empty() {
+            } else if !self.ever_childful.load(Ordering::Acquire) {
                 match state.store_starts_with_suffix(parent_pos, blocks) {
                     Some(append_start) => {
                         ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start }
@@ -408,8 +424,8 @@ impl Node {
                 })
                 .unwrap_or(ParentEdgeAction::Stale),
             ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => self
-                .apply_edge_shape_update(plan.shape_version, |state, children| {
-                    if children.is_empty() {
+                .apply_edge_shape_update(plan.shape_version, |state, _children| {
+                    if !self.ever_childful.load(Ordering::Acquire) {
                         state.append_blocks_to_leaf(worker, &blocks[append_start..]);
                         (
                             ParentEdgeAction::ReuseExistingEdge {
@@ -506,8 +522,11 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
         shape_version: u64,
     ) -> Option<bool> {
-        self.apply_edge_shape_update(shape_version, |state, children| {
-            if blocks.is_empty() || !children.is_empty() || state.edge.is_empty() {
+        self.apply_edge_shape_update(shape_version, |state, _children| {
+            if self.ever_childful.load(Ordering::Acquire)
+                || blocks.is_empty()
+                || state.edge.is_empty()
+            {
                 return (false, false);
             }
 
@@ -558,6 +577,7 @@ impl Node {
                 }
                 dashmap::mapref::entry::Entry::Vacant(entry) => {
                     entry.insert(child.clone());
+                    self.ever_childful.store(true, Ordering::Release);
                     (InsertChildOutcome::Inserted(child), true)
                 }
             }
@@ -621,6 +641,7 @@ impl Node {
             suffix_children,
         ));
         self.children.insert(suffix_first_local, suffix.clone());
+        self.ever_childful.store(true, Ordering::Release);
 
         SplitLookupData { suffix }
     }
