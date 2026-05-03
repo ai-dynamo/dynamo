@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Seeds for failure cases proptest has generated in the past. It is
 # automatically read and these particular cases re-run before any
 # novel cases are generated.
