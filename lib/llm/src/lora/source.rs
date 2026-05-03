@@ -510,6 +510,7 @@ impl S3LoRASource {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&lock_path)
                 .with_context(|| format!("Failed to open S3 download lock {:?}", lock_path))?;
 
