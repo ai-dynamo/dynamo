@@ -481,17 +481,7 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
-fn checked_file_basename(cf: &CheckedFile) -> Option<String> {
-    cf.path()
-        .and_then(|p| p.file_name().and_then(|f| f.to_str()))
-        .or_else(|| {
-            cf.url()
-                .and_then(|u| u.path().rsplit('/').find(|s| !s.is_empty()))
-        })
-        .map(String::from)
-}
-
-fn checked_file_uri(cf: &CheckedFile, source: &str, filename: &str) -> anyhow::Result<String> {
+fn checked_file_uri(cf: &CheckedFile, source: &str) -> anyhow::Result<String> {
     if let Some(u) = cf.url() {
         return Ok(u.to_string());
     }
@@ -501,8 +491,22 @@ fn checked_file_uri(cf: &CheckedFile, source: &str, filename: &str) -> anyhow::R
             .map_err(|()| anyhow::anyhow!("invalid file path: {}", path.display()))?
             .to_string())
     } else {
+        let filename = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .with_context(|| format!("no filename in path: {}", path.display()))?;
         Ok(format!("hf://{source}/{filename}"))
     }
+}
+
+fn uri_basename(uri: &str) -> anyhow::Result<String> {
+    url::Url::parse(uri)
+        .with_context(|| format!("parsing uri: {uri}"))?
+        .path()
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .map(String::from)
+        .with_context(|| format!("no basename in uri: {uri}"))
 }
 
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
@@ -915,15 +919,10 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile, String)> = self
+        let entries: Vec<(String, CheckedFile)> = self
             .iter_metadata_files()
             .into_iter()
-            .map(|cf| {
-                let filename =
-                    checked_file_basename(cf).with_context(|| format!("no filename for {cf:?}"))?;
-                let uri = checked_file_uri(cf, &source, &filename)?;
-                Ok((uri, cf.clone(), filename))
-            })
+            .map(|cf| Ok((checked_file_uri(cf, &source)?, cf.clone())))
             .collect::<anyhow::Result<_>>()?;
 
         let client = reqwest::Client::builder()
@@ -932,7 +931,8 @@ impl ModelDeploymentCard {
             .build()
             .context("building http client for metadata fetch")?;
         let mut fetched = 0usize;
-        for (uri, expected, filename) in &entries {
+        for (uri, expected) in &entries {
+            let filename = uri_basename(uri)?;
             let blake3_hex = expected.checksum().hash();
             let blob = blobs.join(blake3_hex);
             let cache_hit = blob.exists();
@@ -947,7 +947,7 @@ impl ModelDeploymentCard {
                 resolve_uri(&client, uri, expected, &blob).await?;
                 fetched += 1;
             }
-            symlink_force(&blob, &slug_dir.join(filename))?;
+            symlink_force(&blob, &slug_dir.join(&filename))?;
         }
         tracing::debug!(
             display_name = %self.display_name,
