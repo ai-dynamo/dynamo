@@ -204,9 +204,8 @@ impl
                             state.finished = true;
                             let mut output = output;
                             if let Some(data) = &mut output.data {
-                                data.finish_reason = Some(FinishReason::Error(format!(
-                                    "decode error: {join_err}"
-                                )));
+                                data.finish_reason =
+                                    Some(FinishReason::Error(format!("decode error: {join_err}")));
                             }
                             return Some((output, state));
                         }
