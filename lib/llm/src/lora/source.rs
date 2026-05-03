@@ -4,8 +4,14 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use object_store::{ClientOptions, ObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath};
+use object_store::{
+    BackoffConfig, ClientOptions, ObjectMeta, ObjectStore, RetryConfig, aws::AmazonS3Builder,
+    path::Path as ObjectPath,
+};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::{
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -85,10 +91,58 @@ pub struct S3LoRASource {
     endpoint: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct S3DownloadObject {
+    location: ObjectPath,
+    relative_object_path: ObjectPath,
+    relative_fs_path: PathBuf,
+    size: u64,
+    e_tag: Option<String>,
+    last_modified: String,
+}
+
+impl S3DownloadObject {
+    fn marker_contents(&self) -> String {
+        format!(
+            "location={}\nsize={}\netag={}\nlast_modified={}\n",
+            self.location,
+            self.size,
+            self.e_tag.as_deref().unwrap_or(""),
+            self.last_modified
+        )
+    }
+}
+
+#[cfg(unix)]
+struct DownloadLock {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for DownloadLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(not(unix))]
+struct DownloadLock {
+    path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl Drop for DownloadLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 impl S3LoRASource {
-    const MAX_RETRIES: u32 = 3;
-    const INITIAL_BACKOFF_MS: u64 = 1000;
-    const MAX_BACKOFF_MS: u64 = 30000;
+    const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
+    const MAX_DOWNLOAD_CONCURRENCY: usize = 64;
+    const RESUME_MANIFEST_DIR: &'static str = ".dynamo-download-manifest";
 
     async fn stream_to_file(
         store: &Arc<dyn ObjectStore>,
@@ -116,41 +170,6 @@ impl S3LoRASource {
         file.flush().await?;
 
         Ok(total_bytes)
-    }
-
-    async fn download_file_with_retry(
-        store: &Arc<dyn ObjectStore>,
-        location: &ObjectPath,
-        dest: &std::path::Path,
-    ) -> Result<u64> {
-        for attempt in 1..=Self::MAX_RETRIES {
-            match Self::stream_to_file(store, location, dest).await {
-                Ok(bytes_written) => return Ok(bytes_written),
-                Err(error) => {
-                    if attempt >= Self::MAX_RETRIES {
-                        return Err(error);
-                    }
-
-                    let backoff_ms = std::cmp::min(
-                        Self::INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1),
-                        Self::MAX_BACKOFF_MS,
-                    );
-                    tracing::warn!(
-                        "S3 download failed (attempt {}/{}), retrying in {}ms: {}",
-                        attempt,
-                        Self::MAX_RETRIES,
-                        backoff_ms,
-                        error
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                }
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "S3 download failed after {} retries",
-            Self::MAX_RETRIES
-        ))
     }
 }
 
@@ -183,13 +202,23 @@ impl S3LoRASource {
             .unwrap_or(3600);
 
         let client_opts = ClientOptions::new().with_timeout(Duration::from_secs(timeout_secs));
+        let retry_config = RetryConfig {
+            max_retries: 5,
+            retry_timeout: Duration::from_secs(600),
+            backoff: BackoffConfig {
+                init_backoff: Duration::from_secs(1),
+                max_backoff: Duration::from_secs(30),
+                base: 2.0,
+            },
+        };
 
         let mut builder = AmazonS3Builder::new()
             .with_access_key_id(&self.access_key_id)
             .with_secret_access_key(&self.secret_access_key)
             .with_region(&self.region)
             .with_bucket_name(bucket)
-            .with_client_options(client_opts);
+            .with_client_options(client_opts)
+            .with_retry(retry_config);
 
         if let Some(ref endpoint) = self.endpoint {
             builder = builder
@@ -226,6 +255,320 @@ impl S3LoRASource {
 
         Ok((bucket, key))
     }
+
+    fn download_concurrency() -> usize {
+        std::env::var("LORA_DOWNLOAD_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .map(|v| v.min(Self::MAX_DOWNLOAD_CONCURRENCY))
+            .unwrap_or(Self::DEFAULT_DOWNLOAD_CONCURRENCY)
+    }
+
+    fn download_object_from_meta(
+        meta: ObjectMeta,
+        prefix: &ObjectPath,
+    ) -> Result<Option<S3DownloadObject>> {
+        let relative_object_path: ObjectPath = meta
+            .location
+            .prefix_match(prefix)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Listed object {} did not match requested prefix {}",
+                    meta.location,
+                    prefix
+                )
+            })?
+            .collect();
+
+        if relative_object_path.as_ref().is_empty() {
+            return Ok(None);
+        }
+
+        let mut relative_fs_path = PathBuf::new();
+        for part in relative_object_path.parts() {
+            relative_fs_path.push(part.as_ref());
+        }
+
+        Ok(Some(S3DownloadObject {
+            location: meta.location,
+            relative_object_path,
+            relative_fs_path,
+            size: meta.size,
+            e_tag: meta.e_tag,
+            last_modified: meta.last_modified.to_rfc3339(),
+        }))
+    }
+
+    async fn list_download_objects(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &ObjectPath,
+    ) -> Result<Vec<S3DownloadObject>> {
+        let metas = store
+            .list(Some(prefix))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to list S3 prefix")?;
+
+        let mut objects = Vec::with_capacity(metas.len());
+        for meta in metas {
+            if let Some(object) = Self::download_object_from_meta(meta, prefix)? {
+                objects.push(object);
+            }
+        }
+        objects.sort_by(|a, b| a.location.cmp(&b.location));
+
+        Ok(objects)
+    }
+
+    fn object_set_marker_path(staging_path: &Path) -> PathBuf {
+        staging_path
+            .join(Self::RESUME_MANIFEST_DIR)
+            .join("objects.metadata")
+    }
+
+    fn object_set_marker_contents(objects: &[S3DownloadObject]) -> String {
+        objects
+            .iter()
+            .map(S3DownloadObject::marker_contents)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn marker_path(staging_path: &Path, object: &S3DownloadObject) -> PathBuf {
+        let mut marker_path = staging_path
+            .join(Self::RESUME_MANIFEST_DIR)
+            .join(&object.relative_fs_path);
+
+        if let Some(file_name) = marker_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        {
+            marker_path.set_file_name(format!("{}.metadata", file_name));
+        }
+
+        marker_path
+    }
+
+    async fn staging_file_is_complete(
+        staging_path: &Path,
+        object: &S3DownloadObject,
+    ) -> Result<bool> {
+        let file_path = staging_path.join(&object.relative_fs_path);
+        let local_meta = match tokio::fs::metadata(&file_path).await {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Failed to stat staged file {:?}", file_path));
+            }
+        };
+
+        if !local_meta.is_file() || local_meta.len() != object.size {
+            return Ok(false);
+        }
+
+        let marker_path = Self::marker_path(staging_path, object);
+        let marker_contents = match tokio::fs::read_to_string(&marker_path).await {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Failed to read resume marker {:?}", marker_path));
+            }
+        };
+
+        Ok(marker_contents == object.marker_contents())
+    }
+
+    async fn write_resume_marker(staging_path: &Path, object: &S3DownloadObject) -> Result<()> {
+        let marker_path = Self::marker_path(staging_path, object);
+        if let Some(parent) = marker_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create marker directory {:?}", parent))?;
+        }
+
+        tokio::fs::write(&marker_path, object.marker_contents())
+            .await
+            .with_context(|| format!("Failed to write resume marker {:?}", marker_path))
+    }
+
+    async fn download_one_object(
+        store: Arc<dyn ObjectStore>,
+        staging_path: PathBuf,
+        object: S3DownloadObject,
+    ) -> Result<(String, u64, bool)> {
+        let rel_path = object.relative_object_path.to_string();
+        let file_path = staging_path.join(&object.relative_fs_path);
+
+        if Self::staging_file_is_complete(&staging_path, &object).await? {
+            tracing::debug!("Resume: skipping completed shard {}", rel_path);
+            return Ok((rel_path, object.size, true));
+        }
+
+        if let Some(parent) = file_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create parent dir for {:?}", file_path))?;
+        }
+
+        let bytes_written = Self::stream_to_file(&store, &object.location, &file_path).await?;
+        if bytes_written != object.size {
+            anyhow::bail!(
+                "Downloaded {} bytes for {}, expected {} bytes",
+                bytes_written,
+                object.location,
+                object.size
+            );
+        }
+
+        Self::write_resume_marker(&staging_path, &object).await?;
+        Ok((rel_path, bytes_written, false))
+    }
+
+    async fn directory_has_objects(directory: &Path, objects: &[S3DownloadObject]) -> Result<bool> {
+        for object in objects {
+            let file_path = directory.join(&object.relative_fs_path);
+            let local_meta = match tokio::fs::metadata(&file_path).await {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("Failed to stat downloaded file {:?}", file_path)
+                    });
+                }
+            };
+
+            if !local_meta.is_file() || local_meta.len() != object.size {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn prepare_staging_directory(
+        staging_path: &Path,
+        objects: &[S3DownloadObject],
+    ) -> Result<()> {
+        let expected_marker = Self::object_set_marker_contents(objects);
+
+        match tokio::fs::read_to_string(Self::object_set_marker_path(staging_path)).await {
+            Ok(existing_marker) if existing_marker == expected_marker => {}
+            Ok(_) => {
+                tracing::info!(
+                    "S3 LoRA staging metadata changed, resetting {:?}",
+                    staging_path
+                );
+                Self::remove_path_if_exists(staging_path).await?;
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Self::remove_path_if_exists(staging_path).await?;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Failed to read object set marker {:?}",
+                        Self::object_set_marker_path(staging_path)
+                    )
+                });
+            }
+        }
+
+        tokio::fs::create_dir_all(staging_path)
+            .await
+            .context("Failed to create staging directory")?;
+
+        let marker_path = Self::object_set_marker_path(staging_path);
+        if let Some(parent) = marker_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create marker directory {:?}", parent))?;
+        }
+
+        tokio::fs::write(&marker_path, expected_marker)
+            .await
+            .with_context(|| format!("Failed to write object set marker {:?}", marker_path))
+    }
+
+    async fn remove_path_if_exists(path: &Path) -> Result<()> {
+        let meta = match tokio::fs::symlink_metadata(path).await {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e).with_context(|| format!("Failed to stat {:?}", path)),
+        };
+
+        if meta.is_dir() {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .with_context(|| format!("Failed to remove directory {:?}", path))?;
+        } else {
+            tokio::fs::remove_file(path)
+                .await
+                .with_context(|| format!("Failed to remove file {:?}", path))?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn acquire_download_lock(lock_path: &Path) -> Result<DownloadLock> {
+        let lock_path = lock_path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<DownloadLock> {
+            if let Some(parent) = lock_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create lock directory {:?}", parent))?;
+            }
+
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .with_context(|| format!("Failed to open S3 download lock {:?}", lock_path))?;
+
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("Failed to lock {:?}", lock_path));
+            }
+
+            Ok(DownloadLock {
+                path: lock_path,
+                file,
+            })
+        })
+        .await
+        .context("S3 download lock task failed")?
+    }
+
+    #[cfg(not(unix))]
+    async fn acquire_download_lock(lock_path: &Path) -> Result<DownloadLock> {
+        loop {
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(lock_path)
+                .await
+            {
+                Ok(_) => {
+                    return Ok(DownloadLock {
+                        path: lock_path.to_path_buf(),
+                    });
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("Failed to create lock {:?}", lock_path));
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -241,7 +584,11 @@ impl LoRASource for S3LoRASource {
 
         let bucket_store = self.build_store(&bucket)?;
         let object_prefix = ObjectPath::from(prefix.clone());
-        let mut list_stream = bucket_store.list(Some(&object_prefix));
+        let download_objects = Self::list_download_objects(&bucket_store, &object_prefix).await?;
+
+        if download_objects.is_empty() {
+            anyhow::bail!("No files found at S3 URI: {}", s3_uri);
+        }
 
         let parent = dest_path
             .parent()
@@ -250,84 +597,64 @@ impl LoRASource for S3LoRASource {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Destination path has no file name"))?;
-
-        let temp_suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_dir_name = format!("{}.tmp.{}", dest_name, temp_suffix);
-        let temp_path = parent.join(&temp_dir_name);
-
-        tokio::fs::create_dir_all(&temp_path)
+        tokio::fs::create_dir_all(parent)
             .await
-            .context("Failed to create temporary directory")?;
+            .context("Failed to create cache parent directory")?;
 
-        let cleanup_on_error = async |err: anyhow::Error| -> anyhow::Error {
-            tracing::warn!(
-                "S3 download failed, cleaning up temporary directory at {:?}",
-                temp_path
-            );
-            if let Err(cleanup_err) = tokio::fs::remove_dir_all(&temp_path).await {
-                tracing::warn!("Failed to cleanup temporary directory: {}", cleanup_err);
-            }
-            err
-        };
+        let staging_path = parent.join(format!("{}.partial", dest_name));
+        let lock_path = parent.join(format!("{}.download.lock", dest_name));
+        let _download_lock = Self::acquire_download_lock(&lock_path).await?;
 
-        let mut file_count = 0;
-        while let Some(meta_result) = list_stream.next().await {
-            let meta = match meta_result {
-                Ok(m) => m,
-                Err(e) => return Err(cleanup_on_error(e.into()).await),
-            };
-
-            let rel_path = meta
-                .location
-                .as_ref()
-                .strip_prefix(prefix.as_str())
-                .unwrap_or(meta.location.as_ref())
-                .trim_start_matches('/');
-
-            if rel_path.is_empty() {
-                continue;
-            }
-
-            let file_path = temp_path.join(rel_path);
-
-            #[allow(clippy::collapsible_if)]
-            if let Some(parent) = file_path.parent() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    return Err(cleanup_on_error(e.into()).await);
-                }
-            }
-
-            let bytes_written =
-                match Self::download_file_with_retry(&bucket_store, &meta.location, &file_path)
-                    .await
-                {
-                    Ok(n) => n,
-                    Err(e) => return Err(cleanup_on_error(e).await),
-                };
-
-            file_count += 1;
-            tracing::debug!("Downloaded: {} ({} bytes)", rel_path, bytes_written);
+        if Self::directory_has_objects(dest_path, &download_objects).await? {
+            tracing::debug!("LoRA already downloaded to {:?}", dest_path);
+            return Ok(dest_path.to_path_buf());
         }
 
-        if file_count == 0 {
-            return Err(
-                cleanup_on_error(anyhow::anyhow!("No files found at S3 URI: {}", s3_uri)).await,
+        Self::prepare_staging_directory(&staging_path, &download_objects).await?;
+
+        let concurrency = Self::download_concurrency();
+        let download_futs = download_objects.iter().cloned().map(|object| {
+            Self::download_one_object(bucket_store.clone(), staging_path.clone(), object)
+        });
+
+        let mut stream = futures::stream::iter(download_futs).buffer_unordered(concurrency);
+        let mut downloaded_count = 0usize;
+        let mut skipped_count = 0usize;
+
+        while let Some(result) = stream.next().await {
+            let (rel_path, bytes_written, skipped) = result?;
+            if skipped {
+                skipped_count += 1;
+                tracing::debug!("Reused: {} ({} bytes)", rel_path, bytes_written);
+            } else {
+                downloaded_count += 1;
+                tracing::debug!("Downloaded: {} ({} bytes)", rel_path, bytes_written);
+            }
+        }
+
+        if !Self::directory_has_objects(&staging_path, &download_objects).await? {
+            anyhow::bail!(
+                "Downloaded files at {:?} did not match expected S3 objects for {}",
+                staging_path,
+                s3_uri
             );
         }
 
         if dest_path.exists() {
-            tokio::fs::remove_dir_all(dest_path)
-                .await
-                .context("Failed to remove existing destination directory")?;
+            Self::remove_path_if_exists(dest_path).await?;
         }
-        tokio::fs::rename(&temp_path, dest_path)
-            .await
-            .context("Failed to atomically move temporary directory to destination")?;
 
-        tracing::info!("Downloaded {} files from S3 to {:?}", file_count, dest_path);
+        Self::remove_path_if_exists(&staging_path.join(Self::RESUME_MANIFEST_DIR)).await?;
+        tokio::fs::rename(&staging_path, dest_path)
+            .await
+            .context("Failed to atomically move staging directory to destination")?;
+
+        tracing::info!(
+            "Downloaded {} files from S3 to {:?} ({} reused from staging)",
+            downloaded_count,
+            dest_path,
+            skipped_count
+        );
 
         Ok(dest_path.to_path_buf())
     }
