@@ -86,7 +86,7 @@ impl ConcurrentRadixTreeCompressed {
                 }
                 ParentEdgeAction::InsertFromParent(split_data) => {
                     if let Some(split) = split_data {
-                        Self::apply_split_lookup(lookup, split);
+                        self.apply_split_lookup(lookup, split);
                     }
                     return Ok(StoreParentResolution::InsertFrom {
                         parent_is_anchor: self.is_anchor_node(parent_hash, &node),
@@ -105,11 +105,13 @@ impl ConcurrentRadixTreeCompressed {
         op: &KvCacheStoreData,
         id: u64,
     ) -> Result<SharedNode, KvCacheEventError> {
-        {
-            let wl = lookup.get_mut(&worker).unwrap();
-            if let Some(node) = Self::resolve_lookup(wl, parent_hash) {
-                return Ok(node);
-            }
+        if let Some(node) = self.resolve_lookup(
+            lookup,
+            worker,
+            parent_hash,
+            LookupRepairDirection::TowardTail,
+        ) {
+            return Ok(node);
         }
 
         if let Some(node) = self.resolve_anchor_lookup(lookup, worker, parent_hash) {
@@ -208,11 +210,12 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     fn finish_after_split_lookup(
+        &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         finish: SplitLookupFinish<'_>,
     ) -> StoreInsertOutcome {
-        Self::apply_split_lookup(lookup, finish.split);
+        self.apply_split_lookup(lookup, finish.split);
 
         let wl = lookup.get_mut(&worker).unwrap();
         let (prefix_added, _) =
@@ -271,8 +274,9 @@ impl ConcurrentRadixTreeCompressed {
                 });
             }
             ParentChildPlan::StaleParent { hash } => {
-                let wl = lookup.get_mut(&worker).unwrap();
-                let Some(resolved) = Self::resolve_lookup(wl, hash) else {
+                let Some(resolved) =
+                    self.resolve_lookup(lookup, worker, hash, LookupRepairDirection::TowardTail)
+                else {
                     tracing::warn!(
                         worker_id = worker.worker_id.to_string(),
                         dp_rank = worker.dp_rank,
@@ -319,7 +323,7 @@ impl ConcurrentRadixTreeCompressed {
                         )));
                     }
                     ParentEdgeAction::InsertFromParent(Some(split)) => {
-                        Self::apply_split_lookup(lookup, split);
+                        self.apply_split_lookup(lookup, split);
                         return Ok(StoreInsertStep::RetryParent {
                             parent: cursor.parent.clone(),
                             parent_is_anchor: cursor.parent_is_anchor,
@@ -417,6 +421,7 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     fn insert_into_child(
+        &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         child: &SharedNode,
@@ -485,7 +490,7 @@ impl ConcurrentRadixTreeCompressed {
                     );
                 }
 
-                return ChildInsertStep::Done(Self::finish_after_split_lookup(
+                return ChildInsertStep::Done(self.finish_after_split_lookup(
                     lookup,
                     worker,
                     SplitLookupFinish {
@@ -584,7 +589,7 @@ impl ConcurrentRadixTreeCompressed {
                 StoreInsertStep::Done(outcome) => return Ok(outcome),
             };
 
-            match Self::insert_into_child(
+            match self.insert_into_child(
                 lookup,
                 worker,
                 &child,

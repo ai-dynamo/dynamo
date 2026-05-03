@@ -106,6 +106,12 @@ pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum LookupRepairDirection {
+    TowardTail,
+    TowardHead,
+}
+
 pub(super) struct StoreInsertOutcome {
     pub(super) num_blocks_added: usize,
     pub(super) duplicate_store: bool,

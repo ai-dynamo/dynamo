@@ -229,6 +229,11 @@ pub trait SyncIndexer: Send + Sync + 'static {
         0
     }
 
+    /// Return a human-readable backend-specific timing or instrumentation report.
+    fn timing_report(&self) -> String {
+        String::new()
+    }
+
     /// Number of radix-tree nodes created since construction.
     /// Only meaningful when the `shard-metrics` feature is enabled; returns 0 otherwise.
     fn node_count(&self) -> usize {

@@ -60,22 +60,22 @@ impl ConcurrentRadixTreeCompressed {
         let mut total_removed = 0usize;
 
         'outer: for block_hash in op.block_hashes {
-            let mut cur_node = {
-                let Some(wl) = lookup.get_mut(&worker) else {
+            let mut cur_node = match self.resolve_lookup(
+                lookup,
+                worker,
+                block_hash,
+                LookupRepairDirection::TowardHead,
+            ) {
+                Some(n) => n,
+                None => {
+                    tracing::debug!(
+                        worker_id = worker.worker_id.to_string(),
+                        dp_rank = worker.dp_rank,
+                        id,
+                        block_hash = ?block_hash,
+                        "Block not found during remove; skipping"
+                    );
                     continue;
-                };
-                match Self::resolve_lookup(wl, block_hash) {
-                    Some(n) => n,
-                    None => {
-                        tracing::debug!(
-                            worker_id = worker.worker_id.to_string(),
-                            dp_rank = worker.dp_rank,
-                            id,
-                            block_hash = ?block_hash,
-                            "Block not found during remove; skipping"
-                        );
-                        continue;
-                    }
                 }
             };
 
@@ -94,9 +94,16 @@ impl ConcurrentRadixTreeCompressed {
                         // Hash was moved to a descendant by a concurrent split.
                         match Self::find_in_subtree(&cur_node, block_hash) {
                             Some(resolved) => {
-                                if let Some(wl) = lookup.get_mut(&worker) {
-                                    wl.insert(block_hash, resolved.clone());
-                                }
+                                self.repair_lookup_for_resolved_node(
+                                    lookup,
+                                    block_hash,
+                                    &resolved,
+                                    LookupRepairDirection::TowardHead,
+                                );
+                                #[cfg(feature = "bench")]
+                                self.bench_metrics
+                                    .lookup_repair_scans
+                                    .fetch_add(1, Ordering::Relaxed);
                                 cur_node = resolved;
                                 // Retry the inner loop with the resolved node.
                             }

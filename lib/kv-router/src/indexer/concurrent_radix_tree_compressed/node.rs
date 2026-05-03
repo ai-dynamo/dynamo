@@ -349,6 +349,31 @@ impl Node {
         entries
     }
 
+    pub(super) fn lookup_hashes_for_worker_repair(
+        &self,
+        worker: WorkerWithDpRank,
+        hash: ExternalSequenceBlockHash,
+        direction: LookupRepairDirection,
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let state = self.state.read();
+        let Some(&pos) = state.edge_index.get(&hash) else {
+            return Vec::new();
+        };
+        let cutoff = state.current_cutoff(worker).min(state.edge.len());
+        let range = match direction {
+            LookupRepairDirection::TowardTail => {
+                if pos < cutoff {
+                    pos..cutoff
+                } else {
+                    0..0
+                }
+            }
+            LookupRepairDirection::TowardHead => 0..pos.min(cutoff),
+        };
+
+        state.edge[range].iter().map(|&(_, hash)| hash).collect()
+    }
+
     pub(super) fn reject_uncovered_parent(
         &self,
         worker: WorkerWithDpRank,

@@ -159,6 +159,32 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             .sum()
     }
 
+    fn timing_report(&self) -> String {
+        #[cfg(not(feature = "bench"))]
+        {
+            String::new()
+        }
+
+        #[cfg(feature = "bench")]
+        {
+            let node_splits = self.bench_metrics.node_splits.load(Ordering::Relaxed);
+            let lookup_repair_scans = self
+                .bench_metrics
+                .lookup_repair_scans
+                .load(Ordering::Relaxed);
+            let lookup_repair_entries = self
+                .bench_metrics
+                .lookup_repair_entries
+                .load(Ordering::Relaxed);
+            format!(
+                "ConcurrentRadixTreeCompressed bench metrics:\n  \
+                 node splits = {node_splits}\n  \
+                 lookup repair scans = {lookup_repair_scans}\n  \
+                 lookup repair entries = {lookup_repair_entries}"
+            )
+        }
+    }
+
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         Some(self.dump_tree_as_events())
     }

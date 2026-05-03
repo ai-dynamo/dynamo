@@ -679,6 +679,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         curr_size
     }
 
+    fn timing_report(&self) -> String {
+        self.backend.timing_report()
+    }
+
     fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         vec![ShardSizeSnapshot {
             shard_idx: 0,

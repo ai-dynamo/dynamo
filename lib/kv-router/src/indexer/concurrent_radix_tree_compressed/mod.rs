@@ -3,67 +3,16 @@
 
 //! Concurrent Radix Tree (compressed trie) implementation for KV cache routing.
 //!
-//! This module provides a thread-safe radix tree data structure that enables concurrent
-//! `find_matches` operations while maintaining correctness for write operations.
-//!
-//! Unlike a regular trie where each node holds a single hash, each node here holds
-//! a compressed edge: a `Vec` of `(LocalBlockHash, ExternalSequenceBlockHash)` pairs.
-//! Per-worker validity within each edge is tracked as a match index (cutoff) rather than
-//! a simple present/absent flag. Nodes support splitting (when a partial match requires
-//! divergent paths) but not merging.
-//!
-//! # Key Data Structures
-//!
-//! Each node contains:
-//! - `edge`: the sequence of `(LocalBlockHash, ExternalSequenceBlockHash)` pairs
-//! - `edge_index`: reverse lookup from `ExternalSequenceBlockHash` to position in `edge`,
-//!   enabling O(1) position queries during removal.
-//! - `full_edge_workers`: workers with full edge coverage (fast path set)
-//! - `worker_cutoffs`: workers with partial coverage, mapping to their match index `k`,
-//!   meaning the worker has cached blocks `edge[0..k]` with `0 < k < edge.len()`.
-//! - `children`: child nodes keyed by the first `LocalBlockHash` of the child's edge
-//!
-//! # Removal Semantics
-//!
-//! When a remove event arrives for worker `w` at edge position `i`:
-//! - current_cutoff = `edge.len()` if `w` is in `full_edge_workers`, else `worker_cutoffs[w]`
-//! - If `i >= current_cutoff`: **no-op** (block is already beyond the worker's coverage)
-//! - If `i < current_cutoff`: new_cutoff = `i`
-//!   - If new_cutoff == 0: remove worker entirely from this node
-//!   - Else: move worker to `worker_cutoffs[w] = new_cutoff`
-//! - Worker lookup entries for the newly uncovered suffix are scrubbed eagerly
-//!
-//! Removal does NOT perform structural splits. Multiple workers can independently reduce
-//! their match indices without fragmenting the tree, accurately tracking each worker's
-//! individual eviction patterns.
-//!
-//! # Split Semantics (during store only)
-//!
-//! When a new store requires splitting an edge at position `pos`:
-//! - `full_edge_workers`: full in both prefix (unchanged) and suffix
-//! - `worker_cutoffs[w] = k` where `k >= pos`: promoted to full in prefix;
-//!   in suffix with `adj = k - pos` (partial if `adj > 0`, absent if `adj == 0`)
-//! - `worker_cutoffs[w] = k` where `k < pos`: unchanged in prefix, absent from suffix
-//!
-//! # Concurrency Model
-//!
-//! - Multiple `find_matches` can run in parallel (read locks only)
-//! - Write operations (`apply_event`, `remove_worker`) acquire write locks
-//! - Each worker thread owns its own `WorkerLookup`; no cross-thread lookup contention
-//! - Deadlock prevention: always lock parent before child (hand-over-hand)
-//! - Cross-thread splits: stale lookup entries are resolved lazily via `resolve_lookup`
-//!
-//! # Limitations vs RadixTree
-//!
-//! - Does NOT support `expiration_duration` / frequency tracking
-//! - `new_with_frequency()` is not provided
-//! - `find_matches` does not populate `OverlapScores.frequencies`
+//! See `README.md` in this module for structure, removal, split, and concurrency
+//! notes.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
+#[cfg(feature = "bench")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
@@ -81,6 +30,7 @@ use types::*;
 mod dump;
 mod matches;
 mod remove;
+mod repair;
 mod store;
 mod sync_impl;
 
@@ -95,6 +45,26 @@ pub struct ConcurrentRadixTreeCompressed {
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
+    #[cfg(feature = "bench")]
+    bench_metrics: CrtcBenchMetrics,
+}
+
+#[cfg(feature = "bench")]
+struct CrtcBenchMetrics {
+    node_splits: AtomicU64,
+    lookup_repair_scans: AtomicU64,
+    lookup_repair_entries: AtomicU64,
+}
+
+#[cfg(feature = "bench")]
+impl CrtcBenchMetrics {
+    fn new() -> Self {
+        Self {
+            node_splits: AtomicU64::new(0),
+            lookup_repair_scans: AtomicU64::new(0),
+            lookup_repair_entries: AtomicU64::new(0),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +99,8 @@ impl ConcurrentRadixTreeCompressed {
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
+            #[cfg(feature = "bench")]
+            bench_metrics: CrtcBenchMetrics::new(),
         }
     }
 
@@ -197,42 +169,6 @@ impl ConcurrentRadixTreeCompressed {
             .map(|size| size.load(Ordering::Relaxed))
     }
 
-    // ------------------------------------------------------------------
-    // Lookup resolution helpers
-    // ------------------------------------------------------------------
-
-    /// Search a node's subtree for the node whose edge contains `hash`.
-    /// Used to resolve stale lookup entries caused by cross-thread splits.
-    fn find_in_subtree(start: &SharedNode, hash: ExternalSequenceBlockHash) -> Option<SharedNode> {
-        let mut queue = VecDeque::from(start.children_snapshot());
-        while let Some(node) = queue.pop_front() {
-            if node.contains_edge_hash(hash) {
-                return Some(node);
-            }
-            queue.extend(node.children_snapshot());
-        }
-        None
-    }
-
-    /// Look up `hash` in a worker's lookup, resolving stale entries caused by
-    /// cross-thread splits. Returns the `SharedNode` whose edge contains `hash`.
-    fn resolve_lookup(
-        worker_lookup: &mut WorkerLookup,
-        hash: ExternalSequenceBlockHash,
-    ) -> Option<SharedNode> {
-        let node = worker_lookup.get(&hash)?.clone();
-
-        // Fast path: hash is still in this node's edge_index.
-        if node.contains_edge_hash(hash) {
-            return Some(node);
-        }
-
-        // Slow path: hash was moved to a descendant by a cross-thread split.
-        let resolved = Self::find_in_subtree(&node, hash)?;
-        worker_lookup.insert(hash, resolved.clone());
-        Some(resolved)
-    }
-
     fn resolve_anchor_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
@@ -260,9 +196,14 @@ impl ConcurrentRadixTreeCompressed {
     /// Updates worker lookup maps so entries for blocks that moved to the suffix now
     /// point to the suffix node. Must be called **after** the write guard is dropped.
     fn apply_split_lookup(
+        &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         split: SplitLookupData,
     ) {
+        #[cfg(feature = "bench")]
+        self.bench_metrics
+            .node_splits
+            .fetch_add(1, Ordering::Relaxed);
         for (worker, hashes) in split.suffix.lookup_entries_by_worker() {
             if let Some(wl) = lookup.get_mut(&worker) {
                 for hash in hashes {
