@@ -34,8 +34,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use ::velo::Velo;
-pub use velo_common::InstanceId;
-use velo_transports::tcp::TcpTransportBuilder;
+pub use ::velo::InstanceId;
+use ::velo::transports::tcp::TcpTransportBuilder;
 
 pub use self::kv_discovery::{KvPeerDiscovery, KvPeerRegistrationGuard, VELO_PEERS_BUCKET};
 
@@ -229,7 +229,7 @@ async fn build_velo_handle(
         .with_context(|| format!("building velo TCP transport on {bind_addr}"))?;
 
     let discovery = Arc::new(KvPeerDiscovery::new(kv_manager));
-    let discovery_for_velo: Arc<dyn velo_discovery::PeerDiscovery> = discovery.clone();
+    let discovery_for_velo: Arc<dyn ::velo::discovery::PeerDiscovery> = discovery.clone();
 
     let velo = Velo::builder()
         .add_transport(Arc::new(transport))

@@ -21,8 +21,8 @@ use anyhow::{Context as _, Result, anyhow};
 use futures::future::BoxFuture;
 use uuid::Uuid;
 
-use velo_common::{InstanceId, PeerInfo, WorkerId};
-use velo_discovery::{PeerDiscovery, PeerRegistrationGuard};
+use ::velo::discovery::{PeerDiscovery, PeerRegistrationGuard};
+use ::velo::{InstanceId, PeerInfo, WorkerId};
 
 use crate::storage::kv::{self, Bucket as _, Key};
 
@@ -205,7 +205,7 @@ impl Drop for KvPeerRegistrationGuard {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use velo_common::{PeerInfo, WorkerAddress};
+    use ::velo::{PeerInfo, WorkerAddress};
 
     fn dummy_peer() -> PeerInfo {
         let id = InstanceId::new_v4();

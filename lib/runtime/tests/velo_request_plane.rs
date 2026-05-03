@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use velo::Velo;
-use velo_transports::tcp::TcpTransportBuilder;
+use velo::transports::tcp::TcpTransportBuilder;
 
 use dynamo_runtime::SystemHealth;
 use dynamo_runtime::pipeline::PipelineError;
@@ -83,7 +83,7 @@ async fn build_velo_node(
         .bind_addr(bind)
         .build()
         .expect("build velo TCP transport");
-    let discovery_for_velo: Arc<dyn velo_discovery::PeerDiscovery> = disco.clone();
+    let discovery_for_velo: Arc<dyn velo::discovery::PeerDiscovery> = disco.clone();
     let velo = Velo::builder()
         .add_transport(Arc::new(transport))
         .discovery(discovery_for_velo)
@@ -169,7 +169,7 @@ async fn velo_two_nodes_can_discover_each_other_via_kv() {
     let (velo_b, _guard_b) = build_velo_node(disco.clone()).await;
 
     // Direct discovery hit.
-    let resolved = velo_discovery::PeerDiscovery::discover_by_instance_id(
+    let resolved = velo::discovery::PeerDiscovery::discover_by_instance_id(
         &*disco,
         velo_a.instance_id(),
     )
