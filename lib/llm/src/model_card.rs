@@ -502,9 +502,8 @@ fn checked_file_uri(cf: &CheckedFile, source: &str) -> anyhow::Result<String> {
 fn uri_basename(uri: &str) -> anyhow::Result<String> {
     url::Url::parse(uri)
         .with_context(|| format!("parsing uri: {uri}"))?
-        .path()
-        .rsplit('/')
-        .find(|s| !s.is_empty())
+        .path_segments()
+        .and_then(|mut s| s.rfind(|s| !s.is_empty()))
         .map(String::from)
         .with_context(|| format!("no basename in uri: {uri}"))
 }
