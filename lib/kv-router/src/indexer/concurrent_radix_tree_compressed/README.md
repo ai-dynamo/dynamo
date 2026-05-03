@@ -12,6 +12,50 @@ parent hash is still the covered tail.
 The tree supports splitting but not merging. Cleanup may remove stale leaves,
 but a split edge is not recompressed later.
 
+## Motivation
+
+The original KV-router indexers optimize different tradeoffs:
+
+- `RadixTree` is simple and exact, but it stores one block per trie node. Long
+  shared prompts and decode tails create many nodes, and every append has to
+  walk or allocate at block granularity.
+- `RadixTreeIndex` improves concurrent event ingestion by sharding workers, but
+  each shard is still an ordinary radix tree. Shared prefixes that cross shard
+  boundaries are duplicated instead of represented by shared structure.
+- `BranchShardedIndexer` routes divergent branches to different shards, but the
+  underlying per-shard structure still needs to handle high fanout, decode
+  extension, and stale parent lookups cheaply.
+
+`ConcurrentRadixTreeCompressed` is the per-shard structure built for that shape.
+Its main differences are:
+
+- **Radix compression**: each non-root node stores a compressed edge instead of a
+  single block. A prefill chain can be represented by one node, and decode can
+  append directly to a leaf while the node is still childless.
+- **Per-worker cutoffs**: worker coverage is tracked as a cutoff inside the
+  compressed edge. Removal can shorten one worker's coverage without splitting
+  the physical tree for every eviction.
+- **Sticky internal nodes**: once a node has had children, it remains logically
+  internal even if cleanup removes those children. This avoids reopening old
+  fanout points for decode extension after races or cleanup.
+- **Lazy lookup repair**: worker-local reverse lookups are repaired only when a
+  stale entry is observed. Cross-thread splits do not need to synchronously patch
+  every other thread's lookup table.
+- **Semi-lock-free structural reads**: child maps use `DashMap`, while the edge
+  state is protected separately. Hot read paths do not take the shape gate, and
+  shape-sensitive writes use version validation to retry when a plan becomes
+  stale.
+- **Versioned shape gates**: the node's `shape_gate` and `shape_version` combine
+  a small critical section with explicit stale-plan detection. Shared operations,
+  such as adding a child under a stable internal node, can proceed with a shared
+  gate; structural mutations, such as splits and leaf extensions, take the
+  exclusive path.
+
+The intended result is not a fully lock-free tree. It is a compressed tree where
+common prefill fanout and decode extension avoid unnecessary exclusive
+serialization, while rare structural races are resolved by retrying or lazily
+repairing lookup state.
+
 ## Node State
 
 Each node contains:
