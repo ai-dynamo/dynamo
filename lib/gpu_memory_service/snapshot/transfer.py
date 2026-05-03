@@ -57,15 +57,25 @@ TRANSFER_BACKEND_CHOICES = (
 
 _PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
 _PINNED_COPY_BUFFERS_PER_ROOT = 2
+_LIBC = ctypes.CDLL(None)
+_LIBC.posix_memalign.argtypes = [
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.c_size_t,
+    ctypes.c_size_t,
+]
+_LIBC.posix_memalign.restype = ctypes.c_int
+_LIBC.free.argtypes = [ctypes.c_void_p]
+_LIBC.free.restype = None
 
-try:
-    from nixl._api import nixl_agent, nixl_agent_config
 
-    _NIXL_AVAILABLE = True
-except ImportError:
-    _NIXL_AVAILABLE = False
-    nixl_agent = None  # type: ignore[assignment]
-    nixl_agent_config = None  # type: ignore[assignment]
+def _load_nixl_api() -> Tuple[Any, Any]:
+    try:
+        from nixl._api import nixl_agent, nixl_agent_config
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL Python bindings are required for the nixl-gds transfer backend"
+        ) from exc
+    return nixl_agent, nixl_agent_config
 
 
 @dataclass(frozen=True)
@@ -817,12 +827,19 @@ def _load_cuda_runtime() -> _CudaRuntime:
     return _CudaRuntime()
 
 
-def _allocate_aligned_numpy_buffer(size: int, np_module: Any) -> Tuple[Any, Any]:
+def _allocate_aligned_buffer(size: int) -> Tuple[memoryview, Any, int]:
     alignment = 4096
-    raw = np_module.empty(size + alignment, dtype=np_module.uint8)
-    base = int(raw.ctypes.data)
-    offset = (-base) % alignment
-    return raw[offset : offset + size], raw
+    ptr = ctypes.c_void_p()
+    rc = _LIBC.posix_memalign(ctypes.byref(ptr), alignment, size)
+    if rc != 0:
+        raise OSError(rc, os.strerror(rc))
+    array = (ctypes.c_ubyte * size).from_address(ptr.value)
+    return memoryview(array), array, int(ptr.value)
+
+
+def _free_aligned_buffer(view: memoryview, ptr: int) -> None:
+    view.release()
+    _LIBC.free(ctypes.c_void_p(ptr))
 
 
 def _open_read_fd(path: str) -> int:
@@ -859,11 +876,9 @@ def _read_exact_into_buffer(
 
 
 class _PinnedCopySlot:
-    def __init__(self, cuda: Any, np_module: Any, size: int) -> None:
+    def __init__(self, cuda: Any, size: int) -> None:
         self._cuda = cuda
-        self.array, self._raw = _allocate_aligned_numpy_buffer(size, np_module)
-        self.view = memoryview(self.array)
-        self.ptr = int(self.array.ctypes.data)
+        self.view, self._raw, self.ptr = _allocate_aligned_buffer(size)
         self.stream = cuda.create_stream()
         self.busy = False
         self.byte_count = 0
@@ -872,7 +887,10 @@ class _PinnedCopySlot:
             cuda.host_register(self.ptr, size)
             self._registered = True
         except Exception:
-            cuda.destroy_stream(self.stream)
+            try:
+                cuda.destroy_stream(self.stream)
+            finally:
+                _free_aligned_buffer(self.view, self.ptr)
             raise
 
     def wait(self, stats: Optional[_TransferStats]) -> None:
@@ -892,7 +910,10 @@ class _PinnedCopySlot:
                 self._cuda.host_unregister(self.ptr)
                 self._registered = False
         finally:
-            self._cuda.destroy_stream(self.stream)
+            try:
+                self._cuda.destroy_stream(self.stream)
+            finally:
+                _free_aligned_buffer(self.view, self.ptr)
 
 
 class LocalSSDPinnedTransferBackend:
@@ -1040,16 +1061,13 @@ class _LocalSSDPinnedTransferSession:
         targets: Mapping[str, GMSTransferTarget],
         stats: _TransferStats,
     ) -> None:
-        np_module = _get_numpy_module()
         slots: List[_PinnedCopySlot] = []
         root_t0 = time.monotonic()
         root_bytes = 0
         next_slot = 0
         try:
             for _ in range(_PINNED_COPY_BUFFERS_PER_ROOT):
-                slots.append(
-                    _PinnedCopySlot(self._cuda, np_module, _PINNED_COPY_CHUNK_SIZE)
-                )
+                slots.append(_PinnedCopySlot(self._cuda, _PINNED_COPY_CHUNK_SIZE))
             for file_path, sources in grouped_paths:
                 fd = _open_read_fd(file_path)
                 try:
@@ -1479,10 +1497,7 @@ class NixlGDSTransferBackend:
     name = NIXL_GDS_TRANSFER_BACKEND
 
     def __init__(self, *, device: int) -> None:
-        if not _NIXL_AVAILABLE:
-            raise RuntimeError(
-                "NIXL Python bindings are required for the nixl-gds transfer backend"
-            )
+        nixl_agent, nixl_agent_config = _load_nixl_api()
         self._device = device
         self._agent_name = f"gms_gds_{device}_{os.getpid()}"
         self._agent = nixl_agent(

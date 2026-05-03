@@ -9,6 +9,7 @@ Devices are loaded in parallel to saturate PVC bandwidth.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import signal
@@ -17,10 +18,35 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from gpu_memory_service.common.cuda_utils import list_devices
-from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.snapshot.storage_client import GMSStorageClient
-from gpu_memory_service.snapshot.transfer import DEFAULT_TRANSFER_BACKEND
+_STARTUP_MONOTONIC_NS = time.monotonic_ns()
+
+
+def _startup_log(event: str, detail: str = "") -> None:
+    elapsed_ms = (time.monotonic_ns() - _STARTUP_MONOTONIC_NS) / 1_000_000
+    message = f"GMS_LOADER_STARTUP event={event} elapsed_ms={elapsed_ms:.3f}"
+    if detail:
+        message = f"{message} {detail}"
+    print(message, flush=True)
+
+
+_startup_log("module_start")
+_startup_log("import_common_utils_start")
+common_utils = importlib.import_module("gpu_memory_service.common.utils")
+get_socket_path = common_utils.get_socket_path
+
+_startup_log("import_common_utils_done")
+_startup_log("import_storage_client_start")
+storage_client_module = importlib.import_module(
+    "gpu_memory_service.snapshot.storage_client"
+)
+GMSStorageClient = storage_client_module.GMSStorageClient
+
+_startup_log("import_storage_client_done")
+_startup_log("import_transfer_start")
+transfer_module = importlib.import_module("gpu_memory_service.snapshot.transfer")
+DEFAULT_TRANSFER_BACKEND = transfer_module.DEFAULT_TRANSFER_BACKEND
+
+_startup_log("import_transfer_done")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +112,23 @@ def _clear_completion_sentinel(checkpoint_dir: str) -> None:
         pass
 
 
+def _list_checkpoint_devices(checkpoint_dir: str) -> list[int]:
+    devices: list[int] = []
+    for child in Path(checkpoint_dir).iterdir():
+        if not child.is_dir() or not child.name.startswith("device-"):
+            continue
+        suffix = child.name.removeprefix("device-")
+        if suffix.isdigit():
+            devices.append(int(suffix))
+    if devices:
+        return sorted(set(devices))
+
+    _startup_log("checkpoint_devices_missing_fallback_nvml")
+    from gpu_memory_service.common.cuda_utils import list_devices
+
+    return list_devices()
+
+
 def _write_completion_sentinel(checkpoint_dir: str) -> None:
     path = _completion_sentinel_path(checkpoint_dir)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -96,6 +139,7 @@ def _write_completion_sentinel(checkpoint_dir: str) -> None:
 
 
 def main() -> None:
+    _startup_log("main_enter", f"pid={os.getpid()}")
     control_dir = os.environ["GMS_CHECKPOINT_DIR"]
     checkpoint_dir = os.environ.get(GMS_WEIGHTS_CHECKPOINT_DIR_ENV, control_dir)
     max_workers = int(os.environ.get("GMS_LOAD_WORKERS", "8"))
@@ -103,10 +147,25 @@ def main() -> None:
         GMS_TRANSFER_BACKEND_ENV,
         DEFAULT_TRANSFER_BACKEND,
     )
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+    nvidia_visible = os.environ.get("NVIDIA_VISIBLE_DEVICES", "<unset>")
+    _startup_log(
+        "env_loaded",
+        f"transfer_backend={transfer_backend} max_workers={max_workers} "
+        f"cuda_visible={cuda_visible} nvidia_visible={nvidia_visible}",
+    )
+    _startup_log("clear_sentinel_start")
     _clear_completion_sentinel(control_dir)
-    devices = list_devices()
+    _startup_log("clear_sentinel_done")
+    _startup_log("discover_devices_start")
+    devices = _list_checkpoint_devices(checkpoint_dir)
+    _startup_log(
+        "discover_devices_done",
+        f"devices={','.join(str(dev) for dev in devices)}",
+    )
 
     t0 = time.monotonic()
+    _startup_log("thread_pool_submit_start", f"device_count={len(devices)}")
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
         futures = {
             pool.submit(
@@ -118,6 +177,7 @@ def main() -> None:
             ): dev
             for dev in devices
         }
+        _startup_log("thread_pool_submit_done", f"future_count={len(futures)}")
         for future in as_completed(futures):
             dev = futures[future]
             future.result()
