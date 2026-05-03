@@ -8,8 +8,6 @@ use object_store::{
     BackoffConfig, ClientOptions, ObjectMeta, ObjectStore, RetryConfig, aws::AmazonS3Builder,
     path::Path as ObjectPath,
 };
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -113,28 +111,14 @@ impl S3DownloadObject {
     }
 }
 
-#[cfg(unix)]
 struct DownloadLock {
     path: PathBuf,
     file: std::fs::File,
 }
 
-#[cfg(unix)]
 impl Drop for DownloadLock {
     fn drop(&mut self) {
-        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(not(unix))]
-struct DownloadLock {
-    path: PathBuf,
-}
-
-#[cfg(not(unix))]
-impl Drop for DownloadLock {
-    fn drop(&mut self) {
+        let _ = self.file.unlock();
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -514,7 +498,6 @@ impl S3LoRASource {
         Ok(())
     }
 
-    #[cfg(unix)]
     async fn acquire_download_lock(lock_path: &Path) -> Result<DownloadLock> {
         let lock_path = lock_path.to_path_buf();
         tokio::task::spawn_blocking(move || -> Result<DownloadLock> {
@@ -530,11 +513,8 @@ impl S3LoRASource {
                 .open(&lock_path)
                 .with_context(|| format!("Failed to open S3 download lock {:?}", lock_path))?;
 
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("Failed to lock {:?}", lock_path));
-            }
+            file.lock()
+                .with_context(|| format!("Failed to lock {:?}", lock_path))?;
 
             Ok(DownloadLock {
                 path: lock_path,
@@ -543,31 +523,6 @@ impl S3LoRASource {
         })
         .await
         .context("S3 download lock task failed")?
-    }
-
-    #[cfg(not(unix))]
-    async fn acquire_download_lock(lock_path: &Path) -> Result<DownloadLock> {
-        loop {
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(lock_path)
-                .await
-            {
-                Ok(_) => {
-                    return Ok(DownloadLock {
-                        path: lock_path.to_path_buf(),
-                    });
-                }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    return Err(e)
-                        .with_context(|| format!("Failed to create lock {:?}", lock_path));
-                }
-            }
-        }
     }
 }
 
