@@ -887,58 +887,50 @@ impl ModelDeploymentCard {
 
     /// Resolve every populated metadata `CheckedFile` through the
     /// content-addressed MDC cache, blake3-verifying every byte.
-    ///
-    /// Pass 1 — for each slot, normalize `cf.path()` to a URL form
-    /// (`file://` if it exists locally, `hf://<source_path>/<filename>`
-    /// otherwise, or unchanged if already a URL), then snapshot
-    /// `(uri, expected, filename)` for the async fetch loop.
-    /// Pass 2 — `resolve_uri` per slot if the blob isn't already
-    /// cached; symlink into `by-slug/<slug>/<mdcsum>/`.
-    /// Pass 3 — rewrite each `cf.path` to point at the cache symlink.
-    ///
-    /// Bypasses `update_dir` because its `is_custom` exclusion is for
-    /// the legacy `hub::from_hf` fall-through and would leave URLs in
-    /// the MDC for custom templates.
+    /// Walks `iter_metadata_files_mut` directly rather than going
+    /// through `MDC::update_dir`, whose `is_custom` exclusion would
+    /// skip user-supplied custom chat templates.
     async fn resolve_metadata_files(&mut self) -> anyhow::Result<()> {
         let source = self.source_path().to_string();
         let mdcsum = self.mdcsum().to_string();
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
-        // Pass 1: normalize to URL form + snapshot for the async loop.
+        // Snapshot the logical filename + a fetchable URI for each
+        // slot. We don't mutate cf here: Pass 3's `update_dir` runs
+        // against the original cf.path, which preserves the logical
+        // filename even when the worker's path is an HF cache symlink
+        // into `blobs/<sha>`.
         let mut entries: Vec<(String, CheckedFile, String)> = Vec::new();
-        for cf in self.iter_metadata_files_mut() {
-            if cf.url().is_none() {
-                let url = {
-                    let path = cf.path().context("CheckedFile has neither path nor url")?;
-                    let filename = path
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .with_context(|| format!("no filename in path: {}", path.display()))?;
-                    if path.exists() {
-                        url::Url::from_file_path(std::fs::canonicalize(path)?).map_err(|()| {
+        for cf in self.iter_metadata_files() {
+            let filename = if let Some(p) = cf.path() {
+                p.file_name()
+                    .and_then(|f| f.to_str())
+                    .with_context(|| format!("no filename in path: {}", p.display()))?
+                    .to_string()
+            } else {
+                let url = cf.url().expect("either path or url is set");
+                url.path()
+                    .rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .with_context(|| format!("no filename in url: {url}"))?
+                    .to_string()
+            };
+            let uri = if let Some(u) = cf.url() {
+                u.to_string()
+            } else {
+                let path = cf.path().expect("path or url");
+                if path.exists() {
+                    url::Url::from_file_path(std::fs::canonicalize(path)?)
+                        .map_err(|()| {
                             anyhow::anyhow!("invalid file path for url: {}", path.display())
                         })?
-                    } else {
-                        url::Url::parse(&format!("hf://{source}/{filename}")).with_context(
-                            || {
-                                format!(
-                                    "synthesizing hf:// from source '{source}', filename '{filename}'"
-                                )
-                            },
-                        )?
-                    }
-                };
-                cf.move_to_url(url);
-            }
-            let url = cf.url().expect("set above").clone();
-            let filename = url
-                .path()
-                .rsplit('/')
-                .find(|s| !s.is_empty())
-                .with_context(|| format!("no filename in url: {url}"))?
-                .to_string();
-            entries.push((url.to_string(), cf.clone(), filename));
+                        .to_string()
+                } else {
+                    format!("hf://{source}/{filename}")
+                }
+            };
+            entries.push((uri, cf.clone(), filename));
         }
 
         // Pass 2: fetch + verify + cache + symlink.
@@ -1623,7 +1615,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 mod tests {
     use super::HFConfig;
     use std::collections::HashSet;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
@@ -1788,76 +1780,78 @@ mod tests {
     /// This is the "shared-mount legacy" path under the unified
     /// pipeline — proves the file:// arm of `resolve_uri` works
     /// end-to-end without network or mocker.
+    /// Build an HF-cache-style snapshot fixture from the TinyLlama
+    /// sample model: per-file symlinks into a sibling `blobs/<hash>`
+    /// dir. The symlink layout is what triggers the canonicalize trap
+    /// `resolve_metadata_files` has to handle.
+    fn hf_cache_fixture(workspace: &Path) -> anyhow::Result<PathBuf> {
+        use std::hash::{Hash, Hasher};
+        let snapshot = workspace.join("snapshots/abc");
+        let blobs = workspace.join("blobs");
+        std::fs::create_dir_all(&snapshot)?;
+        std::fs::create_dir_all(&blobs)?;
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        for entry in std::fs::read_dir(&src)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            name.to_string_lossy().hash(&mut hasher);
+            let blob = format!("blob-{:x}", hasher.finish());
+            std::fs::copy(entry.path(), blobs.join(&blob))?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(
+                Path::new("../..").join("blobs").join(&blob),
+                snapshot.join(name),
+            )?;
+        }
+        Ok(snapshot)
+    }
+
     #[tokio::test]
     #[serial_test::serial] // mutates $HOME
     async fn download_config_pipelines_local_files_through_cache() -> anyhow::Result<()> {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let workspace = tempfile::tempdir()?;
+        let snapshot = hf_cache_fixture(workspace.path())?;
+        let temp_home = tempfile::tempdir()?;
 
-        let temp = tempfile::tempdir()?;
-        let home_override = temp.path().to_path_buf();
-
-        // serial_test guards $HOME mutation against parallel test runs;
-        // restore on drop is enough.
         let prior_home = std::env::var_os("HOME");
-        // SAFETY: serial_test ensures no concurrent env access from
-        // other tests in this binary.
-        unsafe { std::env::set_var("HOME", &home_override) };
-        let result = run_pipeline_assertions(&fixture, &home_override).await;
+        // SAFETY: serial_test guards against parallel env access.
+        unsafe { std::env::set_var("HOME", temp_home.path()) };
+        let result = run_pipeline_assertions(&snapshot, temp_home.path()).await;
         match prior_home {
-            // SAFETY: same as above.
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
         }
         result
     }
 
-    async fn run_pipeline_assertions(fixture: &Path, home: &Path) -> anyhow::Result<()> {
-        let mut mdc = super::ModelDeploymentCard::load_from_disk(fixture, None)?;
+    async fn run_pipeline_assertions(snapshot: &Path, home: &Path) -> anyhow::Result<()> {
+        let mut mdc = super::ModelDeploymentCard::load_from_disk(snapshot, None)?;
         let slug = mdc.slug.clone();
         let mdcsum = mdc.mdcsum().to_string();
 
         mdc.download_config().await?;
 
-        let mdc_root = home.join(".cache/dynamo/mdc");
-        let blobs = mdc_root.join("blobs");
-        let snap = mdc_root
-            .join("by-slug")
+        let blobs = home.join(".cache/dynamo/mdc/blobs");
+        let snap = home
+            .join(".cache/dynamo/mdc/by-slug")
             .join(slug.to_string())
             .join(&mdcsum);
 
-        assert!(blobs.is_dir(), "blobs dir was not created");
-        let blob_count = blobs.read_dir()?.count();
-        assert!(
-            blob_count > 0,
-            "expected at least one blob to be written, got {blob_count}"
-        );
+        // slug_dir is named by logical filename — not the HF cache
+        // blob basename — so consumers reading siblings (e.g.
+        // `parent.join("generation_config.json")`) find them.
+        assert!(snap.join("config.json").exists());
+        assert!(snap.join("tokenizer.json").exists());
+        assert!(snap.join("generation_config.json").exists());
 
-        assert!(snap.is_dir(), "by-slug snap dir was not created: {snap:?}");
-        let snap_count = snap.read_dir()?.count();
-        assert!(
-            snap_count > 0,
-            "expected at least one symlink in {snap:?}, got {snap_count}"
-        );
-
-        // Every populated CheckedFile's path was rewritten into the snap
-        // dir, and the symlink target resolves to a real blob file.
         for cf in mdc.iter_metadata_files() {
             let path = cf
                 .path()
                 .ok_or_else(|| anyhow::anyhow!("post-download cf should have a local path"))?;
-            assert!(
-                path.starts_with(&snap),
-                "cf.path not rewritten into snap dir: {} not under {}",
-                path.display(),
-                snap.display()
-            );
-            let resolved = std::fs::canonicalize(path)?;
-            assert!(
-                resolved.starts_with(&blobs),
-                "symlink should resolve to blobs/, got: {}",
-                resolved.display()
-            );
+            assert!(path.starts_with(&snap));
+            assert!(std::fs::canonicalize(path)?.starts_with(&blobs));
         }
         Ok(())
     }
