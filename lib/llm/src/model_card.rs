@@ -905,21 +905,6 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
-        // Visibility for slot population — a None slot here means no symlink
-        // for that file in slug_dir, which can surface downstream as a missing
-        // generation_config.json / chat_template.jinja / etc. Logged at info
-        // for now so gh-8749 PR2 reviewers can see slot coverage in CI logs.
-        tracing::info!(
-            display_name = %self.display_name,
-            slug = %self.slug,
-            model_info = self.model_info.is_some(),
-            tokenizer = self.tokenizer.is_some(),
-            prompt_formatter = self.prompt_formatter.is_some(),
-            chat_template_file = self.chat_template_file.is_some(),
-            gen_config = self.gen_config.is_some(),
-            "resolving MDC metadata slots",
-        );
-
         // Pass 1: normalize to URL form + snapshot for the async loop.
         let mut entries: Vec<(String, CheckedFile, String)> = Vec::new();
         for cf in self.iter_metadata_files_mut() {
@@ -1130,35 +1115,10 @@ impl ModelDeploymentCard {
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
-            let gen_config = match GenerationConfig::from_disk(local_path) {
-                Ok(g) => Some(g),
-                Err(err) => {
-                    // generation_config.json is optional — many models ship without
-                    // it. But if the file IS on disk and we still failed to load it,
-                    // surface that so a missing eos_token_id later is easier to
-                    // attribute. The legacy frontend path silently fell through to
-                    // hub::from_hf which would re-fetch the file; the unified pipeline
-                    // doesn't, so a None slot here means a missing symlink in slug_dir.
-                    let path = local_path.join("generation_config.json");
-                    if path.exists() {
-                        tracing::warn!(
-                            %err,
-                            path = %path.display(),
-                            "generation_config.json exists on disk but CheckedFile::from_disk failed",
-                        );
-                    } else {
-                        tracing::debug!(
-                            "generation_config.json absent from {}; gen_config slot will be None",
-                            local_path.display()
-                        );
-                    }
-                    None
-                }
-            };
             (
                 Some(ModelInfoType::from_disk(local_path)?),
                 TokenizerKind::from_disk(local_path)?,
-                gen_config,
+                GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
         } else {
