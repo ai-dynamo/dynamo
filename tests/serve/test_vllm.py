@@ -730,6 +730,8 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(9.6)  # same Qwen3-VL-2B agg multimodal profile
+@pytest.mark.requested_vllm_kv_cache_bytes(922_354_000)
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,

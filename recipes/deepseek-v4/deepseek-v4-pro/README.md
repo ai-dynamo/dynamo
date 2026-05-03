@@ -9,9 +9,9 @@ Recipes for **DeepSeek-V4-Pro** on Dynamo across two backends (**vLLM**, **SGLan
 
 | Variant | Backend | Hardware | Manifest | Topology | Container |
 |---------|---------|----------|----------|----------|-----------|
-| **vllm-agg-b200**       | vLLM   | 1 node, 8x B200 | [`vllm/agg/b200/deploy.yaml`](vllm/agg/b200/deploy.yaml)         | TP=8 + Expert Parallel (single node)                                            | Standard Dynamo vLLM runtime image |
-| **vllm-agg-gb200**      | vLLM   | 2 nodes, 4x GB200 each (8 total) | [`vllm/agg/gb200/deploy.yaml`](vllm/agg/gb200/deploy.yaml)       | TP=8 + Expert Parallel cross-node, MNNVL via ComputeDomain (NVLink72)           | Standard Dynamo vLLM runtime image (arm64) |
-| **vllm-disagg-gb200**   | vLLM   | 2 nodes, 4x GB200 each (8 prefill + 8 decode = 16 total) | [`vllm/disagg/gb200/deploy.yaml`](vllm/disagg/gb200/deploy.yaml) | 1P + 1D, DP=8 + Expert Parallel per worker, MNNVL via ComputeDomain (NVLink72) | Standard Dynamo vLLM runtime image (arm64) |
+| **vllm-agg-b200**       | vLLM   | 1 node, 8x B200 | [`vllm/agg/b200/deploy.yaml`](vllm/agg/b200/deploy.yaml)         | TP=8 + Expert Parallel (single node)                                            | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.2`, multi-arch) |
+| **vllm-agg-gb200**      | vLLM   | 2 nodes, 4x GB200 each (8 total) | [`vllm/agg/gb200/deploy.yaml`](vllm/agg/gb200/deploy.yaml)       | TP=8 + Expert Parallel cross-node, MNNVL via ComputeDomain (NVLink72)           | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.2`, multi-arch) |
+| **vllm-disagg-gb200**   | vLLM   | 2 nodes, 4x GB200 each (8 prefill + 8 decode = 16 total) | [`vllm/disagg/gb200/deploy.yaml`](vllm/disagg/gb200/deploy.yaml) | 1P + 1D, DP=8 + Expert Parallel per worker, MNNVL via ComputeDomain (NVLink72) | Prebuilt NGC image (`...1.2.0-deepseek-v4-cuda13-dev.2`, multi-arch) |
 | **sglang-agg**          | SGLang | 1 node, 8x B200 | [`sglang/agg/deploy.yaml`](sglang/agg/deploy.yaml)               | TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP 3/4                                   | Prebuilt NGC image; optional [custom build](../container/) |
 
 A perf-benchmark Job for the GB200 disagg variant is provided alongside the deploy:
@@ -29,20 +29,6 @@ Status: **Experimental** (Day-0). Modality: text only.
    - **B200 variants** (`vllm-agg-b200`, `sglang-agg`): 8 B200 GPUs available on a single node (x86_64). TP=8 fills the box.
    - **GB200 variants** (`vllm-agg-gb200`, `vllm-disagg-gb200`): **2 GB200 nodes**, each with 4 GPUs (single NVL4 tray each), connected to the **same NVLink72 clique**. Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule`. The cluster must have the **DRA / ComputeDomain controller** installed (verify with `kubectl get crd | grep computedomain`); each manifest's `ComputeDomain` CR + `resourceClaims` are how the operator co-locates the worker pod set on the same NVLink72 fabric (the agg variant places 2 pods, the disagg variant places 4).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Pro`.
-4. **Container image.** Pick the path that matches your variant:
-
-   - **SGLang** (`sglang-agg`): the manifest pulls the prebuilt NGC image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` directly — **no build step required.** To rebuild from source (e.g. to pin a custom Dynamo branch or a different SGLang base), see the shared [`recipes/deepseek-v4/container/README.md`](../container/README.md).
-
-   - **vLLM** (`vllm-agg-b200` or `vllm-disagg-gb200`): Build the standard Dynamo vLLM runtime image per [`<repo_root>/container/README.md`](../../../container/README.md):
-
-     ```bash
-     container/render.py --framework vllm --target runtime --output-short-filename
-     docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
-     ```
-
-     For the GB200 variant, build with `--platform linux/arm64`. Then set the `image:` fields in your chosen `vllm/.../deploy.yaml` (Frontend + both worker pods on disagg) to your pushed image tag.
-
-   > The Pro and Flash recipes share the same image on each backend and architecture. If you've already built the vLLM or SGLang runtime for [deepseek-v4-flash](../deepseek-v4-flash/), reuse the tag here — model selection happens at runtime via `--model` (vLLM) or `--model-path` (SGLang).
 
 ## Quick Start
 
@@ -69,8 +55,6 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ### Deploy — vLLM B200 (`vllm-agg-b200`)
 
 ```bash
-# Update the `image:` fields in vllm/agg/b200/deploy.yaml to your Dynamo + vLLM
-# build (Prerequisite 4 — vLLM path).
 kubectl apply -f vllm/agg/b200/deploy.yaml -n ${NAMESPACE}
 
 # First launch of the decode worker takes up to ~90 minutes (TP=8 weight load +
@@ -83,8 +67,6 @@ kubectl wait --for=condition=Ready pod \
 ### Deploy — vLLM GB200 agg (`vllm-agg-gb200`)
 
 ```bash
-# Update the `image:` fields in vllm/agg/gb200/deploy.yaml to your arm64
-# Dynamo + vLLM build (Prerequisite 4 — vLLM path).
 kubectl apply -f vllm/agg/gb200/deploy.yaml -n ${NAMESPACE}
 
 # First launch of the decode worker takes up to ~90 minutes (TP=8 weight load
@@ -97,8 +79,6 @@ kubectl wait --for=condition=Ready pod \
 ### Deploy — vLLM GB200 disagg (`vllm-disagg-gb200`)
 
 ```bash
-# Update the `image:` fields in vllm/disagg/gb200/deploy.yaml to your arm64
-# Dynamo + vLLM build (Prerequisite 4 — vLLM path).
 kubectl apply -f vllm/disagg/gb200/deploy.yaml -n ${NAMESPACE}
 
 # First launch of each leader takes up to ~90 minutes (DP=8 weight load +
@@ -114,7 +94,6 @@ kubectl wait --for=condition=Ready pod \
 ### Deploy — SGLang (`sglang-agg`)
 
 ```bash
-# Manifest already points at the prebuilt NGC image — no image edit needed.
 kubectl apply -f sglang/agg/deploy.yaml -n ${NAMESPACE}
 
 # First launch of the decode worker takes up to ~60 minutes (TP=8 weight load +
@@ -231,7 +210,7 @@ Recipe-level (per-variant) settings:
 
 | | vLLM (`vllm-agg`) | SGLang (`sglang-agg`) |
 |---|---|---|
-| **Backend image** | Standard Dynamo vLLM runtime | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` |
+| **Backend image** | Prebuilt `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (multi-arch) | Prebuilt `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` |
 | **Parallelism** | TP=8, Expert Parallel enabled | TP=8 |
 | **MoE backend** | vLLM's V4 expert kernel (FP4) | FlashInfer MXFP4 |
 | **KV cache** | FP8, block size 256 | engine default |
@@ -307,13 +286,13 @@ If `tool_calls` is missing and raw tool-call markers appear in `content`, confir
 
 ### vLLM-specific
 
-- **Image tag.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) ship with `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`. Replace with your built Dynamo vLLM runtime tag — see Prerequisite 4. Both GB200 manifests expect an arm64 build.
+- **Prebuilt images.** All three vLLM manifests (`vllm/agg/b200/`, `vllm/agg/gb200/`, `vllm/disagg/gb200/`) reference `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (multi-arch). To rebuild from source (custom Dynamo branch, different vLLM base, etc.), see [`<repo_root>/container/README.md`](../../../container/README.md).
 - **Engine-ready timeout.** `VLLM_ENGINE_READY_TIMEOUT_S=5400` is set to match the startup probe budget (`failureThreshold: 540` at `periodSeconds: 10`).
 - **GB200: agg vs. disagg.** Both spread V4-Pro across two GB200 NVL4 trays via MNNVL/ComputeDomain. The agg variant runs one TP=8 group across both nodes (lower-latency, simpler topology, 2 pods); the disagg variant runs separate prefill and decode DP=8 workers (higher steady-state throughput at high concurrency, 4 pods). Use the agg variant for general-purpose serving and the disagg variant when prefill/decode separation pays off for the workload.
 
 ### SGLang-specific
 
-- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
+- **Prebuilt image.** `sglang/agg/deploy.yaml` already references the public NGC tag `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2`. To rebuild (custom Dynamo branch, different SGLang base, etc.), see [`recipes/deepseek-v4/container/README.md`](../container/README.md).
 - **DeepGEMM / FlashInfer warmup.** `SGLANG_JIT_DEEPGEMM_PRECOMPILE=0` + `SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1` skip the slow precompile and use the fast warmup path. `--disable-flashinfer-autotune` skips per-shape FlashInfer autotuning at startup; the dsv4 base ships pre-tuned defaults.
 - **NCCL / Gloo.** `NCCL_CUMEM_ENABLE=1` is set for V4 NCCL collectives on Blackwell. `GLOO_SOCKET_IFNAME=eth0` pins Gloo to the standard pod interface.
 

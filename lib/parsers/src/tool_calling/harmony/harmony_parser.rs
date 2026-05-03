@@ -2,11 +2,75 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::ToolDefinition;
+use super::super::json::base_json_parser::try_repair_truncated_json;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 use openai_harmony::chat::{Content::Text, Role};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding};
+use regex::Regex;
 use serde_json::Value;
+use std::sync::OnceLock;
+
+static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Regex fallback used only when `openai_harmony`'s tokenizer rejects the
+/// input — alternative on this path is silent-drop. Worst case is missing
+/// a call, never fabricating one (full structural signature required).
+fn commentary_block_regex() -> &'static Regex {
+    COMMENTARY_BLOCK_REGEX.get_or_init(|| {
+        // Name is `[\w.\-]+` (alphanumeric / dot / hyphen / underscore).
+        // Between name and `<|message|>` we tolerate optional
+        // `<|constrain|>json` and whitespace by using non-greedy `.*?`.
+        // Args end at either `<|call|>` (normal close) or end-of-string
+        // (`\z`, the bare-envelope CASE.5 variant where the model never
+        // emitted `<|call|>` before EOS / max_tokens).
+        Regex::new(
+            r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
+        )
+        .expect("commentary block regex")
+    })
+}
+
+/// Extract calls via regex when harmony's strict tokenizer rejects the input
+/// (truncated JSON, multiple back-to-back commentary blocks, etc.).
+/// Returns (calls, residual_text) where residual_text is everything not
+/// consumed by a matched commentary block — preserved so analysis prose and
+/// non-tool suffixes aren't dropped.
+fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
+    let mut out = Vec::new();
+    let mut residual = String::new();
+    let mut cursor = 0;
+    for (i, cap) in commentary_block_regex().captures_iter(text).enumerate() {
+        let m = cap.get(0).expect("regex match has full span");
+        residual.push_str(&text[cursor..m.start()]);
+        cursor = m.end();
+
+        let name = cap.name("name").map(|x| x.as_str()).unwrap_or("");
+        let raw_args = cap.name("args").map(|x| x.as_str().trim()).unwrap_or("{}");
+        if name.is_empty() {
+            continue;
+        }
+        let args_json = match serde_json::from_str::<Value>(raw_args) {
+            Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| raw_args.to_string()),
+            Err(_) => match try_repair_truncated_json(raw_args)
+                .and_then(|r| serde_json::from_str::<Value>(&r).ok())
+            {
+                Some(v) => serde_json::to_string(&v).unwrap_or_else(|_| raw_args.to_string()),
+                None => raw_args.to_string(),
+            },
+        };
+        out.push(ToolCallResponse {
+            id: format!("call-{}", i + 1),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name: name.to_string(),
+                arguments: args_json,
+            },
+        });
+    }
+    residual.push_str(&text[cursor..]);
+    (out, residual.trim().to_string())
+}
 
 static GLOBAL_HARMONY_GPTOSS_ENCODING: tokio::sync::OnceCell<
     Result<HarmonyEncoding, anyhow::Error>,
@@ -46,7 +110,7 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 /// * `Err(e)` - If parsing fails due to encoding or tokenization errors
 pub async fn parse_tool_calls_harmony_complete(
     text: &str,
-    _config: &JsonParserConfig,
+    config: &JsonParserConfig,
     _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let enc = match get_harmony_encoding().await.as_ref() {
@@ -63,8 +127,18 @@ pub async fn parse_tool_calls_harmony_complete(
         Ok(messages) => messages,
         Err(e) => {
             tracing::debug!(
-                "Failed to parse messages from completion tokens: {e}. Tool calls will not be parsed."
+                "Failed to parse messages from completion tokens: {e}. Falling back to regex extraction."
             );
+            // Recovery: harmony rejects parallel commentary blocks and
+            // truncated JSON. Gated on `allow_eof_recovery` so streaming
+            // jails (where the tokenizer often rejects mid-chunk before all
+            // tokens have arrived) don't extract a partial call.
+            if config.allow_eof_recovery {
+                let (calls, residual) = extract_calls_via_regex(text);
+                if !calls.is_empty() {
+                    return Ok((calls, Some(residual)));
+                }
+            }
             return Ok((vec![], Some(text.to_string())));
         }
     };
@@ -95,12 +169,22 @@ pub async fn parse_tool_calls_harmony_complete(
             };
 
             let args = match message.content.first() {
-                Some(Text(text)) => match serde_json::from_str::<Value>(text.text.trim()) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        Value::Null // Set args to null if it's not valid JSON
+                Some(Text(text)) => {
+                    let trimmed = text.text.trim();
+                    match serde_json::from_str::<Value>(trimmed) {
+                        Ok(value) => value,
+                        Err(_) if config.allow_eof_recovery => {
+                            // Truncation recovery: balance unclosed strings /
+                            // braces (max_tokens / EOS pattern) and retry.
+                            // Gated so streaming early-exit doesn't extract
+                            // a partial call with synthesized closers.
+                            try_repair_truncated_json(trimmed)
+                                .and_then(|r| serde_json::from_str::<Value>(&r).ok())
+                                .unwrap_or(Value::Null)
+                        }
+                        Err(_) => Value::Null,
                     }
-                },
+                }
                 _ => {
                     Value::Null // Set args to null if it's not a text content
                 }
@@ -283,33 +367,95 @@ mod tests {
     // customer sees HTTP 200 with fewer tool_calls than the model emitted.
     // Promoting this to recovery is a parser change.
     #[tokio::test] // CASE.2 — gpt-oss
-    async fn test_parse_harmony_multiple_calls_silent_drop() {
+    async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
-        let (tool_calls, _normal) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
-        assert_eq!(
-            tool_calls.len(),
-            0,
-            "harmony today drops both calls when two commentary blocks appear back-to-back"
-        );
+        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tool_calls.len(), 2);
+        let (n0, a0) = extract_name_and_args(tool_calls[0].clone());
+        let (n1, a1) = extract_name_and_args(tool_calls[1].clone());
+        assert_eq!(n0, "a");
+        assert_eq!(a0["x"], 1);
+        assert_eq!(n1, "b");
+        assert_eq!(a1["y"], 2);
     }
 
     // Pin current behavior on truncated JSON args. harmony today drops the
     // call entirely rather than falling back to a string-form arguments or
     // surfacing an explicit error.
     #[tokio::test] // CASE.4 — gpt-oss
-    async fn test_parse_harmony_truncated_json_silent_drop() {
+    async fn test_parse_harmony_truncated_json_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
-        let (tool_calls, _normal) =
-            parse_tool_calls_harmony_complete(text, &Default::default(), None)
-                .await
-                .unwrap();
-        assert_eq!(
-            tool_calls.len(),
-            0,
-            "harmony today drops the call when JSON args are truncated mid-value"
+        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
+    }
+
+    // Bare-envelope CASE.5: no preceding `analysis` block, no `<|call|>`
+    // at the end. harmony's tokenizer rejects this; the regex fallback
+    // accepts EOS as a synthetic close.
+    #[tokio::test] // CASE.5 — gpt-oss
+    async fn test_parse_harmony_bare_envelope_no_call_token_recovers() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
+        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
+    }
+
+    // The regex fallback must preserve any non-tool spans (prose before
+    // the call, suffix after `<|call|>`) as `normal_text`, not zero them.
+    #[tokio::test]
+    async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
+        let text = r#"PREFIX <|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
+        let (tool_calls, normal) = parse_tool_calls_harmony_complete(
+            text,
+            &JsonParserConfig {
+                allow_eof_recovery: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let normal = normal.unwrap_or_default();
+        assert!(
+            normal.contains("PREFIX"),
+            "normal must keep prefix: {normal:?}"
+        );
+        assert!(
+            normal.contains("SUFFIX"),
+            "normal must keep suffix: {normal:?}"
         );
     }
 

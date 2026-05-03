@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # DeepSeek-V4-Flash on vLLM, aggregated, GB200 (TP=4 + EP, single NVL4 tray).
-# Image: replace `:my-tag` with an arm64 Dynamo + vLLM build.
 # Weights: pre-staged on the `model-cache` PVC by `../../model-cache/model-download.yaml`.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -30,7 +29,7 @@ spec:
             value: arm64
             effect: NoSchedule
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -56,7 +55,7 @@ spec:
             value: arm64
             effect: NoSchedule
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace/examples/backends/vllm
           # ~60 min budget for first launch (10 * 360 = 3600s).
           startupProbe:

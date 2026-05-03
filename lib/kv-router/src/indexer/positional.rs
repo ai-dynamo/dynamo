@@ -162,6 +162,18 @@ impl SyncIndexer for PositionalIndexer {
                         c.inc(kind, result);
                     }
                 }
+                WorkerTask::EventWithAck { event, resp } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
+                    let applied = result.is_ok();
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                    let _ = resp.send(applied);
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
                 }
@@ -501,7 +513,7 @@ impl PositionalIndexer {
         bytes[..8].copy_from_slice(&prev_seq_hash.to_le_bytes());
         bytes[8..].copy_from_slice(&current_local_hash.to_le_bytes());
 
-        crate::protocols::compute_hash(&bytes)
+        dynamo_tokens::compute_hash_v2(&bytes, crate::protocols::XXH3_SEED)
     }
 
     /// Ensure seq_hashes is computed up to and including target_pos.

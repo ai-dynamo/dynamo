@@ -20,6 +20,8 @@ pub struct AgentTracePolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
+    pub tool_events_zmq_endpoint: Option<String>,
+    pub tool_events_zmq_topic: Option<String>,
 }
 
 static POLICY: OnceLock<AgentTracePolicy> = OnceLock::new();
@@ -47,6 +49,16 @@ fn load_from_env() -> AgentTracePolicy {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let tool_events_zmq_endpoint =
+        std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    let tool_events_zmq_topic =
+        std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
     let capacity = std::env::var(env_agent_trace::DYN_AGENT_TRACE_CAPACITY)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -71,7 +83,7 @@ fn load_from_env() -> AgentTracePolicy {
         .filter(|value| *value > 0);
 
     AgentTracePolicy {
-        enabled: !sinks.is_empty(),
+        enabled: !sinks.is_empty() || tool_events_zmq_endpoint.is_some(),
         sinks,
         output_path,
         capacity,
@@ -79,6 +91,8 @@ fn load_from_env() -> AgentTracePolicy {
         jsonl_flush_interval_ms,
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
+        tool_events_zmq_endpoint,
+        tool_events_zmq_topic,
     }
 }
 
