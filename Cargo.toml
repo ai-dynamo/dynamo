@@ -63,6 +63,7 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
 
 # velo
 velo = { version = "0.1.0" }
+velo-messenger = { version = "=0.1.0" }
 velo-rendezvous = { version = "=0.1.0" }
 
 # External dependencies
