@@ -26,7 +26,7 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Initial sync** | Not built in — consumer starts from live stream | Tree dump (request with `start_event_id=None`) |
 | **Authoritative state** | Buffer only | RadixTree (buffer is an optimization layer) |
 | **Compression / dedup** | Events stored as-is (pre-serialized) | RadixTree compresses shared prefixes across sequences |
-| **Pruning** | Implicit via `maxlen` eviction | TTL + size-based pruning via `PruneManager` |
+| **Expiration** | Implicit via `maxlen` eviction | TTL expiration via `PruneManager` |
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
 | **Thread model** | Background thread with queue | Single-threaded tokio runtime on dedicated OS thread |

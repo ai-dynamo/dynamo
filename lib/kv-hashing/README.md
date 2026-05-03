@@ -53,7 +53,7 @@ pub struct UniversalBlock {
 }
 
 impl UniversalBlock {
-    pub fn position(&self) -> u64 { self.plh.position() }
+    pub fn position(&self) -> u32 { self.plh.position_u32() }
     pub fn sequence_hash(&self) -> SequenceHash { self.plh.current_sequence_hash() }
 }
 ```

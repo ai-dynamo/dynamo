@@ -661,6 +661,11 @@ impl PositionalLineageHash {
     /// Returns `u64` for source compatibility with the pre-universal-hashing API used
     /// by `lib/kvbm-*`. The native storage is `u32`; this widens at the boundary.
     /// Callers that want the native width can read [`Self::position_u32`].
+    ///
+    // TODO: collapse this into [`Self::position_u32`] — `position()` should return `u32`
+    // (the native 20-bit width). Not deprecating yet to avoid churn across `lib/kvbm-*`
+    // call sites that annotate `: u64` or compare against `as u64`. Flip after those
+    // call sites are migrated; then `position_u32` can be removed.
     #[inline]
     pub fn position(&self) -> u64 {
         self.flags.position() as u64
@@ -668,6 +673,8 @@ impl PositionalLineageHash {
 
     /// Returns the block position as `u32`, the native storage width. Single mask —
     /// hot path.
+    ///
+    // TODO: this becomes `position()` once the `u64`-returning shim above is retired.
     #[inline]
     pub fn position_u32(&self) -> u32 {
         self.flags.position()
@@ -853,6 +860,56 @@ impl std::fmt::Debug for PositionalLineageHash {
 impl std::fmt::Display for PositionalLineageHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.format_impl(f)
+    }
+}
+
+impl std::cmp::PartialOrd for PositionalLineageHash {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::cmp::Ord for PositionalLineageHash {
+    /// Lexicographic order: [`Self::position`], then [`Self::current_hash_fragment`],
+    /// then the raw `(current, parent, flags)` tuple so the order is total and
+    /// consistent with [`Eq`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` and `other` belong to different regimes — i.e. they differ
+    /// in any non-position bit of `flags` (`block_size`, `partition`, `synthetic`,
+    /// or `version`). Comparing across regimes is a programming error: at
+    /// `block_size = 16`, position 5 covers token 80; at `block_size = 64`,
+    /// position 5 covers token 320 — `position()` is not on the same axis. The
+    /// hot-path check is a single masked-word compare; field decoding only runs
+    /// on the panic path.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let s = self.flags.raw();
+        let o = other.flags.raw();
+        if (s & !POSITION_MASK) != (o & !POSITION_MASK) {
+            panic!(
+                "PositionalLineageHash::cmp: regime mismatch — \
+                 left {{ block_size: {}, partition: {}, synthetic: {}, version: {} }}, \
+                 right {{ block_size: {}, partition: {}, synthetic: {}, version: {} }}",
+                self.flags.block_size(),
+                self.flags.partition(),
+                self.flags.is_synthetic(),
+                self.flags.version(),
+                other.flags.block_size(),
+                other.flags.partition(),
+                other.flags.is_synthetic(),
+                other.flags.version(),
+            );
+        }
+        self.position()
+            .cmp(&other.position())
+            .then_with(|| {
+                self.current_hash_fragment()
+                    .cmp(&other.current_hash_fragment())
+            })
+            .then_with(|| {
+                (self.current, self.parent, s).cmp(&(other.current, other.parent, o))
+            })
     }
 }
 
@@ -3108,6 +3165,99 @@ mod tests {
             PlhFlags::for_block_size(16).raw(),
         );
         assert_ne!(plh.as_u128(), plh3.as_u128());
+    }
+
+    // The four ord-tests below use the [`PositionalLineageHash::new`] deprecated
+    // shim (fixed `block_size=16`, partition=0, V1, non-synthetic) — that keeps
+    // every PLH in the same regime, so the cross-regime panic in `Ord::cmp`
+    // does not fire. `#[allow(deprecated)]` suppresses the shim's warning.
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_positional_lineage_hash_ord_by_position_then_current_fragment() {
+        let at_5_low = PositionalLineageHash::new(0x10, Some(0x1111), 5);
+        let at_5_high = PositionalLineageHash::new(0x20, Some(0x1111), 5);
+        assert!(
+            at_5_low.current_hash_fragment() < at_5_high.current_hash_fragment(),
+            "test assumes distinct current fragments at the same position"
+        );
+        assert!(at_5_low < at_5_high);
+        assert!(at_5_high > at_5_low);
+
+        let at_3 = PositionalLineageHash::new(0x99, Some(0x2222), 3);
+        assert!(at_3 < at_5_low);
+        assert!(at_5_high < PositionalLineageHash::new(0x01, Some(0x3333), 6));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_positional_lineage_hash_ord_tiebreak_parent_via_raw_fields() {
+        let same_pos_same_current = PositionalLineageHash::new(0x1234, Some(0x100), 10);
+        let same_pos_same_current_other_parent =
+            PositionalLineageHash::new(0x1234, Some(0x200), 10);
+        assert_eq!(same_pos_same_current.position(), 10);
+        assert_eq!(
+            same_pos_same_current.position(),
+            same_pos_same_current_other_parent.position()
+        );
+        assert_eq!(
+            same_pos_same_current.current_hash_fragment(),
+            same_pos_same_current_other_parent.current_hash_fragment()
+        );
+        assert_ne!(same_pos_same_current, same_pos_same_current_other_parent);
+        assert_ne!(
+            same_pos_same_current.cmp(&same_pos_same_current_other_parent),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_positional_lineage_hash_vec_sort_matches_ord() {
+        let a = PositionalLineageHash::new(0x30, None, 0);
+        let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
+        let c = PositionalLineageHash::new(0x20, Some(0x30), 2);
+        let mut v = vec![b, a, c];
+        v.sort();
+        assert_eq!(v, vec![a, b, c]);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_positional_lineage_hash_itertools_sorted() {
+        use itertools::Itertools;
+
+        let a = PositionalLineageHash::new(0x30, None, 0);
+        let b = PositionalLineageHash::new(0x10, Some(0x30), 2);
+        let c = PositionalLineageHash::new(0x20, Some(0x30), 2);
+        let sorted: Vec<_> = vec![b, a, c].into_iter().sorted().collect();
+        assert_eq!(sorted, vec![a, b, c]);
+    }
+
+    #[test]
+    #[should_panic(expected = "regime mismatch")]
+    fn test_positional_lineage_hash_cmp_cross_block_size_panics() {
+        let bs16 = PlhFlags::new(16, 0).raw();
+        let bs64 = PlhFlags::new(64, 0).raw();
+        let a = PositionalLineageHash::from_raw_parts(0, 0, 0, bs16);
+        let b = PositionalLineageHash::from_raw_parts(0, 0, 0, bs64);
+        let _ = a.cmp(&b);
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_msgpack_json_roundtrip() {
+        let flags = PlhFlags::new(16, 0).raw();
+        let plh = PositionalLineageHash::from_raw_parts(0xDEAD_BEEF, 0xCAFE, 7, flags);
+
+        let mp_bytes = rmp_serde::to_vec(&plh).expect("plh msgpack serialize");
+        let mp_decoded: PositionalLineageHash =
+            rmp_serde::from_slice(&mp_bytes).expect("plh msgpack deserialize");
+        assert_eq!(plh, mp_decoded);
+
+        let js = serde_json::to_string(&plh).expect("plh json serialize");
+        let js_decoded: PositionalLineageHash =
+            serde_json::from_str(&js).expect("plh json deserialize");
+        assert_eq!(plh, js_decoded);
     }
 
     // === Tokens From Impls ===

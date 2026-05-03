@@ -1292,3 +1292,570 @@ mod forward_pass_metrics {
         assert!(fpm.wall_time_secs > 0.0);
     }
 }
+
+#[cfg(feature = "kvbm-offload")]
+mod offload {
+    use dynamo_tokens::PositionalLineageHash;
+    use kvbm_engine::G2;
+    use kvbm_logical::manager::BlockManager;
+    use uuid::Uuid;
+
+    use crate::common::protocols::{DirectRequest, MockEngineArgs};
+    use crate::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
+
+    use super::super::core::VllmCore;
+
+    /// Seed `g2` with each PLH by allocating a fresh slot, staging,
+    /// registering, and dropping — so the block lands in the inactive
+    /// pool and `find_matches_with_options(plh)` returns it.
+    fn seed_g2_blocks(g2: &BlockManager<G2>, plhs: &[PositionalLineageHash]) {
+        for plh in plhs {
+            let (mut alloc, _evicted) = g2.allocate_blocks_with_evictions(1).expect("G2 allocate");
+            let mutable = alloc.pop().unwrap();
+            let staged = mutable.stage(*plh, g2.block_size()).expect("G2 stage");
+            drop(g2.register_block(staged));
+        }
+    }
+
+    /// Pass entry must call `tick_offload_engine` when an engine is
+    /// attached — otherwise PS models never advance and swap-ins
+    /// would hang forever. Verifies by observing that
+    /// `earliest_offload_deadline` stays `None` on an idle engine
+    /// across repeated passes (a no-op tick that doesn't panic is
+    /// already a useful signal; the full tick path is covered in
+    /// `engine::tests` — this test just confirms the scheduler hook
+    /// is wired).
+    #[tokio::test]
+    async fn execute_pass_ticks_offload_engine_when_attached() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(8)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let engine = MockOffloadEngine::new(KvbmOffloadConfig::default())
+            .await
+            .expect("engine build");
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        assert!(core.kv_manager.earliest_offload_deadline().is_none());
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, 0.0);
+        core.execute_pass(&mut collector, 10.0);
+        assert!(core.kv_manager.earliest_offload_deadline().is_none());
+    }
+
+    /// Retain-and-promote: an admission-parked swap-in whose handle reports
+    /// complete must be removed from `requests_awaiting_swap_in` during the
+    /// next pass; a handle that's still pending must survive.
+    #[tokio::test]
+    async fn ready_swap_ins_drain_on_pass_entry() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(8)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g2_to_g1_gbps: 1.0,
+            ..Default::default()
+        };
+        let engine = MockOffloadEngine::new(config).await.expect("engine build");
+        engine.tick(0.0);
+
+        let uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let plhs = core
+            .state
+            .requests
+            .get(&uuid)
+            .unwrap()
+            .sequence
+            .positional_lineage_hashes();
+        assert_eq!(plhs.len(), 1, "test request should have one full block");
+        seed_g2_blocks(engine.g2_manager(), &plhs);
+
+        core.kv_manager.attach_new_offload_engine(engine);
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(
+            pass1.admissions.len(),
+            0,
+            "parked swap-in should not admit in the same pass"
+        );
+        assert_eq!(
+            core.requests_awaiting_swap_in.len(),
+            1,
+            "request must be parked on swap-in"
+        );
+
+        // Before finish time (0.5 ms of a 1 ms transfer): handle stays
+        // pending, entry must survive the pass-entry retain.
+        core.execute_pass(&mut collector, 0.5);
+        assert_eq!(
+            core.requests_awaiting_swap_in.len(),
+            1,
+            "pending swap-in must survive"
+        );
+
+        // Past finish time: tick flips the bit, retain drops the entry.
+        core.execute_pass(&mut collector, 1.0);
+        assert!(
+            core.requests_awaiting_swap_in.is_empty(),
+            "completed swap-in must drain on pass entry"
+        );
+    }
+
+    /// A parked G2→G1 transfer must reserve its destination G1 slot before the
+    /// bandwidth model starts. Otherwise a following cold request could allocate
+    /// the same HBM capacity while DMA is still in flight.
+    #[tokio::test]
+    async fn g2_swap_in_reserves_destination_slot_before_transfer() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(1)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g2_to_g1_gbps: 1.0,
+            ..Default::default()
+        };
+        let engine = MockOffloadEngine::new(config).await.expect("engine build");
+        engine.tick(0.0);
+
+        let hit_uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 2,
+            uuid: Some(hit_uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let cold_uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (4..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(cold_uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let plhs = core
+            .state
+            .requests
+            .get(&hit_uuid)
+            .unwrap()
+            .sequence
+            .positional_lineage_hashes();
+        assert_eq!(plhs.len(), 1, "test request should have one full block");
+        seed_g2_blocks(engine.g2_manager(), &plhs);
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(
+            core.requests_awaiting_swap_in.len(),
+            1,
+            "G2 hit should be parked on swap-in"
+        );
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            1,
+            "parked swap-in must pin one destination G1 slot"
+        );
+        assert_eq!(
+            pass.admissions.len(),
+            0,
+            "cold request must not allocate the slot reserved for in-flight swap-in"
+        );
+        assert!(
+            core.state.waiting.contains(&cold_uuid),
+            "cold request should remain waiting for G1 capacity"
+        );
+    }
+
+    /// Completed swap-ins have just paid G2→G1 bandwidth and registered their
+    /// blocks into G1 inactive. They must re-enter at the front, before cold
+    /// requests can allocate and evict those freshly onboarded blocks.
+    #[tokio::test]
+    async fn completed_swap_ins_reenter_front_preserving_order() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(2)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let config = KvbmOffloadConfig {
+            block_size_tokens: 4,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g2_to_g1_gbps: 2.0,
+            ..Default::default()
+        };
+        let engine = MockOffloadEngine::new(config).await.expect("engine build");
+        engine.tick(0.0);
+
+        let first_hit = Uuid::from_u128(1);
+        core.receive(DirectRequest {
+            tokens: (0..4).collect(),
+            max_output_tokens: 2,
+            uuid: Some(first_hit),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let second_hit = Uuid::from_u128(2);
+        core.receive(DirectRequest {
+            tokens: (4..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(second_hit),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let cold = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: (8..12).collect(),
+            max_output_tokens: 2,
+            uuid: Some(cold),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut hit_plhs = Vec::new();
+        for uuid in [first_hit, second_hit] {
+            let plhs = core
+                .state
+                .requests
+                .get(&uuid)
+                .unwrap()
+                .sequence
+                .positional_lineage_hashes();
+            assert_eq!(plhs.len(), 1, "each hit request should have one block");
+            hit_plhs.extend(plhs);
+        }
+        seed_g2_blocks(engine.g2_manager(), &hit_plhs);
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(
+            pass1.admissions.len(),
+            0,
+            "both G2 hits should park, while cold request has no free G1 slot"
+        );
+        assert_eq!(core.requests_awaiting_swap_in.len(), 2);
+        assert_eq!(
+            core.state.waiting.iter().copied().collect::<Vec<_>>(),
+            vec![cold],
+            "only the cold request should remain in waiting while hits are parked"
+        );
+
+        // Both 1 MB transfers share a 2 GB/s link, so each receives
+        // 1 GB/s and finishes at 1 ms. On promotion they should be
+        // admitted before the cold request, preserving their original
+        // parking order.
+        let pass2 = core.execute_pass(&mut collector, 1.0);
+        let admitted: Vec<_> = pass2
+            .admissions
+            .iter()
+            .map(|admission| admission.uuid)
+            .collect();
+        assert_eq!(
+            admitted,
+            vec![first_hit, second_hit],
+            "completed swap-ins should re-enter ahead of cold requests in order"
+        );
+    }
+
+    /// End-to-end: a request whose prefix lives only in G2 (engine
+    /// attached, request fully cold) must be parked on first
+    /// admission, promoted on tick past the swap-in's finish time, and
+    /// scheduled on the subsequent pass with the swapped-in prefix
+    /// counted as cached (no fresh `Stored` event for the prefix on
+    /// admission).
+    #[tokio::test]
+    async fn cold_request_with_g2_prefix_swaps_in_then_admits() {
+        // 4 tokens per block; sequence has 16 tokens → 4 full blocks.
+        let block_size = 4;
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(16)
+            .block_size(block_size)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        // 250 KB/block × 4 blocks ÷ 1 GB/s = 1.0 ms swap-in. Test then
+        // probes at t=0.0 (parked), t=0.5 (still in flight), t=2.0
+        // (completed and admitted in the same pass).
+        let config = KvbmOffloadConfig {
+            block_size_tokens: block_size,
+            block_size_bytes: Some(250_000),
+            bandwidth_g2_to_g1_gbps: 1.0,
+            ..Default::default()
+        };
+        let engine = MockOffloadEngine::new(config).await.expect("engine build");
+        engine.tick(0.0);
+
+        // Receive the request first, then read its PLHs out of the
+        // scheduler's own state so we don't risk drift from
+        // `VllmCore::receive`'s ActiveSequence construction.
+        let uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..(block_size * 4) as u32).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let plhs = core
+            .state
+            .requests
+            .get(&uuid)
+            .unwrap()
+            .sequence
+            .positional_lineage_hashes();
+        assert!(!plhs.is_empty(), "test sequence must have full blocks");
+
+        seed_g2_blocks(engine.g2_manager(), &plhs);
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        // Pass 1 (t=0.0): admission detects G2 prefix, parks the
+        // request, schedules nothing.
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(
+            core.requests_awaiting_swap_in.len(),
+            1,
+            "request must be parked on swap-in"
+        );
+        assert_eq!(
+            pass1.admissions.len(),
+            0,
+            "no admission should fire while parked"
+        );
+
+        // Pass 2 (t=0.5): swap-in still in flight (1MB / 1GB/s = 1ms
+        // finish; only 0.5ms elapsed). Request stays parked.
+        core.execute_pass(&mut collector, 0.5);
+        assert_eq!(core.requests_awaiting_swap_in.len(), 1);
+
+        // Pass 3 (t=2.0): tick past finish → flag flips → promote
+        // registers PLHs in G1 inactive pool → re-adds to waiting.
+        // Same pass then admits the request via schedule_request,
+        // which sees cached_tokens > 0 (InactiveHit) for the prefix.
+        let pass3 = core.execute_pass(&mut collector, 2.0);
+        assert!(
+            core.requests_awaiting_swap_in.is_empty(),
+            "swap-in must drain"
+        );
+        assert_eq!(
+            pass3.admissions.len(),
+            1,
+            "promoted request must be admitted in the same pass"
+        );
+        let admission = &pass3.admissions[0];
+        assert_eq!(admission.uuid, uuid);
+        assert!(
+            admission.reused_input_tokens > 0,
+            "swap-in'd prefix must count as reused tokens; got {}",
+            admission.reused_input_tokens
+        );
+    }
+
+    /// Replaying the same synthetic G2-offload trace twice with the same
+    /// `now_ms` sequence must produce byte-identical scheduler behaviour.
+    /// Live/offline mode is a caller concern: the engine sees only the
+    /// timestamps passed into `tick` / `try_onboard_prefix`.
+    #[tokio::test]
+    async fn equivalence_replayed_twice_with_g2_offload() {
+        use std::sync::{Arc, Mutex};
+
+        use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+
+        use crate::common::protocols::{KvCacheEventSink, KvEventPublishers};
+        use crate::scheduler::AdmissionEvent;
+
+        // Synthetic trace: each request has a 4-block (16-token)
+        // prefix. Requests R0..R3 share the same prompt → all hit the
+        // same G2-resident PLHs. Request R4 is unique → no G2 hit,
+        // takes the normal allocate-fresh path.
+        const BLOCK_SIZE: usize = 4;
+        const NUM_BLOCKS: usize = 4;
+        const TOKENS_PER_REQ: usize = BLOCK_SIZE * NUM_BLOCKS;
+
+        #[derive(Default, Clone)]
+        struct CapturingSink {
+            events: Arc<Mutex<Vec<KvCacheEvent>>>,
+        }
+        impl KvCacheEventSink for CapturingSink {
+            fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct ModeReport {
+            // (uuid_index_in_trace, reused_input_tokens) per admission.
+            admissions: Vec<(usize, usize)>,
+            // (Stored, Removed) event counts.
+            stored_count: usize,
+            removed_count: usize,
+            // Total swap-in promotions observed (parked → admitted).
+            swap_in_admissions: usize,
+        }
+
+        async fn run_mode() -> ModeReport {
+            let args = MockEngineArgs::builder()
+                .num_gpu_blocks(32)
+                .block_size(BLOCK_SIZE)
+                .max_num_batched_tokens(Some(256))
+                .max_num_seqs(Some(8))
+                .enable_chunked_prefill(true)
+                .enable_prefix_caching(true)
+                .speedup_ratio(0.0)
+                .build()
+                .unwrap();
+            let sink = CapturingSink::default();
+            let publishers = KvEventPublishers::new(Some(Arc::new(sink.clone()) as _), None);
+            let mut core = VllmCore::new_with_sink(args, 0, publishers);
+
+            // 4 requests × 4 blocks × 250 KB each = 4 MB of swap-in
+            // work. Under PS with N=4 on a 4 GB/s link (effective
+            // 1 GB/s per transfer), each completes at t=1.0 ms.
+            let config = KvbmOffloadConfig {
+                block_size_tokens: BLOCK_SIZE,
+                block_size_bytes: Some(250_000),
+                bandwidth_g2_to_g1_gbps: 4.0,
+                ..Default::default()
+            };
+            let engine = MockOffloadEngine::new(config).await.unwrap();
+            engine.tick(0.0);
+
+            // Receive 4 G2-hit requests sharing one prompt + 1 fresh
+            // request. Receive R0 first so we can read its PLHs from
+            // the scheduler's own state (avoids building a parallel
+            // `ActiveSequence` that could drift from `VllmCore::receive`).
+            let shared_tokens: Vec<u32> = (0..TOKENS_PER_REQ as u32).collect();
+            let mut uuids = Vec::with_capacity(5);
+            for i in 0..4 {
+                let uuid = Uuid::from_u128(1000 + i as u128);
+                core.receive(DirectRequest {
+                    tokens: shared_tokens.clone(),
+                    max_output_tokens: 2,
+                    uuid: Some(uuid),
+                    dp_rank: 0,
+                    arrival_timestamp_ms: None,
+                });
+                uuids.push(uuid);
+            }
+            let r4 = Uuid::from_u128(2000);
+            core.receive(DirectRequest {
+                tokens: ((TOKENS_PER_REQ as u32)..(2 * TOKENS_PER_REQ as u32)).collect(),
+                max_output_tokens: 2,
+                uuid: Some(r4),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+            uuids.push(r4);
+
+            let plhs = core
+                .state
+                .requests
+                .get(&uuids[0])
+                .unwrap()
+                .sequence
+                .positional_lineage_hashes();
+            seed_g2_blocks(engine.g2_manager(), &plhs);
+            core.kv_manager.attach_new_offload_engine(engine);
+
+            // Drive 5 passes at well-separated `now_ms`. Pass 1 parks
+            // the G2 hits + admits R4 (no G2 prefix, falls through).
+            // Passes 2-3 are pre-completion. Passes 4-5 promote and
+            // admit R0..R3.
+            let timestamps = [0.0, 0.5, 0.8, 1.5, 3.0];
+            let mut all_admissions: Vec<AdmissionEvent> = Vec::new();
+            let mut collector = crate::replay::TraceCollector::default();
+            let mut swap_in_admissions = 0usize;
+            for &ts in &timestamps {
+                let parked_before = core.requests_awaiting_swap_in.len();
+                let pass = core.execute_pass(&mut collector, ts);
+                let parked_after = core.requests_awaiting_swap_in.len();
+                swap_in_admissions += parked_before.saturating_sub(parked_after);
+                all_admissions.extend(pass.admissions);
+            }
+
+            let admissions = all_admissions
+                .into_iter()
+                .map(|a| {
+                    let idx = uuids.iter().position(|u| *u == a.uuid).unwrap();
+                    (idx, a.reused_input_tokens)
+                })
+                .collect();
+            let events = sink.events.lock().unwrap().clone();
+            let stored_count = events
+                .iter()
+                .filter(|e| matches!(e.data, KvCacheEventData::Stored(_)))
+                .count();
+            let removed_count = events
+                .iter()
+                .filter(|e| matches!(e.data, KvCacheEventData::Removed(_)))
+                .count();
+
+            ModeReport {
+                admissions,
+                stored_count,
+                removed_count,
+                swap_in_admissions,
+            }
+        }
+
+        let report_first = run_mode().await;
+        let report_second = run_mode().await;
+
+        // Sanity: the trace must actually have exercised G2 offload —
+        // otherwise this test reduces to "G1 mode parity" and gives a
+        // false sense of coverage.
+        assert!(
+            report_first.swap_in_admissions > 0,
+            "trace should exercise at least one G2 swap-in admission"
+        );
+        assert_eq!(
+            report_first, report_second,
+            "replayed G2-offload trace must be deterministic\nfirst:  {report_first:?}\nsecond: {report_second:?}",
+        );
+    }
+}

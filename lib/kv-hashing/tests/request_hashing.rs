@@ -385,7 +385,7 @@ fn universal_block_struct_sizes() {
 }
 
 // -----------------------------------------------------------------------------
-// Bonus: Request::new validates mm_info via the same path as TokenBlockSequence.
+// Bonus: Request::builder().build() validates mm_info via the same path as TokenBlockSequence.
 // -----------------------------------------------------------------------------
 #[test]
 fn request_new_rejects_invalid_mm_info() {

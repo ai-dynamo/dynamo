@@ -28,6 +28,7 @@ from tests.router.helper import (
     wait_for_indexer_workers_active,
 )
 from tests.utils.constants import DefaultPort
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -60,6 +61,13 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
+
+
+def _vllm_gpu_mem_args(gpu_memory_utilization: Optional[float]) -> list[str]:
+    args = build_gpu_mem_args("build_vllm_gpu_mem_args")
+    if args or gpu_memory_utilization is None:
+        return args
+    return ["--gpu-memory-utilization", str(gpu_memory_utilization)]
 
 
 class VLLMProcess(ManagedEngineProcessMixin):
@@ -209,10 +217,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 command.append("--enforce-eager")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
-            if gpu_memory_utilization is not None:
-                command.extend(
-                    ["--gpu-memory-utilization", str(gpu_memory_utilization)]
-                )
+            command.extend(_vllm_gpu_mem_args(gpu_memory_utilization))
 
             # Add optional max_model_len if specified
             if max_model_len is not None:
@@ -482,6 +487,10 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    331_801_000
+)  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
@@ -506,6 +515,10 @@ def test_vllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    331_801_000
+)  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
@@ -530,6 +543,10 @@ def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    331_801_000
+)  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
@@ -624,6 +641,10 @@ def test_router_decisions_vllm_disagg(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    331_801_000
+)  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",

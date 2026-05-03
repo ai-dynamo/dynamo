@@ -21,6 +21,8 @@ members = [
     "lib/protocols",
     "lib/parsers",
     "lib/bench",
+    "lib/backend-common",
+    "lib/backend-common/examples/mocker",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
 ]
@@ -49,6 +51,7 @@ dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["metrics", "runtime-protocols"] }
 dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
 dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
+dynamo-backend-common = { path = "lib/backend-common", version = "1.2.0" }
 fastokens = { version = "0.1.0" }
 
 
@@ -65,6 +68,7 @@ velo = { version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
+lru = { version = "0.12" }
 async-nats = { version = "0.45.0", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }

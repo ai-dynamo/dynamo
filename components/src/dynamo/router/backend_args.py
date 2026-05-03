@@ -27,8 +27,6 @@ class DynamoRouterConfig(ConfigBase):
     router_assume_kv_reuse: bool
     router_track_output_blocks: bool
     router_ttl_secs: float
-    router_max_tree_size: int
-    router_prune_target_ratio: float
     router_event_threads: int
 
     def validate(self) -> None:
@@ -99,7 +97,7 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-kv-events",
             env_var="DYN_ROUTER_USE_KV_EVENTS",
             default=True,
-            help="KV Router: Enable KV events from workers. When disabled (--no-router-kv-events), the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers.",
+            help="KV Router: Enable KV events from workers. When disabled (--no-router-kv-events), the router predicts cache state based on routing decisions with TTL-based expiration, rather than receiving events from workers.",
             dest="router_use_kv_events",
             obsolete_flag="--kv-events",
         )
@@ -176,27 +174,9 @@ class DynamoRouterArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--router-max-tree-size",
-            env_var="DYN_ROUTER_MAX_TREE_SIZE",
-            default=2**20,
-            help="KV Router: Maximum tree size before pruning. Only used when --no-router-kv-events is set.  When the indexer tree exceeds this size, pruning is triggered.",
-            arg_type=int,
-        )
-
-        add_argument(
-            g,
-            flag_name="--router-prune-target-ratio",
-            env_var="DYN_ROUTER_PRUNE_TARGET_RATIO",
-            default=0.8,
-            help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-router-kv-events is set. Determines how aggressively to prune the tree.",
-            arg_type=float,
-        )
-
-        add_argument(
-            g,
             flag_name="--router-event-threads",
             env_var="DYN_ROUTER_EVENT_THREADS",
             default=4,
-            help="KV Router: Number of event processing threads. >1 uses concurrent radix tree and thread pool for higher throughput. Ignored when --no-router-kv-events is set (approximate mode always uses single-threaded indexer with TTL/pruning).",
+            help="KV Router: Number of event processing threads. >1 uses concurrent radix tree and thread pool for higher throughput. Ignored when --no-router-kv-events is set (approximate mode uses TTL expiration).",
             arg_type=int,
         )

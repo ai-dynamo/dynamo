@@ -29,7 +29,7 @@ pub struct UniversalBlock {
 }
 
 impl UniversalBlock {
-    /// Block index in the sequence (zero-based).
+    /// Zero-based block position in the sequence (i.e. block index, not token index).
     #[inline]
     pub fn position(&self) -> u32 {
         self.plh.position_u32()
