@@ -3,10 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Multi-frontend variant of sbatch_sa_cluster_dynamo.sh
-# Runs N dynamo.frontend processes on the head node behind an nginx
-# round-robin load balancer to distribute tokenization & orchestration
-# across multiple processes (mirrors trtllm-serve's per-prefill-server
-# tokenization parallelism).
+# Runs dynamo.frontend processes behind an nginx round-robin load balancer.
+# Frontends are paired with the six prefill workers, two per prefill node, so
+# decode nodes stay dedicated to the TP32 generation worker.
 #
 #SBATCH --job-name=glm5_nvfp4_dynamo_mf_ISL1K_OSL1K_ctx6dep2_gen1dep32_batch256_eplb288_mtp0
 #SBATCH --nodes=12
@@ -25,7 +24,7 @@ SRTCTL_SOURCE="/data/home/rihuo/srt-slurm"
 OUTPUT_BASE="/data/home/rihuo/srt-slurm/outputs"
 OUTPUT_DIR="${OUTPUT_BASE}/${SLURM_JOB_ID}"
 LOG_DIR="${OUTPUT_DIR}/logs"
-CONTAINER_IMAGE="/data/home/rihuo/tensorrtllm-runtime-1-1-0-dev-3.sqsh"
+CONTAINER_IMAGE="/data/home/rihuo/dynamo-trtllm-runtime-1-1-0-dev-3-debug-1.sqsh"
 NGINX_CONTAINER_IMAGE="nginx:1.27.4"
 MODEL_PATH="/data/home/rihuo/nvidia_GLM-5-NVFP4"
 MODEL_NAME="nvidia_GLM-5-NVFP4"
@@ -38,9 +37,10 @@ ETCD_PORT=2379
 NATS_PORT=4222
 # Public port (nginx) — what the benchmark client connects to.
 FRONTEND_PORT=8000
-# Per-node dynamo.frontend port. Each node runs at most one frontend on this port,
-# so the same port can be reused across nodes.
-FRONTEND_NODE_PORT=8001
+# Per-prefill-node dynamo.frontend ports. Each prefill node runs two frontend
+# replicas, one for each local prefill worker.
+FRONTEND_PREFILL_PORT_0=8001
+FRONTEND_PREFILL_PORT_1=8002
 DYNAMO_REQUEST_PLANE=tcp
 
 # DYN_SYSTEM_PORT assignments (one per worker, starting at 8081)
@@ -67,6 +67,16 @@ PREFILL_NODE_B="${ALL_NODES[2]}"
 PREFILL_NODE_C="${ALL_NODES[3]}"
 DECODE_NODES=("${ALL_NODES[@]:4:8}")
 DECODE_NODELIST="$(IFS=,; echo "${DECODE_NODES[*]}")"
+FRONTEND_NODES=(
+    "${PREFILL_NODE_A}" "${PREFILL_NODE_A}"
+    "${PREFILL_NODE_B}" "${PREFILL_NODE_B}"
+    "${PREFILL_NODE_C}" "${PREFILL_NODE_C}"
+)
+FRONTEND_PORTS=(
+    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}"
+    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}"
+    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}"
+)
 
 SRUN_PIDS=()
 
@@ -112,14 +122,20 @@ write_nginx_conf() {
         for upstream in "${upstreams[@]}"; do
             echo "        server ${upstream};"
         done
+        echo "        keepalive 16384;"
         echo "    }"
         echo ""
         echo "    server {"
         echo "        listen ${listen_port};"
+        echo "        keepalive_requests 100000;"
+        echo "        keepalive_timeout 75s;"
         echo ""
         echo "        location / {"
         echo "            proxy_pass http://backend_servers;"
         echo ""
+        echo "            proxy_http_version 1.1;"
+        echo "            proxy_set_header Connection \"\";"
+        echo "            proxy_request_buffering off;"
         echo "            proxy_buffering off;"
         echo "            proxy_read_timeout 24h;"
         echo "            proxy_send_timeout 24h;"
@@ -173,18 +189,19 @@ start_inflight_monitor() {
 }
 
 # Periodically scrape every dynamo frontend's /metrics. Spawns one polling
-# loop per frontend, each writing to its own CSV file
-# `${output_dir}/frontend_metrics_${host}.csv`.
+# loop per frontend upstream, each writing to its own CSV file
+# `${output_dir}/frontend_metrics_${host}_${port}.csv`.
 # Long format: timestamp,metric_with_labels,value
 start_frontend_metrics_monitor() {
     local output_dir="$1"
     local interval="${2:-2}"
-    local port="$3"
-    shift 3
-    local -a hosts=("$@")
+    shift 2
+    local -a upstreams=("$@")
 
-    for host in "${hosts[@]}"; do
-        local output_path="${output_dir}/frontend_metrics_${host}.csv"
+    for upstream in "${upstreams[@]}"; do
+        local host="${upstream%%:*}"
+        local port="${upstream##*:}"
+        local output_path="${output_dir}/frontend_metrics_${host}_${port}.csv"
         (
             echo "timestamp,metric,value"
             while true; do
@@ -205,7 +222,7 @@ start_frontend_metrics_monitor() {
             done
         ) >> "${output_path}" 2>&1 &
         SRUN_PIDS+=($!)
-        echo "Frontend metrics monitor started for ${host} (pid=${SRUN_PIDS[-1]}, log=${output_path})"
+        echo "Frontend metrics monitor started for ${upstream} (pid=${SRUN_PIDS[-1]}, log=${output_path})"
     done
 }
 
@@ -454,14 +471,14 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Nodes: ${SLURM_JOB_NUM_NODES}"
 echo "Container: ${CONTAINER_IMAGE}"
 echo "Nginx container: ${NGINX_CONTAINER_IMAGE}"
-echo "Frontends: ${#ALL_NODES[@]} replicas (one per node) on port ${FRONTEND_NODE_PORT}"
+echo "Frontends: ${#FRONTEND_NODES[@]} replicas (same as prefill workers, prefill nodes only)"
 echo "Public port (nginx, on ${HEAD_NODE}): ${FRONTEND_PORT}"
 echo "Start: $(date)"
 echo "=========================================="
 echo ""
-echo "Head node (infra + nginx + frontend): ${HEAD_NODE}"
-echo "Prefill nodes (workers + frontend each): ${PREFILL_NODE_A}, ${PREFILL_NODE_B}, ${PREFILL_NODE_C}"
-echo "Decode nodes (workers + frontend each): ${DECODE_NODELIST}"
+echo "Head node (infra + nginx): ${HEAD_NODE}"
+echo "Prefill nodes (workers + frontends): ${PREFILL_NODE_A}, ${PREFILL_NODE_B}, ${PREFILL_NODE_C}"
+echo "Decode nodes (workers only): ${DECODE_NODELIST}"
 echo ""
 
 write_prefill_config "${LOG_DIR}/trtllm_prefill.yaml"
@@ -531,9 +548,9 @@ echo "Infrastructure services are ready"
 # ==============================================================================
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
-DYN_TCP_WORKER_POOL_SIZE=10240
-DYN_TCP_POOL_SIZE=2048
-DYN_TCP_QUEUE_SIZE=$((DYN_TCP_POOL_SIZE * 4))
+DYN_TCP_WORKER_POOL_SIZE=100000
+DYN_TCP_POOL_SIZE=100000
+DYN_TCP_QUEUE_SIZE=$((DYN_TCP_WORKER_POOL_SIZE * 4))
 DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_WORKER_POOL_SIZE=${DYN_TCP_WORKER_POOL_SIZE} && export DYN_TCP_WORK_QUEUE_SIZE=${DYN_TCP_QUEUE_SIZE} && export DYN_TCP_POOL_SIZE=${DYN_TCP_POOL_SIZE}"
 
 echo "Starting prefill workers (6x TP2/EP2)"
@@ -649,15 +666,16 @@ for pid_name in CTX0_PID CTX1_PID CTX2_PID CTX3_PID CTX4_PID CTX5_PID GEN_PID; d
 done
 
 # ==============================================================================
-# Stage 3: Start one dynamo frontend replica per node
+# Stage 3: Start dynamo frontend replicas on prefill nodes
 # ==============================================================================
-echo "Starting ${#ALL_NODES[@]} dynamo frontend replicas (one per node) on port ${FRONTEND_NODE_PORT}"
+echo "Starting ${#FRONTEND_NODES[@]} dynamo frontend replicas on prefill nodes"
 
 FRONTEND_UPSTREAMS=()
 FRONTEND_PIDS=()
-for ((i = 0; i < ${#ALL_NODES[@]}; i++)); do
-    FE_NODE="${ALL_NODES[i]}"
-    FRONTEND_UPSTREAMS+=("${FE_NODE}:${FRONTEND_NODE_PORT}")
+for ((i = 0; i < ${#FRONTEND_NODES[@]}; i++)); do
+    FE_NODE="${FRONTEND_NODES[i]}"
+    FE_PORT="${FRONTEND_PORTS[i]}"
+    FRONTEND_UPSTREAMS+=("${FE_NODE}:${FE_PORT}")
 
     start_bg srun \
         --jobid "${SLURM_JOB_ID}" \
@@ -666,25 +684,26 @@ for ((i = 0; i < ${#ALL_NODES[@]}; i++)); do
         --nodes 1 \
         --ntasks 1 \
         --nodelist "${FE_NODE}" \
-        --output "${LOG_DIR}/${FE_NODE}_frontend.out" \
+        --output "${LOG_DIR}/${FE_NODE}_frontend_${FE_PORT}.out" \
         --container-image "${CONTAINER_IMAGE}" \
         --no-container-entrypoint \
         --no-container-mount-home \
         --container-mounts "${SCRIPT_MOUNTS}" \
-        bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_POOL_SIZE=${DYN_TCP_POOL_SIZE} && export DYN_LOG=info && python3 -m dynamo.frontend --http-port ${FRONTEND_NODE_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
+        bash -c "export ETCD_ENDPOINTS=http://${HEAD_NODE}:${ETCD_PORT} && export NATS_SERVER=nats://${HEAD_NODE}:${NATS_PORT} && export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && export DYN_TCP_POOL_SIZE=${DYN_TCP_POOL_SIZE} && export DYN_LOG=info && python3 -m dynamo.frontend --http-port ${FE_PORT} --request-plane ${DYNAMO_REQUEST_PLANE}"
     FRONTEND_PIDS+=("${SRUN_PIDS[-1]}")
 done
 
 for ((i = 0; i < ${#FRONTEND_PIDS[@]}; i++)); do
-    require_alive "${FRONTEND_PIDS[i]}" "FRONTEND_${i}_PID(${ALL_NODES[i]})"
+    require_alive "${FRONTEND_PIDS[i]}" "FRONTEND_${i}_PID(${FRONTEND_NODES[i]}:${FRONTEND_PORTS[i]})"
 done
 
 # Wait for every frontend to be ready before starting nginx, so all upstreams
 # resolve cleanly on first proxy_pass.
-for ((i = 0; i < ${#ALL_NODES[@]}; i++)); do
-    FE_NODE="${ALL_NODES[i]}"
-    echo "Waiting for frontend on ${FE_NODE}:${FRONTEND_NODE_PORT}..."
-    wait_for_http_ok "${FE_NODE}" "${FRONTEND_NODE_PORT}" "/health" 600
+for ((i = 0; i < ${#FRONTEND_NODES[@]}; i++)); do
+    FE_NODE="${FRONTEND_NODES[i]}"
+    FE_PORT="${FRONTEND_PORTS[i]}"
+    echo "Waiting for frontend on ${FE_NODE}:${FE_PORT}..."
+    wait_for_http_ok "${FE_NODE}" "${FE_PORT}" "/health" 600
 done
 
 # ==============================================================================
@@ -734,7 +753,7 @@ fi
 echo "All workers healthy and model is serving - starting benchmark"
 
 start_inflight_monitor "${LOG_DIR}/inflight_monitor.csv" 2
-start_frontend_metrics_monitor "${LOG_DIR}" 2 "${FRONTEND_NODE_PORT}" "${ALL_NODES[@]}"
+start_frontend_metrics_monitor "${LOG_DIR}" 2 "${FRONTEND_UPSTREAMS[@]}"
 
 # ==============================================================================
 # Stage 6: Run benchmark (through nginx)
