@@ -308,7 +308,7 @@ class HandlerBase(BaseGenerativeHandler):
         self,
         generation_result: _Abortable,
         context: Context,
-    ) -> AsyncGenerator[Optional[asyncio.Task], None]:
+    ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
@@ -319,19 +319,8 @@ class HandlerBase(BaseGenerativeHandler):
         Raise EngineShutdown if shutdown event is triggered.
 
         Yields:
-            asyncio.Task or None: The cancellation monitoring task, or None
-            when monitoring is skipped because there is no action it would
-            take (abort is disabled and no shutdown event to watch).
+            asyncio.Task: The cancellation monitoring task
         """
-        # Fast path: when abort is disabled and there is no shutdown event,
-        # the monitor task would only log on cancellation and never call
-        # abort() or raise EngineShutdown. At high concurrency that is one
-        # idle asyncio task per in-flight request on rank 0's event loop;
-        # skipping the spawn cuts scheduler overhead in half on the hot path.
-        if self.disable_request_abort:
-            yield None
-            return
-
         monitor_task = asyncio.create_task(
             self._handle_cancellation(generation_result, context)
         )
