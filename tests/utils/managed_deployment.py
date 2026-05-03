@@ -1177,28 +1177,24 @@ class ManagedDeployment:
         return result
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
-        directory = os.path.join(self.log_dir, service_name)
-        os.makedirs(directory, exist_ok=True)
+        """Capture per-pod artifacts at a point in time.
 
+        Writes the pod manifest and an HTTP-metrics scrape only. The
+        container's stdout/stderr is already captured continuously to
+        the log-collection PVC by the tee wrapper, so we don't grab
+        ``pod.logs()`` here — it would just duplicate what the PVC has.
+        That also avoids empty ``.previous.log`` files (the kubectl
+        previous-incarnation log only has content when the SAME pod's
+        container restarted in place; for our DeletePod scenarios the
+        replacement pod never has a previous incarnation).
+        """
+        directory = os.path.join(self.log_dir, service_name.lower())
+        os.makedirs(directory, exist_ok=True)
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
                 f.write(pod.to_yaml())
         except Exception as e:
             self._logger.error(e)
-        try:
-            with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
-                f.write("\n".join(pod.logs()))
-        except Exception as e:
-            self._logger.error(e)
-        try:
-            previous_logs = pod.logs(previous=True)
-            with open(
-                os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
-            ) as f:
-                f.write("\n".join(previous_logs))
-        except Exception as e:
-            self._logger.debug(e)
-
         self._get_pod_metrics(pod, service_name, suffix)
 
     def _get_service_logs(self, service_name=None, suffix=""):
@@ -1627,8 +1623,13 @@ class ManagedDeployment:
             raise
 
     def _get_pod_manifest(self, pod: Pod, service_name: str, suffix: str = ""):
-        """Save pod manifest YAML to log_dir/<service>/<pod>.yaml."""
-        directory = os.path.join(self.log_dir, service_name)
+        """Save pod manifest YAML to log_dir/<service>/<pod>.yaml.
+
+        Service dir is lowercased so it overlays the PVC-extracted log
+        paths (the tee wrapper uses lowercase service names) — every
+        per-pod artifact (manifest, metrics, stdout) lives in one dir.
+        """
+        directory = os.path.join(self.log_dir, service_name.lower())
         os.makedirs(directory, exist_ok=True)
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
@@ -1714,11 +1715,14 @@ class ManagedDeployment:
     async def _get_pod_metrics(
         self, pod: Pod, service_name: str, suffix="", use_services_dir: bool = False
     ):
-        """Fetch HTTP metrics. Async - needs exec for timestamp."""
-        if use_services_dir:
-            directory = os.path.join(self.log_dir, "services", service_name.lower())
-        else:
-            directory = os.path.join(self.log_dir, service_name)
+        """Fetch HTTP metrics. Async - needs exec for timestamp.
+
+        Writes alongside the per-pod manifest in the lowercased service
+        dir so all per-pod artifacts (manifest, metrics, stdout) are
+        under one dir per pod. ``use_services_dir`` is kept for back-
+        compat callers but the result is the same path either way.
+        """
+        directory = os.path.join(self.log_dir, service_name.lower())
         os.makedirs(directory, exist_ok=True)
 
         port = (
@@ -2053,9 +2057,12 @@ class ManagedDeployment:
                 self._logger.warning("No PVC name found for log extraction")
                 return
 
-            services_dir = os.path.join(self.log_dir, "services")
-            os.makedirs(services_dir, exist_ok=True)
-
+            # Extract the PVC contents directly into the test output root.
+            # The PVC tee writes to ``service_logs/<service-lower>/<pod>.log``,
+            # so when we extract from sub_path=service_logs the resulting
+            # files land at ``<log_dir>/<service-lower>/<pod>.log`` —
+            # overlaying the manifest/metrics paths so each per-pod dir
+            # holds stdout, manifest, and metrics together.
             extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
             await extractor.init()
 
@@ -2064,12 +2071,12 @@ class ManagedDeployment:
                 sub_path="service_logs",
                 container_path=self.container_log_dir,
                 file_patterns=["*.log"],
-                local_output_dir=services_dir,
+                local_output_dir=self.log_dir,
             )
 
             if result.get("success"):
                 self._logger.info(
-                    f"Extracted {result.get('file_count', 0)} log files to {services_dir}"
+                    f"Extracted {result.get('file_count', 0)} log files to {self.log_dir}"
                 )
             else:
                 self._logger.warning(

@@ -13,9 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import pytest
 
 from tests.fault_tolerance.deploy.scenarios import scenarios
+
+
+@pytest.fixture(autouse=True)
+def _route_outputs_to_repo(monkeypatch):
+    """Route this dir's tests' outputs to ``<cwd>/test_outputs/<test>/``.
+
+    The shared ``resolve_test_output_path`` defaults to
+    ``/tmp/dynamo_tests/`` to keep outputs out of the git tree, which is
+    fine when pytest runs on the host. Inside a dev container with the
+    worktree mounted at ``/workspace``, ``/tmp`` is container-local and
+    artifacts disappear from the host. We narrow the override to this
+    conftest so non-k8s tests on the host keep their existing default,
+    and k8s tests get one host-visible per-test directory holding load,
+    services, pod yaml, test.log.txt, and the report together.
+
+    The user-set ``DYN_TEST_OUTPUT_PATH`` always wins (we use
+    ``setdefault`` semantics via the ``not in`` guard).
+    """
+    if "DYN_TEST_OUTPUT_PATH" not in os.environ:
+        monkeypatch.setenv(
+            "DYN_TEST_OUTPUT_PATH",
+            os.path.join(os.getcwd(), "test_outputs"),
+        )
+    yield
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.

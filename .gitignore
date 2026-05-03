@@ -140,3 +140,6 @@ package-lock.json
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Test output (logs, aiperf artifacts, fault-tolerance reports) — see tests/utils/test_output.py
+test_outputs/

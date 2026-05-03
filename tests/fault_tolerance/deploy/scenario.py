@@ -100,7 +100,14 @@ async def run_scenario(
     7. Generate reports (BEFORE checks, so failures don't block reports)
     8. Run checks (assertions happen last)
     """
-    log_dir = test_name or "scenario"
+    # Resolve the test output dir ONCE so every component (ManagedDeployment,
+    # ManagedLoad, the FaultToleranceReport, the conftest test.log handler)
+    # writes to the same canonical location. Without this, ManagedLoad lands
+    # under cwd and ManagedDeployment under /tmp/dynamo_tests, which made
+    # logs hard to find.
+    from tests.utils.test_output import resolve_test_output_path
+
+    log_dir = resolve_test_output_path(test_name or "scenario")
     logger = logging.getLogger(test_name or "scenario")
 
     reports = reports or []
