@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import os
 
@@ -457,6 +458,39 @@ def build_sampling_params_openai(
         sampling_params.min_tokens = request["min_tokens"]
 
     return sampling_params
+
+
+def _engine_generate_reasoning_kwargs(
+    engine_client: Any,
+    reasoning_ended: bool | None,
+    reasoning_parser_kwargs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if reasoning_ended is None and reasoning_parser_kwargs is None:
+        return {}
+
+    try:
+        parameters = inspect.signature(engine_client.generate).parameters
+    except (TypeError, ValueError):
+        logger.debug(
+            "Unable to inspect vLLM generate signature; dropping reasoning parser kwargs"
+        )
+        return {}
+
+    accepts_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
+    kwargs: dict[str, Any] = {}
+    if accepts_kwargs or "reasoning_ended" in parameters:
+        kwargs["reasoning_ended"] = reasoning_ended
+    if accepts_kwargs or "reasoning_parser_kwargs" in parameters:
+        kwargs["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+
+    if not kwargs:
+        logger.debug(
+            "vLLM generate does not accept reasoning parser kwargs; "
+            "running without request-local reasoning parser metadata"
+        )
+    return kwargs
 
 
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
@@ -1931,6 +1965,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length=None,
         trace_headers=None,
         priority=0,
+        reasoning_ended=None,
+        reasoning_parser_kwargs=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -1947,6 +1983,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
                 priority=priority,
+                **_engine_generate_reasoning_kwargs(
+                    self.engine_client,
+                    reasoning_ended,
+                    reasoning_parser_kwargs,
+                ),
             )
 
             num_output_tokens_so_far: dict[int, int] = {}
@@ -2225,6 +2266,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
+        reasoning_ended = request.get("reasoning_ended")
+        reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -2248,6 +2291,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         embedding_sequence_length=embedding_sequence_length,
                         trace_headers=trace_headers,
                         priority=priority,
+                        reasoning_ended=reasoning_ended,
+                        reasoning_parser_kwargs=reasoning_parser_kwargs,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -2483,6 +2528,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
+        reasoning_ended = request.get("reasoning_ended")
+        reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -2494,6 +2541,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=priority,
+                    **_engine_generate_reasoning_kwargs(
+                        self.engine_client,
+                        reasoning_ended,
+                        reasoning_parser_kwargs,
+                    ),
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")

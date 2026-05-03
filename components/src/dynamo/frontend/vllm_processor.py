@@ -81,6 +81,29 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     return mapped
 
 
+def _build_reasoning_parser_metadata(
+    reasoning_parser_class: type[ReasoningParser] | None,
+    tokenizer: TokenizerLike,
+    chat_template_kwargs: dict[str, Any],
+    request_for_sampling: Any,
+    prompt_token_ids: list[int],
+) -> tuple[bool | None, dict[str, Any] | None]:
+    if reasoning_parser_class is None:
+        return None, None
+
+    parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
+    if not getattr(request_for_sampling, "include_reasoning", True):
+        return True, parser_kwargs
+    if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
+        return True, parser_kwargs
+
+    reasoning_parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -367,6 +390,14 @@ class VllmProcessor:
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
         # tokenizer metadata for EOS ids when constructing the router payload.
 
+        reasoning_ended, reasoning_parser_kwargs = _build_reasoning_parser_metadata(
+            self.reasoning_parser_class,
+            self.tokenizer,
+            chat_template_kwargs,
+            request_for_sampling,
+            tokens,
+        )
+
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
         dynamo_preproc = {
@@ -399,6 +430,10 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        if reasoning_ended is not None:
+            dynamo_preproc["reasoning_ended"] = reasoning_ended
+        if reasoning_parser_kwargs is not None:
+            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
 
         # Extract MM routing metadata and prepare transfer.
         cleanup_items: list = []
