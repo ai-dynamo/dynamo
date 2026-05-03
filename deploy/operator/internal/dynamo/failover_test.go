@@ -632,17 +632,24 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
-func TestIsFailoverEnabled(t *testing.T) {
-	assert.True(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+// --- IsIntraPodFailoverEnabled ---
+
+func TestIsIntraPodFailoverEnabled(t *testing.T) {
+	assert.True(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
 	}))
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.False(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
 	}), "inter-pod mode must not trigger intra-pod container cloning")
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.False(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: false, Mode: v1alpha1.GMSModeIntraPod},
 	}))
-	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+	assert.False(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+	assert.False(t, IsIntraPodFailoverEnabled(nil))
+}
+
+func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
+	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -14,11 +14,13 @@ coverage[toml]==7.13.1
 # For IFEval dataset loading in kvbm tests
 datasets==4.4.1
 filelock==3.25.1
+# For faster model downloads
+hf-xet
 # For Kubernetes operations in deploy tests
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0
 matplotlib-stubs
-mistral-common>=1.10.0
+mistral-common>=1.11.0
 mypy==1.18.2
 # For NATS object store verification in router tests
 nats-py==2.12.0
@@ -35,6 +37,7 @@ pytest-forked==1.6.0
 pytest-httpserver==1.1.3
 pytest-md-report==0.7.0
 pytest-order==1.3.0
+pytest-rerunfailures==16.1
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 requests==2.32.5

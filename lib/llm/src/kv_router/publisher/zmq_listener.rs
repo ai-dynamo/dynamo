@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
-use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +28,7 @@ pub(super) async fn start_zmq_listener(
         zmq_topic
     );
 
-    let warning_count = Arc::new(AtomicU32::new(0));
+    let mut normalizer = ZmqEventNormalizer::new(kv_block_size);
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -86,7 +85,7 @@ pub(super) async fn start_zmq_listener(
 
                 let engine_seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
 
-                let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
+                let batch_result = decode_event_batch(&payload);
                 let Ok(batch) = batch_result else {
                     let e = batch_result.unwrap_err();
                     tracing::warn!("Failed to decode KVEventBatch msgpack: {e}");
@@ -103,13 +102,13 @@ pub(super) async fn start_zmq_listener(
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
                 for raw_event in batch.events {
-                    if matches!(raw_event, RawKvEvent::Ignored) {
-                        continue;
-                    }
-                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
                     let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                    let Some(raw_event) = normalizer.preprocess(raw_event, worker) else {
+                        continue;
+                    };
+                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
                     let Some(event) =
-                        convert_event(raw_event, event_id, kv_block_size, worker, &warning_count)
+                        normalizer.normalize_preprocessed(raw_event, event_id, worker)
                     else {
                         continue;
                     };

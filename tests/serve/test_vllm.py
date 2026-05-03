@@ -89,6 +89,14 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             chat_payload(
                 "Can you write me a song?",
@@ -722,6 +730,8 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(9.6)  # same Qwen3-VL-2B agg multimodal profile
+@pytest.mark.requested_vllm_kv_cache_bytes(922_354_000)
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
