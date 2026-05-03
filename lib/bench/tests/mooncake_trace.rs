@@ -395,6 +395,7 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Result<()> {
+    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
     let ttl = Duration::from_millis(250);
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
@@ -405,6 +406,7 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
 
     for config in &variants {
         let label = config.short_name();
+        support::reset_warning_count(&warning_count);
         let indexer = config.build_approximate_with_prune_config(
             BLOCK_SIZE,
             Arc::new(KvIndexerMetrics::new_unregistered()),
@@ -428,6 +430,13 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
         );
 
         indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            warning_count.load(Ordering::Relaxed),
+            0,
+            "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+        );
     }
 
     Ok(())
