@@ -64,23 +64,54 @@ except ImportError:
     GMSClientMemoryManager = None  # type: ignore[assignment,misc]
     RequestedLockType = None  # type: ignore[assignment]
 
-try:
-    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+torch = None  # type: ignore[assignment]
+_tensor_from_pointer = None  # type: ignore[assignment]
+_TORCH_AVAILABLE = False
+_GMS_TENSOR_IMPORTS_AVAILABLE = False
+_GMS_IMPORTS_AVAILABLE = False
+_TORCH_IMPORTS_ATTEMPTED = False
+_TORCH_IMPORT_ERROR: Optional[BaseException] = None
 
-    _GMS_TENSOR_IMPORTS_AVAILABLE = True
-except ImportError:
-    _GMS_TENSOR_IMPORTS_AVAILABLE = False
-    _tensor_from_pointer = None  # type: ignore[assignment]
 
-_GMS_IMPORTS_AVAILABLE = _GMS_CORE_IMPORTS_AVAILABLE and _GMS_TENSOR_IMPORTS_AVAILABLE
+def _load_torch_imports(*, required: bool = True) -> Tuple[Any, Any]:
+    global torch
+    global _tensor_from_pointer
+    global _TORCH_AVAILABLE
+    global _GMS_TENSOR_IMPORTS_AVAILABLE
+    global _GMS_IMPORTS_AVAILABLE
+    global _TORCH_IMPORTS_ATTEMPTED
+    global _TORCH_IMPORT_ERROR
 
-try:
-    import torch
+    if _TORCH_IMPORTS_ATTEMPTED:
+        if required and (not _TORCH_AVAILABLE or not _GMS_TENSOR_IMPORTS_AVAILABLE):
+            raise RuntimeError(
+                "PyTorch tensor imports are required for this GMS storage operation"
+            ) from _TORCH_IMPORT_ERROR
+        return torch, _tensor_from_pointer
 
+    _TORCH_IMPORTS_ATTEMPTED = True
+    try:
+        import torch as torch_module
+        from gpu_memory_service.client.torch.tensor import (
+            _tensor_from_pointer as tensor_from_pointer,
+        )
+    except ImportError as exc:
+        _TORCH_IMPORT_ERROR = exc
+        _TORCH_AVAILABLE = False
+        _GMS_TENSOR_IMPORTS_AVAILABLE = False
+        _GMS_IMPORTS_AVAILABLE = False
+        if required:
+            raise RuntimeError(
+                "PyTorch tensor imports are required for this GMS storage operation"
+            ) from exc
+        return None, None
+
+    torch = torch_module
+    _tensor_from_pointer = tensor_from_pointer
     _TORCH_AVAILABLE = True
-except ImportError:
-    _TORCH_AVAILABLE = False
-    torch = None  # type: ignore[assignment]
+    _GMS_TENSOR_IMPORTS_AVAILABLE = True
+    _GMS_IMPORTS_AVAILABLE = _GMS_CORE_IMPORTS_AVAILABLE
+    return torch, _tensor_from_pointer
 
 
 def _read_shard_sequential(
@@ -90,6 +121,7 @@ def _read_shard_sequential(
     pin_memory: bool = False,
 ) -> Dict[str, "torch.Tensor"]:
     """Facade wrapper kept for test patchability and backwards compatibility."""
+    torch_module, _ = _load_torch_imports()
     return _read_shard_sequential_impl(
         abs_path,
         sorted_entries,
@@ -97,7 +129,7 @@ def _read_shard_sequential(
         pin_memory=pin_memory,
         os_module=os,
         np_module=_get_numpy_module(),
-        torch_module=torch,
+        torch_module=torch_module,
         logger=logger,
     )
 
@@ -240,12 +272,9 @@ class GMSStorageClient:
         return manifest
 
     def _validate_save_request(self) -> None:
-        if not _GMS_IMPORTS_AVAILABLE:
-            raise RuntimeError(
-                "GMS client imports unavailable (missing cuda-python or torch)"
-            )
-        if not _TORCH_AVAILABLE:
-            raise RuntimeError("PyTorch is required for save()")
+        if not _GMS_CORE_IMPORTS_AVAILABLE:
+            raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
+        _load_torch_imports()
         if self.output_dir is None:
             raise ValueError(
                 "output_dir must be set to call save(); pass it to GMSStorageClient()"
@@ -294,6 +323,7 @@ class GMSStorageClient:
         def _write_one_shard(
             shard_idx: int, alloc_pairs: List[Tuple[int, int]]
         ) -> None:
+            torch_module, tensor_from_pointer = _load_torch_imports()
             filename = f"shard_{shard_idx:04d}.bin"
             shards_dir = shard_dirs[shard_idx % len(shard_dirs)]
             abs_path = os.path.join(shards_dir, filename)
@@ -303,11 +333,11 @@ class GMSStorageClient:
                 for index, byte_offset in alloc_pairs:
                     alloc = allocations_info[index]
                     aligned_size = int(alloc["aligned_size"])
-                    tensor = _tensor_from_pointer(
+                    tensor = tensor_from_pointer(
                         va_list[index],
                         [aligned_size],
                         [1],
-                        torch.uint8,
+                        torch_module.uint8,
                         self.device,
                     )
                     tensor.cpu().numpy().tofile(handle)
@@ -381,14 +411,20 @@ class GMSStorageClient:
 
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
         sources = build_file_transfer_sources(input_dir, manifest.allocations)
+        torch_module = None
+        tensor_from_pointer = None
+        if backend_name in {
+            _DEFAULT_TRANSFER_BACKEND,
+            _AIO_TRANSFER_BACKEND,
+            _LOCAL_SSD_STRIPED_TRANSFER_BACKEND,
+        }:
+            torch_module, tensor_from_pointer = _load_torch_imports()
         backend = create_transfer_backend(
             backend_name,
             device=self.device,
             max_workers=max_workers,
-            torch_module=torch if _TORCH_AVAILABLE else None,
-            tensor_from_pointer=_tensor_from_pointer
-            if _GMS_TENSOR_IMPORTS_AVAILABLE
-            else None,
+            torch_module=torch_module,
+            tensor_from_pointer=tensor_from_pointer,
         )
         session = None
         id_map: Dict[str, str] = {}
@@ -435,14 +471,8 @@ class GMSStorageClient:
             _AIO_TRANSFER_BACKEND,
             _LOCAL_SSD_STRIPED_TRANSFER_BACKEND,
         }
-        if transfer_backend in cpu_staged_backends and not _GMS_IMPORTS_AVAILABLE:
-            raise RuntimeError(
-                f"{transfer_backend} GMS transfer backend requires cuda-python and torch"
-            )
-        if transfer_backend in cpu_staged_backends and not _TORCH_AVAILABLE:
-            raise RuntimeError(
-                f"{transfer_backend} GMS transfer backend requires PyTorch"
-            )
+        if transfer_backend in cpu_staged_backends:
+            _load_torch_imports()
 
     def _restore_metadata(
         self,
@@ -466,8 +496,7 @@ class GMSStorageClient:
         *,
         max_workers: int = 4,
     ) -> Tuple[Dict[str, "torch.Tensor"], Dict[str, Dict[str, Any]]]:
-        if not _TORCH_AVAILABLE:
-            raise RuntimeError("PyTorch is required for load_tensors()")
+        _load_torch_imports()
 
         manifest, metadata = _load_manifest_and_metadata(input_dir)
         groups = _group_entries_by_shard(manifest.allocations)

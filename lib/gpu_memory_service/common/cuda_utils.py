@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import fail
@@ -26,13 +28,34 @@ except ImportError:
 
 def list_devices() -> list[int]:
     """Return list of CUDA device indices visible to this process via NVML."""
+    logger = logging.getLogger(__name__)
+    started_ns = time.monotonic_ns()
+
     import pynvml
 
+    import_elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000
+    init_started_ns = time.monotonic_ns()
     pynvml.nvmlInit()
+    init_elapsed_ms = (time.monotonic_ns() - init_started_ns) / 1_000_000
     try:
+        count_started_ns = time.monotonic_ns()
         count = pynvml.nvmlDeviceGetCount()
+        count_elapsed_ms = (time.monotonic_ns() - count_started_ns) / 1_000_000
     finally:
+        shutdown_started_ns = time.monotonic_ns()
         pynvml.nvmlShutdown()
+        shutdown_elapsed_ms = (time.monotonic_ns() - shutdown_started_ns) / 1_000_000
+    total_elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000
+    logger.info(
+        "CUDA device discovery timing: import_pynvml_ms=%.3f nvml_init_ms=%.3f "
+        "nvml_count_ms=%.3f nvml_shutdown_ms=%.3f total_ms=%.3f count=%d",
+        import_elapsed_ms,
+        init_elapsed_ms,
+        count_elapsed_ms,
+        shutdown_elapsed_ms,
+        total_elapsed_ms,
+        count,
+    )
     if count == 0:
         raise SystemExit("no nvidia devices found")
     return list(range(count))
