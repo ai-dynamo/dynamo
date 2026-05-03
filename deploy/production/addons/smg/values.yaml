@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SMG (Shepherd Model Gateway) production overrides.
+#
+# Boundary contract — read this before changing routing fields:
+#
+#   client → SMG → Dynamo Frontend → SGLang prefill / decode → HiSparse / TurboQuant
+#       │      │           │                                       │
+#       │      │           └ KV-aware routing (Dynamo's own        │
+#       │      │             KV-event router, --router-mode kv)   │
+#       │      │                                                  └ kernel layer
+#       │      └ gateway concerns: model selection, retry,
+#       │        circuit breaker, OpenAI-compat surface,
+#       │        observability, history (when enabled)
+#       └ ChatCompletions request
+#
+# SMG MUST NOT do prefix-aware / cache-aware routing here. Dynamo Frontend's
+# KV router consumes the SGLang ZMQ kv-events stream from prefill+decode and
+# is the single owner of "which worker gets this prefix". If SMG also did
+# cache_aware here, the two prefix trees would disagree and you'd see worse
+# routing than either alone. Keep `policy: round_robin` with a single backend.
+
+global:
+  image:
+    registry: ghcr.io
+    repository: lightseekorg/smg
+    tag: "1.4.1"
+    pullPolicy: IfNotPresent
+
+router:
+  replicas: 1
+
+  # Defer prefix routing entirely to Dynamo Frontend.
+  policy: round_robin
+
+  # Single backend: the Dynamo Frontend Service deployed by the operator
+  # for the deepseek-v32-reap-sglang DynamoGraphDeployment. The Service
+  # name follows the operator convention <deployment-name>-frontend on
+  # port 8000 (matching --http-port in the example).
+  workerUrls:
+    - http://deepseek-v32-reap-sglang-frontend.dynamo-system.svc.cluster.local:8000
+
+  # No K8s service discovery — single, explicit backend.
+  serviceDiscovery:
+    enabled: false
+
+  # Model identity surfaced to clients via /v1/models. Must match the
+  # `--served-model-name` arg on the SGLang workers and the Dynamo
+  # Frontend's view so SMG's tokenizer (used for history token-counts,
+  # MCP tool budgeting, and tool-call/reasoning parser invocation)
+  # agrees with the engine on segmentation.
+  model: BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+  # Tokenizer source. The model dir is mounted into the prefill+decode
+  # workers from the host hostPath; SMG can pull it from HF via the
+  # cached HF_HOME volume on the same node, or use the same hostPath
+  # if mounted in. We keep it as the HF id here so SMG resolves it
+  # via the smg-hf-cache PVC; for fully air-gapped clusters point this
+  # at the on-disk path the workers also use.
+  tokenizerPath: BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+
+  # Request-handling sized for the disagg deployment's
+  # --max-running-requests=8 + 73K context budget.
+  maxPayloadSize: 536870912    # 512 MiB
+  requestTimeoutSecs: 1800     # match SGLang --watchdog-timeout
+  maxConcurrentRequests: -1
+  queueSize: 100
+  queueTimeoutSecs: 60
+
+  retry:
+    enabled: true
+    maxRetries: 3              # Dynamo handles its own internal retries; keep
+                               # SMG retries low to avoid amplification.
+    initialBackoffMs: 100
+    maxBackoffMs: 5000
+    backoffMultiplier: 2.0
+    jitterFactor: 0.2
+
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 10
+    successThreshold: 3
+    timeoutDurationSecs: 60
+    windowDurationSecs: 120
+
+  healthCheck:
+    enabled: true
+    failureThreshold: 3
+    successThreshold: 2
+    timeoutSecs: 5
+    intervalSecs: 30
+    endpoint: /health          # Dynamo Frontend exposes /health on 8000
+
+  port: 30000
+  service:
+    type: ClusterIP
+    port: 80
+
+  ingress:
+    enabled: false             # external exposure is handled at cluster
+                               # ingress level, not by SMG itself
+
+  metrics:
+    port: 29000
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      labels:
+        release: kube-prometheus-stack
+
+  tracing:
+    enabled: true
+    # OTLP gRPC endpoint of the OpenTelemetryCollector deployed by the
+    # production profile (examples/opentelemetry-collector.yaml — name
+    # `dynamo` in namespace `observability`, listening on 4317).
+    otlpEndpoint: http://dynamo-collector.observability.svc.cluster.local:4317
+
+  logging:
+    level: info
+    json: true                 # for fluentd/loki ingest
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
+  # Pin to the same node as the Dynamo Frontend so the SMG → Frontend
+  # hop stays intra-node (no cross-AZ TCP) on the single-node B200
+  # production target. Remove this when the cluster grows and the
+  # Frontend becomes multi-replica.
+  nodeSelector:
+    kubernetes.io/hostname: a4-us-001-rl9
+  tolerations:
+    - operator: Exists
+
+  podAnnotations:
+    ai-blaise.io/integration: smg-frontend-of-dynamo
+  podLabels:
+    app.kubernetes.io/part-of: dynamo-production
+
+  # Inject the secrets the router needs from the cluster:
+  #   HF_TOKEN — used by SMG to download the tokenizer (the target
+  #              model is gated). Replicated into the `smg` namespace
+  #              from the existing `hf-token-secret` in `dynamo-system`
+  #              by the addons/smg/secrets-mirror.yaml ExternalSecret
+  #              (which uses the cluster's external-secrets operator).
+  #   SMG_HISTORY_POSTGRES_PASSWORD — referenced from the URL field
+  #              under history.postgres.url; the value lives in the
+  #              `smg-history-postgres` Secret created alongside the
+  #              sibling Postgres deployment (addons/smg/postgres/).
+  extraEnv:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: smg-hf-token
+          key: HF_TOKEN
+    - name: SMG_HISTORY_POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: smg-history-postgres
+          key: password
+
+  autoscaling:
+    enabled: false             # single-node target; no need yet
+
+  # SMG-side parsers for the engine's chat-template structured output.
+  # These run AFTER the SGLang response arrives, so the engine returns
+  # raw model text (no engine-side parsing) and SMG attaches structured
+  # `tool_calls` and reasoning content fields to the OpenAI response.
+  # Keeping the parser at the gateway layer matches the responsibility
+  # split documented in docs/smg-integration.md: SMG owns gateway
+  # concerns including chat-template structured output, Dynamo owns
+  # routing, SGLang owns kernel-level inference. To make this work the
+  # `--tool-call-parser` and `--reasoning-parser` flags are removed from
+  # the SGLang workers in examples/deepseek-v32-reap-sglang.yaml — see
+  # the comment block at the top of that file.
+  reasoningParser: deepseek_v31      # SMG's closest match to the
+                                     # DeepSeek V3.x reasoning syntax
+                                     # (V3.2 inherits V3.1's template).
+  toolCallParser: deepseek32         # SMG has a V3.2-specific tool
+                                     # parser (DeepSeekDsmlParser::v32).
+
+  # Optional features
+  mcp:
+    enabled: true
+    # MCP tool registry pulled from a sibling ConfigMap. Empty path
+    # means SMG starts with no tools registered; the operations team
+    # later applies tools.json into smg-mcp-config and SMG hot-reloads.
+    configPath: /etc/smg/mcp/tools.json
+
+# CRITICAL: keep workers empty. Inference workers are owned by the Dynamo
+# operator (deepseek-v32-reap-sglang DynamoGraphDeployment); SMG must not
+# spawn its own SGLang processes here or it will fight Dynamo for the
+# 4+4 GPU disaggregation.
+workers: []
+
+# Auth (off by default — set apiKey via an external-secrets ExternalSecret
+# referencing the cluster's secret store, then template it in here when
+# you flip authentication on).
+auth:
+  apiKey: ""
+  rateLimitTokensPerSecond: -1
+
+# Chat history / audit log. Backend is Postgres pointing at the sibling
+# smg-postgres deployment in addons/smg/postgres/ (synced by ArgoCD app
+# 65-smg-postgres.yaml at sync-wave 6, before SMG at sync-wave 7). The
+# DSN credential lives in the smg-history-postgres Secret created by the
+# postgres manifest.
+history:
+  backend: postgres
+  postgres:
+    # Connection string template. The chart resolves env vars into the
+    # router pod, where SMG reads SMG_HISTORY_POSTGRES_URL. We point at
+    # the sibling smg-postgres Service in the same namespace.
+    url: postgresql://smg:$(SMG_HISTORY_POSTGRES_PASSWORD)@smg-postgres.smg.svc.cluster.local:5432/smg
+    poolMax: 10
+    deploy: false              # we manage the sibling Postgres ourselves
+                               # (not via the chart's commented-out
+                               # bitnami subchart dependency)
+
+postgresql:
+  enabled: false               # see history.postgres.url above
+redis:
+  enabled: false
+
+grafana:
+  dashboard:
+    enabled: true              # ships SMG's Grafana dashboard JSON as a
+                               # ConfigMap with the kube-prometheus-stack
+                               # sidecar discovery label.
+    labels:
+      grafana_dashboard: "1"

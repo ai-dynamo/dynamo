@@ -26,6 +26,10 @@ spec:
     - https://parca-dev.github.io/helm-charts
     - https://github.com/kubernetes-sigs/lws
     - https://volcano-sh.github.io/helm-charts
+    # Shepherd Model Gateway (SMG): client-facing OpenAI-compatible
+    # gateway in front of the Dynamo Frontend. Chart lives in the
+    # upstream git repo; see addons/smg/ for the boundary contract.
+    - https://github.com/lightseekorg/smg.git
   destinations:
     - namespace: "*"
       server: https://kubernetes.default.svc

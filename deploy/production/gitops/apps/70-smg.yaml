@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shepherd Model Gateway (SMG) router as the OpenAI-compatible client entry
+# point in front of the Dynamo Frontend Service. See addons/smg/README.md
+# for the full responsibility split between SMG, Dynamo, and HiSparse.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: smg
+  namespace: argocd
+  annotations:
+    # Sync wave 7: after platform addons (kai/grove/etc, waves 0-5) and
+    # before the dynamo-platform itself (wave 9). The Dynamo operator and
+    # the deepseek-v32-reap-sglang DynamoGraphDeployment must be the ones
+    # that create the deepseek-v32-reap-sglang-frontend Service that SMG
+    # points at; SMG's healthCheck will fail until that Service exists,
+    # but circuitBreaker + retry handle the cold-start window.
+    argocd.argoproj.io/sync-wave: "7"
+spec:
+  project: dynamo-production
+  sources:
+    - repoURL: https://github.com/lightseekorg/smg.git
+      targetRevision: v1.4.1
+      path: deploy/helm/smg
+      helm:
+        releaseName: smg
+        valueFiles:
+          - $values/deploy/production/addons/smg/values.yaml
+    - repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: smg
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
