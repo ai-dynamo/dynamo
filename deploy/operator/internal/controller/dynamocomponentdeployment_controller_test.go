@@ -1191,6 +1191,45 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 	})
 
+	t.Run("ready checkpoint preserves manual restore mode from resource annotations", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.Annotations = map[string]string{
+			snapshotprotocol.RestoreModeAnnotation: " manual ",
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		if got := podTemplateSpec.Annotations[snapshotprotocol.RestoreModeAnnotation]; got != snapshotprotocol.RestoreModeManual {
+			t.Fatalf("expected %s=manual annotation, got %q", snapshotprotocol.RestoreModeAnnotation, got)
+		}
+		if _, ok := podTemplateSpec.Annotations[snapshotprotocol.RestoreTriggerAnnotation]; ok {
+			t.Fatalf("restore trigger should not be stamped before the harness patches it")
+		}
+	})
+
 	t.Run("ready gms checkpoint injects gms restore sidecars", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
