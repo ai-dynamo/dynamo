@@ -1657,94 +1657,49 @@ mod tests {
         Ok(())
     }
 
-    /// Build a `CheckedFile` for testing with the given uri + checksum + size.
-    fn test_cf(uri: &str, checksum_hex: &str, size: u64) -> super::CheckedFile {
-        let json = serde_json::json!({
+    fn test_cf(uri: &str, size: u64) -> super::CheckedFile {
+        serde_json::from_value(serde_json::json!({
             "path": uri,
-            "checksum": format!("blake3:{checksum_hex}"),
+            "checksum": format!("blake3:{}", "0".repeat(64)),
             "size": size,
-        });
-        serde_json::from_value(json).unwrap()
+        }))
+        .unwrap()
     }
 
-    /// blake3 mismatch errors and writes nothing.
+    async fn assert_resolve_uri_rejects(body: &[u8], declared_size: u64, expected_err: &str) {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/f")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f");
+        let url = format!("{}/f", server.url());
+        let result = super::resolve_uri(
+            &reqwest::Client::new(),
+            &url,
+            &test_cf(&url, declared_size),
+            &dest,
+        )
+        .await;
+        let msg = result.expect_err("expected error").to_string();
+        assert!(
+            msg.contains(expected_err),
+            "want `{expected_err}` in: {msg}"
+        );
+        assert!(!dest.exists(), "no file should be written");
+    }
+
     #[tokio::test]
     async fn resolve_uri_http_rejects_checksum_mismatch() {
-        let mut server = mockito::Server::new_async().await;
-        let body = b"hello world";
-        let _m = server
-            .mock("GET", "/file.txt")
-            .with_status(200)
-            .with_body(body)
-            .create_async()
-            .await;
-
-        let dir = std::env::temp_dir().join(format!("dynamo-mdc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("file.txt");
-
-        let url = format!("{}/file.txt", server.url());
-        let expected = test_cf(
-            &url,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            body.len() as u64,
-        );
-        let result = super::resolve_uri(&reqwest::Client::new(), &url, &expected, &dest).await;
-
-        assert!(result.is_err(), "checksum mismatch must error");
-        let msg = result.err().unwrap().to_string();
-        assert!(
-            msg.contains("checksum mismatch"),
-            "expected checksum-mismatch error, got: {msg}"
-        );
-        assert!(
-            !dest.exists(),
-            "no file should be written on checksum mismatch"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_resolve_uri_rejects(b"hello world", 11, "checksum mismatch").await;
     }
 
-    /// Oversize http body errors before the in-memory buffer can grow
-    /// past the expected size, so a misbehaving worker can't OOM the
-    /// frontend before blake3 verification fails.
     #[tokio::test]
     async fn resolve_uri_http_rejects_oversize_body() {
-        let mut server = mockito::Server::new_async().await;
-        let body = b"hello hello hello hello hello hello"; // 35 bytes
-        let _m = server
-            .mock("GET", "/big.txt")
-            .with_status(200)
-            .with_body(body)
-            .create_async()
-            .await;
-
-        let dir = std::env::temp_dir().join(format!("dynamo-mdc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("big.txt");
-
-        let url = format!("{}/big.txt", server.url());
-        // Cap is 8 bytes (declared size); body is 35. We trip the
-        // size cap before reaching blake3 verification.
-        let expected = test_cf(
-            &url,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            8,
-        );
-        let result = super::resolve_uri(&reqwest::Client::new(), &url, &expected, &dest).await;
-
-        assert!(result.is_err(), "oversize body must error");
-        let msg = result.err().unwrap().to_string();
-        assert!(
-            msg.contains("exceeds cap"),
-            "expected size-cap error, got: {msg}"
-        );
-        assert!(
-            !dest.exists(),
-            "no file should be written on size-cap rejection"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_resolve_uri_rejects(b"x".repeat(35).as_slice(), 8, "exceeds cap").await;
     }
 
     /// `parse_hf_uri` round-trip — `hf://repo/filename` parses into
@@ -1759,18 +1714,9 @@ mod tests {
         assert!(super::parse_hf_uri("https://example.com/x").is_err());
     }
 
-    /// End-to-end: `download_config` on a local-mount MDC normalizes
-    /// every CheckedFile to `file://`, runs through `resolve_uri`,
-    /// blake3-verifies, populates the content-addressed cache, and
-    /// rewrites `cf.path` to the per-slug symlink dir.
-    ///
-    /// This is the "shared-mount legacy" path under the unified
-    /// pipeline — proves the file:// arm of `resolve_uri` works
-    /// end-to-end without network or mocker.
-    /// Build an HF-cache-style snapshot fixture from the TinyLlama
-    /// sample model: per-file symlinks into a sibling `blobs/<hash>`
-    /// dir. The symlink layout is what triggers the canonicalize trap
-    /// `resolve_metadata_files` has to handle.
+    /// HF-cache-style snapshot of TinyLlama: per-file symlinks into a
+    /// sibling `blobs/<hash>` dir. The symlink layout is what triggers
+    /// the canonicalize trap `resolve_metadata_files` has to handle.
     fn hf_cache_fixture(workspace: &Path) -> anyhow::Result<PathBuf> {
         use std::hash::{Hash, Hasher};
         let snapshot = workspace.join("snapshots/abc");
@@ -1796,50 +1742,36 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial] // mutates $HOME
+    #[serial_test::serial]
     async fn download_config_pipelines_local_files_through_cache() -> anyhow::Result<()> {
         let workspace = tempfile::tempdir()?;
         let snapshot = hf_cache_fixture(workspace.path())?;
-        let temp_home = tempfile::tempdir()?;
+        let home = tempfile::tempdir()?;
+        let home_path = home.path().to_path_buf();
 
-        let prior_home = std::env::var_os("HOME");
-        // SAFETY: serial_test guards against parallel env access.
-        unsafe { std::env::set_var("HOME", temp_home.path()) };
-        let result = run_pipeline_assertions(&snapshot, temp_home.path()).await;
-        match prior_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        result
-    }
+        temp_env::async_with_vars([("HOME", Some(home.path()))], async {
+            let mut mdc = super::ModelDeploymentCard::load_from_disk(&snapshot, None)?;
+            let slug = mdc.slug.clone();
+            let mdcsum = mdc.mdcsum().to_string();
+            mdc.download_config().await?;
 
-    async fn run_pipeline_assertions(snapshot: &Path, home: &Path) -> anyhow::Result<()> {
-        let mut mdc = super::ModelDeploymentCard::load_from_disk(snapshot, None)?;
-        let slug = mdc.slug.clone();
-        let mdcsum = mdc.mdcsum().to_string();
+            let blobs = home_path.join(".cache/dynamo/mdc/blobs");
+            let snap = home_path
+                .join(".cache/dynamo/mdc/by-slug")
+                .join(slug.to_string())
+                .join(&mdcsum);
 
-        mdc.download_config().await?;
+            assert!(snap.join("config.json").exists());
+            assert!(snap.join("tokenizer.json").exists());
+            assert!(snap.join("generation_config.json").exists());
 
-        let blobs = home.join(".cache/dynamo/mdc/blobs");
-        let snap = home
-            .join(".cache/dynamo/mdc/by-slug")
-            .join(slug.to_string())
-            .join(&mdcsum);
-
-        // slug_dir is named by logical filename — not the HF cache
-        // blob basename — so consumers reading siblings (e.g.
-        // `parent.join("generation_config.json")`) find them.
-        assert!(snap.join("config.json").exists());
-        assert!(snap.join("tokenizer.json").exists());
-        assert!(snap.join("generation_config.json").exists());
-
-        for cf in mdc.iter_metadata_files() {
-            let path = cf
-                .path()
-                .ok_or_else(|| anyhow::anyhow!("post-download cf should have a local path"))?;
-            assert!(path.starts_with(&snap));
-            assert!(std::fs::canonicalize(path)?.starts_with(&blobs));
-        }
-        Ok(())
+            for cf in mdc.iter_metadata_files() {
+                let path = cf.path().expect("post-download local path");
+                assert!(path.starts_with(&snap));
+                assert!(std::fs::canonicalize(path)?.starts_with(&blobs));
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
 }
