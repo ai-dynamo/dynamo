@@ -481,6 +481,30 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+fn checked_file_basename(cf: &CheckedFile) -> Option<String> {
+    cf.path()
+        .and_then(|p| p.file_name().and_then(|f| f.to_str()))
+        .or_else(|| {
+            cf.url()
+                .and_then(|u| u.path().rsplit('/').find(|s| !s.is_empty()))
+        })
+        .map(String::from)
+}
+
+fn checked_file_uri(cf: &CheckedFile, source: &str, filename: &str) -> anyhow::Result<String> {
+    if let Some(u) = cf.url() {
+        return Ok(u.to_string());
+    }
+    let path = cf.path().expect("path or url");
+    if path.exists() {
+        Ok(url::Url::from_file_path(std::path::absolute(path)?)
+            .map_err(|()| anyhow::anyhow!("invalid file path: {}", path.display()))?
+            .to_string())
+    } else {
+        Ok(format!("hf://{source}/{filename}"))
+    }
+}
+
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
     match p {
         PromptFormatterArtifact::HfTokenizerConfigJson(cf)
@@ -885,59 +909,23 @@ impl ModelDeploymentCard {
         out
     }
 
-    /// Resolve every populated metadata `CheckedFile` through the
-    /// content-addressed MDC cache, blake3-verifying every byte.
-    /// Walks `iter_metadata_files_mut` directly rather than going
-    /// through `MDC::update_dir`, whose `is_custom` exclusion would
-    /// skip user-supplied custom chat templates.
     async fn resolve_metadata_files(&mut self) -> anyhow::Result<()> {
         let source = self.source_path().to_string();
         let mdcsum = self.mdcsum().to_string();
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
-        // Snapshot the logical filename + a fetchable URI for each
-        // slot. We don't mutate cf here: Pass 3's `update_dir` runs
-        // against the original cf.path, which preserves the logical
-        // filename even when the worker's path is an HF cache symlink
-        // into `blobs/<sha>`.
-        let mut entries: Vec<(String, CheckedFile, String)> = Vec::new();
-        for cf in self.iter_metadata_files() {
-            let filename = if let Some(p) = cf.path() {
-                p.file_name()
-                    .and_then(|f| f.to_str())
-                    .with_context(|| format!("no filename in path: {}", p.display()))?
-                    .to_string()
-            } else {
-                let url = cf.url().expect("either path or url is set");
-                url.path()
-                    .rsplit('/')
-                    .find(|s| !s.is_empty())
-                    .with_context(|| format!("no filename in url: {url}"))?
-                    .to_string()
-            };
-            let uri = if let Some(u) = cf.url() {
-                u.to_string()
-            } else {
-                let path = cf.path().expect("path or url");
-                if path.exists() {
-                    url::Url::from_file_path(std::fs::canonicalize(path)?)
-                        .map_err(|()| {
-                            anyhow::anyhow!("invalid file path for url: {}", path.display())
-                        })?
-                        .to_string()
-                } else {
-                    format!("hf://{source}/{filename}")
-                }
-            };
-            entries.push((uri, cf.clone(), filename));
-        }
+        let entries: Vec<(String, CheckedFile, String)> = self
+            .iter_metadata_files()
+            .into_iter()
+            .map(|cf| {
+                let filename =
+                    checked_file_basename(cf).with_context(|| format!("no filename for {cf:?}"))?;
+                let uri = checked_file_uri(cf, &source, &filename)?;
+                Ok((uri, cf.clone(), filename))
+            })
+            .collect::<anyhow::Result<_>>()?;
 
-        // Pass 2: fetch + verify + cache + symlink.
-        // Bounded timeouts so a stalled metadata endpoint can't hang
-        // download_config indefinitely. 5 min total covers a 1 GiB
-        // file at slow speeds; realistic metadata files complete in
-        // seconds.
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
