@@ -20,6 +20,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -67,7 +68,8 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		}
 	}
 
-	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	manualTrigger := annotations != nil && strings.TrimSpace(annotations[snapshotprotocol.RestoreModeAnnotation]) == snapshotprotocol.RestoreModeManual
+	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, manualTrigger, hash, artifactVersion)
 	if annotations != nil {
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
