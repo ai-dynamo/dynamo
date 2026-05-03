@@ -235,6 +235,11 @@ impl Node {
         self.state.read().edge_index.contains_key(&hash)
     }
 
+    #[cfg(test)]
+    pub(super) fn edge_len_for_test(&self) -> usize {
+        self.state.read().edge.len()
+    }
+
     pub(super) fn promote_worker_to_full_edge(&self, worker: WorkerWithDpRank) -> bool {
         let _gate = self.shape_gate.read();
         self.state.write().promote_to_full(worker)

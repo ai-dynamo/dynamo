@@ -140,6 +140,23 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     #[cfg(test)]
+    pub(crate) fn edge_lengths_for_test(&self) -> Vec<usize> {
+        let mut queue = VecDeque::from([self.root.clone()]);
+        let mut lengths = Vec::new();
+
+        while let Some(node) = queue.pop_front() {
+            let children = node.children_snapshot();
+            for child in &children {
+                lengths.push(child.edge_len_for_test());
+            }
+            queue.extend(children);
+        }
+
+        lengths.sort_unstable();
+        lengths
+    }
+
+    #[cfg(test)]
     pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.tree_sizes
             .get(&worker)
