@@ -30,6 +30,8 @@ func run(args []string) error {
 		return runCheckpoint(args[1:])
 	case "restore":
 		return runRestore(args[1:])
+	case "trigger-restore":
+		return runTriggerRestore(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -94,6 +96,7 @@ func runRestore(args []string) error {
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	checkpointID := flags.String("checkpoint-id", "", "Checkpoint ID to restore")
 	containers := flags.String("containers", "", "Required. Comma-separated target container names to restore the checkpoint into. May be omitted if the manifest/pod already sets the nvidia.com/snapshot-target-containers annotation")
+	manualTrigger := flags.Bool("manual-trigger", false, "Create or patch the restore target but wait for trigger-restore before starting restore")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -107,17 +110,22 @@ func runRestore(args []string) error {
 
 	snapshotctlLog.Info("Running restore", "manifest", *manifest, "pod", *podName, "namespace", *namespace, "checkpoint_id", *checkpointID)
 	result, err := runRestoreFlow(context.Background(), restoreOptions{
-		ManifestPath: *manifest,
-		PodName:      *podName,
-		Namespace:    *namespace,
-		KubeContext:  *kubeContext,
-		CheckpointID: *checkpointID,
-		Containers:   *containers,
+		ManifestPath:  *manifest,
+		PodName:       *podName,
+		Namespace:     *namespace,
+		KubeContext:   *kubeContext,
+		CheckpointID:  *checkpointID,
+		Containers:    *containers,
+		ManualTrigger: *manualTrigger,
 	})
 	if err != nil {
 		return err
 	}
-	snapshotctlLog.Info("Restore requested", "pod", result.RestorePod, "checkpoint_id", result.CheckpointID)
+	if result.Status == restoreStatusPendingTrigger {
+		snapshotctlLog.Info("Restore target is waiting for manual trigger", "pod", result.RestorePod, "checkpoint_id", result.CheckpointID)
+	} else {
+		snapshotctlLog.Info("Restore requested", "pod", result.RestorePod, "checkpoint_id", result.CheckpointID)
+	}
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
@@ -134,9 +142,12 @@ func printUsage() {
 Subcommands:
   checkpoint
   restore
+  trigger-restore
 
 Examples:
   snapshotctl checkpoint --manifest /tmp/vllm-worker-pod.yaml --container main
+  snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --checkpoint-id manual-snapshot-123 --containers main --manual-trigger
+  snapshotctl trigger-restore --pod snapshot-manual-restore
   snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --checkpoint-id manual-snapshot-123 --containers main
   snapshotctl restore --pod existing-restore-target --checkpoint-id manual-snapshot-123 --containers engine-0,engine-1
 `)

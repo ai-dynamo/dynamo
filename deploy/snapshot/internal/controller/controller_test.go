@@ -292,6 +292,9 @@ func TestReconcileRestorePod(t *testing.T) {
 		hash                  string
 		annotationStatus      string
 		annotationContainerID string
+		restoreMode           string
+		restoreTrigger        string
+		processedTrigger      string
 		createDir             bool // whether to create the checkpoint dir on disk
 		preSeed               bool
 		want                  bool
@@ -383,6 +386,51 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:                  false,
 		},
 		{
+			name:        "manual restore waits for trigger",
+			nodeName:    testNodeName,
+			phase:       corev1.PodRunning,
+			ready:       false,
+			hash:        "abc123",
+			restoreMode: snapshotprotocol.RestoreModeManual,
+			createDir:   true,
+			want:        false,
+		},
+		{
+			name:           "manual restore starts after trigger",
+			nodeName:       testNodeName,
+			phase:          corev1.PodRunning,
+			ready:          false,
+			hash:           "abc123",
+			restoreMode:    snapshotprotocol.RestoreModeManual,
+			restoreTrigger: "trigger-1",
+			createDir:      true,
+			want:           true,
+		},
+		{
+			name:             "manual restore ignores consumed trigger",
+			nodeName:         testNodeName,
+			phase:            corev1.PodRunning,
+			ready:            false,
+			hash:             "abc123",
+			restoreMode:      snapshotprotocol.RestoreModeManual,
+			restoreTrigger:   "trigger-1",
+			processedTrigger: "trigger-1",
+			createDir:        true,
+			want:             false,
+		},
+		{
+			name:             "manual restore allows fresh trigger",
+			nodeName:         testNodeName,
+			phase:            corev1.PodRunning,
+			ready:            false,
+			hash:             "abc123",
+			restoreMode:      snapshotprotocol.RestoreModeManual,
+			restoreTrigger:   "trigger-2",
+			processedTrigger: "trigger-1",
+			createDir:        true,
+			want:             true,
+		},
+		{
 			name:                  "completed for previous container retries",
 			nodeName:              testNodeName,
 			phase:                 corev1.PodRunning,
@@ -450,10 +498,22 @@ func TestReconcileRestorePod(t *testing.T) {
 
 			w := makeTestController(t)
 			var annotations map[string]string
-			if tc.annotationStatus != "" {
-				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotationPrefix + "main":      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotationPrefix + "main": tc.annotationContainerID,
+			if tc.annotationStatus != "" || tc.restoreMode != "" || tc.restoreTrigger != "" || tc.processedTrigger != "" {
+				annotations = map[string]string{}
+				if tc.annotationStatus != "" {
+					annotations[snapshotprotocol.RestoreStatusAnnotationFor("main")] = tc.annotationStatus
+				}
+				if tc.annotationContainerID != "" {
+					annotations[snapshotprotocol.RestoreContainerIDAnnotationFor("main")] = tc.annotationContainerID
+				}
+				if tc.restoreMode != "" {
+					annotations[snapshotprotocol.RestoreModeAnnotation] = tc.restoreMode
+				}
+				if tc.restoreTrigger != "" {
+					annotations[snapshotprotocol.RestoreTriggerAnnotation] = tc.restoreTrigger
+				}
+				if tc.processedTrigger != "" {
+					annotations[snapshotprotocol.RestoreProcessedTriggerAnnotationFor("main")] = tc.processedTrigger
 				}
 			}
 
@@ -493,36 +553,6 @@ func TestReconcileRestorePod(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 		})
-	}
-}
-
-func TestReconcileRestorePodRejectsTargetNameThatCannotFitStatusAnnotation(t *testing.T) {
-	checkpointID := "abc123"
-	containerName := "restore-target-with-long-name-123456"
-	w := makeTestController(t)
-	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("failed to create checkpoint dir: %v", err)
-	}
-
-	pod := makePod(
-		"test-pod",
-		"default",
-		testNodeName,
-		corev1.PodRunning,
-		false,
-		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
-		map[string]string{snapshotprotocol.TargetContainersAnnotation: containerName},
-	)
-	pod.Spec.Containers[0].Name = containerName
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:        containerName,
-		ContainerID: "containerd://" + testContainerID,
-	}}
-
-	w.reconcileRestorePod(context.Background(), pod)
-	if len(w.inFlight) != 0 {
-		t.Fatalf("expected restore not to start for overlong annotation key, got inFlight=%v", w.inFlight)
 	}
 }
 

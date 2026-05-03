@@ -29,6 +29,7 @@ type PodOptions struct {
 	ArtifactVersion string
 	Storage         Storage
 	SeccompProfile  string
+	ManualTrigger   bool
 }
 
 // NewRestorePod shapes every annotated target container for restore.
@@ -40,7 +41,7 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
+	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.ManualTrigger, opts.CheckpointID, opts.ArtifactVersion)
 	if err := PrepareRestorePodSpec(&pod.Spec, pod.Annotations, opts.Storage, opts.SeccompProfile, true); err != nil {
 		return nil, err
 	}

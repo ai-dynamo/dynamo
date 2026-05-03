@@ -20,6 +20,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -36,7 +37,8 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		hash = checkpointInfo.Hash
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
-	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	manualTrigger := strings.TrimSpace(annotations[snapshotprotocol.RestoreModeAnnotation]) == snapshotprotocol.RestoreModeManual
+	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, manualTrigger, hash, artifactVersion)
 	// Snapshot-agent reads the restore target container list from the
 	// nvidia.com/snapshot-target-containers annotation. Default target is
 	// the main container; the failover path sets

@@ -59,6 +59,8 @@ GMS_LOAD_COMPLETE_FILE_ENV = "GMS_LOAD_COMPLETE_FILE"
 GMS_TRANSFER_BACKEND_ENV = "GMS_TRANSFER_BACKEND"
 GMS_POD_UID_ENV = "GMS_POD_UID"
 GMS_WEIGHTS_CHECKPOINT_DIR_ENV = "GMS_WEIGHTS_CHECKPOINT_DIR"
+GMS_RESTORE_TRIGGER_FILE_ENV = "GMS_RESTORE_TRIGGER_FILE"
+RESTORE_TRIGGER_POLL_SECONDS = 0.05
 
 
 def _load_device(
@@ -112,6 +114,25 @@ def _clear_completion_sentinel(checkpoint_dir: str) -> None:
         pass
 
 
+def _wait_for_restore_trigger() -> None:
+    trigger_file = os.environ.get(GMS_RESTORE_TRIGGER_FILE_ENV, "").strip()
+    if not trigger_file:
+        return
+
+    path = Path(trigger_file)
+    _startup_log("restore_trigger_wait_start", f"path={path}")
+    while True:
+        try:
+            trigger = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            trigger = ""
+        if trigger:
+            logger.info("Observed GMS restore trigger: file=%s token=%s", path, trigger)
+            _startup_log("restore_trigger_wait_done", f"token={trigger}")
+            return
+        time.sleep(RESTORE_TRIGGER_POLL_SECONDS)
+
+
 def _list_checkpoint_devices(checkpoint_dir: str) -> list[int]:
     devices: list[int] = []
     for child in Path(checkpoint_dir).iterdir():
@@ -157,6 +178,7 @@ def main() -> None:
     _startup_log("clear_sentinel_start")
     _clear_completion_sentinel(control_dir)
     _startup_log("clear_sentinel_done")
+    _wait_for_restore_trigger()
     _startup_log("discover_devices_start")
     devices = _list_checkpoint_devices(checkpoint_dir)
     _startup_log(

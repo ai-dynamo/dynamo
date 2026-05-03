@@ -46,6 +46,9 @@ const (
 	EnvLocalSSDRoots = "GMS_LOCAL_SSD_ROOTS"
 	// EnvShardSizeBytes controls GMS save shard size / local SSD stripe size.
 	EnvShardSizeBytes = "GMS_SHARD_SIZE_BYTES"
+	// EnvRestoreTriggerFile makes the restore loader wait for a non-empty token
+	// in a Downward API file before starting weight transfer.
+	EnvRestoreTriggerFile = "GMS_RESTORE_TRIGGER_FILE"
 )
 
 type GMSCheckpointStorage struct {
@@ -87,6 +90,8 @@ func EnsureGMSRestoreSidecars(
 	loader := gms.Container(GMSLoaderContainer, GMSCheckpointLoaderModule, sidecarSource.Image)
 	addGMSStorageMounts(&loader, storage)
 	addGMSLocalSSDVolumeMounts(&loader, sidecarSource)
+	EnsurePodInfoVolume(podSpec)
+	EnsurePodInfoMount(&loader)
 	loader.Env = append(loader.Env,
 		corev1.EnvVar{Name: EnvCheckpointDir, Value: storage.ControlDir},
 		PodUIDEnvVar(),
@@ -196,7 +201,7 @@ func gmsCheckpointPassThroughEnvVars(mainContainer *corev1.Container) []corev1.E
 	var result []corev1.EnvVar
 	for _, env := range mainContainer.Env {
 		switch env.Name {
-		case EnvTransferBackend, EnvLoadWorkers, EnvSaveWorkers, EnvLocalSSDRoots, EnvShardSizeBytes:
+		case EnvTransferBackend, EnvLoadWorkers, EnvSaveWorkers, EnvLocalSSDRoots, EnvShardSizeBytes, EnvRestoreTriggerFile:
 			result = append(result, env)
 		}
 	}

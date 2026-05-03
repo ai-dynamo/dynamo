@@ -7,13 +7,24 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/util/validation"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
+	// CheckpointSourceLabel tags the Job pod template (i.e. the pod whose
+	// checkpoint gets written to disk). The snapshot agent's checkpoint
+	// informer selects on this label.
 	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
 
-	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
+	// CheckpointIDLabel is the 16-character identity hash (or a generated
+	// manual ID for snapshotctl flows). Both the checkpoint Job pod and
+	// the restore pod carry it; the CheckpointSourceLabel is what
+	// distinguishes them.
+	//
+	// Restore pods are therefore selected as
+	//   CheckpointIDLabel exists AND NOT CheckpointSourceLabel exists
+	// which is cleaner than carrying a redundant "is restore target"
+	// boolean label in parallel with the target-containers annotation.
 	CheckpointIDLabel = "nvidia.com/snapshot-checkpoint-id"
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
@@ -44,13 +55,33 @@ const (
 	// both user-facing paths (DynamoCheckpoint Jobs and DGD restore pods).
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
 
+	// RestoreModeAnnotation opts a restore target into benchmark-controlled
+	// restore triggering. The default path ignores RestoreTriggerAnnotation.
+	RestoreModeAnnotation    = "nvidia.com/snapshot-restore-mode"
+	RestoreModeManual        = "manual"
+	RestoreTriggerAnnotation = "nvidia.com/snapshot-restore-trigger"
+
+	// CheckpointStatusAnnotation is written by snapshot-agent on the
+	// checkpoint Job once the (single) target container's checkpoint either
+	// completes or fails. Watched by the operator and snapshotctl.
 	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
 
-	// Full keys are nvidia.com/snapshot-restore-status.<containerName>.
+	// RestoreStatusAnnotationPrefix is the prefix for per-container restore
+	// status annotations written by snapshot-agent onto the restore pod.
+	// The full key is "nvidia.com/snapshot-restore-status.<containerName>",
+	// one per target container. Use RestoreStatusAnnotationFor to build it.
 	RestoreStatusAnnotationPrefix = "nvidia.com/snapshot-restore-status."
 
-	// Full keys are nvidia.com/snapshot-restore-container-id.<containerName>.
+	// RestoreContainerIDAnnotationPrefix is the prefix for per-container
+	// containerd container-ID annotations used to dedupe restore attempts
+	// across kubelet container restarts. Full key is
+	// "nvidia.com/snapshot-restore-container-id.<containerName>".
 	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
+
+	// RestoreProcessedTriggerAnnotationPrefix stores the last consumed manual
+	// trigger per target container so a pod restart does not replay the same
+	// benchmark trigger unless the harness writes a fresh token.
+	RestoreProcessedTriggerAnnotationPrefix = "nvidia.com/snapshot-restore-processed-trigger."
 
 	CheckpointVolumeName             = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion = "1"
@@ -74,9 +105,16 @@ type Storage struct {
 	BasePath string
 }
 
-type RestoreStatusAnnotationKeys struct {
-	Status      string
-	ContainerID string
+// findContainerByName returns a pointer to the named container in the slice,
+// or nil if not found. Used by the protocol helpers to look up target
+// containers declared in the snapshot-target-containers annotation.
+func findContainerByName(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
 }
 
 func ArtifactVersion(version string) string {
@@ -109,7 +147,26 @@ func ResolveRestoreStorage(checkpointID string, version string, location string,
 	return resolved, nil
 }
 
-// FormatTargetContainers renders the canonical annotation value.
+// RestoreStatusAnnotationFor returns the per-container restore status
+// annotation key. Safe to call with any container name.
+func RestoreStatusAnnotationFor(containerName string) string {
+	return RestoreStatusAnnotationPrefix + containerName
+}
+
+// RestoreContainerIDAnnotationFor returns the per-container containerd-ID
+// annotation key used by the restore dedupe path.
+func RestoreContainerIDAnnotationFor(containerName string) string {
+	return RestoreContainerIDAnnotationPrefix + containerName
+}
+
+func RestoreProcessedTriggerAnnotationFor(containerName string) string {
+	return RestoreProcessedTriggerAnnotationPrefix + containerName
+}
+
+// FormatTargetContainers renders a target-container list into the canonical
+// comma-separated annotation value. Whitespace is trimmed, empty names are
+// dropped, and duplicates are preserved in input order (callers are
+// responsible for providing a sensible list).
 func FormatTargetContainers(names []string) string {
 	cleaned := make([]string, 0, len(names))
 	for _, name := range names {
@@ -122,7 +179,10 @@ func FormatTargetContainers(names []string) string {
 	return strings.Join(cleaned, ",")
 }
 
-// ParseTargetContainers trims names and rejects empty or duplicate entries.
+// ParseTargetContainers returns the list of target container names encoded
+// in the nvidia.com/snapshot-target-containers annotation, in order. A
+// missing or empty annotation returns an empty slice; callers decide whether
+// that is an error. Whitespace is trimmed and duplicate names are rejected.
 func ParseTargetContainers(value string) ([]string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -145,7 +205,10 @@ func ParseTargetContainers(value string) ([]string, error) {
 	return out, nil
 }
 
-// TargetContainersFromAnnotations requires the target list and enforces bounds.
+// TargetContainersFromAnnotations reads the target-container list from an
+// annotation map. It enforces the snapshot contract: the annotation is
+// required, and at least minCount / at most maxCount names must be present
+// (maxCount == 0 means "no upper bound").
 func TargetContainersFromAnnotations(annotations map[string]string, minCount, maxCount int) ([]string, error) {
 	raw, ok := annotations[TargetContainersAnnotation]
 	if !ok || strings.TrimSpace(raw) == "" {
@@ -164,48 +227,37 @@ func TargetContainersFromAnnotations(annotations map[string]string, minCount, ma
 	return names, nil
 }
 
-func RestoreStatusAnnotationKeysFor(containerName string) (RestoreStatusAnnotationKeys, error) {
-	keys := RestoreStatusAnnotationKeys{
-		Status:      RestoreStatusAnnotationPrefix + containerName,
-		ContainerID: RestoreContainerIDAnnotationPrefix + containerName,
-	}
-	for _, annotationKey := range []string{keys.Status, keys.ContainerID} {
-		if errs := validation.IsQualifiedName(annotationKey); len(errs) > 0 {
-			return RestoreStatusAnnotationKeys{}, fmt.Errorf("container name %q cannot be used in restore status annotation key %q: %s", containerName, annotationKey, strings.Join(errs, "; "))
-		}
-	}
-	return keys, nil
-}
-
-func RestoreStatusAnnotations(containerName, status, containerID string) (map[string]string, error) {
-	keys, err := RestoreStatusAnnotationKeysFor(containerName)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]string{
-		keys.Status:      status,
-		keys.ContainerID: containerID,
-	}, nil
-}
-
+// clearRestoreStatusKeys drops every restore status annotation from the map.
+// Used when re-applying restore-target metadata before a new restore so stale
+// values from a previous run do not leak into observation.
 func clearRestoreStatusKeys(annotations map[string]string) {
 	delete(annotations, "nvidia.com/snapshot-restore-status")
 	delete(annotations, "nvidia.com/snapshot-restore-container-id")
 	for key := range annotations {
 		if strings.HasPrefix(key, RestoreStatusAnnotationPrefix) ||
-			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) {
+			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) ||
+			strings.HasPrefix(key, RestoreProcessedTriggerAnnotationPrefix) {
 			delete(annotations, key)
 		}
 	}
 }
 
-// ApplyRestoreTargetMetadata resets restore metadata and stamps checkpoint ID.
-// The caller owns TargetContainersAnnotation.
-func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
+// ApplyRestoreTargetMetadata resets restore-related labels/annotations and
+// (when enabled) stamps the checkpoint-id label + artifact version
+// annotation. A pod is identified as a restore target by the snapshot agent
+// via (CheckpointIDLabel present, CheckpointSourceLabel absent); there is
+// no dedicated "is restore target" label. The nvidia.com/snapshot-target-
+// containers annotation is the caller's responsibility: the operator stamps
+// it based on failover vs non-failover intent, snapshotctl stamps it from
+// --containers, etc. This helper never touches it so callers can set it
+// before or after with no ordering surprise.
+func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, manualTrigger bool, checkpointID string, artifactVersion string) {
 	delete(labels, CheckpointSourceLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 	delete(annotations, CheckpointStatusAnnotation)
+	delete(annotations, RestoreModeAnnotation)
+	delete(annotations, RestoreTriggerAnnotation)
 	clearRestoreStatusKeys(annotations)
 
 	if !enabled {
@@ -216,6 +268,9 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 		labels[CheckpointIDLabel] = checkpointID
 	}
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
+	if manualTrigger {
+		annotations[RestoreModeAnnotation] = RestoreModeManual
+	}
 }
 
 func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, artifactVersion string) {

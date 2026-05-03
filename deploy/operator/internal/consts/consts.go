@@ -168,6 +168,7 @@ const (
 	PodInfoFileDynComponent             = "dyn_component"
 	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
 	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
+	PodInfoFileSnapshotRestoreTrigger   = "snapshot_restore_trigger"
 
 	// Rolling update annotations
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"

@@ -250,6 +250,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
 		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
 		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
+		assert.Equal(t, "metadata.annotations['"+snapshotprotocol.RestoreTriggerAnnotation+"']", fields[consts.PodInfoFileSnapshotRestoreTrigger])
 
 		mountPaths := map[string]string{}
 		for _, mount := range podSpec.Containers[0].VolumeMounts {
@@ -329,6 +330,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			corev1.EnvVar{Name: EnvLoadWorkers, Value: "32"},
 			corev1.EnvVar{Name: EnvLocalSSDRoots, Value: "/mnt/nvme0/gms,/mnt/nvme1/gms"},
 			corev1.EnvVar{Name: EnvShardSizeBytes, Value: "1073741824"},
+			corev1.EnvVar{Name: EnvRestoreTriggerFile, Value: "/etc/podinfo/snapshot_restore_trigger"},
 		)
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
@@ -355,6 +357,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName])
 		assert.Equal(t, "/mnt/nvme0", mounts["nvme0"])
 		assert.Equal(t, "/mnt/nvme1", mounts["nvme1"])
+		assert.Equal(t, consts.PodInfoMountPath, mounts[consts.PodInfoVolumeName])
 
 		env := map[string]string{}
 		for _, item := range loader.Env {
@@ -365,6 +368,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, "32", env["GMS_LOAD_WORKERS"])
 		assert.Equal(t, "/mnt/nvme0/gms,/mnt/nvme1/gms", env["GMS_LOCAL_SSD_ROOTS"])
 		assert.Equal(t, "1073741824", env["GMS_SHARD_SIZE_BYTES"])
+		assert.Equal(t, "/etc/podinfo/snapshot_restore_trigger", env["GMS_RESTORE_TRIGGER_FILE"])
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", info.GMSArtifactDir)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
@@ -708,6 +712,20 @@ func TestApplyRestorePodMetadata_FailoverTargets(t *testing.T) {
 		RestoreTargetContainers: []string{"engine-0", "engine-1"},
 	})
 	assert.Equal(t, "engine-0,engine-1", annotations[snapshotprotocol.TargetContainersAnnotation])
+}
+
+func TestApplyRestorePodMetadata_PreservesManualRestoreMode(t *testing.T) {
+	labels := map[string]string{}
+	annotations := map[string]string{
+		snapshotprotocol.RestoreModeAnnotation:    snapshotprotocol.RestoreModeManual,
+		snapshotprotocol.RestoreTriggerAnnotation: "stale",
+	}
+
+	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash})
+
+	assert.Equal(t, snapshotprotocol.RestoreModeManual, annotations[snapshotprotocol.RestoreModeAnnotation])
+	_, ok := annotations[snapshotprotocol.RestoreTriggerAnnotation]
+	assert.False(t, ok, "stale restore trigger must be cleared when restore metadata is restamped")
 }
 
 func TestApplyRestorePodMetadata_GMSArtifactDir(t *testing.T) {
