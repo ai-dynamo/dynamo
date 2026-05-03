@@ -49,6 +49,9 @@ const (
 	// EnvRestoreTriggerFile makes the restore loader wait for a non-empty token
 	// in a Downward API file before starting weight transfer.
 	EnvRestoreTriggerFile = "GMS_RESTORE_TRIGGER_FILE"
+	// EnvRestoreTriggerAnnotation makes the restore loader poll the pod
+	// annotation directly through the Kubernetes API before starting transfer.
+	EnvRestoreTriggerAnnotation = "GMS_RESTORE_TRIGGER_ANNOTATION"
 )
 
 type GMSCheckpointStorage struct {
@@ -201,7 +204,7 @@ func gmsCheckpointPassThroughEnvVars(mainContainer *corev1.Container) []corev1.E
 	var result []corev1.EnvVar
 	for _, env := range mainContainer.Env {
 		switch env.Name {
-		case EnvTransferBackend, EnvLoadWorkers, EnvSaveWorkers, EnvLocalSSDRoots, EnvShardSizeBytes, EnvRestoreTriggerFile:
+		case EnvTransferBackend, EnvLoadWorkers, EnvSaveWorkers, EnvLocalSSDRoots, EnvShardSizeBytes, EnvRestoreTriggerFile, EnvRestoreTriggerAnnotation:
 			result = append(result, env)
 		}
 	}

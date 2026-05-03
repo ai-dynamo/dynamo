@@ -5,6 +5,7 @@ package protocol
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -175,5 +176,29 @@ func TestTargetContainersFromAnnotationsBounds(t *testing.T) {
 	}
 	if _, err := TargetContainersFromAnnotations(map[string]string{TargetContainersAnnotation: "a,a"}, 1, 0); err == nil {
 		t.Fatalf("expected dup rejection")
+	}
+}
+
+func TestRestoreStatusAnnotations(t *testing.T) {
+	got, err := RestoreStatusAnnotations("engine-1", RestoreStatusCompleted, "container-id")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]string{
+		RestoreStatusAnnotationPrefix + "engine-1":      RestoreStatusCompleted,
+		RestoreContainerIDAnnotationPrefix + "engine-1": "container-id",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestRestoreStatusAnnotationsRejectsInvalidContainerName(t *testing.T) {
+	_, err := RestoreStatusAnnotations(strings.Repeat("a", 200), RestoreStatusInProgress, "container-id")
+	if err == nil {
+		t.Fatalf("expected invalid annotation key error")
+	}
+	if !strings.Contains(err.Error(), "restore status annotation key") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

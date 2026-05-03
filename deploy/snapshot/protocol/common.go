@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -105,6 +106,12 @@ type Storage struct {
 	BasePath string
 }
 
+type RestoreStatusAnnotationKeys struct {
+	Status           string
+	ContainerID      string
+	ProcessedTrigger string
+}
+
 // findContainerByName returns a pointer to the named container in the slice,
 // or nil if not found. Used by the protocol helpers to look up target
 // containers declared in the snapshot-target-containers annotation.
@@ -161,6 +168,31 @@ func RestoreContainerIDAnnotationFor(containerName string) string {
 
 func RestoreProcessedTriggerAnnotationFor(containerName string) string {
 	return RestoreProcessedTriggerAnnotationPrefix + containerName
+}
+
+func RestoreStatusAnnotationKeysFor(containerName string) (RestoreStatusAnnotationKeys, error) {
+	keys := RestoreStatusAnnotationKeys{
+		Status:           RestoreStatusAnnotationPrefix + containerName,
+		ContainerID:      RestoreContainerIDAnnotationPrefix + containerName,
+		ProcessedTrigger: RestoreProcessedTriggerAnnotationPrefix + containerName,
+	}
+	for _, annotationKey := range []string{keys.Status, keys.ContainerID, keys.ProcessedTrigger} {
+		if errs := validation.IsQualifiedName(annotationKey); len(errs) > 0 {
+			return RestoreStatusAnnotationKeys{}, fmt.Errorf("container name %q cannot be used in restore status annotation key %q: %s", containerName, annotationKey, strings.Join(errs, "; "))
+		}
+	}
+	return keys, nil
+}
+
+func RestoreStatusAnnotations(containerName, status, containerID string) (map[string]string, error) {
+	keys, err := RestoreStatusAnnotationKeysFor(containerName)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		keys.Status:      status,
+		keys.ContainerID: containerID,
+	}, nil
 }
 
 // FormatTargetContainers renders a target-container list into the canonical

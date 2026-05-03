@@ -556,6 +556,36 @@ func TestReconcileRestorePod(t *testing.T) {
 	}
 }
 
+func TestReconcileRestorePodRejectsTargetNameThatCannotFitStatusAnnotation(t *testing.T) {
+	checkpointID := "abc123"
+	containerName := "restore-target-with-long-name-123456"
+	w := makeTestController(t)
+	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	pod := makePod(
+		"test-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
+		map[string]string{snapshotprotocol.TargetContainersAnnotation: containerName},
+	)
+	pod.Spec.Containers[0].Name = containerName
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:        containerName,
+		ContainerID: "containerd://" + testContainerID,
+	}}
+
+	w.reconcileRestorePod(context.Background(), pod)
+	if len(w.inFlight) != 0 {
+		t.Fatalf("expected restore not to start for overlong annotation key, got inFlight=%v", w.inFlight)
+	}
+}
+
 func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 	labels := map[string]string{
 		snapshotprotocol.CheckpointIDLabel: "abc123",

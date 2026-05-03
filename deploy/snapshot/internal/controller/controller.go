@@ -301,6 +301,17 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		w.log.Error(err, "Restore pod missing target-containers annotation", "pod", podKey)
 		return
 	}
+	for _, containerName := range targets {
+		if _, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName); err != nil {
+			w.log.Error(
+				err,
+				"Restore target container name cannot be used in restore status annotation key",
+				"pod", podKey,
+				"container", containerName,
+			)
+			return
+		}
+	}
 
 	// For each target container: check if kubelet has a running container
 	// for it, check the per-container status annotation, and schedule a
@@ -398,6 +409,12 @@ func (w *NodeController) startRestoreForContainer(
 	checkpointLocation string,
 	podKey string,
 ) {
+	annotationKeys, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName)
+	if err != nil {
+		w.log.Error(err, "Restore target container name cannot be used in restore status annotation key", "pod", podKey, "container", containerName)
+		return
+	}
+
 	restoreTrigger := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreTriggerAnnotation])
 	if strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreModeAnnotation]) == snapshotprotocol.RestoreModeManual {
 		if restoreTrigger == "" {
@@ -407,13 +424,13 @@ func (w *NodeController) startRestoreForContainer(
 			)
 			return
 		}
-		if strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreProcessedTriggerAnnotationFor(containerName)]) == restoreTrigger {
+		if strings.TrimSpace(pod.Annotations[annotationKeys.ProcessedTrigger]) == restoreTrigger {
 			return
 		}
 	}
 
-	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotationFor(containerName)]
-	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotationFor(containerName)]
+	annotationStatus := pod.Annotations[annotationKeys.Status]
+	annotationContainerID := pod.Annotations[annotationKeys.ContainerID]
 	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
 		return
 	}
@@ -622,12 +639,16 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
-		annotations := map[string]string{
-			snapshotprotocol.RestoreStatusAnnotationFor(containerName):      value,
-			snapshotprotocol.RestoreContainerIDAnnotationFor(containerName): containerID,
+		annotations, err := snapshotprotocol.RestoreStatusAnnotations(containerName, value, containerID)
+		if err != nil {
+			return err
 		}
 		if restoreTrigger != "" {
-			annotations[snapshotprotocol.RestoreProcessedTriggerAnnotationFor(containerName)] = restoreTrigger
+			annotationKeys, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName)
+			if err != nil {
+				return err
+			}
+			annotations[annotationKeys.ProcessedTrigger] = restoreTrigger
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
