@@ -456,12 +456,16 @@ def test_storage_client_stripes_shards_across_local_roots(tmp_path, monkeypatch)
         def tofile(self, handle) -> None:
             handle.write(bytes([self._value]) * self._size)
 
+    torch_module = SimpleNamespace(uint8="uint8")
+
+    def tensor_from_pointer(va, shape, *_):
+        return _BytesTensor(va, shape[0])
+
     monkeypatch.setattr(
         storage_client,
-        "_tensor_from_pointer",
-        lambda va, shape, *_: _BytesTensor(va, shape[0]),
+        "_load_torch_imports",
+        lambda *, required=True: (torch_module, tensor_from_pointer),
     )
-    monkeypatch.setattr(storage_client, "torch", SimpleNamespace(uint8="uint8"))
 
     client = storage_client.GMSStorageClient(
         str(output_dir),
@@ -702,9 +706,11 @@ def test_nixl_gds_backend_registers_file_and_vram_extents(tmp_path, monkeypatch)
     agent.transfer.return_value = "PROC"
     agent.check_xfer_state.return_value = "DONE"
 
-    monkeypatch.setattr(transfer, "_NIXL_AVAILABLE", True)
-    monkeypatch.setattr(transfer, "nixl_agent", MagicMock(return_value=agent))
-    monkeypatch.setattr(transfer, "nixl_agent_config", MagicMock(return_value="cfg"))
+    monkeypatch.setattr(
+        transfer,
+        "_load_nixl_api",
+        lambda: (MagicMock(return_value=agent), MagicMock(return_value="cfg")),
+    )
 
     backend = transfer.NixlGDSTransferBackend(device=2)
     source = transfer.FileTransferSource(
