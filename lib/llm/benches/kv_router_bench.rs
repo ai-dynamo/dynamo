@@ -33,7 +33,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_hash,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_block_hash,
     compute_seq_hash_for_block,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -192,7 +192,7 @@ fn compute_block_hashes(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHas
         .chunks_exact(kv_block_size as usize)
         .map(|chunk| {
             let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
-            LocalBlockHash(compute_hash(&bytes))
+            compute_block_hash(&bytes)
         })
         .collect()
 }

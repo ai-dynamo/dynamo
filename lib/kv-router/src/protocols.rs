@@ -158,7 +158,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
             let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
             bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
             bytes[8..].copy_from_slice(&current_block_hash.to_le_bytes());
-            compute_hash(&bytes)
+            compute_hash_v2(&bytes, XXH3_SEED)
         };
         sequence_hashes.push(seq_hash);
     }
