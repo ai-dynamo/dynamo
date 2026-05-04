@@ -144,8 +144,9 @@ impl KvbmRuntimeBuilder {
             }
         };
 
-        // 3. NixL - use provided or build from config (AFTER Messenger)
-        //    Only build if config.nixl is Some (NixL enabled)
+        // 3. NixL - use provided or build from config (AFTER Messenger).
+        //    Backend selection (UCX for host, POSIX/GDS_MT for disk) is handled
+        //    by `KvbmConfig::auto_enable_nixl_backends_for_tiers` at extract time.
         let nixl_agent = match self.nixl_agent {
             Some(agent) => Some(agent),
             None => match &self.config.nixl {

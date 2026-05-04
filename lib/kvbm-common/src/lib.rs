@@ -28,12 +28,21 @@ pub enum LogicalLayoutHandle {
 }
 
 /// Compatibility transfer routes used by KVBM metrics.
+///
+/// Letter convention is direction-dependent: `h` is always host (G2);
+/// `d` resolves by adjacency. In offload routes (going down) `d` adjacent
+/// to `h` is *device* (G1); `d` opposite `h` is *disk* (G3). In onboard
+/// routes (going up) the polarity flips: `d` adjacent to `h` is *disk*
+/// (G3); `d` opposite `h` is *device* (G1). So `OnboardD2H` is the
+/// disk→host (G3→G2) staging step, distinct from `OffloadD2H` which is
+/// device→host (G1→G2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KvbmTransferRoute {
     OffloadD2H,
     OffloadH2D,
     OffloadD2D,
     OffloadD2O,
+    OnboardD2H,
     OnboardH2D,
     OnboardD2D,
     OnboardO2D,
@@ -47,6 +56,7 @@ impl KvbmTransferRoute {
             Self::OffloadH2D => "h2d",
             Self::OffloadD2D => "d2d",
             Self::OffloadD2O => "d2o",
+            Self::OnboardD2H => "d2h",
             Self::OnboardH2D => "h2d",
             Self::OnboardD2D => "d2d",
             Self::OnboardO2D => "o2d",
@@ -57,7 +67,7 @@ impl KvbmTransferRoute {
     pub fn operation_label(&self) -> &'static str {
         match self {
             Self::OffloadD2H | Self::OffloadH2D | Self::OffloadD2D | Self::OffloadD2O => "offload",
-            Self::OnboardH2D | Self::OnboardD2D | Self::OnboardO2D => "onboard",
+            Self::OnboardD2H | Self::OnboardH2D | Self::OnboardD2D | Self::OnboardO2D => "onboard",
         }
     }
 }

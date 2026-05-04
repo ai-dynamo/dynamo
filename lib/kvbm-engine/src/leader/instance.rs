@@ -608,6 +608,24 @@ impl InstanceLeader {
         self.session_sessions.remove(&session_id);
     }
 
+    /// Test-only: is `session_id` registered in any of the three session maps?
+    #[cfg(any(test, feature = "testing"))]
+    pub fn has_session(&self, session_id: SessionId) -> bool {
+        self.sessions.contains_key(&session_id)
+            || self.session_states.contains_key(&session_id)
+            || self.session_sessions.contains_key(&session_id)
+    }
+
+    /// Test-only: insert a sentinel entry into `sessions` so a test can verify
+    /// that `release_session` removes it. The channel has capacity 1 and its
+    /// receiver is dropped immediately; the map entry alone is what the test
+    /// observes.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn insert_test_session_marker(&self, session_id: SessionId) {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        self.sessions.insert(session_id, tx);
+    }
+
     // ========================================================================
     // Inverted Control Pattern (Prefill-Decode) Methods
     // ========================================================================

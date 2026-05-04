@@ -93,7 +93,81 @@ DYN_KVBM_CPU_CACHE_GB=20 \
     --enforce-eager
 ```
 
+### Offload Policies
 
+KVBM v2 runs two independent offload pipelines; each filters blocks through a list of policies (implicit AND). Defaults are:
+
+| Tier | Default | Rationale |
+|------|---------|-----------|
+| G1→G2 | `presence` | Offload any GPU block not already on host and not already in flight. |
+| G2→G3 | `presence` | Offload any host block not already on disk and not already in flight. |
+
+Available policy types:
+
+- `pass_all` — no filtering, every block is offloaded
+- `presence` — skip blocks already in the destination tier or currently in flight
+- `presence_lfu` — `presence` plus a TinyLFU access-count threshold; offloads when `count > min_lfu_count` (default `1`)
+
+Override per tier via env vars (the value is JSON):
+
+```bash
+# Opt into LFU-on-admission for G2→G3 (useful when disk write bandwidth is precious, or SSD lifespan is a concern)
+KVBM_OFFLOAD_G2_TO_G3_POLICIES='["presence_lfu"]'
+
+# Tune the LFU threshold (default 1; e.g. require 4+ hits before offload)
+KVBM_OFFLOAD_G2_TO_G3_PRESENCE_LFU_MIN_LFU_COUNT=3
+
+# Force every block through (helpful for smoke-testing or observing G3 traffic)
+KVBM_OFFLOAD_G2_TO_G3_POLICIES='["pass_all"]'
+```
+
+## Enable and View KVBM Metrics
+
+### Setup Monitoring Stack
+
+```bash
+# Start Prometheus and Grafana (KVBM v2 itself does not require etcd or NATS,
+# but the bundled observability stack is shared with v1 and reused here).
+docker compose -f deploy/docker-observability.yml up -d
+```
+
+### Enable Metrics for vLLM
+
+Set `DYN_KVBM_METRICS=true` when launching the worker. The KVBM metrics endpoint binds to port `6880`; the bundled Prometheus stack scrapes it automatically.
+
+```bash
+DYN_KVBM_METRICS=true \
+DYN_KVBM_CPU_CACHE_GB=20 \
+  python -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.v2.vllm.connector","kv_role":"kv_both"}' \
+    --enforce-eager
+```
+
+### Firewall Configuration (Optional)
+
+```bash
+# If a firewall blocks the KVBM metrics port
+sudo ufw allow 6880/tcp
+```
+
+### View Metrics
+
+Access Grafana at http://localhost:3000 (default login: `dynamo`/`dynamo`) and look for the **KVBM Dashboard**.
+
+### Available Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `kvbm_matched_tokens` | Number of matched tokens |
+| `kvbm_offload_blocks_d2h` | Offload blocks from device to host (G1→G2) |
+| `kvbm_offload_blocks_h2d` | Offload blocks from host to disk (G2→G3) |
+| `kvbm_offload_blocks_d2d` | Offload blocks from device to disk, bypassing host (G1→G3) |
+| `kvbm_onboard_blocks_d2h` | Onboard blocks from disk to host (G3→G2 staging step, v2 only) |
+| `kvbm_onboard_blocks_h2d` | Onboard blocks from host to device (G2→G1) |
+| `kvbm_onboard_blocks_d2d` | Onboard blocks from disk to device direct (G3→G1, e.g. via GDS) |
+| `kvbm_host_cache_hit_rate` | Host cache hit rate (0.0–1.0) |
+| `kvbm_disk_cache_hit_rate` | Disk cache hit rate (0.0–1.0) |
 
 ## Benchmarking
 

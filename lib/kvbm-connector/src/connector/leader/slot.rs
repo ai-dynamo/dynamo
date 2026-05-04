@@ -397,6 +397,37 @@ impl SlotStateMachine {
         }
     }
 
+    /// Take the onboarding state out of `PreparingToOnboard`, transitioning to Inactive.
+    ///
+    /// Used by the cancel path: a request may be finished while we are still
+    /// searching/staging, before `txn_start_onboarding` has run. In that case
+    /// we need to extract the `OnboardingState` so the caller can drain the
+    /// find sessions and release them — no worker callback will arrive,
+    /// because the scheduler never committed the request.
+    ///
+    /// Composes correctly with the CD-decode path: when the returned
+    /// `OnboardingState` is dropped by the caller, any `cd_payload`
+    /// it carries (per HEAD's `OnboardingState` shape) runs its `Drop`
+    /// impl — the canonical RAII cleanup point this slot was designed
+    /// around (see slot.rs::OnboardingState doc).
+    fn txn_take_preparing_to_onboard(&mut self) -> Result<OnboardingState, StateTransitionError> {
+        let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
+
+        match current {
+            TransactionState::PreparingToOnboard(state) => {
+                self.txn_to_inactive();
+                Ok(state)
+            }
+            other => {
+                self.txn_state = other;
+                Err(StateTransitionError::InvalidTransition {
+                    from: self.txn_state.name(),
+                    to: "Inactive (via take_preparing_to_onboard)",
+                })
+            }
+        }
+    }
+
     /// Begin offloading blocks to remote storage.
     ///
     /// Only valid from `Inactive` state. Takes ownership of the offloading state.
@@ -979,6 +1010,16 @@ impl RequestSlot {
         cd_payload: Box<dyn CdOnboardingPayload>,
     ) -> Result<(), StateTransitionError> {
         self.state.txn_install_or_attach_cd_payload(cd_payload)
+    }
+
+    /// Take the onboarding state out of `PreparingToOnboard`, transitioning to Inactive.
+    ///
+    /// Used by the cancel path in `request_finished` when a request is
+    /// finished before `txn_start_onboarding` has run.
+    pub fn txn_take_preparing_to_onboard(
+        &mut self,
+    ) -> Result<OnboardingState, StateTransitionError> {
+        self.state.txn_take_preparing_to_onboard()
     }
 
     /// Begin offloading blocks to remote storage.
@@ -2714,6 +2755,95 @@ mod tests {
                 result.unwrap_err(),
                 StateTransitionError::InvalidTransition { .. }
             ));
+        }
+
+        // =========================================================================
+        // Transaction State Transition Tests - PreparingToOnboard Cancel Path
+        // =========================================================================
+
+        #[test]
+        fn test_txn_take_preparing_to_onboard_from_preparing_succeeds() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+
+            // Setup: Inactive -> PreparingToOnboard
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+                .unwrap();
+            assert!(matches!(
+                slot.txn_state(),
+                TransactionState::PreparingToOnboard(_)
+            ));
+
+            // Take the PreparingToOnboard state
+            let result = slot.txn_take_preparing_to_onboard();
+            assert!(result.is_ok());
+
+            let state = result.unwrap();
+            assert_eq!(state.num_computed_tokens, 100);
+
+            // Verify we're back to Inactive
+            assert!(slot.txn_state().is_inactive());
+        }
+
+        #[test]
+        fn test_txn_take_preparing_to_onboard_from_inactive_fails() {
+            let mut slot = create_test_slot();
+
+            // Try from Inactive - should fail
+            let result = slot.txn_take_preparing_to_onboard();
+
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                StateTransitionError::InvalidTransition { .. }
+            ));
+        }
+
+        #[test]
+        fn test_txn_take_preparing_to_onboard_from_onboarding_fails() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+
+            // Setup: Inactive -> PreparingToOnboard -> Onboarding
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+                .unwrap();
+            slot.txn_start_onboarding().unwrap();
+
+            // Try from Onboarding - should fail; Onboarding must go through
+            // txn_take_onboarding, not txn_take_preparing_to_onboard.
+            let result = slot.txn_take_preparing_to_onboard();
+
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                StateTransitionError::InvalidTransition { .. }
+            ));
+
+            // State is preserved on failed transition
+            assert!(matches!(slot.txn_state(), TransactionState::Onboarding(_)));
+        }
+
+        #[test]
+        fn test_txn_take_preparing_to_onboard_side_effect_when_marked() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+
+            // Setup: Inactive -> PreparingToOnboard
+            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+                .unwrap();
+
+            // Mark for deletion — this is the cancel path in request_finished.
+            let status = slot.slot_mark_finished();
+            assert_eq!(status, FinishedStatus::Pending);
+
+            // Take the state
+            let _ = slot.txn_take_preparing_to_onboard().unwrap();
+
+            // Slot stays marked for deletion; txn_to_inactive advanced the
+            // slot_state to NotifyWorkersToFinish (same side effect as the
+            // other take_* methods).
+            assert!(slot.is_marked_for_deletion());
+            assert!(slot.txn_state().is_inactive());
         }
 
         // =========================================================================
