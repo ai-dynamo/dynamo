@@ -2284,10 +2284,7 @@ mod tests {
         );
         assert_eq!(
             seq_hash_9_12(),
-            compute_hash_v2(
-                cast_slice(&[seq_hash_5_8(), lbh3]),
-                LOCAL_BLOCK_HASH_SEED,
-            ),
+            compute_hash_v2(cast_slice(&[seq_hash_5_8(), lbh3]), LOCAL_BLOCK_HASH_SEED,),
         );
 
         // Different salt diverges the PLH chain starting at the root, but the
