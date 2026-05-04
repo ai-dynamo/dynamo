@@ -28,6 +28,7 @@ import pytest
 import requests
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
@@ -49,6 +50,9 @@ pytestmark = [
         922_354_000
     ),  # 2x safety over min=461 MiB
     pytest.mark.model(VLLM_MM_MODEL),
+    pytest.mark.requested_vllm_kv_cache_bytes(
+        1_719_075_000
+    ),  # KV cache cap (2x safety over min=859_537_408)
 ]
 
 _COLORS = [
@@ -102,16 +106,11 @@ _COMMON_PROCESS_KWARGS: dict[str, Any] = {
 }
 
 
-def _vllm_gpu_memory_args() -> list[str]:
-    kv_bytes = os.getenv("_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES")
-    if kv_bytes:
-        return [
-            "--kv-cache-memory-bytes",
-            kv_bytes,
-            "--gpu-memory-utilization",
-            "0.01",
-        ]
-    return ["--gpu-memory-utilization", "0.40"]
+def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
+    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+        "--gpu-memory-utilization",
+        default_utilization,
+    ]
 
 
 class VLLMWorkerProcess(ManagedProcess):
@@ -129,9 +128,9 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
+                *_vllm_gpu_mem_args("0.40"),
                 "--max-model-len",
                 "4096",
-                *_vllm_gpu_memory_args(),
                 "--kv-events-config",
                 (
                     f'{{"publisher":"zmq","topic":"kv-events",'

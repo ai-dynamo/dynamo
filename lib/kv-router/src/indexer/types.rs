@@ -34,6 +34,27 @@ pub enum KvRouterError {
 
     #[error("Prune operation failed: {0}")]
     PruneFailed(String),
+
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+}
+
+/// Shared structural anchor used by branch-sharded routing when a routed
+/// subtree starts on a different shard from its parent prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AnchorRef {
+    pub anchor_id: ExternalSequenceBlockHash,
+    pub anchor_local_hash: LocalBlockHash,
+    pub anchor_depth: usize,
+}
+
+/// Worker task payload that installs an [`AnchorRef`] into a shard-local
+/// backend before dependent suffix events are applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AnchorTask {
+    pub anchor_id: ExternalSequenceBlockHash,
+    pub anchor_local_hash: LocalBlockHash,
+    pub anchor_depth: usize,
 }
 
 // -------
@@ -144,7 +165,6 @@ pub struct IndexerQueryRequest {
 pub struct WireOverlapScores {
     pub scores: Vec<(WorkerWithDpRank, u32)>,
     pub frequencies: Vec<usize>,
-    pub tree_sizes: Vec<(WorkerWithDpRank, usize)>,
 }
 
 impl From<OverlapScores> for WireOverlapScores {
@@ -152,7 +172,6 @@ impl From<OverlapScores> for WireOverlapScores {
         Self {
             scores: s.scores.into_iter().collect(),
             frequencies: s.frequencies,
-            tree_sizes: s.tree_sizes.into_iter().collect(),
         }
     }
 }
@@ -162,7 +181,6 @@ impl From<WireOverlapScores> for OverlapScores {
         Self {
             scores: w.scores.into_iter().collect(),
             frequencies: w.frequencies,
-            tree_sizes: w.tree_sizes.into_iter().collect(),
         }
     }
 }
@@ -389,6 +407,10 @@ pub enum WorkerTask {
     EventWithAck {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
+    },
+    Anchor {
+        worker: WorkerWithDpRank,
+        anchor: AnchorTask,
     },
     /// Permanently remove a worker from tracking (keep_worker: false).
     RemoveWorker(WorkerId),

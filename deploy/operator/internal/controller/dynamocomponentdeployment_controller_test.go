@@ -1119,7 +1119,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
-						snapshotprotocol.RestoreTargetLabel:             commonconsts.KubeLabelValueTrue,
 					},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 						Enabled:       true,
@@ -1181,11 +1180,14 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; got != commonconsts.KubeLabelValueTrue {
-			t.Fatalf("expected %s label to be true, got %q", snapshotprotocol.RestoreTargetLabel, got)
-		}
 		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
+		}
+		if _, has := podTemplateSpec.Labels[snapshotprotocol.CheckpointSourceLabel]; has {
+			t.Fatalf("restore pod template must not carry %s label: %#v", snapshotprotocol.CheckpointSourceLabel, podTemplateSpec.Labels)
+		}
+		if got := podTemplateSpec.Annotations[snapshotprotocol.TargetContainersAnnotation]; got != commonconsts.MainContainerName {
+			t.Fatalf("expected %s=main annotation, got %q", snapshotprotocol.TargetContainersAnnotation, got)
 		}
 	})
 
@@ -1310,8 +1312,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if podTemplateSpec.Spec.Containers[1].Args != nil {
 			t.Fatalf("expected main container args to be cleared, got %#v", podTemplateSpec.Spec.Containers[1].Args)
 		}
-		if got := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; got != commonconsts.KubeLabelValueTrue {
-			t.Fatalf("expected %s label to be true, got %q", snapshotprotocol.RestoreTargetLabel, got)
+		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
+			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
+		}
+		if _, has := podTemplateSpec.Labels[snapshotprotocol.CheckpointSourceLabel]; has {
+			t.Fatalf("restore pod template must not carry %s label: %#v", snapshotprotocol.CheckpointSourceLabel, podTemplateSpec.Labels)
 		}
 	})
 
@@ -1393,11 +1398,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if _, ok := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; ok {
-			t.Fatalf("did not expect %s label when checkpoint is not ready", snapshotprotocol.RestoreTargetLabel)
-		}
 		if _, ok := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; ok {
 			t.Fatalf("did not expect %s label when checkpoint is not ready", snapshotprotocol.CheckpointIDLabel)
+		}
+		if _, ok := podTemplateSpec.Annotations[snapshotprotocol.TargetContainersAnnotation]; ok {
+			t.Fatalf("did not expect %s annotation when checkpoint is not ready", snapshotprotocol.TargetContainersAnnotation)
 		}
 	})
 }
