@@ -75,7 +75,7 @@ func assertOnlyKnownDGDAnnotations(t *testing.T, annotations map[string]string) 
 	t.Helper()
 	for key := range annotations {
 		switch key {
-		case annDGDHubSpec, annDGDSpokeSpec, annDGDSpokeStatus:
+		case annDGDSpec, annDGDStatus:
 		default:
 			t.Fatalf("unexpected annotation %q in %v", key, annotations)
 		}
@@ -84,13 +84,13 @@ func assertOnlyKnownDGDAnnotations(t *testing.T, annotations map[string]string) 
 
 func mustRestoreDGDSpokeServiceSave(t *testing.T, hub *v1beta1.DynamoGraphDeployment, serviceName string) *DynamoComponentDeploymentSharedSpec {
 	t.Helper()
-	raw := hub.Annotations[annDGDSpokeSpec]
+	raw := hub.Annotations[annDGDSpec]
 	if raw == "" {
-		t.Fatalf("expected %q in annotations, got %v", annDGDSpokeSpec, hub.Annotations)
+		t.Fatalf("expected %q in annotations, got %v", annDGDSpec, hub.Annotations)
 	}
 	saved, ok := restoreDGDSpokeSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDGDSpokeSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpec, raw)
 	}
 	service := saved.Services[serviceName]
 	if service == nil {
@@ -184,10 +184,10 @@ func TestDGD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if raw, ok := spoke.Annotations[annDGDHubSpec]; ok {
+	if raw, ok := spoke.Annotations[annDGDSpec]; ok {
 		preserved, ok := restoreDGDHubSpec(raw)
 		if !ok {
-			t.Fatalf("failed to restore %q payload: %s", annDGDHubSpec, raw)
+			t.Fatalf("failed to restore %q payload: %s", annDGDSpec, raw)
 		}
 		if len(preserved.Components) != 1 {
 			t.Fatalf("expected one preserved component, got %#v", preserved.Components)
@@ -292,13 +292,13 @@ func TestDGD_SpokeSaveCarriesAlphaOnlyFieldsSparsely(t *testing.T) {
 		t.Fatalf("ConvertTo: %v", err)
 	}
 	assertOnlyKnownDGDAnnotations(t, hub.Annotations)
-	raw := hub.Annotations[annDGDSpokeSpec]
+	raw := hub.Annotations[annDGDSpec]
 	if raw == "" {
-		t.Fatalf("expected alpha-only fields in %q, got %v", annDGDSpokeSpec, hub.Annotations)
+		t.Fatalf("expected alpha-only fields in %q, got %v", annDGDSpec, hub.Annotations)
 	}
 	saved, ok := restoreDGDSpokeSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDGDSpokeSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpec, raw)
 	}
 	if diff := cmp.Diff(src.Spec.PVCs, saved.PVCs); diff != "" {
 		t.Fatalf("PVC save mismatch (-want +got):\n%s", diff)
@@ -325,13 +325,13 @@ func TestDGD_SpokeSaveCarriesNilServicesSparsely(t *testing.T) {
 	if err := src.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	raw := hub.Annotations[annDGDSpokeSpec]
+	raw := hub.Annotations[annDGDSpec]
 	if raw == "" {
-		t.Fatalf("expected sparse nil-service save in %q, got %v", annDGDSpokeSpec, hub.Annotations)
+		t.Fatalf("expected sparse nil-service save in %q, got %v", annDGDSpec, hub.Annotations)
 	}
 	saved, ok := restoreDGDSpokeSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDGDSpokeSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpec, raw)
 	}
 	if len(saved.Services) != 1 || saved.Services["nil-service"] != nil {
 		t.Fatalf("expected only nil-service in sparse save, got %#v", saved.Services)

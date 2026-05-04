@@ -232,13 +232,13 @@ func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testin
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	raw := spoke.Annotations[annDCDHubSpec]
+	raw := spoke.Annotations[annDCDSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve hub-only podTemplate metadata", annDCDHubSpec)
+		t.Fatalf("expected %s to preserve hub-only podTemplate metadata", annDCDSpec)
 	}
 	preserved, ok := restoreDCDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to decode %s: %s", annDCDHubSpec, raw)
+		t.Fatalf("failed to decode %s: %s", annDCDSpec, raw)
 	}
 	if preserved.PodTemplate == nil || preserved.PodTemplate.Name != testHubOnlyTemplateName {
 		t.Fatalf("expected preserved podTemplate metadata, got %#v", preserved.PodTemplate)
@@ -336,13 +336,13 @@ func TestBugDCD_HubEditToFrontendSidecarHubOnlyFieldRoundTrips(t *testing.T) {
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	raw, ok := spoke.Annotations[annDCDHubSpec]
+	raw, ok := spoke.Annotations[annDCDSpec]
 	if !ok {
-		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDHubSpec, spoke.Annotations)
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDSpec, spoke.Annotations)
 	}
 	preserved, ok := restoreDCDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 	}
 	preservedSidecar, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName)
 	if !ok {
@@ -386,13 +386,13 @@ func TestBugDCD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyCont
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom hub: %v", err)
 	}
-	raw, ok := spoke.Annotations[annDCDHubSpec]
+	raw, ok := spoke.Annotations[annDCDSpec]
 	if !ok {
-		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDHubSpec, spoke.Annotations)
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDSpec, spoke.Annotations)
 	}
 	preserved, ok := restoreDCDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 	}
 	if _, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName); !ok {
 		t.Fatalf("expected preserved generated frontend sidecar remainder, got %#v", preserved.PodTemplate)
@@ -447,13 +447,13 @@ func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 	if _, ok := findContainerByName(spoke.Spec.ExtraPodSpec.PodSpec.Containers, sidecarName); !ok {
 		t.Fatalf("expected sidecar container in spoke ExtraPodSpec, got %#v", spoke.Spec.ExtraPodSpec.PodSpec.Containers)
 	}
-	raw, ok := spoke.Annotations[annDCDHubSpec]
+	raw, ok := spoke.Annotations[annDCDSpec]
 	if !ok {
-		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDHubSpec, spoke.Annotations)
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDCDSpec, spoke.Annotations)
 	}
 	preserved, ok := restoreDCDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 	}
 	preservedSidecar, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, sidecarName)
 	if !ok {
@@ -506,13 +506,13 @@ func TestBugDGD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyCont
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom hub: %v", err)
 	}
-	raw, ok := spoke.Annotations[annDGDHubSpec]
+	raw, ok := spoke.Annotations[annDGDSpec]
 	if !ok {
-		t.Fatalf("expected sparse hub preservation in %q, got %v", annDGDHubSpec, spoke.Annotations)
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDGDSpec, spoke.Annotations)
 	}
 	preserved, ok := restoreDGDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDGDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpec, raw)
 	}
 	if _, ok := findContainerByName(preserved.Components[0].PodTemplate.Spec.Containers, defaultFrontendSidecarContainerName); !ok {
 		t.Fatalf("expected preserved generated frontend sidecar remainder, got %#v", preserved.Components[0].PodTemplate)
@@ -572,13 +572,13 @@ func TestDGD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 	if _, ok := findContainerByName(component.ExtraPodSpec.PodSpec.Containers, sidecarName); !ok {
 		t.Fatalf("expected sidecar container in spoke ExtraPodSpec, got %#v", component.ExtraPodSpec.PodSpec.Containers)
 	}
-	raw, ok := spoke.Annotations[annDGDHubSpec]
+	raw, ok := spoke.Annotations[annDGDSpec]
 	if !ok {
-		t.Fatalf("expected sparse hub preservation in %q, got %v", annDGDHubSpec, spoke.Annotations)
+		t.Fatalf("expected sparse hub preservation in %q, got %v", annDGDSpec, spoke.Annotations)
 	}
 	preserved, ok := restoreDGDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDGDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDGDSpec, raw)
 	}
 	if len(preserved.Components) != 1 {
 		t.Fatalf("expected one preserved component, got %#v", preserved.Components)
