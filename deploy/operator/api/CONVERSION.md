@@ -258,7 +258,7 @@ frontendSidecar:
   image: frontend:v1
 metadata:
   annotations:
-    nvidia.com/dgd-hub-spec: '{... "securityContext":{"runAsNonRoot":true} ...}'
+    nvidia.com/dgd-spec: '{... "securityContext":{"runAsNonRoot":true} ...}'
 ```
 
 ## Generics

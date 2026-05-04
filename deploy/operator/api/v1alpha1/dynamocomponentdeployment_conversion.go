@@ -33,9 +33,8 @@ import (
 )
 
 const (
-	annDCDHubSpec     = "nvidia.com/dcd-hub-spec"
-	annDCDSpokeSpec   = "nvidia.com/dcd-spoke-spec"
-	annDCDSpokeStatus = "nvidia.com/dcd-spoke-status"
+	annDCDSpec   = "nvidia.com/dcd-spec"
+	annDCDStatus = "nvidia.com/dcd-status"
 
 	preservedDCDEmptyServiceNamePath = "serviceName"
 )
@@ -56,7 +55,7 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 	var preservedHubSpec *v1beta1.DynamoComponentDeploymentSpec
 
-	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDCDHubSpec); ok && raw != "" {
+	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDCDSpec); ok && raw != "" {
 		if spec, ok := restoreDCDHubSpec(raw); ok {
 			preservedHubSpec = &spec
 		}
@@ -136,11 +135,11 @@ func saveDCDSpokeAnnotations(specSave *DynamoComponentDeploymentSpec, saveSpec b
 	if saveSpec {
 		data, err := marshalDCDSpokeSpec(specSave, emptyServiceName)
 		if err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDCDSpokeSpec, string(data))
+			setAnnOnObj(&dst.ObjectMeta, annDCDSpec, string(data))
 		}
 	}
 	if !dcdAlphaStatusSaveIsZero(statusSave) {
-		setJSONAnnOnObj(&dst.ObjectMeta, annDCDSpokeStatus, statusSave)
+		setJSONAnnOnObj(&dst.ObjectMeta, annDCDStatus, statusSave)
 	}
 }
 
@@ -198,13 +197,13 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	var preservedSpokeEmptyServiceName bool
 	var preservedSpokeStatus *DynamoComponentDeploymentStatus
 	spokeOrigin := hasDCDSpokeAnnotations(&dst.ObjectMeta)
-	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDCDSpokeSpec); ok && raw != "" {
+	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDCDSpec); ok && raw != "" {
 		if spec, emptyServiceName, ok := restoreDCDSpokeSpec(raw); ok {
 			preservedSpokeSpec = &spec
 			preservedSpokeEmptyServiceName = emptyServiceName
 		}
 	}
-	if status, ok := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDSpokeStatus); ok {
+	if status, ok := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDStatus); ok {
 		preservedSpokeStatus = &status
 	}
 
@@ -227,7 +226,7 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 		if err != nil {
 			return fmt.Errorf("preserve DCD hub spec: %w", err)
 		}
-		setAnnOnObj(&dst.ObjectMeta, annDCDHubSpec, string(data))
+		setAnnOnObj(&dst.ObjectMeta, annDCDSpec, string(data))
 	}
 	return nil
 }
@@ -316,8 +315,8 @@ func dcdHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSpec) bool {
 }
 
 func hasDCDSpokeAnnotations(obj metav1.Object) bool {
-	_, hasSpec := getAnnFromObj(obj, annDCDSpokeSpec)
-	_, hasStatus := getAnnFromObj(obj, annDCDSpokeStatus)
+	_, hasSpec := getAnnFromObj(obj, annDCDSpec)
+	_, hasStatus := getAnnFromObj(obj, annDCDStatus)
 	return hasSpec || hasStatus
 }
 
@@ -360,9 +359,8 @@ func convertDCDStatusFromHub(src *v1beta1.DynamoComponentDeploymentStatus, dst *
 
 func scrubDCDInternalAnnotations(obj metav1.Object) {
 	for _, key := range []string{
-		annDCDHubSpec,
-		annDCDSpokeSpec,
-		annDCDSpokeStatus,
+		annDCDSpec,
+		annDCDStatus,
 	} {
 		delAnnFromObj(obj, key)
 	}
