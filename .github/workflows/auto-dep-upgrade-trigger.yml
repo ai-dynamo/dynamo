@@ -90,7 +90,7 @@ jobs:
         if: steps.detect.outputs.upgrade_needed == 'true' && steps.branch.outputs.exists == 'false'
         run: |
           git config user.name  "dynamo-ops"
-          git config user.email "dynamo-ops@users.noreply.github.com"
+          git config user.email "170655669+dynamo-ops@users.noreply.github.com"
           git checkout -b "${{ steps.branch.outputs.name }}"
           git add container/context.yaml pyproject.toml docs/reference/support-matrix.md
           git commit -s -m "chore: bump ${{ matrix.framework }} to v${{ steps.detect.outputs.latest }}"
