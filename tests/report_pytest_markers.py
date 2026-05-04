@@ -202,6 +202,7 @@ STUB_MODULES = [
     "vllm.entrypoints.openai.engine.protocol",
     "vllm.inputs",
     "vllm.logprobs",
+    "vllm.logger",
     "vllm.lora",
     "vllm.lora.request",
     "vllm.multimodal",
