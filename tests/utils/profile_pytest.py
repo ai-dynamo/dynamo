@@ -679,14 +679,24 @@ def _looks_like_oom(stdout: str) -> bool:
 
 
 _SGLANG_MAX_TOKENS_RE = re.compile(r"max_total_tokens=(\d+)")
+# Fallback for configs that don't emit the scheduler line (e.g. multimodal
+# E/P/D where the encode worker has no KV pool and the PD worker logs only
+# the post-init allocation message).
+_SGLANG_KV_ALLOC_RE = re.compile(r"KV Cache is allocated\.\s*#tokens:\s*(\d+)")
 
 
 def _extract_requested_sglang_kv_tokens(stdout: str) -> int | None:
     """Extract max_total_tokens from SGLang engine output.
 
-    SGLang logs: "Got total KV blocks from scheduler: N (max_total_tokens=M, page_size=P)"
+    Tries (in order):
+      1. "Got total KV blocks from scheduler: N (max_total_tokens=M, page_size=P)"
+      2. "KV Cache is allocated. #tokens: M, K size: ..., V size: ..."
+    Both report the same M — the actually-allocated KV pool size.
     """
     match = _SGLANG_MAX_TOKENS_RE.search(stdout)
+    if match:
+        return int(match.group(1))
+    match = _SGLANG_KV_ALLOC_RE.search(stdout)
     if match:
         return int(match.group(1))
     return None
@@ -736,7 +746,12 @@ def _run_once(
     time.sleep(baseline_seconds)
     baseline_end = time.monotonic() - sampler._t0
 
-    pytest_cmd = [sys.executable, "-m", "pytest"] + list(pytest_args)
+    # -s (== --capture=no) is required so worker stdout reaches us. Without it
+    # pytest swallows the engine's startup logs on test success, and we lose
+    # the lines _extract_requested_*_kv_tokens greps for (e.g. TensorRT-LLM's
+    # '[MemUsageChange] Allocated ... for max tokens in paged KV cache (N)' or
+    # SGLang's 'max_total_tokens=N').
+    pytest_cmd = [sys.executable, "-m", "pytest", "-s"] + list(pytest_args)
     if not quiet:
         print(f"Running: {' '.join(pytest_cmd)}")
     sys.stdout.flush()

@@ -7,12 +7,16 @@ use std::sync::{
 };
 
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
-use dynamo_kv_router::{
-    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
-    ThreadPoolIndexer,
+use dynamo_kv_router::protocols::{
+    KvCacheEvent, KvCacheEventData, RouterEvent, TokensWithHashes, WorkerWithDpRank,
 };
+use dynamo_kv_router::{
+    AnchorAwareBranchShardedIndexer, BranchShardedIndexer, ConcurrentRadixTree,
+    ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+};
+use dynamo_mocker::loadgen::Trace;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +33,7 @@ pub enum MooncakeIndexerKind {
     ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
+    AnchorAwareBranchShardedCrtc,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +98,20 @@ impl MooncakeIndexerConfig {
         }
     }
 
+    pub fn anchor_aware_branch_sharded_crtc(
+        num_shards: usize,
+        num_event_workers_per_shard: usize,
+        prefix_depth: usize,
+    ) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::AnchorAwareBranchShardedCrtc,
+            num_shards,
+            num_event_workers_per_shard,
+            prefix_depth,
+            ..Self::radix_tree()
+        }
+    }
+
     pub fn short_name(&self) -> &'static str {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
@@ -102,6 +121,7 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
+            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => "anchor-aware-branch-sharded-crtc",
         }
     }
 
@@ -112,11 +132,20 @@ impl MooncakeIndexerConfig {
                 | MooncakeIndexerKind::ConcurrentRadixTree
                 | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
                 | MooncakeIndexerKind::BranchShardedCrtc
+                | MooncakeIndexerKind::AnchorAwareBranchShardedCrtc
         )
     }
 
     pub fn supports_remove(&self) -> bool {
         true
+    }
+
+    pub fn supports_approximate(&self) -> bool {
+        !matches!(
+            self.kind,
+            MooncakeIndexerKind::BranchShardedCrtc
+                | MooncakeIndexerKind::AnchorAwareBranchShardedCrtc
+        )
     }
 
     pub fn from_short_name(name: &str, num_event_workers: usize) -> anyhow::Result<Self> {
@@ -128,8 +157,11 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
+            "anchor-aware-branch-sharded-crtc" => {
+                Self::anchor_aware_branch_sharded_crtc(2, num_event_workers, 2)
+            }
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc, anchor-aware-branch-sharded-crtc",
                 name
             ),
         };
@@ -186,7 +218,85 @@ impl MooncakeIndexerConfig {
                     block_size,
                 ))
             }
+            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => {
+                let shards = (0..self.num_shards)
+                    .map(|_| {
+                        ThreadPoolIndexer::new_with_metrics(
+                            ConcurrentRadixTreeCompressed::new(),
+                            self.num_event_workers_per_shard,
+                            block_size,
+                            Some(Arc::clone(&metrics)),
+                        )
+                    })
+                    .collect();
+                Arc::new(AnchorAwareBranchShardedIndexer::new_with_options(
+                    shards,
+                    self.prefix_depth,
+                    block_size,
+                ))
+            }
         }
+    }
+
+    pub fn build_approximate(
+        &self,
+        block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        self.build_approximate_with_prune_config(block_size, metrics, PruneConfig::default())
+    }
+
+    pub fn build_approximate_with_prune_config(
+        &self,
+        block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        prune_config: PruneConfig,
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = match self.kind {
+            MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new_with_frequency(
+                CancellationToken::new(),
+                None,
+                block_size,
+                metrics,
+                Some(prune_config),
+            )),
+            MooncakeIndexerKind::NestedMap => {
+                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    PositionalIndexer::new(self.jump_size),
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                    Some(prune_config),
+                ))
+            }
+            MooncakeIndexerKind::ConcurrentRadixTree => {
+                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    ConcurrentRadixTree::new(),
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                    Some(prune_config),
+                ))
+            }
+            MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
+                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    ConcurrentRadixTreeCompressed::new(),
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                    Some(prune_config),
+                ))
+            }
+            MooncakeIndexerKind::BranchShardedCrtc => {
+                anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
+            }
+            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => {
+                anyhow::bail!(
+                    "anchor-aware-branch-sharded-crtc does not support approximate pruning"
+                )
+            }
+        };
+        Ok(indexer)
     }
 }
 
@@ -196,6 +306,7 @@ pub struct MooncakeBenchmarkConfig {
     pub inference_worker_duplication_factor: usize,
     pub count_events: bool,
     pub find_matches_concurrency: usize,
+    pub block_size: u32,
 }
 
 /// A single entry in a worker's merged benchmark timeline.
@@ -203,6 +314,7 @@ pub struct MooncakeBenchmarkConfig {
 enum WorkerTraceEntry {
     Request(Vec<LocalBlockHash>),
     Event(KvCacheEvent),
+    ApproxWrite { tokens: Vec<u32>, num_blocks: usize },
 }
 
 /// A timestamped entry in a worker's benchmark trace, used to replay requests
@@ -213,7 +325,13 @@ struct WorkerTrace {
     timestamp_us: u64,
 }
 
-fn prepare_worker_traces(
+#[derive(Clone)]
+pub enum MooncakeBenchmarkInput {
+    KvEvents(Vec<WorkerReplayArtifacts>),
+    Approx(Vec<Trace>),
+}
+
+fn prepare_event_worker_traces(
     artifacts: Vec<WorkerReplayArtifacts>,
     benchmark_duration_ms: u64,
 ) -> Vec<Vec<WorkerTrace>> {
@@ -248,12 +366,87 @@ fn prepare_worker_traces(
     )
 }
 
+fn synthesized_tokens(
+    turn: &dynamo_mocker::loadgen::TurnTrace,
+    trace_block_size: usize,
+) -> Vec<u32> {
+    let mut tokens = Vec::with_capacity(turn.input_length);
+    for &hash_id in &turn.hash_ids {
+        tokens.extend((0..trace_block_size).map(|_| hash_id as u32));
+        if tokens.len() >= turn.input_length {
+            tokens.truncate(turn.input_length);
+            break;
+        }
+    }
+    tokens
+}
+
+fn prepare_approx_worker_traces(
+    traces: Vec<Trace>,
+    block_size: u32,
+    benchmark_duration_ms: u64,
+) -> anyhow::Result<Vec<Vec<WorkerTrace>>> {
+    let mut worker_traces = Vec::with_capacity(traces.len());
+    for trace in traces {
+        let trace_block_size = trace.block_size;
+        let mut entries = Vec::new();
+        for session in trace.sessions {
+            let mut timestamp_ms = session.first_arrival_timestamp_ms.unwrap_or(0.0);
+            for (turn_idx, turn) in session.turns.into_iter().enumerate() {
+                if turn_idx > 0 {
+                    timestamp_ms += turn.delay_after_previous_ms;
+                }
+                let replay_hashes = turn.to_replay_hashes(trace_block_size, block_size as usize)?;
+                let tokens = synthesized_tokens(&turn, trace_block_size);
+                let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
+                entries.push(WorkerTrace {
+                    timestamp_us,
+                    entry: WorkerTraceEntry::Request(replay_hashes.local_block_hashes),
+                });
+                entries.push(WorkerTrace {
+                    timestamp_us,
+                    entry: WorkerTraceEntry::ApproxWrite {
+                        tokens,
+                        num_blocks: replay_hashes.sequence_hashes.len(),
+                    },
+                });
+            }
+        }
+        entries.sort_by_key(|entry| entry.timestamp_us);
+        worker_traces.push(entries);
+    }
+    Ok(rescale_trace_timestamps(
+        &worker_traces,
+        benchmark_duration_ms,
+        |entry| entry.timestamp_us,
+        |entry, timestamp_us| WorkerTrace {
+            entry: entry.entry.clone(),
+            timestamp_us,
+        },
+    ))
+}
+
+fn prepare_worker_traces(
+    input: MooncakeBenchmarkInput,
+    config: MooncakeBenchmarkConfig,
+) -> anyhow::Result<Vec<Vec<WorkerTrace>>> {
+    match input {
+        MooncakeBenchmarkInput::KvEvents(artifacts) => Ok(prepare_event_worker_traces(
+            artifacts,
+            config.benchmark_duration_ms,
+        )),
+        MooncakeBenchmarkInput::Approx(traces) => {
+            prepare_approx_worker_traces(traces, config.block_size, config.benchmark_duration_ms)
+        }
+    }
+}
+
 pub async fn run_benchmark(
     indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
-    artifacts: Vec<WorkerReplayArtifacts>,
+    input: MooncakeBenchmarkInput,
     config: MooncakeBenchmarkConfig,
 ) -> anyhow::Result<BenchmarkRun> {
-    let worker_traces = prepare_worker_traces(artifacts, config.benchmark_duration_ms);
+    let worker_traces = prepare_worker_traces(input, config)?;
     let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
 
     let progress = make_progress_bar(Some(
@@ -287,6 +480,17 @@ pub async fn run_benchmark(
                             indexer
                                 .apply_event(RouterEvent::new(worker_id as u64, event))
                                 .await;
+                            Ok(None)
+                        }
+                        WorkerTraceEntry::ApproxWrite { tokens, .. } => {
+                            let mut tokens_with_hashes =
+                                TokensWithHashes::new(tokens, config.block_size);
+                            indexer
+                                .process_routing_decision_for_request(
+                                    &mut tokens_with_hashes,
+                                    WorkerWithDpRank::from_worker_id(worker_id as u64),
+                                )
+                                .await?;
                             Ok(None)
                         }
                     }
@@ -347,7 +551,7 @@ pub async fn run_benchmark(
                 .flat_map(|trace| trace.iter())
                 .filter_map(|entry| match &entry.entry {
                     WorkerTraceEntry::Request(hashes) => Some(hashes.clone()),
-                    WorkerTraceEntry::Event(_) => None,
+                    WorkerTraceEntry::Event(_) | WorkerTraceEntry::ApproxWrite { .. } => None,
                 })
                 .collect(),
         );
@@ -396,17 +600,28 @@ pub async fn run_benchmark(
         })
         .sum::<usize>()
         * config.inference_worker_duplication_factor;
+    let total_approx_writes = worker_traces
+        .iter()
+        .map(|trace| {
+            trace
+                .iter()
+                .filter(|entry| matches!(entry.entry, WorkerTraceEntry::ApproxWrite { .. }))
+                .count()
+        })
+        .sum::<usize>()
+        * config.inference_worker_duplication_factor;
 
     let total_requests = worker_traces.iter().map(|trace| trace.len()).sum::<usize>()
         * config.inference_worker_duplication_factor
-        - total_events;
+        - total_events
+        - total_approx_writes;
 
     let total_request_blocks = worker_traces
         .iter()
         .flat_map(|trace| trace.iter())
         .filter_map(|entry| match &entry.entry {
             WorkerTraceEntry::Request(hashes) => Some(hashes.len()),
-            WorkerTraceEntry::Event(_) => None,
+            WorkerTraceEntry::Event(_) | WorkerTraceEntry::ApproxWrite { .. } => None,
         })
         .sum::<usize>()
         * config.inference_worker_duplication_factor;
@@ -419,12 +634,14 @@ pub async fn run_benchmark(
                 KvCacheEventData::Stored(store) => Some(store.blocks.len()),
                 _ => Some(0),
             },
+            WorkerTraceEntry::ApproxWrite { num_blocks, .. } => Some(*num_blocks),
             WorkerTraceEntry::Request(_) => None,
         })
         .sum::<usize>()
         * config.inference_worker_duplication_factor;
 
-    let counted_events = if config.count_events { total_events } else { 0 };
+    let total_writes = total_events + total_approx_writes;
+    let counted_events = if config.count_events { total_writes } else { 0 };
     let counted_event_blocks = if config.count_events {
         total_event_blocks
     } else {

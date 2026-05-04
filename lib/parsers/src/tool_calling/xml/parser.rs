@@ -138,7 +138,31 @@ fn extract_tool_calls(
 
                 cursor = abs_end;
             } else {
-                // No end token found -> treat the rest as normal text.
+                // Recovery: outer end token absent (max_tokens / EOS truncation).
+                // Gated on `allow_eof_recovery` so streaming early-exit doesn't
+                // fire mid-stream. Recovery also requires the trailing slice
+                // to contain a function-start opener — structural signal that
+                // a real tool call was emitted, so plain text starting with
+                // `<tool_call>` is preserved verbatim.
+                let block = &text[abs_start..];
+                let function_start = &config.function_start_token;
+                let function_end = &config.function_end_token;
+                if config.allow_eof_recovery
+                    && block.contains(function_start.as_str())
+                    && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
+                    && !parsed_calls.is_empty()
+                {
+                    calls.append(&mut parsed_calls);
+                    // Preserve any suffix after the last function close so
+                    // non-tool trailing content isn't dropped.
+                    if let Some(last_end) = block.rfind(function_end.as_str()) {
+                        let suffix_start = abs_start + last_end + function_end.len();
+                        if suffix_start < text.len() {
+                            normal_parts.push(&text[suffix_start..]);
+                        }
+                    }
+                    break;
+                }
                 normal_parts.push(&text[abs_start..]);
                 break;
             }
@@ -900,6 +924,71 @@ rust programming
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         // This matches the original SGLang python implementation.
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
+    }
+
+    // Recovery for missing outer </tool_call> (max_tokens / EOS truncation):
+    // when the inner function block is well-formed, treat EOF as the end
+    // token and extract the call. Recovery is gated on a function-start
+    // opener in the trailing slice so plain text that happens to start with
+    // `<tool_call>` is preserved verbatim.
+    #[test] // CASE.5 — qwen3_coder
+    fn test_parse_qwen3_no_outer_close_recovers() {
+        let input = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+NYC
+</parameter>
+</function>"#;
+
+        let config = XmlParserConfig {
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
+    }
+
+    // After EOF-recovery, any non-tool suffix following the last
+    // `</function>` close must surface as normal_text rather than being
+    // dropped along with the recovered call.
+    #[test]
+    fn test_parse_qwen3_no_outer_close_preserves_suffix() {
+        let input = "<tool_call>\n<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\nTRAILING NOTE";
+
+        let config = XmlParserConfig {
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, normal) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        let normal = normal.unwrap_or_default();
+        assert!(
+            normal.contains("TRAILING NOTE"),
+            "normal must keep suffix after </function>: {normal:?}"
+        );
+    }
+
+    #[test] // CASE.5 — minimax_m2
+    fn test_parse_minimax_m2_no_outer_close_recovers() {
+        let config = XmlParserConfig {
+            tool_call_start_token: "<minimax:tool_call>".to_string(),
+            tool_call_end_token: "</minimax:tool_call>".to_string(),
+            function_start_token: "<invoke name=".to_string(),
+            function_end_token: "</invoke>".to_string(),
+            parameter_start_token: "<parameter name=".to_string(),
+            parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: true,
+        };
+        let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
+
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     #[test] // CASE.18

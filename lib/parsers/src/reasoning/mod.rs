@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 mod base_parser;
+mod gemma4_parser;
 mod gpt_oss_parser;
 mod granite_parser;
 mod minimax_append_think_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
+pub use gemma4_parser::Gemma4ReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
@@ -58,6 +60,11 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
             "minimax_append_think",
             ReasoningParserType::MiniMaxAppendThink,
         );
+        // Gemma 4 thinking models: reasoning is wrapped in `<|channel>...<channel|>`
+        // with a `thought\n` role label that this parser strips. Pair with
+        // `--dyn-tool-call-parser gemma4` for end-to-end Gemma 4 support.
+        map.insert("gemma4", ReasoningParserType::Gemma4);
+        map.insert("gemma-4", ReasoningParserType::Gemma4);
         map
     })
 }
@@ -140,6 +147,9 @@ pub enum ReasoningParserType {
     Mistral,
     Granite,
     MiniMaxAppendThink,
+    /// Google Gemma 4 thinking models. Custom `<|channel>...<channel|>`
+    /// delimiters with a `thought\n` role-label prefix stripped by the parser.
+    Gemma4,
 }
 
 #[derive(std::fmt::Debug)]
@@ -240,6 +250,9 @@ impl ReasoningParserType {
             ReasoningParserType::MiniMaxAppendThink => ReasoningParserWrapper {
                 parser: Box::new(MiniMaxAppendThinkParser::new()),
             },
+            ReasoningParserType::Gemma4 => ReasoningParserWrapper {
+                parser: Box::new(Gemma4ReasoningParser::new()),
+            },
         }
     }
 
@@ -289,12 +302,13 @@ mod tests {
             "nemotron3",
             "glm45",
             "minimax_append_think",
+            "gemma4",
+            "gemma-4",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
         }
     }
-    /// `CASE.10` — reasoning-only (V4 `<think>`/`</think>`).
 
     #[test] // CASE.10
     fn test_deepseek_v4_detect_and_parse() {
@@ -305,7 +319,6 @@ mod tests {
             assert_eq!(result.normal_text, "answer");
         }
     }
-    /// `CASE.3` / `CASE.10` — no reasoning tags ⇒ no `reasoning_content`.
 
     #[test] // CASE.3, CASE.10
     fn test_deepseek_v4_no_forced_reasoning_without_tags() {
@@ -314,7 +327,6 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
         assert_eq!(result.normal_text, "answer only");
     }
-    /// `CASE.8` — streaming reasoning parse (chunked).
 
     #[test] // CASE.8, CASE.10
     fn test_deepseek_v4_streaming() {
@@ -534,5 +546,31 @@ mod tests {
         }
         assert_eq!(all_reasoning, "reasoning done.");
         assert_eq!(all_content, "Hello world");
+    }
+
+    // P2-1: V4 production regime where the prompt ends in <think>, so the stream
+    // begins INSIDE a reasoning block (no opening <think> sentinel). The caller
+    // initializes the parser via set_in_reasoning(true); bytes before </think>
+    // must route to reasoning_content, bytes after to normal content.
+    #[test]
+    fn test_deepseek_v4_streaming_with_set_in_reasoning() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        parser.set_in_reasoning(true);
+
+        // Token-by-token stream, starting with raw reasoning (no <think> prefix),
+        // </think> in the middle, then normal content.
+        let tokens = &[
+            "Wei", "gh", "ing ", "options", ".", "</think>", "Bei", "jing", " is", " sunny.",
+        ];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        assert_eq!(all_reasoning, "Weighing options.");
+        assert_eq!(all_content, "Beijing is sunny.");
     }
 }

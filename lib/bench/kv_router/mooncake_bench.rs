@@ -10,7 +10,9 @@ mod mooncake_shared;
 
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
-use mooncake_shared::{MooncakeBenchmarkConfig, MooncakeIndexerConfig, run_benchmark};
+use mooncake_shared::{
+    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig, run_benchmark,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -65,11 +67,23 @@ enum IndexerArgs {
         /// keys, while depth=2 gives a much larger set of distinguishable branches.
         #[clap(long, default_value = "2")]
         prefix_depth: usize,
+    },
 
-        /// Number of OS threads per shard dedicated to find_matches (read isolation).
-        /// 0 (default): reads run inline on the calling tokio thread.
-        #[clap(long, default_value = "0")]
-        num_read_threads_per_shard: usize,
+    /// Anchor-aware branch-sharded CRTC: bounded routing trie with structural
+    /// anchors for depth-boundary suffixes. Exact KV-event replay only;
+    /// approximate pruning is unsupported.
+    AnchorAwareBranchShardedCrtc {
+        /// Number of independent CRTC shards.
+        #[clap(long, default_value = "2")]
+        num_shards: usize,
+
+        /// Number of OS event-worker threads per shard.
+        #[clap(long, default_value = "4")]
+        num_event_workers_per_shard: usize,
+
+        /// Maximum routing-trie depth before dispatching to one shard.
+        #[clap(long, default_value = "2")]
+        prefix_depth: usize,
     },
 }
 
@@ -91,8 +105,16 @@ impl IndexerArgs {
                 num_shards,
                 num_event_workers_per_shard,
                 prefix_depth,
-                num_read_threads_per_shard: _,
             } => MooncakeIndexerConfig::branch_sharded_crtc(
+                *num_shards,
+                *num_event_workers_per_shard,
+                *prefix_depth,
+            ),
+            IndexerArgs::AnchorAwareBranchShardedCrtc {
+                num_shards,
+                num_event_workers_per_shard,
+                prefix_depth,
+            } => MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(
                 *num_shards,
                 *num_event_workers_per_shard,
                 *prefix_depth,
@@ -114,13 +136,15 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed.
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
+    /// anchor-aware-branch-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
     /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed).
+    /// concurrent-radix-tree-compressed, branch-sharded-crtc,
+    /// anchor-aware-branch-sharded-crtc).
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
@@ -130,6 +154,10 @@ struct Args {
     /// trace-replay workers.  Set to 0 (default) to disable.
     #[clap(long, default_value = "0")]
     find_matches_concurrency: usize,
+
+    /// Use approximate routing-decision writes instead of offline-generated KV events.
+    #[clap(long)]
+    approx: bool,
 
     /// Output path for the shard-size CSV produced when `shard-metrics` feature
     /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
@@ -373,13 +401,19 @@ async fn main() -> anyhow::Result<()> {
         args.common.num_unique_inference_workers,
         args.common.seed,
     )?;
-    let artifacts = generate_replay_artifacts(
-        &traces,
-        args.common.num_gpu_blocks,
-        args.common.block_size,
-        args.common.trace_simulation_duration_ms,
-    )
-    .await?;
+    let benchmark_input = if args.approx {
+        MooncakeBenchmarkInput::Approx(traces.clone())
+    } else {
+        MooncakeBenchmarkInput::KvEvents(
+            generate_replay_artifacts(
+                &traces,
+                args.common.num_gpu_blocks,
+                args.common.block_size,
+                args.common.trace_simulation_duration_ms,
+            )
+            .await?,
+        )
+    };
 
     let indexer_names: Vec<String> = if args.compare.is_empty() {
         vec![args.get_indexer().to_config().short_name().to_string()]
@@ -420,13 +454,20 @@ async fn main() -> anyhow::Result<()> {
 
             for &dur_ms in durations {
                 println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
-                let indexer = config.build(
-                    args.common.block_size,
-                    Arc::new(KvIndexerMetrics::new_unregistered()),
-                );
+                let indexer = if args.approx {
+                    config.build_approximate(
+                        args.common.block_size,
+                        Arc::new(KvIndexerMetrics::new_unregistered()),
+                    )?
+                } else {
+                    config.build(
+                        args.common.block_size,
+                        Arc::new(KvIndexerMetrics::new_unregistered()),
+                    )
+                };
                 let run = run_benchmark(
                     indexer,
-                    artifacts.clone(),
+                    benchmark_input.clone(),
                     MooncakeBenchmarkConfig {
                         benchmark_duration_ms: dur_ms,
                         inference_worker_duplication_factor: args
@@ -434,6 +475,7 @@ async fn main() -> anyhow::Result<()> {
                             .inference_worker_duplication_factor,
                         count_events: config.supports_remove(),
                         find_matches_concurrency: args.find_matches_concurrency,
+                        block_size: args.common.block_size,
                     },
                 )
                 .await?;
@@ -499,8 +541,6 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
         println!("Sweep results saved to {}", json_path);
     } else {
-        drop(traces);
-
         for name in &indexer_names {
             println!("\nBenchmarking indexer: {}", name);
             let config = if args.compare.is_empty() {
@@ -508,10 +548,17 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)?
             };
-            let indexer = config.build(
-                args.common.block_size,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
-            );
+            let indexer = if args.approx {
+                config.build_approximate(
+                    args.common.block_size,
+                    Arc::new(KvIndexerMetrics::new_unregistered()),
+                )?
+            } else {
+                config.build(
+                    args.common.block_size,
+                    Arc::new(KvIndexerMetrics::new_unregistered()),
+                )
+            };
 
             // Start shard-size sampler if a CSV path was provided.
             let shard_cancel = CancellationToken::new();
@@ -527,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
 
             let run = run_benchmark(
                 indexer.clone(),
-                artifacts.clone(),
+                benchmark_input.clone(),
                 MooncakeBenchmarkConfig {
                     benchmark_duration_ms: args.common.benchmark_duration_ms,
                     inference_worker_duplication_factor: args
@@ -535,6 +582,7 @@ async fn main() -> anyhow::Result<()> {
                         .inference_worker_duplication_factor,
                     count_events: config.supports_remove(),
                     find_matches_concurrency: args.find_matches_concurrency,
+                    block_size: args.common.block_size,
                 },
             )
             .await?;
