@@ -2760,6 +2760,14 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "dynamo-recipe",
 					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
 				},
 			},
 			wantRequests: 1,
@@ -2788,6 +2796,14 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 					Namespace: "default",
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "my-very-long-original-dgd-name",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "my-very-long-original-dgd-name",
+							Controller: ptr.To(true),
+						},
 					},
 				},
 			},
