@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
+import os
 from typing import Callable, Coroutine
 
 import uvloop
@@ -80,6 +82,10 @@ def _make_drain_callback(
 
 async def worker():
     config = parse_args()
+
+    if os.getenv("TRTLLM_SERVER_DISABLE_GC", "0") == "1":
+        gc.disable()
+        logging.info("Python cyclic GC disabled (TRTLLM_SERVER_DISABLE_GC=1)")
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(
