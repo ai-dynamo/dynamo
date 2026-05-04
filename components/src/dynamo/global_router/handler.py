@@ -14,13 +14,52 @@ Both modes support priority-based pool overrides from agent hints.
 """
 
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from dynamo.runtime import Client, DistributedRuntime
 
 from .pool_selection import load_config
 
 logger = logging.getLogger(__name__)
+
+
+async def _setup_with_fallback(
+    pool_chain: List[int],
+    namespaces: List[str],
+    clients: Dict[str, Client],
+    request: Dict[str, Any],
+    pool_kind: str,
+):
+    """Try each pool in `pool_chain` in order, returning the first stream whose
+    `client.generate(request)` setup succeeds.
+
+    The fallback boundary is the *setup* call only — once a stream is returned,
+    any later error during iteration is the caller's problem (it would be unsafe
+    to retry after partial output has already been forwarded to the client).
+
+    Returns: (stream, chosen_pool_idx). Raises the last exception if all pools
+    fail setup.
+    """
+    last_err: Optional[BaseException] = None
+    for idx in pool_chain:
+        namespace = namespaces[idx]
+        client = clients[namespace]
+        try:
+            stream = await client.generate(request)
+            if last_err is not None:
+                logger.info(
+                    f"Routing {pool_kind} request: chain {pool_chain} -> "
+                    f"accepted by pool {idx} ({namespace}) after fallback"
+                )
+            return stream, idx
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                f"Routing {pool_kind} setup failed for pool {idx} ({namespace}): "
+                f"{e}; trying next in routing_priority chain"
+            )
+    assert last_err is not None  # pool_chain is guaranteed non-empty by validation
+    raise last_err
 
 
 class GlobalRouterHandler:
@@ -166,27 +205,30 @@ class GlobalRouterHandler:
         routing = request.get("routing") or {}
         priority = routing.get("priority")
 
-        # Select prefill pool
-        pool_idx = self.config.prefill_pool_selection_strategy.select_pool(
+        # Select prefill pool chain (single pool from grid, or routing_priority list)
+        pool_chain = self.config.prefill_pool_selection_strategy.select_pool_chain(
             isl=isl, ttft_target=ttft_target, priority=priority
         )
-        namespace = self.config.prefill_pool_dynamo_namespaces[pool_idx]
-        client = self.prefill_clients[namespace]
 
         logger.info(
             f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target}, "
-            f"priority={priority} -> pool {pool_idx} ({namespace})"
+            f"priority={priority} -> pool chain {pool_chain}"
         )
 
-        # Forward request to local router and stream back responses
+        stream, _ = await _setup_with_fallback(
+            pool_chain=pool_chain,
+            namespaces=self.config.prefill_pool_dynamo_namespaces,
+            clients=self.prefill_clients,
+            request=request,
+            pool_kind="prefill",
+        )
+
         try:
-            stream = await client.generate(request)
             async for output in stream:
-                # Extract data from stream response object
                 data = output.data() if hasattr(output, "data") else output
                 yield data
         except Exception as e:
-            logger.error(f"Error forwarding prefill request to {namespace}: {e}")
+            logger.error(f"Error streaming prefill response: {e}")
             raise
 
     async def handle_decode(
@@ -216,30 +258,33 @@ class GlobalRouterHandler:
         routing = request.get("routing") or {}
         priority = routing.get("priority")
 
-        # Select decode pool
-        pool_idx = self.config.decode_pool_selection_strategy.select_pool(
+        # Select decode pool chain
+        pool_chain = self.config.decode_pool_selection_strategy.select_pool_chain(
             context_length=context_length,
             itl_target=itl_target,
             priority=priority,
         )
-        namespace = self.config.decode_pool_dynamo_namespaces[pool_idx]
-        client = self.decode_clients[namespace]
 
         logger.info(
             f"Routing decode request: context_length={context_length}, "
             f"ITL_target={itl_target}, priority={priority} -> "
-            f"pool {pool_idx} ({namespace})"
+            f"pool chain {pool_chain}"
         )
 
-        # Forward request to local router and stream back responses
+        stream, _ = await _setup_with_fallback(
+            pool_chain=pool_chain,
+            namespaces=self.config.decode_pool_dynamo_namespaces,
+            clients=self.decode_clients,
+            request=request,
+            pool_kind="decode",
+        )
+
         try:
-            stream = await client.generate(request)
             async for output in stream:
-                # Extract data from stream response object
                 data = output.data() if hasattr(output, "data") else output
                 yield data
         except Exception as e:
-            logger.error(f"Error forwarding decode request to {namespace}: {e}")
+            logger.error(f"Error streaming decode response: {e}")
             raise
 
     async def handle_generate(
@@ -269,26 +314,30 @@ class GlobalRouterHandler:
         routing = request.get("routing") or {}
         priority = routing.get("priority")
 
-        # Select agg pool
-        pool_idx = self.config.agg_pool_selection_strategy.select_pool(
+        # Select agg pool chain
+        pool_chain = self.config.agg_pool_selection_strategy.select_pool_chain(
             ttft_target=ttft_target, itl_target=itl_target, priority=priority
         )
-        namespace = self.config.agg_pool_dynamo_namespaces[pool_idx]
-        client = self.agg_clients[namespace]
 
         logger.info(
             f"Routing agg request: TTFT_target={ttft_target}, ITL_target={itl_target}, "
-            f"priority={priority} -> pool {pool_idx} ({namespace})"
+            f"priority={priority} -> pool chain {pool_chain}"
         )
 
-        # Forward request to local router and stream back responses
+        stream, _ = await _setup_with_fallback(
+            pool_chain=pool_chain,
+            namespaces=self.config.agg_pool_dynamo_namespaces,
+            clients=self.agg_clients,
+            request=request,
+            pool_kind="agg",
+        )
+
         try:
-            stream = await client.generate(request)
             async for output in stream:
                 data = output.data() if hasattr(output, "data") else output
                 yield data
         except Exception as e:
-            logger.error(f"Error forwarding agg request to {namespace}: {e}")
+            logger.error(f"Error streaming agg response: {e}")
             raise
 
     def get_pool_info(self) -> Dict[str, Any]:

@@ -46,6 +46,35 @@ def _apply_priority_overrides(
     return base_pool
 
 
+def _validate_routing_priority(
+    routing_priority: Optional[List[int]],
+    num_pools: int,
+    label: str,
+) -> None:
+    """Validate a routing_priority pool chain.
+
+    Rules: when set, must be non-empty, every entry must be a valid pool index
+    in `[0, num_pools)`, and entries must be unique (a duplicate pool would
+    just re-fail the same way and is almost certainly a config mistake).
+    """
+    if routing_priority is None:
+        return
+    if not routing_priority:
+        raise ValueError(f"{label} routing_priority must be non-empty when set")
+    seen: set[int] = set()
+    for pos, pool_idx in enumerate(routing_priority):
+        if pool_idx < 0 or pool_idx >= num_pools:
+            raise ValueError(
+                f"{label} routing_priority[{pos}]: invalid pool index {pool_idx} "
+                f"(must be 0 to {num_pools - 1})"
+            )
+        if pool_idx in seen:
+            raise ValueError(
+                f"{label} routing_priority contains duplicate pool index {pool_idx}"
+            )
+        seen.add(pool_idx)
+
+
 @dataclass
 class PrefillPoolSelectionStrategy:
     """Strategy for selecting prefill pools based on ISL and TTFT target."""
@@ -58,6 +87,7 @@ class PrefillPoolSelectionStrategy:
     isl_resolution: int
     prefill_pool_mapping: List[List[int]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
+    routing_priority: Optional[List[int]] = None
 
     @property
     def ttft_step(self) -> float:
@@ -108,6 +138,22 @@ class PrefillPoolSelectionStrategy:
         )
         return pool_idx
 
+    def select_pool_chain(
+        self,
+        isl: int,
+        ttft_target: Optional[float] = None,
+        priority: Optional[int] = None,
+    ) -> List[int]:
+        """Return ordered chain of prefill pools to try.
+
+        If `routing_priority` is set, returns that list directly (grid and
+        priority_overrides are bypassed). Otherwise returns a single-element
+        list containing the grid result.
+        """
+        if self.routing_priority:
+            return list(self.routing_priority)
+        return [self.select_pool(isl=isl, ttft_target=ttft_target, priority=priority)]
+
     @staticmethod
     def _clamp_index(value: float, resolution: int) -> int:
         """Clamp index to valid grid range."""
@@ -126,6 +172,7 @@ class DecodePoolSelectionStrategy:
     context_length_resolution: int
     decode_pool_mapping: List[List[int]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
+    routing_priority: Optional[List[int]] = None
 
     @property
     def itl_step(self) -> float:
@@ -179,6 +226,28 @@ class DecodePoolSelectionStrategy:
         )
         return pool_idx
 
+    def select_pool_chain(
+        self,
+        context_length: int,
+        itl_target: Optional[float] = None,
+        priority: Optional[int] = None,
+    ) -> List[int]:
+        """Return ordered chain of decode pools to try.
+
+        If `routing_priority` is set, returns that list directly (grid and
+        priority_overrides are bypassed). Otherwise returns a single-element
+        list containing the grid result.
+        """
+        if self.routing_priority:
+            return list(self.routing_priority)
+        return [
+            self.select_pool(
+                context_length=context_length,
+                itl_target=itl_target,
+                priority=priority,
+            )
+        ]
+
     @staticmethod
     def _clamp_index(value: float, resolution: int) -> int:
         """Clamp index to valid grid range."""
@@ -207,6 +276,7 @@ class AggPoolSelectionStrategy:
     itl_resolution: int
     agg_pool_mapping: List[List[int]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
+    routing_priority: Optional[List[int]] = None
 
     @property
     def ttft_step(self) -> float:
@@ -258,6 +328,26 @@ class AggPoolSelectionStrategy:
             f"priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
+
+    def select_pool_chain(
+        self,
+        ttft_target: Optional[float] = None,
+        itl_target: Optional[float] = None,
+        priority: Optional[int] = None,
+    ) -> List[int]:
+        """Return ordered chain of agg pools to try.
+
+        If `routing_priority` is set, returns that list directly (grid and
+        priority_overrides are bypassed). Otherwise returns a single-element
+        list containing the grid result.
+        """
+        if self.routing_priority:
+            return list(self.routing_priority)
+        return [
+            self.select_pool(
+                ttft_target=ttft_target, itl_target=itl_target, priority=priority
+            )
+        ]
 
     @staticmethod
     def _clamp_index(value: float, resolution: int) -> int:
@@ -385,6 +475,10 @@ class GlobalRouterConfig:
                     f"{override.target_pool} (must be 0 to {self.num_prefill_pools - 1})"
                 )
 
+        _validate_routing_priority(
+            prefill_strategy.routing_priority, self.num_prefill_pools, "Prefill"
+        )
+
         # Validate decode strategy
         decode_strategy = self.decode_pool_selection_strategy
         if decode_strategy.context_length_resolution <= 0:
@@ -443,6 +537,10 @@ class GlobalRouterConfig:
                     f"Decode priority_overrides[{i}]: invalid target_pool "
                     f"{override.target_pool} (must be 0 to {self.num_decode_pools - 1})"
                 )
+
+        _validate_routing_priority(
+            decode_strategy.routing_priority, self.num_decode_pools, "Decode"
+        )
 
     def _validate_agg(self) -> None:
         """Validate agg mode configuration."""
@@ -512,6 +610,10 @@ class GlobalRouterConfig:
                     f"{override.target_pool} (must be 0 to {self.num_agg_pools - 1})"
                 )
 
+        _validate_routing_priority(
+            agg_strategy.routing_priority, self.num_agg_pools, "Agg"
+        )
+
 
 def load_config(config_path: str | Path) -> GlobalRouterConfig:
     """
@@ -566,6 +668,7 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
         isl_resolution=prefill_strategy_data["isl_resolution"],
         prefill_pool_mapping=prefill_strategy_data["prefill_pool_mapping"],
         priority_overrides=prefill_priority_overrides,
+        routing_priority=prefill_strategy_data.get("routing_priority"),
     )
 
     # Parse decode selection strategy
@@ -583,6 +686,7 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
         context_length_resolution=decode_strategy_data["context_length_resolution"],
         decode_pool_mapping=decode_strategy_data["decode_pool_mapping"],
         priority_overrides=decode_priority_overrides,
+        routing_priority=decode_strategy_data.get("routing_priority"),
     )
 
     config = GlobalRouterConfig(
@@ -618,6 +722,7 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
         itl_resolution=agg_strategy_data["itl_resolution"],
         agg_pool_mapping=agg_strategy_data["agg_pool_mapping"],
         priority_overrides=agg_priority_overrides,
+        routing_priority=agg_strategy_data.get("routing_priority"),
     )
 
     config = GlobalRouterConfig(

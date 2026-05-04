@@ -215,42 +215,43 @@ Priority is set by the client via the NVIDIA OpenAI extension:
 }
 ```
 
-### Priority-Based Pool Override
+### Pool Fallback Chain (`routing_priority`)
 
-Both prefill and decode strategies support optional `priority_overrides` rules.
-When a request carries a priority value (from `nvext.agent_hints.priority`), the
-global router evaluates the override rules **after** the grid lookup. The first
-rule whose `[min_priority, max_priority]` range contains the request priority
-wins, and the request is routed to that rule's `target_pool` instead of the
-grid result. If no rule matches (or no priority is present), the grid result
-is used as normal.
+Each strategy supports an optional `routing_priority` field — an ordered list of
+pool indices to try in sequence. When set, it **replaces** the grid lookup and
+`priority_overrides` for that strategy. The handler attempts the first pool;
+if `client.generate()` raises before any tokens have been streamed back, the
+handler falls back to the next pool in the list, and so on.
 
-This is useful for straggler mitigation in RL workloads: the RL framework can
-tag slow requests with a high priority, and the global router redirects them to
-a dedicated min-latency pool.
+Use this when you want a simple "send everything to Pool A; fall back to Pool B
+if A is unreachable" deployment without authoring a 2D grid.
 
 ```jsonc
-"priority_overrides": [
-    {
-        "min_priority": 10,     // inclusive lower bound
-        "max_priority": 100,    // inclusive upper bound
-        "target_pool": 1        // pool index to route to
-    }
-]
-```
-
-Priority is set by the client via the NVIDIA OpenAI extension:
-
-```json
-{
-    "messages": [...],
-    "nvext": {
-        "agent_hints": {
-            "priority": 50
-        }
-    }
+"agg_pool_selection_strategy": {
+    "ttft_min": 10, "ttft_max": 3000, "ttft_resolution": 2,
+    "itl_min": 5, "itl_max": 200, "itl_resolution": 2,
+    "agg_pool_mapping": [[0, 1], [1, 1]],
+    "routing_priority": [0, 1, 2]
 }
 ```
+
+Semantics and validation:
+
+- The list must be non-empty. Every entry must be a valid pool index for the
+  relevant pool type. Duplicates are rejected (a duplicate would just re-fail
+  the same way).
+- Fallback fires **only on setup errors** — i.e. failures raised from the
+  `client.generate(request)` call before any output has been forwarded to the
+  caller. Once a stream has started, errors propagate and no further pools are
+  tried (it would be unsafe to retry mid-stream and risk emitting duplicate or
+  inconsistent tokens to the client).
+- When `routing_priority` is set, both the grid mapping and `priority_overrides`
+  are bypassed for that strategy. The grid mapping must still be present in the
+  config (for structural validation) but its contents are inert.
+
+`routing_priority` is unrelated to the request-level `nvext.agent_hints.priority`
+integer used by `priority_overrides`. The former is a pool fallback ordering;
+the latter routes individual high-priority requests to a dedicated pool.
 
 ### Passing SLA Targets
 
