@@ -220,8 +220,12 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     }
 
     /// Blocks available for allocation (reset + inactive pools).
+    ///
+    /// Reads both pool sizes under a single store-lock acquisition so the
+    /// returned value is a coherent snapshot, never an over- or under-count
+    /// produced by a concurrent reset↔inactive transition.
     pub fn available_blocks(&self) -> usize {
-        self.store.reset_len() + self.store.inactive_len()
+        self.store.available_len()
     }
 
     /// Tokens per block (constant after construction).

@@ -72,13 +72,35 @@ impl BlockRegistrationHandleInner {
 impl Drop for BlockRegistrationHandleInner {
     #[inline]
     fn drop(&mut self) {
-        if let Some(registry) = self.registry.upgrade()
-            && registry
-                .prefix(&self.seq_hash)
-                .remove(&self.seq_hash)
-                .is_none()
-        {
-            tracing::warn!("Failed to remove block from registry: {:?}", self.seq_hash);
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        // The position-level write lock held by `prefix()` for the lifetime of
+        // `map` serializes us against concurrent `register_sequence_hash` and
+        // `transfer_registration` on this `seq_hash`. Without that lock, a
+        // concurrent registration could replace the entry's `Weak` between our
+        // strong-count-drop and this body running, and an unconditional remove
+        // would silently delete the newer registration's entry.
+        //
+        // Compare the stored `Weak`'s pointer to `self`: `Weak::<T>::as_ptr()`
+        // for sized `T` returns the same pointer as `&T as *const T`, and
+        // during `drop_in_place` the inner allocation is still live (the
+        // implicit weak from the strong refcount is released after `Drop`
+        // returns). Only remove if the entry still points to us.
+        let map = registry.prefix(&self.seq_hash);
+        let should_remove = match map.get(&self.seq_hash) {
+            Some(weak_ref) => std::ptr::eq(weak_ref.as_ptr(), self as *const Self),
+            None => {
+                debug_assert!(
+                    false,
+                    "registry entry vanished while a strong ref was alive: {:?}",
+                    self.seq_hash
+                );
+                false
+            }
+        };
+        if should_remove {
+            map.remove(&self.seq_hash);
         }
     }
 }

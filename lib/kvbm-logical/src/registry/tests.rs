@@ -546,3 +546,64 @@ fn test_is_from_registry() {
     assert!(handle.is_from_registry(&registry1));
     assert!(!handle.is_from_registry(&registry2));
 }
+
+/// Regression: `BlockRegistrationHandleInner::drop` must not remove the registry
+/// entry when a newer registration has already replaced it. The race in
+/// production:
+///
+/// 1. Thread A drops the last `Arc<InnerA>` for `seq_hash`; `drop_in_place` runs
+///    but has not yet acquired the registry's position lock.
+/// 2. Thread B calls `register_sequence_hash`, finds `weak.upgrade() == None`,
+///    creates `InnerB`, and overwrites the entry's `Weak` in place.
+/// 3. Thread A's drop body runs and unconditionally removes the entry —
+///    deleting `InnerB`'s `Weak` and silently making the live block
+///    unreachable through `match_sequence_hash`.
+///
+/// We simulate this race deterministically by manually injecting `InnerB`'s
+/// weak into the PRT entry between A's strong-count-drop and A's `Drop` body.
+#[test]
+fn drop_does_not_remove_entry_when_replaced_by_newer_registration() {
+    use super::handle::BlockRegistrationHandleInner;
+
+    let registry = BlockRegistry::new();
+    let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
+
+    // 1. Register InnerA the normal way and keep a single strong Arc to it.
+    let handle_a = registry.register_sequence_hash(seq_hash);
+    let inner_a: Arc<BlockRegistrationHandleInner> = handle_a.inner.clone();
+    drop(handle_a);
+
+    // 2. Inject a foreign InnerB weak into the PRT entry, simulating Thread B's
+    //    `register_sequence_hash` overwriting the slot in place. The strong
+    //    Arc to InnerB is held in `inner_b` so its weak stays upgradeable.
+    let inner_b = Arc::new(BlockRegistrationHandleInner::new(
+        seq_hash,
+        Arc::downgrade(&registry.prt),
+    ));
+    {
+        let map = registry.prt.prefix(&seq_hash);
+        let mut weak = map.get_mut(&seq_hash).expect("entry present");
+        *weak = Arc::downgrade(&inner_b);
+    }
+
+    // 3. Drop InnerA. Its Drop must NOT remove InnerB's entry.
+    drop(inner_a);
+
+    // 4. InnerB must still be reachable through the registry.
+    assert!(
+        registry.is_registered(seq_hash),
+        "stale Drop removed a newer registration's entry"
+    );
+    let matched = registry
+        .match_sequence_hash(seq_hash, false)
+        .expect("InnerB should still be reachable via match_sequence_hash");
+    assert!(
+        Arc::ptr_eq(&matched.inner, &inner_b),
+        "match_sequence_hash returned a handle that does not point to InnerB"
+    );
+
+    // 5. Sanity: after dropping InnerB, the entry is properly cleaned up.
+    drop(matched);
+    drop(inner_b);
+    assert!(!registry.is_registered(seq_hash));
+}

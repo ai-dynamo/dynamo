@@ -268,6 +268,15 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         self.inner.lock().inactive.len()
     }
 
+    /// Atomic snapshot of `reset_len + inactive_len` under a single store-lock
+    /// acquisition. Reading the two pools separately can yield a count that
+    /// never existed (e.g. a concurrent reset→inactive promotion observed
+    /// twice, inflating the total above `total_blocks`).
+    pub(crate) fn available_len(&self) -> usize {
+        let inner = self.inner.lock();
+        inner.free.len() + inner.inactive.len()
+    }
+
     pub(crate) fn has_inactive(&self, seq_hash: SequenceHash) -> bool {
         self.inner.lock().inactive.has(seq_hash)
     }

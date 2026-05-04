@@ -177,8 +177,11 @@ impl LineageBackend {
     }
 
     /// Non-mutating lookup: returns the `BlockId` currently stored under
-    /// `lineage_hash` if (and only if) the node is `Real`. Does not touch
-    /// `current_tick`, `last_used`, or `leaf_queue`.
+    /// `lineage_hash` if (and only if) the node is `Real` AND its full
+    /// `SequenceHash` matches. Does not touch `current_tick`, `last_used`, or
+    /// `leaf_queue`. The `(position, current_hash_fragment)` key alone is not
+    /// sufficient — different `PositionalLineageHash`es can share that pair —
+    /// so we compare the full hash before claiming a hit.
     fn peek_by_hash(&self, lineage_hash: &PositionalLineageHash) -> Option<BlockId> {
         let position = lineage_hash.position();
         let fragment = lineage_hash.current_hash_fragment();
@@ -186,12 +189,16 @@ impl LineageBackend {
             .get(&position)
             .and_then(|level| level.get(&fragment))
             .and_then(|node| match &node.data {
-                LineageNodeData::Real { block_id, .. } => Some(*block_id),
-                LineageNodeData::Ghost => None,
+                LineageNodeData::Real {
+                    block_id, seq_hash, ..
+                } if seq_hash == lineage_hash => Some(*block_id),
+                _ => None,
             })
     }
 
     /// Remove a specific block by its lineage hash (cache-hit path).
+    /// Verifies the stored full `SequenceHash` matches before removing — see
+    /// `peek_by_hash` for why the `(position, fragment)` key is not unique.
     fn remove_by_hash(
         &mut self,
         lineage_hash: &PositionalLineageHash,
@@ -204,8 +211,12 @@ impl LineageBackend {
             .get(&position)
             .and_then(|level| level.get(&fragment))
             .and_then(|node| match &node.data {
-                LineageNodeData::Real { last_used, .. } => Some(*last_used),
-                LineageNodeData::Ghost => None,
+                LineageNodeData::Real {
+                    last_used,
+                    seq_hash,
+                    ..
+                } if seq_hash == lineage_hash => Some(*last_used),
+                _ => None,
             });
 
         if let Some(tick) = node_data {
@@ -365,7 +376,12 @@ impl InactiveIndex for LineageBackend {
         self.nodes
             .get(&position)
             .and_then(|level| level.get(&fragment))
-            .is_some_and(|node| matches!(node.data, LineageNodeData::Real { .. }))
+            .is_some_and(|node| match &node.data {
+                LineageNodeData::Real {
+                    seq_hash: stored, ..
+                } => *stored == seq_hash,
+                LineageNodeData::Ghost => false,
+            })
     }
 
     fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
@@ -615,5 +631,80 @@ mod tests {
         assert_eq!(backend.len(), 6);
 
         assert_eq!(backend.get_queue_len(), 2);
+    }
+
+    /// Regression: lookups must compare the full `SequenceHash`, not just
+    /// `(position, current_hash_fragment)`. Two `PositionalLineageHash`es that
+    /// share that key pair but have different parents (or different full
+    /// hashes generally) must not collide on lookup — otherwise `find_matches`
+    /// / `scan_matches` / `take` / `has` would return or remove the wrong
+    /// block. We construct two such hashes by hand and verify each lookup
+    /// path rejects the impostor.
+    #[test]
+    fn lookup_rejects_same_position_fragment_but_different_full_hash() {
+        // Same current hash + position, different parent → identical
+        // (position, current_hash_fragment) key, distinct full hashes.
+        let stored: SequenceHash = SequenceHash::new(0xAA, Some(0x11), 5);
+        let impostor: SequenceHash = SequenceHash::new(0xAA, Some(0x22), 5);
+        assert_eq!(stored.position(), impostor.position());
+        assert_eq!(
+            stored.current_hash_fragment(),
+            impostor.current_hash_fragment()
+        );
+        assert_ne!(stored.as_u128(), impostor.as_u128());
+
+        let mut backend = LineageBackend::new();
+        backend.insert(stored, 42);
+
+        // Sanity: the stored hash hits.
+        assert!(backend.has(stored));
+        assert_eq!(backend.peek_by_hash(&stored), Some(42));
+
+        // The impostor must NOT hit any of the read paths.
+        assert!(
+            !backend.has(impostor),
+            "has() returned a false-positive for impostor PLH"
+        );
+        assert!(
+            backend.peek_by_hash(&impostor).is_none(),
+            "peek_by_hash returned a false-positive for impostor PLH"
+        );
+
+        // The impostor must NOT remove the stored block via any mutating path.
+        assert!(
+            backend.remove_by_hash(&impostor).is_none(),
+            "remove_by_hash matched impostor PLH and deleted stored block"
+        );
+        assert_eq!(
+            backend.len(),
+            1,
+            "stored block must remain after impostor remove_by_hash"
+        );
+
+        let scan_hits = backend.scan_matches(&[impostor], false);
+        assert!(
+            scan_hits.is_empty(),
+            "scan_matches matched impostor PLH and removed stored block"
+        );
+        assert_eq!(backend.len(), 1);
+
+        let find_hits = backend.find_matches(&[impostor], false);
+        assert!(
+            find_hits.is_empty(),
+            "find_matches matched impostor PLH and removed stored block"
+        );
+        assert_eq!(backend.len(), 1);
+
+        // The impostor must NOT consume the stored block via take.
+        assert!(
+            !backend.take(impostor, 42),
+            "take() matched impostor PLH and removed stored block"
+        );
+        assert_eq!(backend.len(), 1);
+
+        // The genuine hash still resolves and removes correctly.
+        let removed = backend.remove_by_hash(&stored);
+        assert_eq!(removed, Some((stored, 42)));
+        assert_eq!(backend.len(), 0);
     }
 }
