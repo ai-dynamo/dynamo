@@ -62,10 +62,7 @@ pub struct Backend {
 #[allow(dead_code)]
 struct DecoderUnfoldState {
     stream: ManyOut<ExecutionOutputStream>,
-    /// Wrapped in `Option` so we can `take()` it out to move into `spawn_blocking`
-    /// for the synchronous detokenization work, then restore it. Always `Some`
-    /// outside of that critical section.
-    decoder: Option<Decoder>,
+    decoder: Decoder,
     validate_engine_decode: bool,
     /// Set to true when a local stop condition is detected, causing the stream to end
     finished: bool,
@@ -113,7 +110,7 @@ impl Backend {
 
         Ok(DecoderUnfoldState {
             stream,
-            decoder: Some(decoder),
+            decoder,
             validate_engine_decode: self.validate_engine_decode,
             finished: false,
         })
@@ -186,33 +183,7 @@ impl
 
                     let data = output.data.as_ref().unwrap();
 
-                    // Detokenization (`tokenizer.decode()`) is a synchronous CPU-bound op
-                    // that runs twice per token. Offload to the blocking thread pool so
-                    // it doesn't stall the async executor at high concurrency.
-                    let token_ids = data.token_ids.clone();
-                    let mut decoder = state.decoder.take().expect("decoder always present");
-                    let (decoder, decode_result) = match tokio::task::spawn_blocking(move || {
-                        let r = decoder.process_token_ids(&token_ids);
-                        (decoder, r)
-                    })
-                    .await
-                    {
-                        Ok(pair) => pair,
-                        Err(join_err) => {
-                            tracing::error!("detokenize task panicked: {join_err}");
-                            state.stream.context().stop_generating();
-                            state.finished = true;
-                            let mut output = output;
-                            if let Some(data) = &mut output.data {
-                                data.finish_reason =
-                                    Some(FinishReason::Error(format!("decode error: {join_err}")));
-                            }
-                            return Some((output, state));
-                        }
-                    };
-                    state.decoder = Some(decoder);
-
-                    let result = match decode_result {
+                    let result = match state.decoder.process_token_ids(&data.token_ids) {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to process token_ids: {e}");

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
+import os
 
 import uvloop
 
@@ -18,6 +20,10 @@ shutdown_endpoints: list = []
 
 async def worker():
     config = parse_args()
+
+    if os.environ.get("TRTLLM_WORKER_DISABLE_GC") == "1":
+        gc.disable()
+        logging.info("Python cyclic GC disabled (TRTLLM_WORKER_DISABLE_GC=1)")
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(

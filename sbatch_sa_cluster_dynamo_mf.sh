@@ -4,7 +4,7 @@
 #
 # Multi-frontend variant of sbatch_sa_cluster_dynamo.sh
 # Runs dynamo.frontend processes behind an nginx round-robin load balancer.
-# Frontends are paired with the six prefill workers, two per prefill node, so
+# Three frontend replicas run on each prefill node (9 frontends total), so
 # decode nodes stay dedicated to the TP32 generation worker.
 #
 #SBATCH --job-name=glm5_nvfp4_dynamo_mf_ISL1K_OSL1K_ctx6dep2_gen1dep32_batch256_eplb288_mtp0
@@ -24,7 +24,7 @@ SRTCTL_SOURCE="/data/home/rihuo/srt-slurm"
 OUTPUT_BASE="/data/home/rihuo/srt-slurm/outputs"
 OUTPUT_DIR="${OUTPUT_BASE}/${SLURM_JOB_ID}"
 LOG_DIR="${OUTPUT_DIR}/logs"
-CONTAINER_IMAGE="/data/home/rihuo/dynamo-trtllm-runtime-1-1-0-dev-3-debug-1.sqsh"
+CONTAINER_IMAGE="/data/home/rihuo/tensorrtllm-runtime-1-1-0-dev-3.sqsh"
 NGINX_CONTAINER_IMAGE="nginx:1.27.4"
 MODEL_PATH="/data/home/rihuo/nvidia_GLM-5-NVFP4"
 MODEL_NAME="nvidia_GLM-5-NVFP4"
@@ -37,10 +37,11 @@ ETCD_PORT=2379
 NATS_PORT=4222
 # Public port (nginx) — what the benchmark client connects to.
 FRONTEND_PORT=8000
-# Per-prefill-node dynamo.frontend ports. Each prefill node runs two frontend
-# replicas, one for each local prefill worker.
+# Per-prefill-node dynamo.frontend ports. Each prefill node runs three frontend
+# replicas (overall 9 frontends across 3 prefill nodes).
 FRONTEND_PREFILL_PORT_0=8001
 FRONTEND_PREFILL_PORT_1=8002
+FRONTEND_PREFILL_PORT_2=8003
 DYNAMO_REQUEST_PLANE=tcp
 
 # DYN_SYSTEM_PORT assignments (one per worker, starting at 8081)
@@ -68,14 +69,14 @@ PREFILL_NODE_C="${ALL_NODES[3]}"
 DECODE_NODES=("${ALL_NODES[@]:4:8}")
 DECODE_NODELIST="$(IFS=,; echo "${DECODE_NODES[*]}")"
 FRONTEND_NODES=(
-    "${PREFILL_NODE_A}" "${PREFILL_NODE_A}"
-    "${PREFILL_NODE_B}" "${PREFILL_NODE_B}"
-    "${PREFILL_NODE_C}" "${PREFILL_NODE_C}"
+    "${PREFILL_NODE_A}" "${PREFILL_NODE_A}" "${PREFILL_NODE_A}"
+    "${PREFILL_NODE_B}" "${PREFILL_NODE_B}" "${PREFILL_NODE_B}"
+    "${PREFILL_NODE_C}" "${PREFILL_NODE_C}" "${PREFILL_NODE_C}"
 )
 FRONTEND_PORTS=(
-    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}"
-    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}"
-    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}"
+    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}" "${FRONTEND_PREFILL_PORT_2}"
+    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}" "${FRONTEND_PREFILL_PORT_2}"
+    "${FRONTEND_PREFILL_PORT_0}" "${FRONTEND_PREFILL_PORT_1}" "${FRONTEND_PREFILL_PORT_2}"
 )
 
 SRUN_PIDS=()
@@ -471,7 +472,7 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Nodes: ${SLURM_JOB_NUM_NODES}"
 echo "Container: ${CONTAINER_IMAGE}"
 echo "Nginx container: ${NGINX_CONTAINER_IMAGE}"
-echo "Frontends: ${#FRONTEND_NODES[@]} replicas (same as prefill workers, prefill nodes only)"
+echo "Frontends: ${#FRONTEND_NODES[@]} replicas (3 per prefill node)"
 echo "Public port (nginx, on ${HEAD_NODE}): ${FRONTEND_PORT}"
 echo "Start: $(date)"
 echo "=========================================="

@@ -24,15 +24,15 @@ SRTCTL_SOURCE="/data/home/rihuo/srt-slurm"
 OUTPUT_BASE="/data/home/rihuo/srt-slurm/outputs"
 OUTPUT_DIR="${OUTPUT_BASE}/${SLURM_JOB_ID}"
 LOG_DIR="${OUTPUT_DIR}/logs"
-CONTAINER_IMAGE="/data/home/rihuo/tensorrtllm-runtime-1-1-0-dev-3.sqsh"
+CONTAINER_IMAGE="/data/home/rihuo/dynamo-trtllm-runtime-1-1-0-dev-3-debug-3.sqsh"
 NGINX_CONTAINER_IMAGE="nginx:1.27.4"
 MODEL_PATH="/data/home/rihuo/nvidia_GLM-5-NVFP4"
 MODEL_NAME="nvidia_GLM-5-NVFP4"
 NSYS_PROFILE_DIR="/data/home/rihuo/nsys-profile/${SLURM_JOB_ID}"
 SCRIPT_MOUNTS="${LOG_DIR}:/logs,${MODEL_PATH}:/model,${SRTCTL_SOURCE}/configs:/configs,${SRTCTL_SOURCE}/src/srtctl/benchmarks/scripts:/srtctl-benchmarks,${NSYS_PROFILE_DIR}:/nsys-profile"
 NGINX_MOUNTS="${LOG_DIR}:/logs"
-NSYS_DELAY_SECONDS=2100
-NSYS_DURATION_SECONDS=300
+NSYS_DELAY_SECONDS=1500
+NSYS_DURATION_SECONDS=900
 NSYS_PREFIX_BASE="nsys profile --sample=cpu --cpuctxsw=none --trace=nvtx,osrt,python-gil --python-sampling=true --python-sampling-frequency=100 --delay=${NSYS_DELAY_SECONDS} --duration=${NSYS_DURATION_SECONDS} --force-overwrite=true --trace-fork-before-exec=true"
 TRTLLM_COMMON_ENV="export ENROOT_ALLOW_DEV=yes && export MIMALLOC_PURGE_DELAY=0 && export NCCL_GRAPH_MIXING_SUPPORT=0 && export TLLM_LOG_LEVEL=INFO && export TRTLLM_ENABLE_PDL=1 && export TRTLLM_SERVER_DISABLE_GC=1 && export TRTLLM_WORKER_DISABLE_GC=1"
 
