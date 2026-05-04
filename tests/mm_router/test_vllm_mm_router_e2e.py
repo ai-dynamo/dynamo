@@ -235,9 +235,7 @@ def _build_payload(
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for uri in image_uris:
-        content.append(
-            {"type": "image_url", "image_url": {"url": uri, "detail": "auto"}}
-        )
+        content.append({"type": "image_url", "image_url": {"url": uri}})
 
     return {
         "model": VLLM_MM_MODEL,
