@@ -9,6 +9,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
@@ -62,6 +63,12 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+
+# Profiler/test-harness override: when _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS is
+# set, build_sglang_gpu_mem_args emits --max-total-tokens N. Empty when unset, so
+# direct invocations behave identically to before this hook was added.
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+
 print_launch_banner --multimodal "Launching Aggregated Vision Serving" "$MODEL" "$HTTP_PORT"
 
 # run ingress
@@ -87,6 +94,7 @@ python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --enable-metrics \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" &
 

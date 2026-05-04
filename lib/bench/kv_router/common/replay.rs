@@ -5,63 +5,11 @@ use dynamo_kv_router::protocols::KvCacheEventData;
 #[allow(unused_imports)]
 pub use dynamo_kv_router::test_utils::NoopSequencePublisher;
 use dynamo_mocker::common::protocols::MockEngineArgs;
-use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
+use dynamo_mocker::loadgen::Trace;
 pub use dynamo_mocker::replay::ReplayWorkerArtifacts as WorkerReplayArtifacts;
-use indicatif::{ProgressBar, ProgressStyle};
-use serde::Serialize;
-use std::time::Duration;
+use indicatif::ProgressBar;
 
-/// Create a styled progress bar, optionally with a known total length.
-pub fn make_progress_bar(total: Option<u64>) -> ProgressBar {
-    let progress = match total {
-        Some(total) => ProgressBar::new(total),
-        None => ProgressBar::no_length(),
-    };
-
-    progress.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
-
-    progress
-}
-
-/// Results from a single benchmark run.
-#[derive(Clone, Copy, Serialize)]
-pub struct BenchmarkResults {
-    pub offered_ops_throughput: f32,
-    pub ops_throughput: f32,
-    pub offered_block_throughput: f32,
-    pub block_throughput: f32,
-    pub latency_p99_us: f32,
-}
-
-#[derive(Clone, Copy)]
-pub struct BenchmarkRun {
-    pub results: BenchmarkResults,
-    pub kept_up: bool,
-}
-
-/// Load, transform, and partition the mooncake trace into per-worker request lists.
-pub fn process_mooncake_trace(
-    path: &str,
-    block_size: u32,
-    trace_length_factor: usize,
-    trace_duplication_factor: usize,
-    num_workers: usize,
-    seed: u64,
-) -> anyhow::Result<Vec<Trace>> {
-    let trace = Trace::from_mooncake(std::path::Path::new(path), block_size as usize)?
-        .expand_hash_prefix_depth(trace_length_factor)
-        .duplicate_hash_space(trace_duplication_factor);
-    Ok(trace.partition_by_session(SessionPartitionSpec::Random {
-        num_partitions: num_workers,
-        seed,
-    }))
-}
+use super::make_progress_bar;
 
 pub fn maybe_rescale_ready_span(
     trace: Trace,
@@ -70,74 +18,6 @@ pub fn maybe_rescale_ready_span(
     match trace_simulation_duration_ms {
         Some(duration_ms) => trace.rescale_ready_span(duration_ms),
         None => Ok(trace),
-    }
-}
-
-pub fn rescale_trace_timestamps<T, GetTimestamp, WithTimestamp>(
-    traces: &[Vec<T>],
-    benchmark_duration_ms: u64,
-    timestamp_of: GetTimestamp,
-    with_timestamp: WithTimestamp,
-) -> Vec<Vec<T>>
-where
-    GetTimestamp: Fn(&T) -> u64 + Copy,
-    WithTimestamp: Fn(&T, u64) -> T + Copy,
-{
-    let target_us = u128::from(benchmark_duration_ms) * 1000;
-
-    traces
-        .iter()
-        .map(|worker_trace| {
-            if worker_trace.is_empty() {
-                return Vec::new();
-            }
-
-            let max_timestamp_us = worker_trace.last().map(timestamp_of).unwrap_or(1).max(1);
-
-            worker_trace
-                .iter()
-                .map(|entry| {
-                    let scaled_timestamp =
-                        u128::from(timestamp_of(entry)) * target_us / u128::from(max_timestamp_us);
-                    with_timestamp(entry, scaled_timestamp.min(u128::from(u64::MAX)) as u64)
-                })
-                .collect()
-        })
-        .collect()
-}
-
-pub fn compute_benchmark_run(
-    total_ops: usize,
-    total_blocks: usize,
-    benchmark_duration_ms: u64,
-    total_duration: Duration,
-    mut latencies_ns: Vec<u64>,
-) -> BenchmarkRun {
-    let kept_up = total_duration <= Duration::from_millis(benchmark_duration_ms * 11 / 10);
-    let benchmark_duration_secs = (benchmark_duration_ms as f32 / 1000.0).max(1e-6);
-    let total_duration_secs = total_duration.as_secs_f32().max(1e-6);
-    let offered_ops_throughput = total_ops as f32 / benchmark_duration_secs;
-    let ops_throughput = total_ops as f32 / total_duration_secs;
-    let offered_block_throughput = total_blocks as f32 / benchmark_duration_secs;
-    let block_throughput = total_blocks as f32 / total_duration_secs;
-
-    latencies_ns.sort_unstable();
-    let latency_p99_us = if latencies_ns.is_empty() {
-        0.0
-    } else {
-        let p99_idx = latencies_ns.len().saturating_sub(1) * 99 / 100;
-        latencies_ns[p99_idx] as f32 / 1000.0
-    };
-
-    BenchmarkRun {
-        results: BenchmarkResults {
-            offered_ops_throughput,
-            ops_throughput,
-            offered_block_throughput,
-            block_throughput,
-            latency_p99_us,
-        },
-        kept_up,
     }
 }
 

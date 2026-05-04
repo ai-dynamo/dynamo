@@ -7,9 +7,15 @@ added under `src/tool_calling/` or `src/reasoning/` should cover the generic
 explicitly in the test file rather than silently omitted.
 
 Category layout:
-- **`CASE.1`–`CASE.16`** — **Generic**. Apply to every parser regardless of grammar.
+- **`CASE.1`–`CASE.15`** — **Generic**. Apply to every parser regardless of grammar.
 - **`CASE.xml1`–`CASE.xml2`** — XML-family only (hermes, glm47, qwen3_coder, minimax_m2, kimi_k2).
 - **`CASE.harmony1`** — Harmony only (gpt-oss).
+
+Tests that exist because of a specific customer-reported bug should
+include the originating ticket / PR / issue reference inline in the
+`#[test]` comment — e.g. `#[test] // CASE.5 (PR #8208)`. The CASE
+label is the categorical claim; the parenthetical is the audit trail.
+No separate "regression" taxonomy is needed.
 
 Per-model gap tracking lives elsewhere (not in this repo).
 
@@ -32,7 +38,6 @@ Per-model gap tracking lives elsewhere (not in this repo).
 - **`CASE.13`** Normal text interleaved with tool calls.
 - **`CASE.14`** Empty content / empty `tool_calls` array / null response.
 - **`CASE.15`** Duplicate tool calls (same name twice). No test anywhere in the repo; universal gap.
-- **`CASE.16`** Regression for a specific customer bug (ticket ID referenced in test name or body).
 
 ### XML-family (`CASE.xml*`)
 
@@ -211,14 +216,20 @@ arguments.
   IDs. (The runtime / client is responsible for deciding whether duplicate
   invocation is intended.)
 
-## `CASE.16` — Regression for a specific customer bug
+## Customer-incident regression tests
 
-Test named after (or containing) a ticket reference, pinning the fix for
-a customer-reported failure.
+When a test exists because a specific customer ticket / PR / GH issue
+uncovered a bug, include that reference inline in the `#[test]` comment:
 
-- Applies per-incident. Not a category every parser needs to cover in
-  advance; populated as bugs are reported and fixed.
-- Existing example: `kimi_k2_parser.rs::test_parse_malformed_no_section_end`.
+```rust
+#[test] // CASE.5 (PR #8208)
+fn test_parse_malformed_no_section_end() { ... }
+```
+
+The CASE label still names the category being exercised; the
+parenthetical names the originating incident. Greppable from both
+directions: `grep -r 'CASE.5'` finds all CASE.5 tests; `grep -r '#8208'`
+finds every test tied to that incident across layers.
 
 ---
 
@@ -266,7 +277,7 @@ into tool-call extraction while surfacing `analysis` as reasoning and
 
 | Category block | Parsers | Notes |
 | -- | -- | -- |
-| `CASE.1`–`CASE.16` (generic) | All | Required contract for every parser |
+| `CASE.1`–`CASE.15` (generic) | All | Required contract for every parser |
 | `CASE.xml1`–`CASE.xml2` | XML-family only | Entity decoding + schema-aware coercion |
 | `CASE.harmony1` | Harmony only | Channel routing |
 

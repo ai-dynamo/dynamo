@@ -1418,7 +1418,7 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
-    /// `CASE.5` + `CASE.8` + `CASE.16` — kimi-k2 truncated mid-argument
+    /// `CASE.5` + `CASE.8` (PR #8208) — kimi-k2 truncated mid-argument
     /// (no `<|tool_call_end|>`), streaming, customer regression. Also
     /// validates `CASE.12` finish_reason=stop passthrough.
     ///
