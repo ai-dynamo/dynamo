@@ -97,14 +97,14 @@ class OmniStageWorker:
                 yield {"error": str(e), "finished": True}
                 return
 
-            if len(stage_list) != len(
-                self._engine_input_source or stage_connector_refs
-            ):
+            filled = sum(1 for p in stage_list if p.engine_outputs is not None)
+            expected = len(self._engine_input_source or stage_connector_refs)
+            if filled != expected:
                 logger.warning(
                     "Stage %d: expected %d stage inputs, got %d",
                     self.stage_id,
-                    len(self._engine_input_source or stage_connector_refs),
-                    len(stage_list),
+                    expected,
+                    filled,
                 )
 
             if self._processor is not None:
@@ -134,12 +134,25 @@ class OmniStageWorker:
                     prompt = upstream
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
-            parsed = await parse_omni_request(
-                request,
-                self._output_modalities,
-                self._default_video_fps,
-                tokenizer_getter=self.engine.get_tokenizer,
-            )
+            try:
+                parsed = await parse_omni_request(
+                    request,
+                    self._output_modalities,
+                    self._default_video_fps,
+                    tokenizer_getter=self.engine.get_tokenizer,
+                    renderer=getattr(self.engine, "renderer", None),
+                    model_config=getattr(self.engine, "model_config", None),
+                )
+            except Exception as e:
+                logger.error(
+                    "Stage %d request parse error for %s: %s",
+                    self.stage_id,
+                    request_id,
+                    e,
+                    exc_info=True,
+                )
+                yield {"error": str(e), "finished": True}
+                return
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
             sampling_params_list_override = parsed["sampling_params_list"]
@@ -172,6 +185,8 @@ class OmniStageWorker:
             )
             yield {"error": str(e), "finished": True}
             return
+
+        _ensure_cumulative_token_ids(last_result)
 
         # --- Write output ---
         # Check for a downstream connector first, regardless of final_output.
@@ -282,11 +297,13 @@ class OmniStageWorker:
         """Fetch previous stage outputs from connectors for the processor/engine.
 
         Fetches only the stages listed in engine_input_source (or all refs if empty).
-        Returns _Proxy objects in engine_input_source order.
+        Returns a sparse list indexed by stage_id. vLLM-Omni processors use
+        engine_input_source values as indexes into stage_list.
         Raises RuntimeError on any failure so the caller can propagate it as an error chunk.
         """
         sources = self._engine_input_source or sorted(stage_connector_refs.keys())
-        stage_list = []
+        max_stage_id = max(sources) if sources else 0
+        stage_list = [_Proxy() for _ in range(max_stage_id + 1)]
         for stage_k in sources:
             if (meta_k := stage_connector_refs.get(stage_k)) is None:
                 raise RuntimeError(
@@ -316,7 +333,8 @@ class OmniStageWorker:
                 if isinstance(payload_data, dict)
                 else payload_data
             )
-            stage_list.append(_Proxy(engine_outputs=[engine_inputs]))
+            _ensure_cumulative_token_ids(engine_inputs)
+            stage_list[stage_k] = _Proxy(engine_outputs=[engine_inputs])
         return stage_list
 
 
@@ -416,6 +434,13 @@ def _load_processor(func_path: str | None) -> Any:
         return None
     module_path, func_name = func_path.rsplit(".", 1)
     return getattr(importlib.import_module(module_path), func_name)
+
+
+def _ensure_cumulative_token_ids(result: Any) -> None:
+    """Bridge vLLM 0.20 CompletionOutput into vLLM-Omni rc1 processors."""
+    for output in getattr(result, "outputs", []) or []:
+        if not hasattr(output, "cumulative_token_ids") and hasattr(output, "token_ids"):
+            output.cumulative_token_ids = list(output.token_ids)
 
 
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:

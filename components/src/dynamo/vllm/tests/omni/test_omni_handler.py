@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -265,6 +266,116 @@ class TestBuildOriginalPrompt:
 class TestParseOmniRequest:
     """parse_omni_request: original_prompt only has prompt/negative_prompt,
     geometry goes into sampling_params_list dict."""
+
+    @pytest.mark.asyncio
+    async def test_chat_uses_renderer_and_preserves_runtime_metadata(self):
+        class FakeRenderer:
+            async def render_chat_async(
+                self, conversations, chat_params, tok_params, *, prompt_extras=None
+            ):
+                assert conversations[0][0]["content"][0]["text"] == "say hello"
+                assert tok_params.max_total_tokens == 1024
+                return (["conversation"],), (
+                    {
+                        "prompt_token_ids": [151644, 872, 198, 151645],
+                        "multi_modal_data": {"audio": object()},
+                    },
+                )
+
+        request = {
+            "model": "qwen3-omni",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "say hello"}],
+                }
+            ],
+            "modalities": ["text", "audio"],
+            "speaker": "Chelsie",
+            "language": "English",
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text", "audio"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["engine_inputs"]["prompt_token_ids"] == [
+            151644,
+            872,
+            198,
+            151645,
+        ]
+        assert result["engine_inputs"]["additional_information"] == {
+            "speaker": ["Chelsie"],
+            "language": ["English"],
+        }
+        assert result["original_prompt"] == {
+            "prompt_token_ids": [151644, 872, 198, 151645],
+            "additional_information": {
+                "speaker": ["Chelsie"],
+                "language": ["English"],
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_template_fallback_handles_openai_text_parts(self):
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                assert messages == [{"role": "user", "content": "first\nsecond"}]
+                assert kwargs["tokenize"] is False
+                assert kwargs["add_generation_prompt"] is True
+                return "<|im_start|>user\nfirst\nsecond<|im_end|>"
+
+        async def get_tokenizer():
+            return FakeTokenizer()
+
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {"type": "text", "text": "second"},
+                    ],
+                }
+            ],
+        }
+
+        result = await parse_omni_request(
+            request, ["text"], tokenizer_getter=get_tokenizer
+        )
+
+        assert result["engine_inputs"] == "<|im_start|>user\nfirst\nsecond<|im_end|>"
+        assert result["original_prompt"]["prompt"] == result["engine_inputs"]
+
+    @pytest.mark.asyncio
+    async def test_multimodal_chat_renderer_failure_is_returned_as_error(self):
+        class BrokenRenderer:
+            async def render_chat_async(self, *args, **kwargs):
+                raise RuntimeError("missing media")
+
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav"}},
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="Failed to render multimodal chat"):
+            await parse_omni_request(
+                request,
+                ["text", "audio"],
+                renderer=BrokenRenderer(),
+                model_config=SimpleNamespace(max_model_len=1024),
+            )
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):

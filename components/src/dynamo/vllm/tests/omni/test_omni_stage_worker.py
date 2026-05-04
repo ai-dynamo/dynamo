@@ -12,7 +12,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
-    from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
+    from dynamo.vllm.omni.stage_worker import (
+        OmniStageWorker,
+        _ensure_cumulative_token_ids,
+        _Proxy,
+    )
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -293,6 +297,47 @@ def test_fetch_stage_inputs_calls_correct_connector():
     connector.get.assert_called_once_with("0", "1", "r1", metadata=meta0)
     assert result is not None
     assert result[0].engine_outputs == [{"tok": [1, 2]}]
+
+
+def test_fetch_stage_inputs_returns_sparse_stage_indexed_list():
+    meta1 = {"name": "ref1"}
+    connector = MagicMock()
+    connector.get.return_value = {"engine_inputs": {"tok": [3, 4]}}
+
+    worker = _make_worker_at_stage(
+        2, connectors={("1", "2"): connector}, engine_input_source=[1]
+    )
+    result = worker._fetch_stage_inputs({1: meta1}, "r1")
+
+    connector.get.assert_called_once_with("1", "2", "r1", metadata=meta1)
+    assert len(result) == 2
+    assert result[0].engine_outputs is None
+    assert result[1].engine_outputs == [{"tok": [3, 4]}]
+
+
+def test_fetch_stage_inputs_adds_cumulative_token_ids_for_vllm_020_outputs():
+    output = SimpleNamespace(token_ids=[7, 8, 9])
+    request_output = SimpleNamespace(outputs=[output])
+    connector = MagicMock()
+    connector.get.return_value = request_output
+
+    worker = _make_worker_at_stage(
+        1, connectors={("0", "1"): connector}, engine_input_source=[0]
+    )
+    result = worker._fetch_stage_inputs({0: {"name": "ref0"}}, "r1")
+
+    assert result[0].engine_outputs[0].outputs[0].cumulative_token_ids == [7, 8, 9]
+
+
+def test_ensure_cumulative_token_ids_copies_token_ids_only_when_missing():
+    output = SimpleNamespace(token_ids=(1, 2, 3))
+    existing = SimpleNamespace(token_ids=[4, 5], cumulative_token_ids=[4])
+    result = SimpleNamespace(outputs=[output, existing])
+
+    _ensure_cumulative_token_ids(result)
+
+    assert output.cumulative_token_ids == [1, 2, 3]
+    assert existing.cumulative_token_ids == [4]
 
 
 def test_fetch_stage_inputs_raises_on_missing_connector():
