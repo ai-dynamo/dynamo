@@ -214,6 +214,7 @@ Key customization points include:
 - **[Service Discovery](service-discovery.md)** - Discovery backends and configuration
 - **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README.md)** - For advanced users
 - **[Snapshot](snapshot.md)** - Fast pod startup with checkpoint/restore
+- **[Shadow Engine Failover](shadow-engine-failover.md)** - Experimental active/passive engine failover using GPU Memory Service
 - **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
 - **[Logging](observability/logging.md)** - For logging setup
 - **[Multinode Deployment](deployment/multinode-deployment.md)** - For multinode deployment
