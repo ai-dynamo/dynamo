@@ -890,6 +890,20 @@ impl ModelManager {
         let configs = rx.borrow();
         configs.get(&worker_id)?.disaggregated_endpoint.clone()
     }
+
+    /// Get the registered `data_parallel_size` for a specific worker.
+    /// Used by PD prefill routing so the chosen prefill DP rank can be
+    /// encoded into `bootstrap_room` (`bootstrap_room % dp_size == dp_rank`)
+    /// and recovered modulo-style on the decode side.
+    pub fn get_data_parallel_size(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> Option<u32> {
+        let rx = self.runtime_configs.get(endpoint_id)?;
+        let configs = rx.borrow();
+        Some(configs.get(&worker_id)?.data_parallel_size)
+    }
 }
 
 #[cfg(test)]

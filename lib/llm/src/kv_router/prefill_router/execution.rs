@@ -89,8 +89,22 @@ impl PrefillRouter {
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
-        let r: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());                                                                                                                                                                                                                                                                                                         
-        let bootstrap_room: u64 = (r / dp_size as u64) * dp_size as u64 + dp_rank as u64;
+        // Generate `bootstrap_room` so that `bootstrap_room % dp_size == dp_rank`.
+        // This lets the decode side recover the prefill DP rank via
+        // `bootstrap_room % dp_size` (the existing modulo contract in sglang)
+        // even when the rank was chosen by a load-aware policy upstream.
+        // Falls back to a plain random room when `dp_rank` or `dp_size` is
+        // unavailable (single-DP worker, or registration metadata missing).
+        let r: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        let dp_size: Option<u32> = self
+            .model_manager
+            .get_data_parallel_size(endpoint_id, worker_id);
+        let bootstrap_room: u64 = match (dp_rank, dp_size) {
+            (Some(rank), Some(size)) if size > 0 => {
+                (r / size as u64) * size as u64 + rank as u64
+            }
+            _ => r,
+        };
 
         tracing::debug!(
             worker_id = worker_id,
