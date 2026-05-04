@@ -259,6 +259,29 @@ class BaseConfigModifier:
         volume_mounts.append({"name": pvc_name, "mountPoint": mount_path})
         setattr(service, "volumeMounts", volume_mounts)
 
+    @staticmethod
+    def _ensure_service_hf_home_env(service: Any, hf_home: str) -> None:
+        eps = getattr(service, "extraPodSpec", None)
+        if eps is None:
+            return
+        mc = getattr(eps, "mainContainer", None)
+        if mc is None:
+            return
+
+        env_list = getattr(mc, "env", None)
+        if env_list is None:
+            env_list = []
+        if not isinstance(env_list, list):
+            env_list = []
+
+        env_list[:] = [
+            e
+            for e in env_list
+            if not (isinstance(e, dict) and e.get("name") == "HF_HOME")
+        ]
+        env_list.append({"name": "HF_HOME", "value": hf_home})
+        setattr(mc, "env", env_list)
+
     @classmethod
     def _update_container_args_preserving_shell_form(
         cls, container: Container, update_fn
@@ -562,6 +585,7 @@ class BaseConfigModifier:
                 cls._ensure_spec_pvc(cfg, pvc_name)
                 for _svc_name, svc in cfg.spec.services.items():
                     cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                    cls._ensure_service_hf_home_env(svc, pvc_mount_path)
                 result = cls.update_model(
                     cfg.model_dump(),
                     model_name=model_name,
