@@ -292,6 +292,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         }
         self.metrics.dec_reset_pool_size_by(take as i64);
         self.metrics.inc_inflight_mutable_by(take as i64);
+        self.metrics.inc_allocations(take as u64);
+        self.metrics.inc_allocations_from_reset(take as u64);
         out
     }
 

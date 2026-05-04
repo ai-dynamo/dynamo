@@ -44,13 +44,17 @@ pub(crate) mod tests {
             let tb = create_test_token_block(&tokens, wrong_size as u32);
             let result = mutable.complete(&tb);
 
-            prop_assert!(result.is_err());
-            if let Err(BlockError::BlockSizeMismatch { expected, actual, block: recovered }) = result {
-                prop_assert_eq!(expected, block_size);
-                prop_assert_eq!(actual, wrong_size);
-                let recovered: MutableBlock<TestData> = recovered;
-                prop_assert_eq!(recovered.block_id(), original_id);
-                prop_assert_eq!(recovered.block_size(), block_size);
+            // Exhaustive match: if `BlockError` grows a new variant, this
+            // fails to compile rather than silently passing the property.
+            match result {
+                Ok(_) => prop_assert!(false, "expected BlockSizeMismatch, got Ok"),
+                Err(BlockError::BlockSizeMismatch { expected, actual, block: recovered }) => {
+                    prop_assert_eq!(expected, block_size);
+                    prop_assert_eq!(actual, wrong_size);
+                    let recovered: MutableBlock<TestData> = recovered;
+                    prop_assert_eq!(recovered.block_id(), original_id);
+                    prop_assert_eq!(recovered.block_size(), block_size);
+                }
             }
         }
 

@@ -176,6 +176,21 @@ impl LineageBackend {
         allocated
     }
 
+    /// Non-mutating lookup: returns the `BlockId` currently stored under
+    /// `lineage_hash` if (and only if) the node is `Real`. Does not touch
+    /// `current_tick`, `last_used`, or `leaf_queue`.
+    fn peek_by_hash(&self, lineage_hash: &PositionalLineageHash) -> Option<BlockId> {
+        let position = lineage_hash.position();
+        let fragment = lineage_hash.current_hash_fragment();
+        self.nodes
+            .get(&position)
+            .and_then(|level| level.get(&fragment))
+            .and_then(|node| match &node.data {
+                LineageNodeData::Real { block_id, .. } => Some(*block_id),
+                LineageNodeData::Ghost => None,
+            })
+    }
+
     /// Remove a specific block by its lineage hash (cache-hit path).
     fn remove_by_hash(
         &mut self,
@@ -354,14 +369,12 @@ impl InactiveIndex for LineageBackend {
     }
 
     fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
-        match self.remove_by_hash(&seq_hash) {
-            Some((_, id)) if id == block_id => true,
-            Some((removed_hash, removed_id)) => {
-                // Wrong block under that hash: re-insert and report miss.
-                self.insert_inner(removed_hash, removed_id);
-                false
-            }
-            None => false,
+        // Non-mutating lookup first; only remove on an exact id match so
+        // a miss leaves `current_tick`, `last_used`, and `leaf_queue`
+        // untouched.
+        match self.peek_by_hash(&seq_hash) {
+            Some(id) if id == block_id => self.remove_by_hash(&seq_hash).is_some(),
+            _ => false,
         }
     }
 }
