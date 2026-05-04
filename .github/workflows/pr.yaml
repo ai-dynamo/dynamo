@@ -13,9 +13,6 @@ concurrency:
   group: docker-build-test-${{ github.ref_name }}
   cancel-in-progress: true
 
-env:
-  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
-
 jobs:
   # ============================================================================
   # SETUP & DETECTION JOBS
@@ -32,7 +29,6 @@ jobs:
       trtllm: ${{ steps.changes.outputs.trtllm }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -42,10 +38,6 @@ jobs:
         uses: ./.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
     runs-on: ubuntu-latest
@@ -118,7 +110,7 @@ jobs:
         with:
           component: operator
           image_tag: ${{ github.sha }}-operator
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -146,7 +138,7 @@ jobs:
         with:
           component: snapshot
           image_tag: ${{ github.sha }}-snapshot-agent
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
 
@@ -167,7 +159,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -181,7 +173,7 @@ jobs:
       target: dev
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       push_image: false
       build_timeout_minutes: 60
     secrets: inherit
@@ -196,7 +188,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -210,7 +202,7 @@ jobs:
       target: dev
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       push_image: false
       build_timeout_minutes: 60
     secrets: inherit
@@ -225,7 +217,7 @@ jobs:
       target: runtime
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -239,7 +231,7 @@ jobs:
       target: dev
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       push_image: false
       build_timeout_minutes: 60
     secrets: inherit
@@ -254,7 +246,7 @@ jobs:
       target: planner
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -266,7 +258,7 @@ jobs:
       target: frontend
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -418,7 +410,7 @@ jobs:
       needs.changed-files.outputs.benchmarks == 'true'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
@@ -655,17 +647,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Create K8s builders (skip bootstrap)
-        uses: ./.github/actions/bootstrap-buildkit
-        continue-on-error: true
-        with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-          skip_bootstrap: true
       - name: Builder Cleanup in case of k8s builder
         shell: bash
         run: |
-          docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
+          PREFIX="b-${{ github.run_id }}-${{ github.run_attempt }}-"
+
+          docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -E "^${PREFIX}" | while read -r builder; do
+            docker buildx rm "$builder" || true
+          done
 
   # ============================================================================
   # ALLURE REPORT

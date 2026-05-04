@@ -54,7 +54,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
@@ -82,7 +82,7 @@ jobs:
         with:
           component: operator
           image_tag: ${{ github.sha }}-operator
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -107,7 +107,7 @@ jobs:
         with:
           component: snapshot
           image_tag: ${{ github.sha }}-snapshot-agent
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -130,7 +130,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
@@ -147,7 +147,7 @@ jobs:
       target: dev
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       push_image: true
       build_timeout_minutes: 60
       extra_tags: |
@@ -166,7 +166,7 @@ jobs:
       platform: 'linux/amd64'
       cuda_version: '["12.9"]'
       make_efa: true
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
@@ -183,7 +183,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
@@ -200,7 +200,7 @@ jobs:
       target: dev
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       push_image: true
       build_timeout_minutes: 60
       extra_tags: |
@@ -217,7 +217,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       cuda_version: '["12.9"]'
       make_efa: true
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
@@ -234,7 +234,7 @@ jobs:
       target: runtime
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
@@ -251,7 +251,7 @@ jobs:
       target: dev
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       push_image: true
       build_timeout_minutes: 60
       extra_tags: |
@@ -270,7 +270,7 @@ jobs:
       platform: 'linux/amd64'
       cuda_version: '["13.1"]'
       make_efa: true
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
@@ -286,7 +286,7 @@ jobs:
       target: planner
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 45
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
@@ -303,7 +303,7 @@ jobs:
       target: frontend
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 45
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
@@ -797,19 +797,16 @@ jobs:
     if: always()
     needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-        buildkit_worker_addresses: '' # k8s builder
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Builder Cleanup in case of k8s builder
+        shell: bash
+        run: |
+          PREFIX="b-${{ github.run_id }}-${{ github.run_attempt }}-"
+
+          docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -E "^${PREFIX}" | while read -r builder; do
+            docker buildx rm "$builder" || true
+          done
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:

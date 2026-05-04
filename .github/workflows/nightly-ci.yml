@@ -16,31 +16,6 @@ env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
-
-  # ============================================================================
-  # PRE-WARM K8S BUILDER
-  # ============================================================================
-  create-fresh-builder:
-    name: Create fresh K8s builder
-    runs-on: prod-default-small-v2
-    permissions:
-      contents: read
-    outputs:
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-      - name: Create and bootstrap fresh K8s builder
-        uses: ./.github/actions/bootstrap-buildkit
-        with:
-          builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-          suppress_fallback_warning: 'true'
-
   # ============================================================================
   # COMPUTE NIGHTLY DEV VERSION
   # ============================================================================
@@ -68,40 +43,37 @@ jobs:
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [create-fresh-builder]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
     secrets: inherit
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [create-fresh-builder]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
     secrets: inherit
 
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [create-fresh-builder]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 120
     secrets: inherit
 
@@ -223,10 +195,10 @@ jobs:
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
-    needs: [create-fresh-builder, compute-dev-version]
+    needs: [compute-dev-version]
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       fresh_builder: true
       no_cache: true
       build_timeout_minutes: 120
@@ -516,23 +488,20 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline]
     permissions:
       contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Register K8s builder context (skip bootstrap)
-        uses: ./.github/actions/bootstrap-buildkit
-        continue-on-error: true
-        with:
-          builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-          skip_bootstrap: 'true'
-      - name: Remove K8s builder
+      - name: Builder Cleanup in case of k8s builder
         shell: bash
         run: |
-          docker buildx rm ${{ env.BUILDER_NAME }} || true
+          PREFIX="b-${{ github.run_id }}-${{ github.run_attempt }}-"
+
+          docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -E "^${PREFIX}" | while read -r builder; do
+            docker buildx rm "$builder" || true
+          done
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:

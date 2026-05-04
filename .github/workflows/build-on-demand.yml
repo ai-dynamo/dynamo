@@ -31,13 +31,8 @@ jobs:
   init:
     runs-on: ubuntu-slim
     outputs:
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
       sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
     steps:
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
       - name: Sanitize ref name for container tags
         id: sanitize-ref
         shell: bash
@@ -59,7 +54,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -73,7 +68,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -87,7 +82,7 @@ jobs:
       target: runtime
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -143,7 +138,7 @@ jobs:
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
-          builder_name: ${{ needs.init.outputs.builder_name }}
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           flavor: general
           arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
@@ -196,16 +191,13 @@ jobs:
     if: always()
     needs: [init, vllm-build, sglang-build, trtllm-build, operator]
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: ${{ needs.init.outputs.builder_name }}
-        buildkit_worker_addresses: ''
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ needs.init.outputs.builder_name }} || true
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Builder Cleanup in case of k8s builder
+        shell: bash
+        run: |
+          PREFIX="b-${{ github.run_id }}-${{ github.run_attempt }}-"
+
+          docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -E "^${PREFIX}" | while read -r builder; do
+            docker buildx rm "$builder" || true
+          done
