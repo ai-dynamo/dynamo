@@ -295,6 +295,35 @@ Useful converter flags:
 | `--no-stages`             | Show request slices without prefill/decode stage slices.                       |
 | `--separate-stage-tracks` | Place prefill/decode stages on adjacent tracks for debugging timeline nesting. |
 
+## Step 5: Replay the Trace with Mocker
+
+Request trace rows include text-free replay hashes by default. Convert a trace
+shard to Mooncake JSONL, then replay it through mocker:
+
+```bash
+cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
+  --input-path "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
+  --output-file /tmp/dynamo-agent-trace.mooncake.jsonl
+```
+
+Use the `trace_block_size` printed by the converter when launching replay. For a
+multi-worker KV-router replay:
+
+```bash
+TRACE_BLOCK_SIZE=128
+uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl \
+  --trace-format mooncake \
+  --trace-block-size "${TRACE_BLOCK_SIZE}" \
+  --replay-mode offline \
+  --router-mode kv_router \
+  --num-workers 4 \
+  --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
+  --report-json /tmp/dynamo-agent-trace.replay-report.json
+```
+
+`kv_router` requires more than one mock worker. For a single aggregated-worker
+smoke test, use `--router-mode round_robin --num-workers 1`.
+
 ## Harness Integration Patterns
 
 An existing harness does not need to import Dynamo packages or link against
@@ -513,10 +542,15 @@ replay hashes and timing metrics.
 Replay hashes describe the cumulative input presented to each LLM request. They
 do not by themselves declare cache movement, observed reuse, or that a prior
 decode stored a block in KV cache. Mooncake conversion maps these sequence
-hashes to compact per-file `hash_ids`; replay/mocker then treats those rows as
-request reads and simulates KV writes/events from the configured engine, router,
-capacity, admission, and timing model. The simulated cache pattern is only as
-exact as those replay parameters.
+hashes to compact per-file `hash_ids` and writes an absolute request-arrival
+`timestamp` on every converted row. Replay/mocker treats rows with explicit
+per-turn timestamps as wall-clock arrivals, so LLM calls from the same
+`program_id` can overlap when the original agent issued them concurrently. Rows
+that use `delay` instead keep closed-loop session behavior: the next turn waits
+for the previous turn to complete plus the delay. Replay/mocker then treats
+those rows as request reads and simulates KV writes/events from the configured
+engine, router, capacity, admission, and timing model. The simulated cache
+pattern is only as exact as those replay parameters.
 
 ## Consistency Model
 

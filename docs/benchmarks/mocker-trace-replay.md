@@ -130,21 +130,26 @@ Example:
 {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
 ```
 
-Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session. The
-first turn uses `timestamp` or `created_time`; later turns may use either:
+Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session. Two
+timing styles are supported:
 
-- `delay` or `delay_ms` directly
-- or an absolute later `timestamp`, in which case replay infers the inter-turn delay from the
-  previous turn timestamp
+- absolute-arrival replay: every turn has `timestamp` or `created_time`; trace-mode replay preserves
+  those wall-clock arrivals and does not gate later turns on earlier turn completion
+- completion-relative replay: later turns use `delay` or `delay_ms`; turn `n+1` waits until turn `n`
+  completes plus the delay
 
 Example:
 
 ```json
 {"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
-{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+{"session_id":"session-a","timestamp":1000,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 {"session_id":"session-b","timestamp":1010,"input_length":1024,"output_length":64,"hash_ids":[9,10]}
 {"session_id":"session-b","delay_ms":50,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
 ```
+
+The first two rows above are eligible together because every turn in `session-a` has an explicit
+arrival timestamp. `session-b` uses closed-loop delay semantics because its second turn uses
+`delay_ms`.
 
 Replay uses two different block-size concepts for trace files:
 
@@ -293,7 +298,10 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --extra-engine-args '{"block_size":64}'
 ```
 
-This is the right mode when you want deterministic replay of the original arrival pattern.
+This is the right mode when you want deterministic replay of the original arrival pattern. For
+multi-turn sessions whose every turn carries an explicit timestamp, replay is open-loop within the
+session too; concurrent same-session LLM calls remain concurrent. Delay-only turns retain the
+closed-loop behavior where each later turn waits for the previous turn to complete.
 
 ### Closed-Loop Concurrency Replay
 

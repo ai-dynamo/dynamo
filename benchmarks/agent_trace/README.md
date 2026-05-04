@@ -47,13 +47,18 @@ cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
 
 The converter accepts `.jsonl`, `.jsonl.gz`, repeated `--input-path` flags, and
 recorder-envelope records of the form `{"timestamp": ..., "event": ...}`. It
-groups turns by
-`workflow_id:program_id`, emits `timestamp` on the first turn in each session,
-and emits `delay` on later turns based on the gap from the previous request end
-to the next request start. Stable trace `input_sequence_hashes` are compacted to
-Mooncake `hash_ids` during conversion. The `hash_ids` are request-level cache
-keys: they describe the cumulative input blocks for each LLM request, not cache
-movement or observed reuse.
+groups turns by `workflow_id:program_id` and emits an absolute `timestamp` on
+every Mooncake row from Dynamo's request-arrival time. Stable trace
+`input_sequence_hashes` are compacted to Mooncake `hash_ids` during conversion.
+The `hash_ids` are request-level cache keys: they describe the cumulative input
+blocks for each LLM request, not cache movement or observed reuse.
+
+Agent-converted traces are wall-clock traces. When every turn in a session has
+an explicit `timestamp`, replay/mocker treats the session as open-loop and does
+not wait for turn `n` to complete before turn `n+1` can arrive. This preserves
+agent fanout patterns such as multiple summarizer LLM calls issued by the same
+program. Delay-only Mooncake traces keep the legacy closed-loop behavior where
+later turns wait for the previous turn to complete plus `delay`.
 
 Replay/mocker uses these request rows as reads and simulates KV writes/events
 from the configured engine, router, capacity, admission, and timing model. This
@@ -62,15 +67,25 @@ match, but it is not a byte-for-byte recording of the live cache event stream.
 For higher-fidelity cache movement, add an explicit replay event stream or
 sidecar rather than inferring hidden writes in the converter.
 
-Replay the output with the same block size used when the trace was captured.
-The converter prints this value after writing the Mooncake JSONL.
+Replay the output with the same trace block size used when the trace was
+captured. The converter prints this value after writing the Mooncake JSONL.
+Use the same value for the mock engine block size when you want the replay hash
+granularity to match the live backend page size.
 
 ```bash
-python -m dynamo.replay \
-  --trace-file /tmp/dynamo-agent-trace.mooncake.jsonl \
+TRACE_BLOCK_SIZE=128
+uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl \
   --trace-format mooncake \
-  --trace-block-size <trace_block_size>
+  --trace-block-size "${TRACE_BLOCK_SIZE}" \
+  --replay-mode offline \
+  --router-mode kv_router \
+  --num-workers 4 \
+  --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
+  --report-json /tmp/dynamo-agent-trace.replay-report.json
 ```
+
+`kv_router` requires more than one mock worker. For a single aggregated-worker
+sanity check, use `--router-mode round_robin --num-workers 1`.
 
 ## Validate Converter
 
