@@ -33,18 +33,23 @@
 //!    owning shard only.
 //! 2. **Broadcast fallback**: if a block hash is absent from the index (evicted,
 //!    out-of-order event, or index overflow), the Remove is broadcast to all
-//!    shards.  Each shard's CRTC handles a missing block as a no-op.
-//!    `remove_broadcast_count` tracks how often this occurs.
+//!    shards.  Each shard's CRTC handles a missing block as a no-op. Shared
+//!    sharded-indexer metrics track how often this occurs.
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
+
+#[cfg(feature = "bench")]
+use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 
+#[cfg(feature = "bench")]
+use super::ShardedIndexerMetrics;
 use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
 use crate::protocols::*;
 
@@ -201,24 +206,8 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
 
     kv_block_size: u32,
 
-    // --- timing / observability ---
-    /// Number of `find_matches` calls that dispatched to a shard.
-    timing_calls: AtomicU64,
-    /// Cumulative routing (table-lookup) time for dispatched calls (ns).
-    timing_sum_routing_ns: AtomicU64,
-    /// Cumulative delegated shard `find_matches` time (ns).
-    timing_sum_shard_ns: AtomicU64,
-    /// `find_matches` calls that returned early (unknown branch key).
-    find_matches_miss_count: AtomicU64,
-    /// `find_matches` calls that resolved via a shallow prefix fallback.
-    ///
-    /// Incremented when the exact branch key (`hash(seq[0..prefix_depth])`) misses
-    /// but a shorter registered prefix key (`hash(seq[0..k])` for k < prefix_depth)
-    /// is found.  The query is routed to that shard; the underlying CRTC returns
-    /// the correct shallow overlap score instead of an empty miss.
-    shallow_fallback_count: AtomicU64,
-    /// Individual `Removed` block hashes that fell back to broadcast.
-    remove_broadcast_count: AtomicU64,
+    #[cfg(feature = "bench")]
+    metrics: ShardedIndexerMetrics,
 }
 
 impl<T: SyncIndexer> BranchShardedIndexer<T> {
@@ -251,12 +240,8 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             block_to_shard: DashMap::with_hasher(FxBuildHasher),
             block_to_fnv_state: DashMap::with_hasher(FxBuildHasher),
             kv_block_size,
-            timing_calls: AtomicU64::new(0),
-            timing_sum_routing_ns: AtomicU64::new(0),
-            timing_sum_shard_ns: AtomicU64::new(0),
-            find_matches_miss_count: AtomicU64::new(0),
-            shallow_fallback_count: AtomicU64::new(0),
-            remove_broadcast_count: AtomicU64::new(0),
+            #[cfg(feature = "bench")]
+            metrics: ShardedIndexerMetrics::new(),
         }
     }
 
@@ -547,7 +532,11 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                     shard_blocks[shard_idx].push(block_hash);
                 }
                 None => {
-                    self.remove_broadcast_count.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .remove_broadcasts
+                        .fetch_add(1, Ordering::Relaxed);
                     broadcast_blocks.push(block_hash);
                 }
             }
@@ -611,32 +600,55 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let t_routing = std::time::Instant::now();
+        #[cfg(feature = "bench")]
+        let t_routing = Instant::now();
         let branch_key = self.branch_key_for_local_hashes(&sequence);
         let shard_idx = match self.lookup_shard(branch_key) {
             Some(idx) => idx,
             None => match self.shallow_fallback_shard(&sequence) {
                 Some(idx) => {
-                    self.shallow_fallback_count.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .shallow_fallback
+                        .fetch_add(1, Ordering::Relaxed);
                     idx
                 }
                 None => {
-                    self.find_matches_miss_count.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .find_match_early_returns
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(OverlapScores::new());
                 }
             },
         };
+        #[cfg(feature = "bench")]
+        self.metrics
+            .counters
+            .find_match_dispatches
+            .fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(feature = "bench")]
         let routing_ns = t_routing.elapsed().as_nanos() as u64;
 
-        let t_shard = std::time::Instant::now();
+        #[cfg(feature = "bench")]
+        let t_shard = Instant::now();
         let result = self.shards[shard_idx].find_matches(sequence).await;
-        let shard_ns = t_shard.elapsed().as_nanos() as u64;
-
-        self.timing_calls.fetch_add(1, Ordering::Relaxed);
-        self.timing_sum_routing_ns
-            .fetch_add(routing_ns, Ordering::Relaxed);
-        self.timing_sum_shard_ns
-            .fetch_add(shard_ns, Ordering::Relaxed);
+        #[cfg(feature = "bench")]
+        {
+            let shard_ns = t_shard.elapsed().as_nanos() as u64;
+            self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .timing
+                .routing_ns
+                .fetch_add(routing_ns, Ordering::Relaxed);
+            self.metrics
+                .timing
+                .shard_ns
+                .fetch_add(shard_ns, Ordering::Relaxed);
+        }
 
         result
     }
@@ -656,32 +668,55 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 block_mm_infos: None,
             },
         );
-        let t_routing = std::time::Instant::now();
+        #[cfg(feature = "bench")]
+        let t_routing = Instant::now();
         let branch_key = self.branch_key_for_local_hashes(&sequence);
         let shard_idx = match self.lookup_shard(branch_key) {
             Some(idx) => idx,
             None => match self.shallow_fallback_shard(&sequence) {
                 Some(idx) => {
-                    self.shallow_fallback_count.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .shallow_fallback
+                        .fetch_add(1, Ordering::Relaxed);
                     idx
                 }
                 None => {
-                    self.find_matches_miss_count.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .find_match_early_returns
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(OverlapScores::new());
                 }
             },
         };
+        #[cfg(feature = "bench")]
+        self.metrics
+            .counters
+            .find_match_dispatches
+            .fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(feature = "bench")]
         let routing_ns = t_routing.elapsed().as_nanos() as u64;
 
-        let t_shard = std::time::Instant::now();
+        #[cfg(feature = "bench")]
+        let t_shard = Instant::now();
         let result = self.shards[shard_idx].find_matches(sequence).await;
-        let shard_ns = t_shard.elapsed().as_nanos() as u64;
-
-        self.timing_calls.fetch_add(1, Ordering::Relaxed);
-        self.timing_sum_routing_ns
-            .fetch_add(routing_ns, Ordering::Relaxed);
-        self.timing_sum_shard_ns
-            .fetch_add(shard_ns, Ordering::Relaxed);
+        #[cfg(feature = "bench")]
+        {
+            let shard_ns = t_shard.elapsed().as_nanos() as u64;
+            self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .timing
+                .routing_ns
+                .fetch_add(routing_ns, Ordering::Relaxed);
+            self.metrics
+                .timing
+                .shard_ns
+                .fetch_add(shard_ns, Ordering::Relaxed);
+        }
         result
     }
 
@@ -766,47 +801,76 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     }
 
     fn timing_report(&self) -> String {
-        // timing_calls counts all shard dispatches: exact hits + shallow fallbacks.
-        // Compute mutually exclusive buckets: exact | shallow-fallback | early-exit.
-        let all_dispatched = self.timing_calls.load(Ordering::Relaxed);
-        let shallow_fallbacks = self.shallow_fallback_count.load(Ordering::Relaxed);
-        let misses = self.find_matches_miss_count.load(Ordering::Relaxed);
-        let exact_dispatched = all_dispatched.saturating_sub(shallow_fallbacks);
-        let total_calls = all_dispatched + misses;
-        let broadcasts = self.remove_broadcast_count.load(Ordering::Relaxed);
-        if total_calls == 0 {
-            return String::new();
+        #[cfg(not(feature = "bench"))]
+        {
+            String::new()
         }
-        let miss_pct = 100.0 * misses as f64 / total_calls as f64;
-        let fallback_pct = 100.0 * shallow_fallbacks as f64 / total_calls as f64;
-        let avg_routing_ns = if all_dispatched > 0 {
-            self.timing_sum_routing_ns.load(Ordering::Relaxed) / all_dispatched
-        } else {
-            0
-        };
-        let avg_shard_us = if all_dispatched > 0 {
-            self.timing_sum_shard_ns.load(Ordering::Relaxed) / all_dispatched / 1000
-        } else {
-            0
-        };
-        let branch_counts = self.branch_counts.lock().unwrap();
-        let total_branches: usize = branch_counts.iter().sum();
-        let branch_dist: Vec<String> = branch_counts
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("shard[{i}]={c}"))
-            .collect();
-        drop(branch_counts);
-        format!(
-            "BranchShardedIndexer find_matches ({total_calls} total: {exact_dispatched} dispatched, \
-             {shallow_fallbacks} shallow-fallback / {fallback_pct:.1}%, \
-             {misses} early-exit / {miss_pct:.1}% miss):\n  \
-             avg routing    = {avg_routing_ns}ns  (routing table lookup)\n  \
-             avg shard      = {avg_shard_us}µs  (CRTC traversal, inline on caller thread)\n  \
-             branches known = {total_branches}  ({})\n  \
-             remove broadcasts = {broadcasts}  (fallback for blocks absent from index)",
-            branch_dist.join(", ")
-        )
+
+        #[cfg(feature = "bench")]
+        {
+            let dispatched = self
+                .metrics
+                .counters
+                .find_match_dispatches
+                .load(Ordering::Relaxed);
+            let shallow_fallbacks = self
+                .metrics
+                .counters
+                .shallow_fallback
+                .load(Ordering::Relaxed);
+            let misses = self
+                .metrics
+                .counters
+                .find_match_early_returns
+                .load(Ordering::Relaxed);
+            let exact_dispatched = dispatched.saturating_sub(shallow_fallbacks);
+            let total_calls = dispatched + misses;
+            let broadcasts = self
+                .metrics
+                .counters
+                .remove_broadcasts
+                .load(Ordering::Relaxed);
+            if total_calls == 0 {
+                return String::new();
+            }
+            let miss_pct = 100.0 * misses as f64 / total_calls as f64;
+            let fallback_pct = 100.0 * shallow_fallbacks as f64 / total_calls as f64;
+
+            let timing = {
+                let timing_calls = self.metrics.timing.calls.load(Ordering::Relaxed);
+                let avg_routing_ns = if timing_calls > 0 {
+                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / timing_calls
+                } else {
+                    0
+                };
+                let avg_shard_us = if timing_calls > 0 {
+                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / timing_calls / 1000
+                } else {
+                    0
+                };
+                format!(
+                    "\n  avg routing    = {avg_routing_ns}ns  (routing table lookup)\n  \
+                     avg shard      = {avg_shard_us}µs  (CRTC traversal, inline on caller thread)"
+                )
+            };
+
+            let branch_counts = self.branch_counts.lock().unwrap();
+            let total_branches: usize = branch_counts.iter().sum();
+            let branch_dist: Vec<String> = branch_counts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("shard[{i}]={c}"))
+                .collect();
+            drop(branch_counts);
+            format!(
+                "BranchShardedIndexer find_matches ({total_calls} total: {exact_dispatched} dispatched, \
+                 {shallow_fallbacks} shallow-fallback / {fallback_pct:.1}%, \
+                 {misses} early-exit / {miss_pct:.1}% miss):{timing}\n  \
+                 branches known = {total_branches}  ({})\n  \
+                 remove broadcasts = {broadcasts}  (fallback for blocks absent from index)",
+                branch_dist.join(", ")
+            )
+        }
     }
 }
 
@@ -906,13 +970,15 @@ mod tests {
             best, 1,
             "query diverging before prefix_depth should get shallow overlap=1 via fallback, not 0"
         );
+        #[cfg(feature = "bench")]
         assert_eq!(
-            indexer.shallow_fallback_count.load(Ordering::Relaxed),
+            indexer.metrics.counters.shallow_fallback.load(Ordering::Relaxed),
             1,
             "shallow fallback counter should be incremented"
         );
+        #[cfg(feature = "bench")]
         assert_eq!(
-            indexer.find_matches_miss_count.load(Ordering::Relaxed),
+            indexer.metrics.counters.find_match_early_returns.load(Ordering::Relaxed),
             0,
             "true miss counter should not be incremented"
         );
@@ -1013,8 +1079,9 @@ mod tests {
             best, 2,
             "intermediate-depth query should get correct overlap via shallow fallback"
         );
+        #[cfg(feature = "bench")]
         assert_eq!(
-            indexer.shallow_fallback_count.load(Ordering::Relaxed),
+            indexer.metrics.counters.shallow_fallback.load(Ordering::Relaxed),
             1,
             "intermediate-depth query must route via shallow fallback, not direct lookup"
         );

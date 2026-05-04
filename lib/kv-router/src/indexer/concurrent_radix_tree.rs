@@ -220,13 +220,6 @@ impl ConcurrentRadixTree {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
             }
-            for worker in scores.scores.keys() {
-                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-                }
-            }
             return scores;
         }
 
@@ -285,15 +278,6 @@ impl ConcurrentRadixTree {
         // Record scores for workers that survived through the deepest matched level.
         for worker in &active {
             scores.scores.insert(*worker, matched_depth);
-        }
-
-        // Get tree sizes from lookup.
-        for worker in scores.scores.keys() {
-            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                scores
-                    .tree_sizes
-                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-            }
         }
 
         scores
@@ -583,6 +567,13 @@ impl ConcurrentRadixTree {
         worker_ids
     }
 
+    #[cfg(test)]
+    pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.tree_sizes
+            .get(&worker)
+            .map(|size| size.load(Ordering::Relaxed))
+    }
+
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
     /// Uses BFS traversal over the shared tree. Since all worker/block membership is
     /// stored in the tree nodes themselves, this can be called from any thread without
@@ -681,6 +672,11 @@ impl SyncIndexer for ConcurrentRadixTree {
                         c.inc(kind, result);
                     }
                     let _ = resp.send(applied);
+                }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);

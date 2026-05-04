@@ -124,6 +124,34 @@ pub fn compute_block_hash_for_seq(
     hashes
 }
 
+/// Compute the next rolling sequence hash from a parent sequence hash and the
+/// current block hash.
+pub fn compute_next_seq_hash(
+    parent_seq_hash: SequenceHash,
+    current_block_hash: LocalBlockHash,
+) -> SequenceHash {
+    let combined = [parent_seq_hash, current_block_hash.0];
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
+        // representation matches the `to_le_bytes()` sequence used by the portable path.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                combined.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(&combined),
+            )
+        };
+        compute_hash_v2(bytes, XXH3_SEED)
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
+        bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
+        bytes[8..].copy_from_slice(&current_block_hash.0.to_le_bytes());
+        compute_hash_v2(&bytes, XXH3_SEED)
+    }
+}
+
 /// Compute rolling sequence hashes for a vector of block hashes.
 ///
 /// - The first block's sequence hash equals its block hash
@@ -138,29 +166,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 
     for i in 1..block_hashes.len() {
         let parent_seq_hash = sequence_hashes[i - 1];
-        let current_block_hash = block_hashes[i].0;
-
-        let combined = [parent_seq_hash, current_block_hash];
-        #[cfg(target_endian = "little")]
-        let seq_hash = {
-            // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
-            // representation matches the `to_le_bytes()` sequence used by the previous code.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    combined.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(&combined),
-                )
-            };
-            compute_hash_v2(bytes, XXH3_SEED)
-        };
-        #[cfg(not(target_endian = "little"))]
-        let seq_hash = {
-            let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
-            bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
-            bytes[8..].copy_from_slice(&current_block_hash.to_le_bytes());
-            compute_hash(&bytes)
-        };
-        sequence_hashes.push(seq_hash);
+        sequence_hashes.push(compute_next_seq_hash(parent_seq_hash, block_hashes[i]));
     }
 
     sequence_hashes
@@ -798,8 +804,6 @@ pub struct OverlapScores {
     pub scores: FxHashMap<WorkerWithDpRank, u32>,
     /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
-    /// Map of worker to their tree size (number of blocks in the tree for that worker).
-    pub tree_sizes: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -818,7 +822,6 @@ impl OverlapScores {
         Self {
             scores: FxHashMap::default(),
             frequencies: Vec::with_capacity(32),
-            tree_sizes: FxHashMap::default(),
         }
     }
 
@@ -1043,6 +1046,21 @@ mod tests {
         let hashes =
             compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_next_seq_hash_matches_rolling_hash() {
+        let block_hashes = [LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(33)];
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        assert_eq!(
+            seq_hashes[1],
+            compute_next_seq_hash(seq_hashes[0], block_hashes[1])
+        );
+        assert_eq!(
+            seq_hashes[2],
+            compute_next_seq_hash(seq_hashes[1], block_hashes[2])
+        );
     }
 
     #[test]
