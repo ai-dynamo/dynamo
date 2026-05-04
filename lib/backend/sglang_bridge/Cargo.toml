@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 prost = "0.13.5"
 prost-types = "0.13.5"
+rand = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"

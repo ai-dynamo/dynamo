@@ -54,12 +54,14 @@ DYN_SYSTEM_PORT=8082 OTEL_SERVICE_NAME=sglang-bridge-prefill \
 RUST_LOG=info \
 "$BRIDGE_BIN" \
     --model-path "$MODEL" --served-model-name "$MODEL" \
-    --sglang-grpc-endpoint http://127.0.0.1:30000 &
+    --sglang-grpc-endpoint http://127.0.0.1:30000 \
+    --disaggregation-mode prefill &
 
 DYN_SYSTEM_PORT=8083 OTEL_SERVICE_NAME=sglang-bridge-decode \
 RUST_LOG=info \
 "$BRIDGE_BIN" \
     --model-path "$MODEL" --served-model-name "$MODEL" \
-    --sglang-grpc-endpoint http://127.0.0.1:30001 &
+    --sglang-grpc-endpoint http://127.0.0.1:30001 \
+    --disaggregation-mode decode &
 
 wait -n

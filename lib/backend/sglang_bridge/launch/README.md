@@ -11,8 +11,8 @@ gRPC schema.
 |---|---|---|
 | `agg.sh` | ✅ tested 2026-05-04 | Single SGLang+bridge, agg flow. Inference verified end-to-end. |
 | `agg_router.sh` | 🟡 untested, KV routing falls back to round-robin | Multi-worker dispatch path. KV-aware routing requires `SubscribeKvEvents` wiring (POC-2). |
-| `disagg.sh` | 🟡 untested | Two GPUs, one prefill + one decode. Bridge already passes `bootstrap_info` via `DisaggregatedParams`. Needs `--disaggregation-mode` flag on bridge so frontend can distinguish prefill vs decode workers. |
-| `disagg_same_gpu.sh` | 🟡 untested | Variant of disagg on single GPU. |
+| `disagg.sh` | 🟡 partial | Two GPUs, one prefill + one decode. Bridge implements both sides: prefill yields a bootstrap chunk (host/port/room) on each request; decode pulls `bootstrap_info` from the request and forwards via `DisaggregatedParams`. End-to-end blocked on **NIXL or Mooncake** install — neither is on this box, so SGLang's KV transfer backend can't initialise and `--disaggregation-mode prefill\|decode` fails at SGLang launch. Bridge boot in prefill mode is verified against a non-disagg SGLang (`bootstrap_port=8998` extracted from `GetServerInfo.server_args`). |
+| `disagg_same_gpu.sh` | 🟡 partial | Same as disagg, single GPU. Same NIXL/Mooncake gating. |
 | `agg_embed.sh` | ❌ deferred | Bridge does not yet implement `Embed` RPC. |
 | `agg_agent.sh` | ❌ deferred | Streaming-sessions / agent controller not yet upstream in SGLang. |
 | `agg_vision.sh`, `multimodal_*.sh`, diffusion | ❌ out of POC scope | Multimodal + diffusion. |
