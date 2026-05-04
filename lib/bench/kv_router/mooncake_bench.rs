@@ -11,7 +11,9 @@ mod mooncake_shared;
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
 use mooncake_shared::{
-    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig, run_benchmark,
+    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig,
+    PreparedMooncakeBenchmark, merge_worker_traces, prepare_scaled_benchmark,
+    run_prepared_benchmark,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -454,6 +456,20 @@ fn build_indexer(
     }
 }
 
+fn benchmark_config(
+    args: &Args,
+    indexer_config: &MooncakeIndexerConfig,
+    benchmark_duration_ms: u64,
+) -> MooncakeBenchmarkConfig {
+    MooncakeBenchmarkConfig {
+        benchmark_duration_ms,
+        inference_worker_duplication_factor: args.common.inference_worker_duplication_factor,
+        count_events: indexer_config.supports_remove(),
+        find_matches_concurrency: args.find_matches_concurrency,
+        block_size: args.common.block_size,
+    }
+}
+
 async fn prepare_benchmark_input(args: &Args) -> anyhow::Result<Option<MooncakeBenchmarkInput>> {
     let Some(path) = args.common.mooncake_trace_path.as_deref() else {
         eprintln!("No mooncake_trace_path provided, skipping benchmark");
@@ -490,6 +506,7 @@ async fn run_sweep_mode(
     indexer_names: &[String],
     benchmark_input: &MooncakeBenchmarkInput,
 ) -> anyhow::Result<()> {
+    let merged = merge_worker_traces(benchmark_input, args.common.block_size)?;
     let durations_low_to_high = compute_sweep_durations(
         args.common.sweep_min_ms,
         args.common.sweep_max_ms,
@@ -518,20 +535,9 @@ async fn run_sweep_mode(
         for &dur_ms in durations {
             println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
             let indexer = build_indexer(args, &config)?;
-            let run = run_benchmark(
-                indexer,
-                benchmark_input,
-                MooncakeBenchmarkConfig {
-                    benchmark_duration_ms: dur_ms,
-                    inference_worker_duplication_factor: args
-                        .common
-                        .inference_worker_duplication_factor,
-                    count_events: config.supports_remove(),
-                    find_matches_concurrency: args.find_matches_concurrency,
-                    block_size: args.common.block_size,
-                },
-            )
-            .await?;
+            let bench_config = benchmark_config(args, &config, dur_ms);
+            let prepared = prepare_scaled_benchmark(&merged, bench_config);
+            let run = run_prepared_benchmark(indexer, &prepared, bench_config).await?;
             warn_if_bench_did_not_keep_up(run.kept_up);
             let result = run.results;
 
@@ -604,14 +610,19 @@ async fn run_repeated_mode(
     indexer_names: &[String],
     benchmark_input: &MooncakeBenchmarkInput,
 ) -> anyhow::Result<()> {
+    let merged = merge_worker_traces(benchmark_input, args.common.block_size)?;
+
     for name in indexer_names {
         let config = indexer_config(args, name)?;
         let mut repeated_results = Vec::with_capacity(args.benchmark_runs);
+        let bench_config = benchmark_config(args, &config, args.common.benchmark_duration_ms);
+        let prepared = prepare_scaled_benchmark(&merged, bench_config);
 
         for run_idx in 0..args.benchmark_runs {
             print_trial_header(name, run_idx, args.benchmark_runs);
-            repeated_results
-                .push(run_single_trial(args, name, &config, benchmark_input, run_idx).await?);
+            repeated_results.push(
+                run_single_trial(args, name, &config, &prepared, bench_config, run_idx).await?,
+            );
         }
 
         let title = format!("Repeated Benchmark Summary: {name}");
@@ -638,7 +649,8 @@ async fn run_single_trial(
     args: &Args,
     name: &str,
     config: &MooncakeIndexerConfig,
-    benchmark_input: &MooncakeBenchmarkInput,
+    prepared: &PreparedMooncakeBenchmark,
+    bench_config: MooncakeBenchmarkConfig,
     run_idx: usize,
 ) -> anyhow::Result<BenchmarkResults> {
     let indexer = build_indexer(args, config)?;
@@ -654,18 +666,7 @@ async fn run_single_trial(
         None
     };
 
-    let run = run_benchmark(
-        indexer.clone(),
-        benchmark_input,
-        MooncakeBenchmarkConfig {
-            benchmark_duration_ms: args.common.benchmark_duration_ms,
-            inference_worker_duplication_factor: args.common.inference_worker_duplication_factor,
-            count_events: config.supports_remove(),
-            find_matches_concurrency: args.find_matches_concurrency,
-            block_size: args.common.block_size,
-        },
-    )
-    .await;
+    let run = run_prepared_benchmark(indexer.clone(), prepared, bench_config).await;
 
     shard_cancel.cancel();
     if let Some(handle) = shard_sampler {
