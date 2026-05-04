@@ -15,8 +15,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RouterSchedulingPolicy,
-    SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, PrefillTokenDeltas, RadixTree,
+    RouterSchedulingPolicy, SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
     scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
@@ -510,22 +510,34 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                request.token_seq.as_deref(),
-                request.isl_tokens,
-                request
-                    .overlaps
-                    .scores
-                    .iter()
-                    .map(|(worker, overlap)| {
-                        (*worker, *overlap as usize * self.block_size as usize)
-                    })
-                    .collect(),
-                request.track_prefill_tokens,
-                decay_now,
-            );
+        let prefill_token_deltas =
+            if request.track_prefill_tokens {
+                let by_worker = request
+                .overlaps
+                .scores
+                .iter()
+                .map(|(worker, overlap)| {
+                    let cached_tokens = *overlap as usize * self.block_size as usize;
+                    let delta = request.isl_tokens.checked_sub(cached_tokens).unwrap_or_else(|| {
+                        tracing::error!(
+                            "prefill_tokens < 0 with ISL {} < cached_tokens {}, returning 0",
+                            request.isl_tokens,
+                            cached_tokens,
+                        );
+                        0
+                    });
+                    (*worker, delta)
+                })
+                .collect::<FxHashMap<_, _>>();
+                PrefillTokenDeltas::new(request.isl_tokens, by_worker)
+            } else {
+                PrefillTokenDeltas::none()
+            };
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            request.token_seq.as_deref(),
+            &prefill_token_deltas,
+            decay_now,
+        );
         let scheduling_request =
             request.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
         let selection = self.selector.select_worker(
