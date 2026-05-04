@@ -245,7 +245,6 @@ fn build_mooncake_rows(requests: Vec<RequestEntry>) -> Result<(usize, Vec<Moonca
     let mut rows = Vec::new();
     for (session_id, mut session_requests) in by_session {
         session_requests.sort_by_key(|request| (request.start_ms, request.end_ms));
-        let mut previous_end_ms: Option<i64> = None;
 
         for request in session_requests {
             let hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
@@ -261,12 +260,9 @@ fn build_mooncake_rows(requests: Vec<RequestEntry>) -> Result<(usize, Vec<Moonca
                 output_length: usize::try_from(output_length)
                     .context("output length does not fit in usize")?,
                 hash_ids,
-                timestamp: previous_end_ms
-                    .is_none()
-                    .then_some(request.start_ms - global_start_ms),
-                delay: previous_end_ms.map(|previous_end| (request.start_ms - previous_end).max(0)),
+                timestamp: Some(request.start_ms - global_start_ms),
+                delay: None,
             };
-            previous_end_ms = Some(request.end_ms);
             rows.push(TimedMooncakeRow {
                 sort_ms: request.start_ms,
                 row,
@@ -317,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn converter_uses_timestamp_then_delay_per_session() {
+    fn converter_preserves_absolute_timestamps_per_request() {
         let requests = vec![
             request("agent", 1_000, 1_100, vec![11, 22]),
             request("agent", 1_500, 1_600, vec![11, 33]),
@@ -328,9 +324,25 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].timestamp, Some(0));
         assert_eq!(entries[0].delay, None);
-        assert_eq!(entries[1].timestamp, None);
-        assert_eq!(entries[1].delay, Some(400));
+        assert_eq!(entries[1].timestamp, Some(500));
+        assert_eq!(entries[1].delay, None);
         assert_eq!(entries[0].hash_ids[0], entries[1].hash_ids[0]);
+    }
+
+    #[test]
+    fn converter_preserves_same_session_parallel_start_times() {
+        let requests = vec![
+            request("agent", 1_000, 1_500, vec![11]),
+            request("agent", 1_000, 1_700, vec![22]),
+        ];
+
+        let (_, entries) = build_mooncake_rows(requests).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].timestamp, Some(0));
+        assert_eq!(entries[1].timestamp, Some(0));
+        assert_eq!(entries[0].delay, None);
+        assert_eq!(entries[1].delay, None);
     }
 
     #[test]

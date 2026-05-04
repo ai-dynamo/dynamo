@@ -32,6 +32,12 @@ pub struct TurnTrace {
     pub input_length: usize,
     pub max_output_tokens: usize,
     pub hash_ids: Vec<u64>,
+    /// Absolute request arrival offset for wall-clock trace replay.
+    ///
+    /// When every turn in a session carries this value, trace-mode loadgen treats
+    /// the session as open-loop and does not gate later turns on earlier
+    /// completions. Delay-only sessions retain the legacy closed-loop behavior.
+    pub arrival_timestamp_ms: Option<f64>,
     pub delay_after_previous_ms: f64,
 }
 

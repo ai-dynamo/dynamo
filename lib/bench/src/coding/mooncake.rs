@@ -21,10 +21,10 @@ use std::path::Path;
 
 /// One row of a Mooncake replay trace.
 ///
-/// `timestamp` and `delay` are mutually exclusive in the typical convention
-/// (the first row in a session carries `timestamp`, subsequent rows carry
-/// `delay`), but neither is required by the schema -- both fields are skipped
-/// during serialization when `None`.
+/// `timestamp` is an absolute request arrival offset in milliseconds. Some
+/// legacy producers emit it only on the first row in a session and use `delay`
+/// for subsequent closed-loop turns. Agent traces should emit `timestamp` on
+/// every row so replay can preserve concurrent LLM arrivals inside one session.
 #[derive(Debug, Clone, Serialize)]
 pub struct MooncakeRow {
     pub session_id: String,

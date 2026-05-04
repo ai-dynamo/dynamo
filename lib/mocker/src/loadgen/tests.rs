@@ -35,6 +35,7 @@ fn test_from_mooncake_single_turn_preserves_fields() {
     assert_eq!(session.turns[0].input_length, 8);
     assert_eq!(session.turns[0].max_output_tokens, 4);
     assert_eq!(session.turns[0].hash_ids, vec![7, 8]);
+    assert_eq!(session.turns[0].arrival_timestamp_ms, Some(123.0));
 }
 
 #[test]
@@ -67,8 +68,37 @@ fn test_from_mooncake_multi_turn_uses_session_id_and_delay() {
     assert_eq!(trace.sessions.len(), 2);
     assert_eq!(trace.sessions[0].session_id, "a");
     assert_eq!(trace.sessions[0].turns.len(), 2);
+    assert_eq!(trace.sessions[0].turns[0].arrival_timestamp_ms, Some(10.0));
+    assert_eq!(trace.sessions[0].turns[1].arrival_timestamp_ms, None);
     assert_eq!(trace.sessions[0].turns[1].delay_after_previous_ms, 25.0);
     assert_eq!(trace.sessions[1].session_id, "b");
+}
+
+#[test]
+fn test_from_mooncake_preserves_per_turn_timestamps() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "session_id": "a",
+            "timestamp": 10.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1],
+        }),
+        serde_json::json!({
+            "session_id": "a",
+            "timestamp": 10.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [2],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    let session = &trace.sessions[0];
+    assert_eq!(session.first_arrival_timestamp_ms, Some(10.0));
+    assert_eq!(session.turns[0].arrival_timestamp_ms, Some(10.0));
+    assert_eq!(session.turns[1].arrival_timestamp_ms, Some(10.0));
+    assert_eq!(session.turns[1].delay_after_previous_ms, 0.0);
 }
 
 #[test]
@@ -171,6 +201,7 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
         input_length: 6,
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
+        arrival_timestamp_ms: None,
         delay_after_previous_ms: 0.0,
     };
 
@@ -187,6 +218,7 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
         input_length: 6,
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
+        arrival_timestamp_ms: None,
         delay_after_previous_ms: 0.0,
     };
 
@@ -211,6 +243,7 @@ fn test_turn_replay_hashes_support_distinct_trace_and_engine_block_sizes() {
         input_length: 6,
         max_output_tokens: 3,
         hash_ids: vec![1, 2],
+        arrival_timestamp_ms: None,
         delay_after_previous_ms: 0.0,
     };
 
@@ -306,6 +339,7 @@ fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
                 input_length: 6,
                 max_output_tokens: 2,
                 hash_ids: vec![7, 8],
+                arrival_timestamp_ms: None,
                 delay_after_previous_ms: 0.0,
             }],
         }],
@@ -335,12 +369,14 @@ fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![1],
+                        arrival_timestamp_ms: None,
                         delay_after_previous_ms: 0.0,
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
+                        arrival_timestamp_ms: None,
                         delay_after_previous_ms: 20.0,
                     },
                 ],
@@ -352,6 +388,7 @@ fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![3],
+                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: 0.0,
                 }],
             },
@@ -377,12 +414,14 @@ fn test_driver_requires_completion_before_follow_up_turn() {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![1],
+                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: 0.0,
                 },
                 TurnTrace {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![2],
+                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: 10.0,
                 },
             ],
@@ -402,6 +441,48 @@ fn test_driver_requires_completion_before_follow_up_turn() {
 }
 
 #[test]
+fn test_trace_driver_allows_same_session_parallel_arrivals_when_timestamps_are_explicit() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![
+                TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    arrival_timestamp_ms: Some(0.0),
+                    delay_after_previous_ms: 0.0,
+                },
+                TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![2],
+                    arrival_timestamp_ms: Some(0.0),
+                    delay_after_previous_ms: 0.0,
+                },
+            ],
+        }],
+    };
+
+    let mut driver = trace.into_trace_driver().unwrap();
+    let ready = driver.pop_ready(0.0, usize::MAX);
+
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[0].session_id, "s");
+    assert_eq!(ready[1].session_id, "s");
+    assert_ne!(ready[0].request_uuid, ready[1].request_uuid);
+    assert_eq!(ready[0].request.arrival_timestamp_ms, Some(0.0));
+    assert_eq!(ready[1].request.arrival_timestamp_ms, Some(0.0));
+
+    driver.on_complete(ready[0].request_uuid, 100.0).unwrap();
+    assert!(!driver.is_drained());
+    driver.on_complete(ready[1].request_uuid, 100.0).unwrap();
+    assert!(driver.is_drained());
+}
+
+#[test]
 fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
     let trace = Trace {
         block_size: 4,
@@ -414,12 +495,14 @@ fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![1],
+                        arrival_timestamp_ms: None,
                         delay_after_previous_ms: 0.0,
                     },
                     TurnTrace {
                         input_length: 4,
                         max_output_tokens: 1,
                         hash_ids: vec![2],
+                        arrival_timestamp_ms: None,
                         delay_after_previous_ms: 5.0,
                     },
                 ],
@@ -431,6 +514,7 @@ fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
                     input_length: 4,
                     max_output_tokens: 1,
                     hash_ids: vec![3],
+                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: 0.0,
                 }],
             },
@@ -465,12 +549,14 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
                         input_length: 4,
                         max_output_tokens: 2,
                         hash_ids: vec![1, 2],
+                        arrival_timestamp_ms: None,
                         delay_after_previous_ms: 0.0,
                     },
                     TurnTrace {
                         input_length: 2,
                         max_output_tokens: 3,
                         hash_ids: vec![3],
+                        arrival_timestamp_ms: None,
                         delay_after_previous_ms: 5.0,
                     },
                 ],
@@ -482,6 +568,7 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
                     input_length: 2,
                     max_output_tokens: 1,
                     hash_ids: vec![4],
+                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: 0.0,
                 }],
             },
@@ -605,6 +692,7 @@ fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
                 input_length: 6,
                 max_output_tokens: 2,
                 hash_ids: vec![1, 2],
+                arrival_timestamp_ms: None,
                 delay_after_previous_ms: 0.0,
             }],
         }],
@@ -622,6 +710,7 @@ fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
                 input_length: 6,
                 max_output_tokens: 2,
                 hash_ids: vec![1, 2],
+                arrival_timestamp_ms: None,
                 delay_after_previous_ms: 0.0,
             }
             .to_replay_hashes(4, 2)
