@@ -52,6 +52,9 @@ navigation:
     path: blogs/index.mdx
     slug: blog
     contents:
+      - page: "Multi-Turn Agentic Harnesses"
+        path: blogs/agentic-inference/agentic-harnesses.md
+        slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
         path: blogs/agentic-inference/agentic-inference.md
         slug: agentic-inference

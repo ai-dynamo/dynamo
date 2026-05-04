@@ -961,6 +961,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			opt.dynamoComponentDeployment.Namespace,
 			podSpec,
 			checkpointInfo,
+			r.Config.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, errors.Wrap(err, "failed to inject checkpoint config")
 		}
