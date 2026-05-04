@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
-subtitle: "Schwinn Saereesitthipitak — May 2026"
+subtitle: "Schwinn Saereesitthipitak, Dan Feigin — May 2026"
 description: "Dynamo Snapshot uses CRIU, cuda-checkpoint, and a per-GPU memory service to bring inference worker startup down to 5 seconds or less."
 keywords: checkpoint restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
 last-updated: May 4, 2026
