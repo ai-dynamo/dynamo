@@ -191,6 +191,10 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
+    # died during handshake (exit code 143)" — the diffusion child process is
+    # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
+    # needs investigation of why StageDiffusionProc is dying.
     "omni_t2v": VLLMOmniConfig(
         name="omni_t2v",
         directory=vllm_dir,
@@ -202,8 +206,12 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(16.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                6_473_647_000
+            ),  # KV cache cap (2x safety over min=3_236_823_040)
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[

@@ -289,6 +289,7 @@ markers = [
     "asyncio: asyncio test marker",
     # Third-party plugin markers
     "timeout: test timeout in seconds (pytest-timeout plugin)",
+    "flaky: rerun a flaky test on failure (pytest-rerunfailures plugin)",
 ]
 
 # Linting/formatting

@@ -213,8 +213,6 @@ impl KvReplayRouter {
             BlockHashOptions::default(),
             None,
         );
-        let tree_sizes: std::collections::HashMap<_, _> =
-            overlaps.tree_sizes.iter().map(|(k, v)| (*k, *v)).collect();
         let response = self
             .scheduler
             .schedule(
@@ -224,7 +222,6 @@ impl KvReplayRouter {
                 TierOverlapBlocks::default(),
                 effective_overlap_blocks,
                 effective_cached_tokens,
-                tree_sizes,
                 None,
                 true,
                 None,

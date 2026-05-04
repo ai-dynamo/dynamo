@@ -142,6 +142,14 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
+      {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
+      seccomp:
+        {{- if .Values.checkpoint.seccomp.disabled }}
+        disabled: true
+        {{- else if .Values.checkpoint.seccomp.profile }}
+        profile: {{ .Values.checkpoint.seccomp.profile | quote }}
+        {{- end }}
+      {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:
