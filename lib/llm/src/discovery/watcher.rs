@@ -441,7 +441,16 @@ impl ModelWatcher {
                 }
                 self.manager
                     .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
-            } else if removed.is_some() {
+            } else {
+                // Decode-component teardown: always run the waiter cleanup,
+                // regardless of whether `remove_worker_set` found an entry. If
+                // a decode worker registered (creating a `DecodeWaiting`
+                // activator entry) but `handle_add_helper` later failed before
+                // `add_worker_set`, the WorkerSet is absent here yet the stale
+                // `DecodeWaiting` still needs to be cleared. The helper is
+                // state-safe (`remove_if(|_, v| matches!(v, DecodeWaiting(_)))`)
+                // so calling it on a key that's vacant or holds `PrefillReady`
+                // is a no-op.
                 self.manager
                     .remove_decode_prefill_waiter(&model_name, worker_namespace);
             }

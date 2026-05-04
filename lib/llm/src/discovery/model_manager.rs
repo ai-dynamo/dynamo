@@ -682,39 +682,44 @@ impl ModelManager {
         namespace: &str,
     ) -> Option<oneshot::Receiver<Endpoint>> {
         let key = Self::model_namespace_key(model_name, namespace);
-        match self.prefill_router_activators.remove(&key) {
-            Some((cache_key, PrefillActivationState::PrefillReady(endpoint))) => {
-                // Prefill endpoint already cached. Hand out a fresh receiver
-                // primed with the endpoint AND re-insert PrefillReady so a
-                // subsequent decode WorkerSet rebuild (e.g., decode pod
-                // restart) finds it and activates immediately.
+        // Use the entry API so the activator state mutation is atomic per-key:
+        // a concurrent `remove_prefill_activator` (called by the watcher on
+        // prefill-component teardown) can't slip into the gap between a
+        // `remove`-then-`insert` pair and miss the cleanup, leaving a stale
+        // PrefillReady cached for a prefill that's already gone.
+        match self.prefill_router_activators.entry(key) {
+            Entry::Occupied(o) => match o.get() {
+                PrefillActivationState::PrefillReady(endpoint) => {
+                    // Read the cached endpoint without removing the entry — its
+                    // shard lock is held for the duration of the OccupiedEntry,
+                    // so any concurrent prefill teardown serializes after us
+                    // and observes the entry it needs to clear.
+                    let endpoint_clone = (**endpoint).clone();
+                    let (tx, rx) = oneshot::channel();
+                    let _ = tx.send(endpoint_clone);
+                    tracing::debug!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Prefill endpoint cached; returning fresh receiver"
+                    );
+                    Some(rx)
+                }
+                PrefillActivationState::DecodeWaiting(_) => {
+                    // Decode already registered — entry stays in place so the
+                    // existing live waiter isn't disturbed. Return None to
+                    // signal the caller that this shouldn't have happened.
+                    tracing::error!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Decode WorkerSet already registered for this prefill router"
+                    );
+                    None
+                }
+            },
+            Entry::Vacant(v) => {
+                // New registration: create tx/rx pair, store sender, return receiver.
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send((*endpoint).clone());
-                self.prefill_router_activators
-                    .insert(cache_key, PrefillActivationState::PrefillReady(endpoint));
-                tracing::debug!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Prefill endpoint cached; returning fresh receiver and re-caching"
-                );
-                Some(rx)
-            }
-            Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
-                // Decode already registered - this shouldn't happen, restore state and return None
-                tracing::error!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Decode WorkerSet already registered for this prefill router"
-                );
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
-                None
-            }
-            None => {
-                // New registration: create tx/rx pair, store sender and return receiver
-                let (tx, rx) = oneshot::channel();
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
+                v.insert(PrefillActivationState::DecodeWaiting(tx));
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
@@ -734,114 +739,103 @@ impl ModelManager {
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
         let key = Self::model_namespace_key(model_name, namespace);
-        match self.prefill_router_activators.remove(&key) {
-            Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
-                // Cold-start (or post-rebuild) handshake: decode registered first.
-                // Wake the waiting receiver with the prefill endpoint.
-                sender.send(endpoint.clone()).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint to prefill router activator for {}:{}",
-                        model_name,
-                        namespace
-                    )
-                })?;
-                tracing::info!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Activated prefill router for decode WorkerSet"
-                );
 
-                // Cache the prefill endpoint as PrefillReady so a future decode
-                // WorkerSet rebuild (e.g., all decode pods restart →
-                // remove_worker_set → new decode comes back →
-                // register_prefill_router) finds the cache and immediately
-                // activates instead of stalling forever in DecodeWaiting.
-                // Without this, post-rebuild PrefillRouters never activate and
-                // PrefillRouter::generate falls back to aggregated mode, sending
-                // bare requests to decode workers that reject them with
-                // "Disaggregated params required for decode mode".
-                self.prefill_router_activators.insert(
-                    key,
-                    PrefillActivationState::PrefillReady(Box::new(endpoint)),
-                );
+        // Reactivate any existing deactivated decode-side `PrefillRouter`. Used
+        // by the PrefillReady-refresh and Vacant arms — the rebuilding case
+        // for prefill workers that previously died and now rejoin.
+        let reactivate_if_needed = || {
+            if let Some(model) = self.get_model(model_name)
+                && let Some(ws) = model.get_worker_set(namespace)
+                && let Some(ref pr) = ws.prefill_router
+                && pr.is_deactivated()
+            {
+                pr.reactivate();
+                true
+            } else {
+                false
+            }
+        };
 
+        // Atomic per-key state transition via the entry API. Replaces the
+        // previous `remove → process → insert` pattern, which left a window in
+        // which a concurrent `remove_prefill_activator` (prefill teardown via
+        // the watcher) could slip in, observe an empty map, and skip the
+        // cleanup — letting a stale `PrefillReady` get resurrected here.
+        match self.prefill_router_activators.entry(key) {
+            Entry::Occupied(mut o) => {
+                // Atomically swap the value to a fresh PrefillReady. The old
+                // value tells us which transition we just performed.
+                let new_value =
+                    PrefillActivationState::PrefillReady(Box::new(endpoint.clone()));
+                let old = o.insert(new_value);
+                // Drop the OccupiedEntry to release the shard lock before any
+                // potentially-non-trivial work (e.g. nested DashMap accesses
+                // via reactivate_if_needed). The state transition above is
+                // already committed.
+                drop(o);
+
+                match old {
+                    PrefillActivationState::DecodeWaiting(sender) => {
+                        // Cold-start (or post-rebuild) handshake: decode
+                        // registered first. Wake the waiting receiver.
+                        sender.send(endpoint).map_err(|_| {
+                            anyhow::anyhow!(
+                                "Failed to send endpoint to prefill router activator for {}:{}",
+                                model_name,
+                                namespace
+                            )
+                        })?;
+                        tracing::info!(
+                            model_name = %model_name,
+                            namespace = %namespace,
+                            "Activated prefill router for decode WorkerSet"
+                        );
+                    }
+                    PrefillActivationState::PrefillReady(_) => {
+                        // Stale PrefillReady from a prior handshake. Two cases:
+                        //   (a) Duplicate activate_prefill_router call (e.g.,
+                        //       the same prefill instance re-publishes its
+                        //       endpoint) — just refresh, no router action.
+                        //   (b) Prefill rejoin after a transient absence —
+                        //       reactivate any deactivated decode-side router.
+                        if reactivate_if_needed() {
+                            tracing::info!(
+                                model_name = %model_name,
+                                namespace = %namespace,
+                                "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                model_name = %model_name,
+                                namespace = %namespace,
+                                "Refreshed cached prefill endpoint for future decode WorkerSet rebuild"
+                            );
+                        }
+                    }
+                }
                 Ok(())
             }
-            Some((_, PrefillActivationState::PrefillReady(_))) => {
-                // Stale PrefillReady from a prior handshake. Two cases land here:
-                //   (a) Duplicate activate_prefill_router call (e.g., the same
-                //       prefill instance re-publishes its endpoint) — refresh.
-                //   (b) Prefill rejoin after a transient absence where the
-                //       cached endpoint is now stale — refresh + reactivate any
-                //       deactivated decode-side router.
-                let reactivated = if let Some(model) = self.get_model(model_name)
-                    && let Some(ws) = model.get_worker_set(namespace)
-                    && let Some(ref pr) = ws.prefill_router
-                    && pr.is_deactivated()
-                {
-                    pr.reactivate();
-                    true
-                } else {
-                    false
-                };
+            Entry::Vacant(v) => {
+                // No prior handshake state. Insert a fresh PrefillReady so a
+                // future decode rebuild's register_prefill_router finds the
+                // cache and activates immediately.
+                v.insert(PrefillActivationState::PrefillReady(Box::new(endpoint)));
 
-                self.prefill_router_activators.insert(
-                    key,
-                    PrefillActivationState::PrefillReady(Box::new(endpoint)),
-                );
-
-                if reactivated {
+                // Then handle the prefill-rejoin case: an existing decode-side
+                // PrefillRouter that was deactivated when prefill went away.
+                if reactivate_if_needed() {
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
                         "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
                     );
                 } else {
-                    tracing::debug!(
-                        model_name = %model_name,
-                        namespace = %namespace,
-                        "Refreshed cached prefill endpoint for future decode WorkerSet rebuild"
-                    );
-                }
-                Ok(())
-            }
-            None => {
-                // Try to reactivate an existing deactivated router first.
-                // This handles prefill rejoin after a transient failure: the decode
-                // WorkerSet's PrefillRouter already exists but is deactivated.
-                if let Some(model) = self.get_model(model_name)
-                    && let Some(ws) = model.get_worker_set(namespace)
-                    && let Some(ref pr) = ws.prefill_router
-                    && pr.is_deactivated()
-                {
-                    pr.reactivate();
-                    // Cache the endpoint so that if the decode WorkerSet is rebuilt
-                    // (removed and re-added), a subsequent register_prefill_router
-                    // call finds PrefillReady instead of falling back to
-                    // DecodeWaiting and stalling.
-                    self.prefill_router_activators.insert(
-                        key,
-                        PrefillActivationState::PrefillReady(Box::new(endpoint)),
-                    );
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
-                        "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                        "Stored prefill endpoint for future decode WorkerSet registration"
                     );
-                    return Ok(());
                 }
-
-                // No existing deactivated router -- cache endpoint for a future
-                // decode registration.
-                self.prefill_router_activators.insert(
-                    key,
-                    PrefillActivationState::PrefillReady(Box::new(endpoint)),
-                );
-                tracing::info!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Stored prefill endpoint for future decode WorkerSet registration"
-                );
                 Ok(())
             }
         }
