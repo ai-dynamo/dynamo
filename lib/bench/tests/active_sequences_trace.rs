@@ -3,7 +3,7 @@
 
 mod support;
 
-#[path = "../kv_router/common/shared.rs"]
+#[path = "../kv_router/common/mod.rs"]
 mod common;
 
 #[path = "../kv_router/active_sequences_shared.rs"]

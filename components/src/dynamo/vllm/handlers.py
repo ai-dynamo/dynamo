@@ -66,7 +66,11 @@ from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.model import (
+    ModelFamily,
+    construct_qwen_decode_mm_data,
+    resolve_model_family,
+)
 from .multimodal_utils.models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
@@ -115,19 +119,40 @@ class _DeferredAbort:
             self._first_token_event.set()
 
     async def abort(self) -> None:
-        """Abort immediately if first token received, otherwise defer."""
-        if self._first_token_received:
+        """Abort the request. Creates a Task to hold a strong reference so the
+        engine abort cannot be dropped if this coroutine is concurrently
+        cancelled."""
+        if self._abort_task is None:
+            if self._first_token_received:
+                logger.debug(
+                    f"Deferred abort: first token already received, "
+                    f"aborting request {self._request_id} now"
+                )
+                self._abort_task = asyncio.create_task(self._run_abort())
+            else:
+                logger.debug(
+                    f"Deferred abort: first token not received for request "
+                    f"{self._request_id}, spawning background task"
+                )
+                self._abort_task = asyncio.create_task(self._wait_and_abort())
+        try:
+            await self._abort_task
+        except asyncio.CancelledError:
+            logger.debug(
+                f"Deferred abort: shielded from cancellation for request "
+                f"{self._request_id}, abort continues in background"
+            )
+
+    async def _run_abort(self) -> None:
+        """Execute engine.abort() and emit the canonical completion log."""
+        try:
             await self._engine_client.abort(self._request_id)
-            logger.debug(
-                f"Deferred abort: first token already received, "
-                f"aborting request {self._request_id} now"
+            logger.debug(f"Aborted Request ID: {self._request_id}")
+        except Exception as e:
+            logger.warning(
+                f"Deferred abort: engine abort raised for request "
+                f"{self._request_id}: {e}"
             )
-        elif self._abort_task is None:
-            logger.debug(
-                f"Deferred abort: first token not received for request "
-                f"{self._request_id}, spawning background task"
-            )
-            self._abort_task = asyncio.create_task(self._wait_and_abort())
 
     async def _wait_and_abort(self) -> None:
         """Background task: wait for first token, then abort."""
@@ -135,17 +160,7 @@ class _DeferredAbort:
             await self._first_token_event.wait()
         except Exception:
             pass
-        try:
-            await self._engine_client.abort(self._request_id)
-            logger.debug(
-                f"Deferred abort: background task fired abort for request "
-                f"{self._request_id}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Deferred abort: background abort failed for request "
-                f"{self._request_id}: {e}"
-            )
+        await self._run_abort()
 
     async def close(self) -> None:
         """Clean up the deferred-abort waiter when generation exits.
@@ -418,6 +433,7 @@ def build_sampling_params_openai(
 
     # Map common OpenAI parameters to SamplingParams
     openai_mapping = {
+        "n": "n",
         "temperature": "temperature",
         "top_p": "top_p",
         "presence_penalty": "presence_penalty",
@@ -857,14 +873,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
 
-            # Abort the request (via guard if provided, otherwise direct)
+            # Log intent before the abort — synchronous, no await, so it is
+            # guaranteed to appear even if this task is concurrently cancelled
+            # by _abort_monitor's cleanup.
+            logger.debug(
+                f"Aborting {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
+
+            # Abort the request (via guard if provided, otherwise direct).
             if abort_guard is not None:
+                # Guard owns completion logging: "Aborted Request ID:" is
+                # emitted from _run_abort() once engine.abort() returns,
+                # even if this task is concurrently cancelled.
                 await abort_guard.abort()
             else:
-                await self.engine_client.abort(request_id)
-            logger.debug(
-                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
-            )
+                # No guard: shield the abort so a concurrent CancelledError
+                # from _abort_monitor cleanup cannot interrupt it mid-flight.
+                try:
+                    await asyncio.shield(self.engine_client.abort(request_id))
+                except asyncio.CancelledError:
+                    logger.debug(
+                        f"Abort shielded from cancellation for request "
+                        f"{request_id}, continuing in background"
+                    )
+                logger.debug(
+                    f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                )
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
@@ -1798,7 +1832,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             prompt_tokens = None
 
-        completion_tokens = len(request_output.outputs[0].token_ids)
+        completion_tokens = sum(
+            len(output.token_ids) for output in request_output.outputs
+        )
 
         return {
             "prompt_tokens": prompt_tokens,
@@ -1942,7 +1978,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 priority=priority,
             )
 
-            num_output_tokens_so_far = 0
+            num_output_tokens_so_far: dict[int, int] = {}
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -1956,43 +1992,53 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Rust will parse this into FinishReason::Error(message)
                     yield {
                         "finish_reason": "error: No outputs from vLLM engine",
+                        "index": 0,
                         "token_ids": [],
                     }
                     break
 
-                output = res.outputs[0]
-                next_total_toks = len(output.token_ids)
-                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                for output in res.outputs:
+                    output_idx = getattr(output, "index", 0) or 0
+                    previous_total_toks = num_output_tokens_so_far.get(output_idx, 0)
+                    next_total_toks = len(output.token_ids)
+                    out = {
+                        "index": output_idx,
+                        "token_ids": output.token_ids[previous_total_toks:],
+                    }
 
-                # Extract logprobs for new tokens if available
-                tokenizer = getattr(self.engine_client, "tokenizer", None)
-                log_probs, top_logprobs = self._extract_logprobs(
-                    output, num_output_tokens_so_far, tokenizer=tokenizer
-                )
-                if log_probs is not None:
-                    out["log_probs"] = log_probs
-                if top_logprobs is not None:
-                    out["top_logprobs"] = top_logprobs
+                    # Extract logprobs for new tokens if available
+                    tokenizer = getattr(self.engine_client, "tokenizer", None)
+                    log_probs, top_logprobs = self._extract_logprobs(
+                        output, previous_total_toks, tokenizer=tokenizer
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
 
-                if output.finish_reason:
-                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
-                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
-                        request_output=res,
-                        embedding_sequence_length=embedding_sequence_length,
-                    )
-                    # Log completion with LoRA info (debug level to avoid log spam)
-                    self._log_with_lora_context(
-                        "Completed token generation for request {request_id}{lora_info}: "
-                        "{output_tokens} output tokens, finish_reason={finish_reason}",
-                        request_id,
-                        lora_request,
-                        output_tokens=next_total_toks,
-                        finish_reason=output.finish_reason,
-                    )
-                if output.stop_reason:
-                    out["stop_reason"] = output.stop_reason
-                yield out
-                num_output_tokens_so_far = next_total_toks
+                    if output.finish_reason:
+                        out["finish_reason"] = normalize_finish_reason(
+                            output.finish_reason
+                        )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
+                        )
+                        # Log completion with LoRA info (debug level to avoid log spam)
+                        self._log_with_lora_context(
+                            "Completed token generation for request {request_id}{lora_info}: "
+                            "{output_tokens} output tokens, finish_reason={finish_reason}",
+                            request_id,
+                            lora_request,
+                            output_tokens=next_total_toks,
+                            finish_reason=output.finish_reason,
+                        )
+                    if output.stop_reason:
+                        out["stop_reason"] = output.stop_reason
+                    yield out
+                    num_output_tokens_so_far[output_idx] = next_total_toks
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -2082,7 +2128,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         pre_rendered: Dict[str, Any] | None = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
-            if is_qwen_vl_model(self.config.model):
+            if resolve_model_family(self.config.model) is ModelFamily.QWEN_VL:
                 # Qwen VL needs embedding_params for mRoPE initialization.
                 if embedding_params is not None:
                     multi_modal_data = construct_qwen_decode_mm_data(
@@ -2267,7 +2313,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
-        previous_text = ""
+        previous_text_per_choice: dict[int, str] = {}
 
         trace_headers = build_trace_headers(context)
 
@@ -2299,34 +2345,38 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         }
                         break
 
-                    output = res.outputs[0]
-                    # Calculate the delta text (new text since last chunk)
-                    delta_text = output.text[len(previous_text) :]
-                    previous_text = output.text
+                    for output in res.outputs:
+                        output_idx = getattr(output, "index", 0) or 0
+                        previous_text = previous_text_per_choice.get(output_idx, "")
+                        # Calculate the delta text (new text since last chunk)
+                        delta_text = output.text[len(previous_text) :]
 
-                    choice_data = {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": delta_text,
-                        },
-                        "finish_reason": normalize_finish_reason(output.finish_reason),
-                    }
+                        choice_data = {
+                            "index": output_idx,
+                            "delta": {
+                                "role": "assistant",
+                                "content": delta_text,
+                            },
+                            "finish_reason": normalize_finish_reason(
+                                output.finish_reason
+                            ),
+                        }
 
-                    chunk = {
-                        "id": openai_request_id,
-                        "created": int(time.time()),
-                        "object": "chat.completion.chunk",
-                        "model": "unknown",
-                        "choices": [choice_data],
-                    }
+                        chunk = {
+                            "id": openai_request_id,
+                            "created": int(time.time()),
+                            "object": "chat.completion.chunk",
+                            "model": "unknown",
+                            "choices": [choice_data],
+                        }
 
-                    if output.finish_reason:
-                        chunk["usage"] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                        )
+                        if output.finish_reason:
+                            chunk["usage"] = BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                            )
 
-                    yield chunk
+                        yield chunk
+                        previous_text_per_choice[output_idx] = output.text
 
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -2368,7 +2418,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Cache Qwen VL grid parameters for computing image_grid_thw from
         # PIL images in the P/D path (no separate encode worker).
-        if is_qwen_vl_model(config.model):
+        if resolve_model_family(config.model) is ModelFamily.QWEN_VL:
             self._qwen_grid_params = load_qwen_grid_params(config.model)
             if self._qwen_grid_params is None and self.embedding_loader is None:
                 logger.error(
@@ -2535,7 +2585,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     ) -> Dict[str, Any] | None:
         # [gluo NOTE] there could be different model architectures that
         # need different embedding params, will add more logic if needed
-        if not is_qwen_vl_model(self.config.model):
+        if resolve_model_family(self.config.model) is not ModelFamily.QWEN_VL:
             # For non-qwen models, vLLM doesn't trigger mm preprocess so
             # decode worker only needs expanded prompt to properly fetch KV blocks
             # from prefill.

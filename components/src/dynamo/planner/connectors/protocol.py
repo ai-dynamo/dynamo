@@ -16,6 +16,7 @@ class ScaleStatus(str, Enum):
 
     SUCCESS = "success"
     ERROR = "error"
+    REJECTED = "rejected"
     SCALING = "scaling"
 
 

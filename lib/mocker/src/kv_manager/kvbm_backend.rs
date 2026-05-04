@@ -31,6 +31,8 @@
 //! - `MultiLru` — 4-tier frequency-aware LRU (requires TinyLFU tracker).
 
 use std::sync::Arc;
+#[cfg(feature = "kvbm-offload")]
+use std::sync::Mutex;
 
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -49,6 +51,42 @@ use crate::common::protocols::{
     G1, KvEventPublishers, MockerEvictionBackend, MoveBlock, PrefillCost,
 };
 use crate::common::sequence::ActiveSequence;
+#[cfg(feature = "kvbm-offload")]
+use crate::kvbm_offload::{MockOffloadEngine, SwapInHandle};
+
+/// Outcome of [`KvManager::try_batch_swap_in`]. The caller uses this to
+/// decide whether to park the request on a pending-swap-in queue or to
+/// fall through to normal G1 allocation.
+#[cfg(feature = "kvbm-offload")]
+pub enum BatchSwapInOutcome {
+    /// No G2 hits (or no offload engine attached). Caller must allocate
+    /// fresh G1 blocks.
+    NoHits,
+    /// Swap-in reservation accepted. Caller parks the request with this
+    /// handle and polls `SwapInHandle::is_complete()` on subsequent
+    /// scheduler passes. Matched G2 blocks are pinned via RAII inside
+    /// the handle for the duration of the transfer, while
+    /// `destination_slots` pins the G1 write targets.
+    Scheduled {
+        handle: SwapInHandle,
+        destination_slots: Vec<MutableBlock<G1>>,
+    },
+    /// G2 had a match, but reserving destination G1 slots first had to
+    /// trigger a G1→G2 eviction. Caller should retry after offload advances.
+    BlockedOnG1Offload,
+}
+
+#[cfg(feature = "kvbm-offload")]
+pub struct SwapInRegistrationOutcome {
+    pub consumed_entries: usize,
+}
+
+#[cfg(feature = "kvbm-offload")]
+enum SwapInSlotReservation {
+    Reserved(Vec<MutableBlock<G1>>),
+    BlockedOnG1Offload,
+    NoCapacity,
+}
 
 /// Classification for each block processed inside `Use`.
 ///
@@ -66,6 +104,24 @@ enum UseOutcome {
     ActiveHit,
     InactiveHit,
     NewStore,
+}
+
+enum G1AllocationAttempt {
+    Allocated {
+        mutable: MutableBlock<G1>,
+        evicted_plhs: Vec<PositionalLineageHash>,
+    },
+    BlockedOnOffload {
+        evicted_plhs: Vec<PositionalLineageHash>,
+        source_slots: Vec<MutableBlock<G1>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct RegisteredBlockInfo {
+    seq_hash: SequenceHash,
+    #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
+    block_id: usize,
 }
 
 /// Synchronous G1 KV block manager backed by `kvbm-logical::BlockManager<G1>`.
@@ -87,13 +143,27 @@ pub struct KvManager {
     /// kvbm-logical's inactive pool (RAII return on drop of the last clone).
     active_full: FxHashMap<SequenceHash, Vec<ImmutableBlock<G1>>>,
 
-    /// Shadow registry of (PLH → mocker u64 seq_hash) for every block that has
-    /// been registered in kvbm-logical. kvbm-logical's registry is keyed by
-    /// `PositionalLineageHash`, but the router's radix tree is keyed by the
-    /// mocker's u64 `SequenceHash` on `UniqueBlock::FullBlock`. We keep this
-    /// map so we can emit router-compatible `Removed` events when kvbm-logical
-    /// evicts inactive blocks as a side effect of `allocate_blocks_with_evictions`.
-    registered_plhs: FxHashMap<PositionalLineageHash, SequenceHash>,
+    /// Shadow registry for every block registered in kvbm-logical. The logical
+    /// registry is keyed by `PositionalLineageHash`, while the router's radix
+    /// tree is keyed by the mocker's u64 `SequenceHash`; the physical G1 block
+    /// id is kept so offload simulation can enqueue the actual block shape when
+    /// kvbm-logical later evicts it from the inactive pool.
+    registered_blocks: FxHashMap<PositionalLineageHash, RegisteredBlockInfo>,
+
+    /// Handle to the G1↔G2 offload engine. `None` until
+    /// [`attach_new_offload_engine`](Self::attach_new_offload_engine) wires
+    /// one in after construction (the engine is built async and cannot be
+    /// created inside `new_*`).
+    ///
+    /// Mocker source-lifetime note: G1 eviction hands kvbm-engine
+    /// `SourceBlocks::External(block_id, plh)` without a strong immutable G1
+    /// block ref. A real byte copy still needs the source HBM slot to stay
+    /// unavailable until DMA completes, so the mocker holds the reset
+    /// `MutableBlock<G1>` capacity token inside the offload engine until the
+    /// simulated transfer completes. The worker never reads source bytes;
+    /// destination presence is registered by `plh`.
+    #[cfg(feature = "kvbm-offload")]
+    offload_engine: Option<Arc<Mutex<MockOffloadEngine>>>,
 }
 
 impl KvManager {
@@ -154,7 +224,222 @@ impl KvManager {
             next_event_id: 0,
             active_partial: FxHashMap::default(),
             active_full: FxHashMap::default(),
-            registered_plhs: FxHashMap::default(),
+            registered_blocks: FxHashMap::default(),
+            #[cfg(feature = "kvbm-offload")]
+            offload_engine: None,
+        }
+    }
+
+    /// Wrap `engine` in `Arc<Mutex<_>>`, install it onto this
+    /// `KvManager`, and return a clone of the Arc to the caller.
+    /// Called once after construction by the scheduler's init helper;
+    /// a second call replaces the previous engine (primarily for tests).
+    #[cfg(feature = "kvbm-offload")]
+    pub fn attach_new_offload_engine(
+        &mut self,
+        engine: MockOffloadEngine,
+    ) -> Arc<Mutex<MockOffloadEngine>> {
+        let shared = Arc::new(Mutex::new(engine));
+        self.offload_engine = Some(shared.clone());
+        shared
+    }
+
+    /// `true` once an offload engine has been attached.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn has_offload_engine(&self) -> bool {
+        self.offload_engine.is_some()
+    }
+
+    /// Advance the offload engine's PS models and fire any
+    /// completion sinks for drained transfers. Scheduler calls this at
+    /// the top of every pass so swap-in flags flip before the
+    /// promote-completed loop runs, and offload awaiters fire before
+    /// the next enqueue measures the active-set size. No-op when no
+    /// engine is attached.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn tick_offload_engine(&self, now_ms: f64) {
+        if let Some(engine_arc) = self.offload_engine.as_ref() {
+            let engine = engine_arc.lock().expect("offload engine mutex poisoned");
+            engine.tick(now_ms);
+        }
+    }
+
+    /// Earliest pending completion time across offload + onboard links,
+    /// or `None` when both are idle or no engine is attached. Scheduler
+    /// uses this to drive stall-advance in virtual-time replay.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn earliest_offload_deadline(&self) -> Option<f64> {
+        let engine_arc = self.offload_engine.as_ref()?;
+        let engine = engine_arc.lock().expect("offload engine mutex poisoned");
+        engine.earliest_pending_deadline()
+    }
+
+    /// Hand blocks that were actually evicted from G1 inactive to the
+    /// offload engine as mock `ExternalBlock`s (no strong immutable ref; see
+    /// `offload_engine` field docs). When capacity pressure tried to reuse
+    /// the same G1 slots, `source_slots` carries reset `MutableBlock` tokens
+    /// that must remain unavailable until the simulated source copy finishes.
+    #[cfg(feature = "kvbm-offload")]
+    fn enqueue_evictions_to_g2(
+        &self,
+        evicted: &[(usize, PositionalLineageHash)],
+        source_slots: Vec<MutableBlock<G1>>,
+    ) {
+        let Some(engine_arc) = self.offload_engine.as_ref() else {
+            drop(source_slots);
+            return;
+        };
+        if evicted.is_empty() {
+            drop(source_slots);
+            return;
+        }
+        let mut engine = engine_arc.lock().expect("offload engine mutex poisoned");
+        engine.enqueue_g1_evictions_holding_sources(evicted, source_slots, None);
+    }
+
+    /// Register a batch of completed G2-swapped-in blocks into the G1
+    /// inactive pool. `destination_slots` were reserved before the G2→G1
+    /// transfer started and are consumed here as DMA write targets.
+    ///
+    /// Entries already cached in G1 (active or inactive) are skipped, but still
+    /// advance the parent cursor so later fresh suffix stores publish the same
+    /// router tree shape as `process_use`.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn register_swapped_in_blocks(
+        &mut self,
+        entries: &[(SequenceHash, PositionalLineageHash, BlockHash)],
+        initial_parent_hash: Option<SequenceHash>,
+        destination_slots: Vec<MutableBlock<G1>>,
+    ) -> SwapInRegistrationOutcome {
+        let mut stored_seq_hashes = Vec::with_capacity(entries.len());
+        let mut stored_local_hashes = Vec::with_capacity(entries.len());
+        let mut stored_parent_hash = initial_parent_hash;
+        let mut consumed_entries = 0usize;
+        let mut destination_slots = destination_slots.into_iter();
+
+        for (seq_hash, plh, local_hash) in entries {
+            let Some(mutable) = destination_slots.next() else {
+                tracing::warn!(
+                    consumed_entries,
+                    entries = entries.len(),
+                    "kvbm-offload: swap-in registration ran out of reserved G1 slots"
+                );
+                break;
+            };
+            if self.active_full.contains_key(seq_hash) {
+                drop(mutable);
+                if !stored_seq_hashes.is_empty() {
+                    let full_blocks = std::mem::take(&mut stored_seq_hashes);
+                    let local_hashes = std::mem::take(&mut stored_local_hashes);
+                    self.publish_kv_event(
+                        full_blocks,
+                        &local_hashes,
+                        stored_parent_hash,
+                        true,
+                        None,
+                    );
+                }
+                stored_parent_hash = Some(*seq_hash);
+                consumed_entries += 1;
+                continue;
+            }
+            let presence = self
+                .block_manager
+                .block_registry()
+                .check_presence::<G1>(&[*plh]);
+            if presence.first().is_some_and(|(_, p)| *p) {
+                drop(mutable);
+                if !stored_seq_hashes.is_empty() {
+                    let full_blocks = std::mem::take(&mut stored_seq_hashes);
+                    let local_hashes = std::mem::take(&mut stored_local_hashes);
+                    self.publish_kv_event(
+                        full_blocks,
+                        &local_hashes,
+                        stored_parent_hash,
+                        true,
+                        None,
+                    );
+                }
+                stored_parent_hash = Some(*seq_hash);
+                consumed_entries += 1;
+                continue;
+            }
+            let complete = mutable
+                .stage(*plh, self.block_size)
+                .expect("stage failed during swap-in registration");
+            let immutable = self.block_manager.register_block(complete);
+            let block_id = immutable.block_id();
+            // Drop ImmutableBlock → block lands in kvbm-logical's
+            // inactive pool, where `process_use`'s `match_blocks`
+            // later reactivates it.
+            drop(immutable);
+            self.registered_blocks.insert(
+                *plh,
+                RegisteredBlockInfo {
+                    seq_hash: *seq_hash,
+                    block_id,
+                },
+            );
+            stored_seq_hashes.push(*seq_hash);
+            stored_local_hashes.push(*local_hash);
+            consumed_entries += 1;
+        }
+
+        if !stored_seq_hashes.is_empty() {
+            self.publish_kv_event(
+                stored_seq_hashes,
+                &stored_local_hashes,
+                stored_parent_hash,
+                true,
+                None,
+            );
+        }
+
+        SwapInRegistrationOutcome { consumed_entries }
+    }
+
+    /// Try to satisfy a request's remaining prefix via a G2→G1 swap-in.
+    ///
+    /// Admission path stays linear: `active → inactive → (this) →
+    /// allocate fresh`. Returns [`BatchSwapInOutcome::NoHits`] when no
+    /// engine is attached or when G2 holds none of `remaining_plhs`.
+    ///
+    /// The G2 tier is keyed by `PositionalLineageHash` (kvbm-engine's
+    /// native identity), not the router-facing `u64` SequenceHash — the
+    /// caller already holds these on the admission path. We first pin the
+    /// matched G2 blocks, then reserve destination G1 slots, and only then
+    /// reserve G2→G1 bandwidth. That prevents swap-in from borrowing
+    /// imaginary HBM capacity while the transfer is in flight.
+    #[cfg(feature = "kvbm-offload")]
+    pub fn try_batch_swap_in(
+        &mut self,
+        remaining_plhs: &[PositionalLineageHash],
+        now_ms: Option<f64>,
+    ) -> BatchSwapInOutcome {
+        let Some(engine_arc) = self.offload_engine.clone() else {
+            return BatchSwapInOutcome::NoHits;
+        };
+        let Some(prepared) = ({
+            let mut engine = engine_arc.lock().expect("offload engine mutex poisoned");
+            engine.prepare_onboard_prefix(remaining_plhs)
+        }) else {
+            return BatchSwapInOutcome::NoHits;
+        };
+        let block_count = prepared.block_count();
+        let destination_slots = match self.reserve_swap_in_destination_slots(block_count) {
+            SwapInSlotReservation::Reserved(slots) => slots,
+            SwapInSlotReservation::BlockedOnG1Offload => {
+                return BatchSwapInOutcome::BlockedOnG1Offload;
+            }
+            SwapInSlotReservation::NoCapacity => return BatchSwapInOutcome::NoHits,
+        };
+        let handle = {
+            let mut engine = engine_arc.lock().expect("offload engine mutex poisoned");
+            engine.start_onboard_prefix(prepared, now_ms)
+        };
+        BatchSwapInOutcome::Scheduled {
+            handle,
+            destination_slots,
         }
     }
 
@@ -274,6 +559,142 @@ impl KvManager {
         }
     }
 
+    fn allocate_one_g1_slot(&mut self) -> Option<G1AllocationAttempt> {
+        let (mut alloc, evicted_plhs) = self.block_manager.allocate_blocks_with_evictions(1)?;
+        let mutable = alloc.pop().expect("allocate_blocks(1) returned no block");
+        if self.should_block_on_g1_offload(&evicted_plhs) {
+            return Some(G1AllocationAttempt::BlockedOnOffload {
+                evicted_plhs,
+                source_slots: vec![mutable],
+            });
+        }
+        Some(G1AllocationAttempt::Allocated {
+            mutable,
+            evicted_plhs,
+        })
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn reserve_swap_in_destination_slots(&mut self, count: usize) -> SwapInSlotReservation {
+        let mut destination_slots = Vec::with_capacity(count);
+        let mut evicted_plhs = Vec::new();
+        let mut blocked_evicted_plhs = Vec::new();
+        let mut blocked_source_slots = Vec::new();
+
+        while destination_slots.len() < count {
+            let Some(allocation) = self.allocate_one_g1_slot() else {
+                self.handle_evictions(evicted_plhs);
+                return SwapInSlotReservation::NoCapacity;
+            };
+            match allocation {
+                G1AllocationAttempt::Allocated {
+                    mutable,
+                    evicted_plhs: evicted,
+                } => {
+                    evicted_plhs.extend(evicted);
+                    destination_slots.push(mutable);
+                }
+                G1AllocationAttempt::BlockedOnOffload {
+                    evicted_plhs: evicted,
+                    source_slots,
+                } => {
+                    blocked_evicted_plhs.extend(evicted);
+                    blocked_source_slots.extend(source_slots);
+                    let remaining_allocations = count - destination_slots.len();
+                    self.extend_blocked_g1_offload_batch(
+                        &mut blocked_evicted_plhs,
+                        &mut blocked_source_slots,
+                        remaining_allocations,
+                    );
+                    drop(destination_slots);
+                    self.handle_evictions(evicted_plhs);
+                    self.handle_evictions_with_source_slots(
+                        blocked_evicted_plhs,
+                        blocked_source_slots,
+                    );
+                    return SwapInSlotReservation::BlockedOnG1Offload;
+                }
+            }
+        }
+
+        self.handle_evictions(evicted_plhs);
+        SwapInSlotReservation::Reserved(destination_slots)
+    }
+
+    fn full_block_present_in_g1(
+        &self,
+        seq_hash: &SequenceHash,
+        plh: PositionalLineageHash,
+    ) -> bool {
+        if self.active_full.contains_key(seq_hash) {
+            return true;
+        }
+        let presence = self
+            .block_manager
+            .block_registry()
+            .check_presence::<G1>(&[plh]);
+        presence.first().is_some_and(|(_, present)| *present)
+    }
+
+    fn pending_use_allocations(
+        &self,
+        blocks: &[UniqueBlock],
+        plhs: &[PositionalLineageHash],
+        mut plh_idx: usize,
+    ) -> usize {
+        let mut allocations = 0usize;
+        for block in blocks {
+            match block {
+                UniqueBlock::FullBlock(seq_hash) => {
+                    let Some(plh) = plhs.get(plh_idx).copied() else {
+                        break;
+                    };
+                    plh_idx += 1;
+                    if !self.full_block_present_in_g1(seq_hash, plh) {
+                        allocations += 1;
+                    }
+                }
+                UniqueBlock::PartialBlock(uuid) => {
+                    if !self.active_partial.contains_key(uuid) {
+                        allocations += 1;
+                    }
+                }
+            }
+        }
+        allocations
+    }
+
+    fn extend_blocked_g1_offload_batch(
+        &mut self,
+        evicted_plhs: &mut Vec<PositionalLineageHash>,
+        source_slots: &mut Vec<MutableBlock<G1>>,
+        max_source_slots: usize,
+    ) {
+        while source_slots.len() < max_source_slots {
+            let Some((mut alloc, evicted)) = self.block_manager.allocate_blocks_with_evictions(1)
+            else {
+                return;
+            };
+            let mutable = alloc.pop().expect("allocate_blocks(1) returned no block");
+            if !self.should_block_on_g1_offload(&evicted) {
+                drop(mutable);
+                return;
+            }
+            evicted_plhs.extend(evicted);
+            source_slots.push(mutable);
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn should_block_on_g1_offload(&self, evicted_plhs: &[PositionalLineageHash]) -> bool {
+        self.offload_engine.is_some() && !evicted_plhs.is_empty()
+    }
+
+    #[cfg(not(feature = "kvbm-offload"))]
+    fn should_block_on_g1_offload(&self, _evicted_plhs: &[PositionalLineageHash]) -> bool {
+        false
+    }
+
     fn process_use(
         &mut self,
         blocks: &[UniqueBlock],
@@ -304,6 +725,8 @@ impl KvManager {
         let mut stored_local_hashes = Vec::<BlockHash>::new();
         let mut stored_token_ids: Option<Vec<Vec<u32>>> = token_ids.map(|_| Vec::new());
         let mut evicted_plhs = Vec::<PositionalLineageHash>::new();
+        let mut blocked_evicted_plhs = Vec::<PositionalLineageHash>::new();
+        let mut blocked_source_slots = Vec::<MutableBlock<G1>>::new();
 
         let mut parent_block: Option<&UniqueBlock> = parent;
         let mut plh_idx = 0usize;
@@ -330,21 +753,51 @@ impl KvManager {
                                 .push(immutable);
                             UseOutcome::InactiveHit
                         } else {
-                            let Some((mut alloc, evicted)) =
-                                self.block_manager.allocate_blocks_with_evictions(1)
-                            else {
+                            let Some(allocation) = self.allocate_one_g1_slot() else {
                                 break; // capacity exhausted; scheduler will preempt
                             };
-                            evicted_plhs.extend(evicted);
-                            let mutable = alloc.pop().unwrap();
+                            let mutable = match allocation {
+                                G1AllocationAttempt::Allocated {
+                                    mutable,
+                                    evicted_plhs: evicted,
+                                } => {
+                                    evicted_plhs.extend(evicted);
+                                    mutable
+                                }
+                                G1AllocationAttempt::BlockedOnOffload {
+                                    evicted_plhs: evicted,
+                                    source_slots,
+                                } => {
+                                    blocked_evicted_plhs.extend(evicted);
+                                    blocked_source_slots.extend(source_slots);
+                                    let remaining_allocations = self.pending_use_allocations(
+                                        &blocks[i + 1..],
+                                        plhs,
+                                        plh_idx,
+                                    );
+                                    self.extend_blocked_g1_offload_batch(
+                                        &mut blocked_evicted_plhs,
+                                        &mut blocked_source_slots,
+                                        1 + remaining_allocations,
+                                    );
+                                    break;
+                                }
+                            };
                             let complete =
                                 mutable.stage(plh, self.block_size).expect("stage failed");
                             let immutable = self.block_manager.register_block(complete);
+                            let block_id = immutable.block_id();
                             self.active_full
                                 .entry(*seq_hash)
                                 .or_default()
                                 .push(immutable);
-                            self.registered_plhs.insert(plh, *seq_hash);
+                            self.registered_blocks.insert(
+                                plh,
+                                RegisteredBlockInfo {
+                                    seq_hash: *seq_hash,
+                                    block_id,
+                                },
+                            );
                             UseOutcome::NewStore
                         }
                     }
@@ -353,13 +806,33 @@ impl KvManager {
                     if self.active_partial.contains_key(uuid) {
                         UseOutcome::ActiveHit
                     } else {
-                        let Some((mut alloc, evicted)) =
-                            self.block_manager.allocate_blocks_with_evictions(1)
-                        else {
+                        let Some(allocation) = self.allocate_one_g1_slot() else {
                             break;
                         };
-                        evicted_plhs.extend(evicted);
-                        let mutable = alloc.pop().unwrap();
+                        let mutable = match allocation {
+                            G1AllocationAttempt::Allocated {
+                                mutable,
+                                evicted_plhs: evicted,
+                            } => {
+                                evicted_plhs.extend(evicted);
+                                mutable
+                            }
+                            G1AllocationAttempt::BlockedOnOffload {
+                                evicted_plhs: evicted,
+                                source_slots,
+                            } => {
+                                blocked_evicted_plhs.extend(evicted);
+                                blocked_source_slots.extend(source_slots);
+                                let remaining_allocations =
+                                    self.pending_use_allocations(&blocks[i + 1..], plhs, plh_idx);
+                                self.extend_blocked_g1_offload_batch(
+                                    &mut blocked_evicted_plhs,
+                                    &mut blocked_source_slots,
+                                    1 + remaining_allocations,
+                                );
+                                break;
+                            }
+                        };
                         self.active_partial.insert(*uuid, mutable);
                         UseOutcome::ActiveHit
                     }
@@ -411,19 +884,62 @@ impl KvManager {
             stored_token_ids,
         );
 
-        // Translate any blocks kvbm-logical evicted from its inactive pool
-        // during the allocations above into router `Removed` events.
-        if !evicted_plhs.is_empty() {
-            let evicted: Vec<SequenceHash> = evicted_plhs
-                .into_iter()
-                .filter_map(|plh| self.registered_plhs.remove(&plh))
-                .collect();
-            if !evicted.is_empty() {
-                self.publish_kv_event(evicted, &[], None, false, None);
-            }
-        }
+        self.handle_evictions(evicted_plhs);
+        self.handle_evictions_with_source_slots(blocked_evicted_plhs, blocked_source_slots);
 
         allocated
+    }
+
+    /// Translate PLHs that kvbm-logical evicted from its inactive pool
+    /// (during an `allocate_blocks_with_evictions` call) into offload
+    /// enqueues plus router `Removed` events. No-op when the input is empty
+    /// or none of the PLHs are in our shadow registry.
+    fn handle_evictions(&mut self, evicted_plhs: Vec<PositionalLineageHash>) {
+        self.handle_evictions_with_source_slots(evicted_plhs, Vec::new());
+    }
+
+    /// Same as [`handle_evictions`](Self::handle_evictions), but also hands
+    /// reset source slots to the offload engine so G1 capacity remains pinned
+    /// until the simulated G1→G2 transfer completes.
+    fn handle_evictions_with_source_slots(
+        &mut self,
+        evicted_plhs: Vec<PositionalLineageHash>,
+        source_slots: Vec<MutableBlock<G1>>,
+    ) {
+        if evicted_plhs.is_empty() {
+            drop(source_slots);
+            return;
+        }
+        let mut evicted_seq_hashes = Vec::with_capacity(evicted_plhs.len());
+        #[cfg(feature = "kvbm-offload")]
+        let mut offload_blocks = Vec::with_capacity(evicted_plhs.len());
+
+        for plh in evicted_plhs {
+            let Some(info) = self.registered_blocks.remove(&plh) else {
+                continue;
+            };
+            evicted_seq_hashes.push(info.seq_hash);
+            #[cfg(feature = "kvbm-offload")]
+            offload_blocks.push((info.block_id, plh));
+        }
+
+        #[cfg(feature = "kvbm-offload")]
+        {
+            if !source_slots.is_empty() && source_slots.len() != offload_blocks.len() {
+                tracing::warn!(
+                    source_slots = source_slots.len(),
+                    offload_blocks = offload_blocks.len(),
+                    "kvbm-offload: source-slot hold count does not match offload block count"
+                );
+            }
+            self.enqueue_evictions_to_g2(&offload_blocks, source_slots);
+        }
+        #[cfg(not(feature = "kvbm-offload"))]
+        drop(source_slots);
+
+        if !evicted_seq_hashes.is_empty() {
+            self.publish_kv_event(evicted_seq_hashes, &[], None, false, None);
+        }
     }
 
     fn process_deref(&mut self, blocks: &[UniqueBlock]) {
@@ -480,8 +996,10 @@ impl KvManager {
                 .stage(plh, self.block_size)
                 .expect("stage failed during promote");
             let immutable = self.block_manager.register_block(complete);
+            let block_id = immutable.block_id();
             self.active_full.insert(seq_hash, vec![immutable]);
-            self.registered_plhs.insert(plh, seq_hash);
+            self.registered_blocks
+                .insert(plh, RegisteredBlockInfo { seq_hash, block_id });
             true
         };
 
@@ -501,8 +1019,9 @@ impl KvManager {
     pub fn num_active_blocks(&self) -> usize {
         // kvbm-logical partitions physical blocks into three pools:
         //   total = reset + inactive + active
-        // where `available = reset + inactive`. So `total - available` is
-        // exactly the number of registered (ImmutableBlock) full blocks.
+        // where `available = reset + inactive`. So `total - available`
+        // includes request-owned Mutable/Immutable blocks plus any reset
+        // source slots quarantined behind in-flight G1→G2 offloads.
         self.block_manager.total_blocks() - self.block_manager.available_blocks()
     }
 
@@ -557,7 +1076,7 @@ impl KvManager {
                         let Some(plh) = plhs.get(i) else {
                             break;
                         };
-                        if self.registered_plhs.contains_key(plh) {
+                        if self.registered_blocks.contains_key(plh) {
                             overlap += 1;
                         } else {
                             break;
@@ -1176,6 +1695,51 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn test_swap_in_registration_anchors_suffix_to_reused_prefix_parent() {
+        let (mut mgr, sink) = make_mgr_capturing(8, 16);
+        let slots = match mgr.reserve_swap_in_destination_slots(2) {
+            SwapInSlotReservation::Reserved(slots) => slots,
+            SwapInSlotReservation::BlockedOnG1Offload => {
+                panic!("fresh manager should not need G1 offload")
+            }
+            SwapInSlotReservation::NoCapacity => panic!("fresh manager should have capacity"),
+        };
+
+        let entries = vec![(12, plh(12), 120), (13, plh(13), 130)];
+        let outcome = mgr.register_swapped_in_blocks(&entries, Some(11), slots);
+        assert_eq!(
+            outcome.consumed_entries,
+            entries.len(),
+            "all reserved swap-in slots should be consumed"
+        );
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "swap-in suffix should publish one Stored");
+        let KvCacheEventData::Stored(ref data) = events[0].data else {
+            panic!("expected Stored");
+        };
+        assert_eq!(
+            data.parent_hash,
+            Some(ExternalSequenceBlockHash(11)),
+            "swapped-in suffix must anchor to the last reused prefix block"
+        );
+        let blocks: Vec<u64> = data.blocks.iter().map(|block| block.block_hash.0).collect();
+        assert_eq!(blocks, vec![12, 13]);
+        let local_hashes: Vec<u64> = data
+            .blocks
+            .iter()
+            .map(|block| block.tokens_hash.0)
+            .collect();
+        assert_eq!(local_hashes, vec![120, 130]);
+        assert_eq!(
+            mgr.num_inactive_blocks(),
+            2,
+            "registered swap-in blocks should land in inactive G1"
+        );
+    }
+
     /// Two requests sharing a prefix must not inflate scheduler-visible
     /// occupancy. The distinct count reflects physically-resident blocks; the
     /// refcount metric reflects held handles.
@@ -1326,5 +1890,85 @@ mod tests {
             removed[0]
         );
         assert_eq!(stored_count, 1, "one Stored event for the fresh block 12");
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    mod offload {
+        use super::*;
+        use crate::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
+
+        #[test]
+        fn fresh_manager_has_no_offload_engine() {
+            let mgr = make_mgr(8, 4);
+            assert!(!mgr.has_offload_engine());
+        }
+
+        #[tokio::test]
+        async fn attach_new_offload_engine_wires_in_after_construction() {
+            let mut mgr = make_mgr(16, 4);
+            assert!(!mgr.has_offload_engine());
+
+            let engine = MockOffloadEngine::new(KvbmOffloadConfig::default())
+                .await
+                .expect("engine build");
+            mgr.attach_new_offload_engine(engine);
+            assert!(mgr.has_offload_engine());
+        }
+
+        #[test]
+        fn g1_eviction_offload_holds_source_slot_until_complete() {
+            let mut mgr = make_mgr(1, 4);
+            let config = KvbmOffloadConfig {
+                block_size_tokens: 4,
+                block_size_bytes: Some(1_000_000),
+                bandwidth_g1_to_g2_gbps: 1.0,
+                ..Default::default()
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut engine = rt
+                .block_on(MockOffloadEngine::new(config))
+                .expect("engine build");
+            engine.attach_runtime(rt);
+            mgr.attach_new_offload_engine(engine);
+
+            assert_eq!(use_full(&mut mgr, 1, plh(1)), 1);
+            deref_full(&mut mgr, 1);
+            assert_eq!(mgr.num_active_blocks(), 0);
+            assert_eq!(mgr.num_inactive_blocks(), 1);
+
+            // Capacity pressure evicts block 1 and starts G1→G2. The returned
+            // reset slot is held as the source-capacity token, so block 2
+            // cannot be allocated until the simulated transfer completes.
+            assert_eq!(use_full(&mut mgr, 2, plh(2)), 0);
+            assert_eq!(
+                mgr.num_active_blocks(),
+                1,
+                "quarantined source slot must count against G1 capacity"
+            );
+            let deadline = mgr
+                .earliest_offload_deadline()
+                .expect("G1→G2 offload should expose a stall-advance deadline");
+
+            mgr.tick_offload_engine(deadline);
+            assert_eq!(
+                mgr.num_active_blocks(),
+                0,
+                "source slot should release after transfer completion"
+            );
+            assert_eq!(use_full(&mut mgr, 2, plh(2)), 1);
+            assert_eq!(mgr.num_active_blocks(), 1);
+        }
+
+        #[test]
+        fn try_batch_swap_in_returns_no_hits_without_engine() {
+            let mut mgr = make_mgr(8, 4);
+            let plhs = [plh(1), plh(2), plh(3)];
+            let outcome = mgr.try_batch_swap_in(&plhs, None);
+            assert!(matches!(outcome, BatchSwapInOutcome::NoHits));
+        }
     }
 }

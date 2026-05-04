@@ -14,12 +14,10 @@
 # limitations under the License.
 
 # Grants the operator delegated-auth permissions (TokenReview + SubjectAccessReview)
-# required by controller-runtime's WithAuthenticationAndAuthorization metrics filter.
-# These are cluster-scoped resources and cannot be granted via a namespace-scoped Role,
-# so this ClusterRole is needed in namespace-restricted mode where the manager-rbac.yaml
-# only renders a namespace-scoped Role. In cluster-wide mode the manager ClusterRole
-# already covers these permissions.
-{{- if .Values.namespaceRestriction.enabled }}
+# required by controller-runtime's WithAuthenticationAndAuthorization metrics filter
+# (cmd/main.go FilterProvider). These are cluster-scoped resources that cannot be
+# granted via a namespace-scoped Role, so they are always provided as a dedicated
+# ClusterRole regardless of namespace-restriction mode.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -61,4 +59,3 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
-{{- end }}

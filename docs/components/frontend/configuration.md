@@ -34,8 +34,6 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for worker sampling. 0 = deterministic |
 | `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
 | `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |
-| `--router-max-tree-size` | `DYN_ROUTER_MAX_TREE_SIZE` | `1048576` | Max radix tree size before pruning (no-events mode) |
-| `--router-prune-target-ratio` | `DYN_ROUTER_PRUNE_TARGET_RATIO` | `0.8` | Target size ratio after pruning (no-events mode) |
 | `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync state across multiple router instances |
 | `--router-snapshot-threshold` | `DYN_ROUTER_SNAPSHOT_THRESHOLD` | `1000000` | Messages before triggering a snapshot |
 | `--router-reset-states` / `--no-router-reset-states` | `DYN_ROUTER_RESET_STATES` | `false` | Reset router state on startup. **Warning:** affects existing replicas |
