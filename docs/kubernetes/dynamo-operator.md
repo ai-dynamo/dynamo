@@ -24,6 +24,14 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
   3. Kubernetes resources (Deployments, Services, etc.) are created or updated to match the CR spec.
   4. Status fields are updated to reflect the current state.
 
+## Advanced Pod Composition
+
+The operator can layer additional containers and resource-sharing primitives on top of the baseline worker pod. These features are opt-in and can be composed:
+
+- **[GPU Memory Service](gpu-memory-service.md)** — injects a `gms-server` sidecar and switches the pod from the NVIDIA device plugin to DRA so multiple containers can share the same physical GPUs.
+- **[Engine Failover](failover.md)** — builds on GMS to clone the main worker container into an active/standby pair (`engine-0` / `engine-1`), coordinated by a shared `flock`.
+- **[Container-mode service discovery](service-discovery.md#discovery-granularity-pod-vs-container)** — emits one `DynamoWorkerMetadata` CR per ready container instead of one per pod, required when a pod exposes more than one identity-bearing container (e.g. under failover).
+
 ## Deployment Modes
 
 The Dynamo operator supports three deployment modes to accommodate different cluster environments and use cases:

@@ -76,6 +76,10 @@ navigation:
             path: kubernetes/dynamo-operator.md
           - page: Service Discovery
             path: kubernetes/service-discovery.md
+          - page: GPU Memory Service
+            path: kubernetes/gpu-memory-service.md
+          - page: Engine Failover
+            path: kubernetes/failover.md
           - page: Webhooks
             path: kubernetes/webhooks.md
           - page: Minikube Setup

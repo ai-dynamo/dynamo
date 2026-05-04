@@ -15,6 +15,7 @@ Fault tolerance in Dynamo operates at multiple levels:
 |-------|-----------|---------|
 | **Request** | Migration, Cancellation | Handle in-flight request failures |
 | **Worker** | Health Checks, Graceful Shutdown | Detect and recover from worker failures |
+| **Engine** | Active-passive Engine Failover (K8s) | Hot standby engine inside the same pod |
 | **System** | Load Shedding, Request Rejection | Prevent system overload |
 | **Infrastructure** | etcd HA, NATS resilience | Handle infrastructure component failures |
 
@@ -59,6 +60,16 @@ When workers are overloaded, Dynamo rejects new requests to prevent cascading fa
 - HTTP 503 responses with retry guidance
 
 See [Request Rejection](request-rejection.md) for details.
+
+### Engine Failover (Kubernetes)
+
+On Kubernetes, a worker pod can be deployed with an active-passive engine pair that shares the same GPUs via DRA and the GPU Memory Service sidecar. When the active engine fails, the standby acquires a shared `flock` and takes over without reloading weights from disk.
+
+- Dual engine containers (`engine-0`, `engine-1`) in the same pod
+- Shared GPUs via DRA; shared UDS sockets and coordination lock on an emptyDir volume
+- Per-engine service discovery via container-mode CRs so only the active engine receives traffic
+
+See [Engine Failover](../kubernetes/failover.md) for details.
 
 ### Health Checks
 
@@ -112,6 +123,15 @@ See [Health Checks](../observability/health-checks.md) for details.
 2. Worker initiates graceful shutdown
 3. Runtime is shut down, engine cleaned up
 4. Process exits with code 1 for pod restart
+
+### Engine Crash (Kubernetes, failover enabled)
+
+1. Active engine (`engine-0`) dies; the kernel releases its `flock` on `/shared/failover.lock`
+2. Standby engine (`engine-1`) acquires the lock and transitions from `notready` to `ready`
+3. The service's EndpointSlice swings to the new active engine and the frontend resumes routing
+4. Kubernetes restarts the failed container; it rejoins as the shadow
+
+See [Engine Failover](../kubernetes/failover.md) for the full flow.
 
 ## Testing Fault Tolerance
 
