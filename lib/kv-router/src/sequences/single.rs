@@ -151,6 +151,7 @@ impl ActiveSequences {
         self.blocks.active_blocks()
     }
 
+    #[cfg(test)]
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
         self.prefill.snapshot().active_tokens_at(decay_now)
     }
@@ -291,15 +292,6 @@ impl ActiveSequences {
         membership_delta
     }
 
-    pub fn potential_blocks_and_tokens(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        prefill_token_delta: usize,
-        decay_now: Instant,
-    ) -> (usize, usize) {
-        self.potential_blocks_and_tokens_at(token_sequence, prefill_token_delta, decay_now)
-    }
-
     /// Add an output block with a random hash and optional fractional decay weight.
     ///
     /// This is used during generation to track output blocks as they are created.
@@ -329,31 +321,6 @@ impl ActiveSequences {
 
         self.validate_state();
         acquire.became_present_on_worker.then_some(random_hash)
-    }
-
-    pub fn potential_blocks_and_tokens_at(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        prefill_token_delta: usize,
-        decay_now: Instant,
-    ) -> (usize, usize) {
-        let potential_blocks = if let Some(token_seq) = token_sequence {
-            self.new_blocks(token_seq) + self.active_blocks()
-        } else {
-            self.active_blocks()
-        };
-        let active_tokens = self.active_tokens(decay_now);
-        let potential_tokens = active_tokens + prefill_token_delta;
-
-        (potential_blocks, potential_tokens)
-    }
-
-    /// Match a request against existing blocks and return the number of new blocks that would be added
-    pub(super) fn new_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        token_sequence
-            .iter()
-            .filter(|block| !self.blocks.unique_blocks.contains_key(block))
-            .count()
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -708,25 +675,6 @@ mod tests {
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
         seq_manager.free(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.active_blocks(), 0);
-    }
-
-    #[test]
-    fn test_potential_blocks_and_tokens_without_prefill_tracking_ignores_prompt_load() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let decay_now = Instant::now();
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1, 2, 3]),
-            None,
-            false,
-            None,
-            decay_now,
-        );
-
-        let (blocks, tokens) =
-            seq_manager.potential_blocks_and_tokens_at(Some(&[1, 2, 3, 4]), 0, decay_now);
-        assert_eq!(blocks, 4);
-        assert_eq!(tokens, 0);
     }
 
     #[test]
