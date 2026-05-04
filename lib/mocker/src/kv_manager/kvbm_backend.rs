@@ -496,6 +496,26 @@ impl KvManager {
         }
     }
 
+    /// Hold the G1 prefix that admission used when deciding to swap in only a
+    /// G2 suffix. The returned guards keep those blocks out of the inactive
+    /// eviction pool until the pending swap-in publishes its Device events.
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn try_pin_g1_prefix(
+        &mut self,
+        prefix_plhs: &[PositionalLineageHash],
+    ) -> Option<Vec<ImmutableBlock<G1>>> {
+        if prefix_plhs.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let pins = self.block_manager.match_blocks(prefix_plhs);
+        if pins.len() == prefix_plhs.len() {
+            Some(pins)
+        } else {
+            None
+        }
+    }
+
     /// Emit a `Stored` or `Removed` KV event to the router.
     /// Ported verbatim from the old `vllm_backend::publish_kv_event` to
     /// preserve KV-aware routing semantics (parent_hash chaining, token_ids).

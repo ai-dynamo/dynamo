@@ -7,7 +7,7 @@ use std::time::Duration;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
 #[cfg(feature = "kvbm-offload")]
-use kvbm_logical::MutableBlock;
+use kvbm_logical::{ImmutableBlock, MutableBlock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -219,12 +219,14 @@ impl SchedulerState {
 /// cached in G1 at park time; the swap-in covers the next
 /// `handle.block_count()` blocks starting at that offset. We need this
 /// to register the right slice of the request's PLHs into G1 inactive
-/// after the transfer completes.
+/// after the transfer completes. `_prefix_pins` keeps that cached prefix
+/// resident until the suffix can publish Device-tier Stored events against it.
 #[cfg(feature = "kvbm-offload")]
 pub(crate) struct AwaitingSwapIn {
     pub(crate) uuid: Uuid,
     pub(crate) handle: crate::kvbm_offload::SwapInHandle,
     pub(crate) destination_slots: Vec<MutableBlock<G1>>,
+    pub(crate) _prefix_pins: Vec<ImmutableBlock<G1>>,
     pub(crate) skip_blocks: usize,
 }
 
@@ -489,6 +491,10 @@ impl VllmCore {
         if remaining_plhs.is_empty() {
             return SwapInAdmissionAttempt::NoHit;
         }
+        let prefix_pins = match self.kv_manager.try_pin_g1_prefix(&plhs[..skip_blocks]) {
+            Some(pins) => pins,
+            None => return SwapInAdmissionAttempt::NoHit,
+        };
         let (handle, destination_slots) = match self
             .kv_manager
             .try_batch_swap_in(remaining_plhs, Some(now_ms))
@@ -507,6 +513,7 @@ impl VllmCore {
             uuid,
             handle,
             destination_slots,
+            _prefix_pins: prefix_pins,
             skip_blocks,
         });
         SwapInAdmissionAttempt::Parked

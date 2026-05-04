@@ -11,6 +11,10 @@ homepage.workspace = true
 repository.workspace = true
 description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 
+[features]
+default = []
+mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
+
 [[bench]]
 name = "multiturn_bench"
 path = "multiturn_bench.rs"

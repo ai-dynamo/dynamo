@@ -29,14 +29,15 @@ use futures::task::noop_waker_ref;
 
 use kvbm_engine::leader::{FindMatchesOptions, InstanceLeader, Leader, StagingMode};
 use kvbm_engine::offload::{
-    ExternalBlock, OffloadEngine, PipelineBuilder, PresenceFilter, SourceBlocks, TransferHandle,
-    TransferStatus,
+    ExternalBlock, OffloadEngine, PendingTracker, PipelineBuilder, PresenceFilter, SourceBlocks,
+    TransferHandle, TransferStatus,
 };
 use kvbm_engine::worker::Worker;
 use kvbm_engine::{BlockId, G1 as EngineG1, G2, SequenceHash};
 use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
 use kvbm_logical::events::{EventsManager, KvCacheEvent as LogicalKvCacheEvent};
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
+use kvbm_logical::pools::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
 use rustc_hash::FxHashMap;
 
@@ -209,10 +210,12 @@ impl MockOffloadEngine {
                 .build()?,
         );
 
+        let g1_to_g2_pending = Arc::new(PendingTracker::new());
+        let g1_to_g2_presence = PresenceFilter::<EngineG1, G2>::new(registry.clone())
+            .with_pending_tracker(g1_to_g2_pending.clone());
         let g1_to_g2_pipeline = PipelineBuilder::<EngineG1, G2>::new()
-            .policy(Arc::new(PresenceFilter::<EngineG1, G2>::new(
-                registry.clone(),
-            )))
+            .policy(Arc::new(g1_to_g2_presence))
+            .pending_tracker(g1_to_g2_pending)
             .batch_size(config.offload_batch_size)
             .max_concurrent_transfers(config.offload_batch_size)
             .build();
@@ -730,6 +733,7 @@ fn build_g2_block_manager(
         .block_count(block_count)
         .block_size(block_size_tokens)
         .registry(registry.clone())
+        .duplication_policy(BlockDuplicationPolicy::Reject)
         .with_lineage_backend()
         .build()
         .expect("BlockManager<G2> should build with valid config")
