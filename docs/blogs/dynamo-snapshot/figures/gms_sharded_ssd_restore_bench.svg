@@ -1,0 +1,267 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="2066" viewBox="0 0 1900 2066" style="background:#f8fafc;color-scheme:light">
+<style><![CDATA[
+      text { font-family: Arial, Helvetica, sans-serif; fill: #0f172a; }
+      .title { font-size: 50px; font-weight: 800; }
+      .subtitle { font-size: 26px; font-weight: 500; fill: #1e293b; }
+      .model-label { font-size: 24px; font-weight: 800; }
+      .lane-label { font-size: 20px; font-weight: 700; fill: #475569; }
+      .axis-label { font-size: 21px; font-weight: 700; fill: #334155; }
+      .legend-label { font-size: 22px; font-weight: 700; fill: #111827; }
+      .bar-label { font-size: 19px; font-weight: 800; fill: #0f172a; }
+    ]]></style>
+<rect width="100%" height="100%" fill="#f8fafc"/>
+<rect x="228" y="280" width="1666" height="1680" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<text class="title" x="240" y="64">Dynamo vLLM Snapshot Restore with GMS</text>
+<text class="subtitle" x="240" y="110">Single-GPU B200 (Local SSD), TP=1</text>
+<line x1="240.0" y1="302" x2="240.0" y2="1972" stroke="#e5e7eb"/>
+<line x1="240.0" y1="296" x2="240.0" y2="302" stroke="#64748b"/>
+<text class="axis-label" x="240.0" y="292" text-anchor="middle">0s</text>
+<text class="axis-label" x="240.0" y="1998" text-anchor="middle">0s</text>
+<line x1="1608.3" y1="302" x2="1608.3" y2="1972" stroke="#e5e7eb"/>
+<line x1="1608.3" y1="296" x2="1608.3" y2="302" stroke="#64748b"/>
+<text class="axis-label" x="1608.3" y="292" text-anchor="middle">5s</text>
+<text class="axis-label" x="1608.3" y="1998" text-anchor="middle">5s</text>
+<line x1="240" y1="302" x2="1882" y2="302" stroke="#64748b" stroke-width="1"/>
+<line x1="240.0" y1="280" x2="240.0" y2="1972" stroke="#0f172a" stroke-width="1.2"/>
+<text class="model-label" x="230" y="318.0" text-anchor="end">Qwen3 0.6B</text>
+<text class="lane-label" x="230" y="361" text-anchor="end">GMS loader</text>
+<line x1="240" y1="384" x2="1882" y2="384" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="425" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="448" x2="1882" y2="448" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="489" text-anchor="end">worker main</text>
+<line x1="240" y1="512" x2="1882" y2="512" stroke="#f1f5f9"/>
+<rect x="240.0" y="394" width="36.7" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B agent setup: 0.134s (0.000s -&gt; 0.134s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="279.7" y="394" width="571.1" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B CRIU restore: 2.087s (0.145s -&gt; 2.232s); raw=criu_restore</title>
+</rect>
+<rect x="542.3" y="403.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="565.3" y="426.0" text-anchor="middle">2.1s</text>
+<rect x="850.6" y="394" width="165.3" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B CUDA restore: 0.604s (2.231s -&gt; 2.835s); raw=cuda_restore</title>
+</rect>
+<rect x="245.7" y="330" width="93.6" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B GMS load setup: 0.342s (0.021s -&gt; 0.363s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="339.3" y="330" width="67.3" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B GMS load weights: 0.246s (0.363s -&gt; 0.609s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="406.7" y="330" width="6.0" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B GMS commit: 0.022s (0.609s -&gt; 0.631s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1032.0" y="458" width="10.7" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B wake / remap: 0.039s (2.894s -&gt; 2.933s); raw=main_gms_remap</title>
+</rect>
+<text class="model-label" x="230" y="552.0" text-anchor="end">Qwen3 8B</text>
+<text class="lane-label" x="230" y="595" text-anchor="end">GMS loader</text>
+<line x1="240" y1="618" x2="1882" y2="618" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="659" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="682" x2="1882" y2="682" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="723" text-anchor="end">worker main</text>
+<line x1="240" y1="746" x2="1882" y2="746" stroke="#f1f5f9"/>
+<rect x="240.0" y="628" width="37.5" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B agent setup: 0.137s (0.000s -&gt; 0.137s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="280.5" y="628" width="602.1" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B CRIU restore: 2.200s (0.148s -&gt; 2.348s); raw=criu_restore</title>
+</rect>
+<rect x="558.5" y="637.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="581.5" y="660.0" text-anchor="middle">2.2s</text>
+<rect x="882.8" y="628" width="155.7" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B CUDA restore: 0.569s (2.349s -&gt; 2.918s); raw=cuda_restore</title>
+</rect>
+<rect x="247.4" y="564" width="107.3" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B GMS load setup: 0.392s (0.027s -&gt; 0.419s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="354.7" y="564" width="179.5" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B GMS load weights: 0.656s (0.419s -&gt; 1.075s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="534.2" y="564" width="8.5" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B GMS commit: 0.031s (1.075s -&gt; 1.106s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1056.1" y="692" width="24.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B wake / remap: 0.088s (2.982s -&gt; 3.070s); raw=main_gms_remap</title>
+</rect>
+<text class="model-label" x="230" y="786.0" text-anchor="end">Qwen3 14B</text>
+<text class="lane-label" x="230" y="829" text-anchor="end">GMS loader</text>
+<line x1="240" y1="852" x2="1882" y2="852" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="893" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="916" x2="1882" y2="916" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="957" text-anchor="end">worker main</text>
+<line x1="240" y1="980" x2="1882" y2="980" stroke="#f1f5f9"/>
+<rect x="240.0" y="862" width="37.5" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B agent setup: 0.137s (0.000s -&gt; 0.137s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="280.8" y="862" width="627.2" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B CRIU restore: 2.292s (0.149s -&gt; 2.441s); raw=criu_restore</title>
+</rect>
+<rect x="571.4" y="871.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="594.4" y="894.0" text-anchor="middle">2.3s</text>
+<rect x="908.0" y="862" width="158.2" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B CUDA restore: 0.578s (2.441s -&gt; 3.019s); raw=cuda_restore</title>
+</rect>
+<rect x="248.5" y="798" width="107.6" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B GMS load setup: 0.393s (0.031s -&gt; 0.424s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="356.0" y="798" width="275.6" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B GMS load weights: 1.007s (0.424s -&gt; 1.431s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="470.8" y="807.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="493.8" y="830.0" text-anchor="middle">1.0s</text>
+<rect x="631.6" y="798" width="9.0" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B GMS commit: 0.033s (1.431s -&gt; 1.464s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1084.3" y="926" width="10.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B wake / remap: 0.037s (3.085s -&gt; 3.122s); raw=main_gms_remap</title>
+</rect>
+<text class="model-label" x="230" y="1020.0" text-anchor="end">Qwen3 32B</text>
+<text class="lane-label" x="230" y="1063" text-anchor="end">GMS loader</text>
+<line x1="240" y1="1086" x2="1882" y2="1086" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1127" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1150" x2="1882" y2="1150" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1191" text-anchor="end">worker main</text>
+<line x1="240" y1="1214" x2="1882" y2="1214" stroke="#f1f5f9"/>
+<rect x="240.0" y="1096" width="37.8" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B agent setup: 0.138s (0.000s -&gt; 0.138s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="281.1" y="1096" width="670.5" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B CRIU restore: 2.450s (0.150s -&gt; 2.600s); raw=criu_restore</title>
+</rect>
+<rect x="593.3" y="1105.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="616.3" y="1128.0" text-anchor="middle">2.5s</text>
+<rect x="951.5" y="1096" width="195.9" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B CUDA restore: 0.716s (2.600s -&gt; 3.316s); raw=cuda_restore</title>
+</rect>
+<rect x="240.8" y="1032" width="122.1" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B GMS load setup: 0.446s (0.003s -&gt; 0.449s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="362.9" y="1032" width="469.1" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B GMS load weights: 1.714s (0.449s -&gt; 2.163s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="574.4" y="1041.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="597.4" y="1064.0" text-anchor="middle">1.7s</text>
+<rect x="831.9" y="1032" width="13.1" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B GMS commit: 0.048s (2.163s -&gt; 2.211s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1176.8" y="1160" width="15.6" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B wake / remap: 0.057s (3.423s -&gt; 3.480s); raw=main_gms_remap</title>
+</rect>
+<text class="model-label" x="230" y="1254.0" text-anchor="end">Llama 3.3 70B FP8</text>
+<text class="lane-label" x="230" y="1297" text-anchor="end">GMS loader</text>
+<line x1="240" y1="1320" x2="1882" y2="1320" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1361" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1384" x2="1882" y2="1384" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1425" text-anchor="end">worker main</text>
+<line x1="240" y1="1448" x2="1882" y2="1448" stroke="#f1f5f9"/>
+<rect x="240.0" y="1330" width="38.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 agent setup: 0.139s (0.000s -&gt; 0.139s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="281.3" y="1330" width="748.8" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 CRIU restore: 2.736s (0.151s -&gt; 2.887s); raw=criu_restore</title>
+</rect>
+<rect x="632.7" y="1339.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="655.7" y="1362.0" text-anchor="middle">2.7s</text>
+<rect x="1029.8" y="1330" width="199.0" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 CUDA restore: 0.727s (2.886s -&gt; 3.613s); raw=cuda_restore</title>
+</rect>
+<rect x="241.9" y="1266" width="131.1" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 GMS load setup: 0.479s (0.007s -&gt; 0.486s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="373.0" y="1266" width="530.6" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 GMS load weights: 1.939s (0.486s -&gt; 2.425s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="615.3" y="1275.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="638.3" y="1298.0" text-anchor="middle">1.9s</text>
+<rect x="903.6" y="1266" width="18.6" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 GMS commit: 0.068s (2.425s -&gt; 2.493s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1263.5" y="1394" width="18.6" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 wake / remap: 0.068s (3.740s -&gt; 3.808s); raw=main_gms_remap</title>
+</rect>
+<text class="model-label" x="230" y="1488.0" text-anchor="end">GPT-OSS 120B</text>
+<text class="lane-label" x="230" y="1531" text-anchor="end">GMS loader</text>
+<line x1="240" y1="1554" x2="1882" y2="1554" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1595" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1618" x2="1882" y2="1618" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1659" text-anchor="end">worker main</text>
+<line x1="240" y1="1682" x2="1882" y2="1682" stroke="#f1f5f9"/>
+<rect x="240.0" y="1564" width="37.5" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B agent setup: 0.137s (0.000s -&gt; 0.137s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="281.1" y="1564" width="835.2" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B CRIU restore: 3.052s (0.150s -&gt; 3.202s); raw=criu_restore</title>
+</rect>
+<rect x="675.7" y="1573.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="698.7" y="1596.0" text-anchor="middle">3.1s</text>
+<rect x="1116.3" y="1564" width="194.0" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B CUDA restore: 0.709s (3.202s -&gt; 3.911s); raw=cuda_restore</title>
+</rect>
+<rect x="243.0" y="1500" width="133.0" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B GMS load setup: 0.486s (0.011s -&gt; 0.497s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="376.0" y="1500" width="609.7" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B GMS load weights: 2.228s (0.497s -&gt; 2.725s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="657.9" y="1509.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="680.9" y="1532.0" text-anchor="middle">2.2s</text>
+<rect x="985.7" y="1500" width="14.0" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B GMS commit: 0.051s (2.725s -&gt; 2.776s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1345.9" y="1628" width="7.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B wake / remap: 0.026s (4.041s -&gt; 4.067s); raw=main_gms_remap</title>
+</rect>
+<text class="model-label" x="230" y="1722.0" text-anchor="end">Qwen2.5 72B</text>
+<text class="lane-label" x="230" y="1765" text-anchor="end">GMS loader</text>
+<line x1="240" y1="1788" x2="1882" y2="1788" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1829" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1852" x2="1882" y2="1852" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1893" text-anchor="end">worker main</text>
+<line x1="240" y1="1916" x2="1882" y2="1916" stroke="#f1f5f9"/>
+<rect x="240.0" y="1798" width="37.2" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B agent setup: 0.136s (0.000s -&gt; 0.136s); raw=restore_agent_to_nsrestore</title>
+</rect>
+<rect x="280.2" y="1798" width="740.0" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B CRIU restore: 2.704s (0.147s -&gt; 2.851s); raw=criu_restore</title>
+</rect>
+<rect x="627.2" y="1807.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="650.2" y="1830.0" text-anchor="middle">2.7s</text>
+<rect x="1020.2" y="1798" width="246.8" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B CUDA restore: 0.902s (2.851s -&gt; 3.753s); raw=cuda_restore</title>
+</rect>
+<rect x="1267.6" y="1798" width="446.1" height="50" rx="3" fill="#e41a1c" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B wait for GMS: 1.630s (3.755s -&gt; 5.385s); raw=agent_wait_after_nsrestore_for_gms</title>
+</rect>
+<rect x="1467.7" y="1807.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="1490.7" y="1830.0" text-anchor="middle">1.6s</text>
+<rect x="246.0" y="1734" width="133.3" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B GMS load setup: 0.487s (0.022s -&gt; 0.509s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+</rect>
+<rect x="379.3" y="1734" width="1317.4" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B GMS load weights: 4.814s (0.509s -&gt; 5.323s); raw=gms_load_phase_b_stream_to_gpu</title>
+</rect>
+<rect x="1015.0" y="1743.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="1038.0" y="1766.0" text-anchor="middle">4.8s</text>
+<rect x="1696.7" y="1734" width="17.0" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B GMS commit: 0.062s (5.323s -&gt; 5.385s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+</rect>
+<rect x="1760.5" y="1862" width="14.8" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B wake / remap: 0.054s (5.556s -&gt; 5.610s); raw=main_gms_remap</title>
+</rect>
+<rect x="240" y="136" width="21" height="21" rx="2" fill="#111827" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="271" y="154">agent setup</text>
+<rect x="532" y="136" width="21" height="21" rx="2" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="563" y="154">CRIU restore</text>
+<rect x="824" y="136" width="21" height="21" rx="2" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="855" y="154">CUDA restore</text>
+<rect x="1116" y="136" width="21" height="21" rx="2" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="1147" y="154">GMS load setup</text>
+<rect x="1408" y="136" width="21" height="21" rx="2" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="1439" y="154">GMS load weights</text>
+<rect x="240" y="174" width="21" height="21" rx="2" fill="#a65628" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="271" y="192">GMS commit</text>
+<rect x="532" y="174" width="21" height="21" rx="2" fill="#e41a1c" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="563" y="192">wait for GMS</text>
+<rect x="824" y="174" width="21" height="21" rx="2" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="855" y="192">wake / remap</text>
+</svg>
