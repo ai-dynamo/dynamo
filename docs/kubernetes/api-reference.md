@@ -382,7 +382,6 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -426,7 +425,6 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
