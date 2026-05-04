@@ -54,50 +54,6 @@ use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, T
 use crate::protocols::*;
 
 // ---------------------------------------------------------------------------
-// Per-shard read thread pool (kept for potential future use)
-// ---------------------------------------------------------------------------
-
-/// A bounded pool of OS threads dedicated to `find_matches` requests for one
-/// shard.  Mirrors the equivalent struct in `prefix_sharded.rs`.
-///
-/// Not currently used by [`BranchShardedIndexer`] — reads run inline on the
-/// caller's thread.  Retained here as a building block if dedicated read
-/// isolation is needed in the future.
-#[allow(dead_code)]
-struct ShardReadPool {
-    sender: flume::Sender<(
-        Vec<LocalBlockHash>,
-        tokio::sync::oneshot::Sender<OverlapScores>,
-    )>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
-}
-
-#[allow(dead_code)]
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx: flume::Receiver<(
-                Vec<LocalBlockHash>,
-                tokio::sync::oneshot::Sender<OverlapScores>,
-            )> = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send(result);
-                }
-            }));
-        }
-        Self {
-            sender: tx,
-            _threads: threads,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // FNV-1a constants
 // ---------------------------------------------------------------------------
 
@@ -202,7 +158,9 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     ///
     /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
     /// `Cleared` events; only `Removed` events prune them.
-    block_to_fnv_state: DashMap<u64, (u64, usize), FxBuildHasher>,
+    /// Third element is the shard index chosen when the chain root was first seen,
+    /// kept so continuations stay on the same shard (sticky routing).
+    block_to_fnv_state: DashMap<u64, (u64, usize, usize), FxBuildHasher>,
 
     kv_block_size: u32,
 
@@ -376,18 +334,21 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     ///    shorter than `prefix_depth` this is a partial key; a future
     ///    continuation in case A will extend it to the full depth.
     ///
-    /// Returns `(shard_idx, Option<(fnv, depth)>)`.  A `Some` state means
+    /// Returns `(shard_idx, Option<(fnv, depth, shard)>)`.  A `Some` state means
     /// the chain has not yet reached `prefix_depth` blocks; the caller should
     /// record it on the last block of the batch so the next continuation can
-    /// extend it.
+    /// extend it.  The shard in the state tuple is the sticky shard so that
+    /// continuations never cross shards mid-chain.
     fn compute_stored_routing(
         &self,
         store_data: &KvCacheStoreData,
-    ) -> (usize, Option<(u64, usize)>) {
+    ) -> (usize, Option<(u64, usize, usize)>) {
         if let Some(parent_hash) = &store_data.parent_hash {
             if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
                 // Case A: parent is shallow — extend FNV accumulator.
-                let (parent_fnv, parent_depth) = *entry;
+                // Inherit the parent's shard (sticky routing) so the full chain
+                // lands on one shard and the CRTC never has to cross.
+                let (parent_fnv, parent_depth, parent_shard) = *entry;
                 drop(entry);
                 let remaining = self.prefix_depth - parent_depth;
                 let to_process = remaining.min(store_data.blocks.len());
@@ -398,11 +359,11 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                 );
                 let fnv = prefix_keys.last().copied().unwrap_or(parent_fnv);
                 let new_depth = parent_depth + to_process;
-                let shard = self.assign_shard(fnv);
+                let shard = parent_shard;
                 if new_depth >= self.prefix_depth {
                     self.register_prefix_keys(shard, prefix_keys);
                 }
-                let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth));
+                let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth, shard));
                 (shard, state)
             } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
                 // Case B: deep chain — inherit shard.
@@ -424,7 +385,7 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             let depth = to_process;
             let shard = self.assign_shard(fnv);
             self.register_prefix_keys(shard, prefix_keys);
-            let state = (depth < self.prefix_depth).then_some((fnv, depth));
+            let state = (depth < self.prefix_depth).then_some((fnv, depth, shard));
             (shard, state)
         }
     }
@@ -857,6 +818,45 @@ mod tests {
         assert_eq!(
             best, 2,
             "prefix keys added during depth crossing should route short queries correctly"
+        );
+    }
+
+    #[tokio::test]
+    async fn shallow_root_continuation_inherits_parent_shard() {
+        // prefix_depth=2, 2 shards.  Root has 1 block (< prefix_depth), so its
+        // FNV state is carried forward in block_to_fnv_state.  After storing the
+        // root, shard_block_counts = [1, 0].  Without sticky routing the
+        // continuation would call assign_shard on the finalized FNV key and land
+        // on shard 1 (lower load), while the parent block lives on shard 0 —
+        // a shard crossing.  With sticky routing the continuation inherits shard 0
+        // from the stored state, the CRTC on shard 0 receives the full chain, and
+        // a full-prefix query returns score 2 instead of ≤1.
+        let indexer = make_indexer(2, 2);
+
+        // Root: 1 block — shallow, stores FNV state on block_hash=301.
+        indexer
+            .apply_event(stored_event(1, None, vec![block(301, 31)]))
+            .await;
+
+        // Continuation: finalises the prefix and adds more blocks.
+        indexer
+            .apply_event(stored_event(
+                1,
+                Some(301),
+                vec![block(302, 32), block(303, 33)],
+            ))
+            .await;
+
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(31), LocalBlockHash(32)])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 2,
+            "continuation must land on the same shard as its root so the CRTC has the full chain"
         );
     }
 }
