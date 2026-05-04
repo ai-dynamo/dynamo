@@ -44,12 +44,12 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc11",
+    "tensorrt-llm==1.3.0rc13",
 ]
 
 vllm = [
     "uvloop",
-    "nixl[cu12]<=0.10.1",
+    "nixl[cu12]<=1.0.1",
     "vllm[flashinfer,runai,otel]==0.20.0",
     # vllm-omni is installed separately in container builds (see
     # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:

@@ -25,7 +25,7 @@ testing-all = ["testing-cuda", "testing-nixl"]
 [dependencies]
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "=0.10.1" }
+nixl-sys = { version = "=1.0.1" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }
