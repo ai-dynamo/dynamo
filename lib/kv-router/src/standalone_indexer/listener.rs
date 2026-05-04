@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use rmp_serde as rmps;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 use crate::recovery::{CursorObservation, CursorState};
-use crate::zmq_wire::{KvEventBatch, convert_event};
+use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 
 use super::indexer::Indexer;
 use super::registry::ListenerRecord;
@@ -32,13 +31,12 @@ fn cursor_from_watermark(watermark: u64) -> CursorState {
 struct ListenerLoop {
     worker_id: WorkerId,
     dp_rank: u32,
-    block_size: u32,
     indexer: Indexer,
     cancel: CancellationToken,
     live_socket: SharedSocket,
     replay_socket: Option<SharedSocket>,
     watermark: Arc<AtomicU64>,
-    warning_count: Arc<AtomicU32>,
+    normalizer: ZmqEventNormalizer,
     messages_processed: u64,
 }
 
@@ -57,13 +55,12 @@ impl ListenerLoop {
         Self {
             worker_id,
             dp_rank,
-            block_size,
             indexer,
             cancel,
             live_socket,
             replay_socket,
             watermark,
-            warning_count: Arc::new(AtomicU32::new(0)),
+            normalizer: ZmqEventNormalizer::new(block_size),
             messages_processed: 0,
         }
     }
@@ -93,9 +90,7 @@ impl ListenerLoop {
 
         let worker_id = self.worker_id;
         let dp_rank = self.dp_rank;
-        let block_size = self.block_size;
         let indexer = &self.indexer;
-        let warning_count = &self.warning_count;
         let watermark = &self.watermark;
 
         let req_frames = vec![Vec::new(), start_seq.to_be_bytes().to_vec()];
@@ -145,7 +140,7 @@ impl ListenerLoop {
             }
             let seq = u64::from_be_bytes(seq_bytes[..8].try_into().expect("length checked above"));
 
-            let Ok(batch) = rmps::from_slice::<KvEventBatch>(payload) else {
+            let Ok(batch) = decode_event_batch(payload) else {
                 tracing::warn!(worker_id, dp_rank, seq, "Failed to decode replayed batch");
                 continue;
             };
@@ -154,12 +149,10 @@ impl ListenerLoop {
                 .data_parallel_rank
                 .map_or(dp_rank, |rank| rank.cast_unsigned());
             for raw_event in batch.events {
-                let Some(placement_event) = convert_event(
+                let Some(placement_event) = self.normalizer.normalize(
                     raw_event,
                     seq,
-                    block_size,
                     WorkerWithDpRank::new(worker_id, effective_dp_rank),
-                    warning_count,
                 ) else {
                     continue;
                 };
@@ -209,7 +202,7 @@ impl ListenerLoop {
     }
 
     async fn apply_live_batch(&mut self, seq: u64, payload: &[u8]) {
-        let batch = match rmps::from_slice::<KvEventBatch>(payload) {
+        let batch = match decode_event_batch(payload) {
             Ok(batch) => batch,
             Err(error) => {
                 tracing::warn!(
@@ -225,12 +218,10 @@ impl ListenerLoop {
             .data_parallel_rank
             .map_or(self.dp_rank, |rank| rank.cast_unsigned());
         for raw_event in batch.events {
-            let Some(placement_event) = convert_event(
+            let Some(placement_event) = self.normalizer.normalize(
                 raw_event,
                 seq,
-                self.block_size,
                 WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
-                &self.warning_count,
             ) else {
                 continue;
             };
