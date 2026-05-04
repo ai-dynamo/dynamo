@@ -291,6 +291,7 @@ class TestParseOmniRequest:
                 }
             ],
             "modalities": ["text", "audio"],
+            "max_tokens": 64,
             "speaker": "Chelsie",
             "language": "English",
         }
@@ -318,6 +319,9 @@ class TestParseOmniRequest:
                 "speaker": ["Chelsie"],
                 "language": ["English"],
             },
+        }
+        assert result["sampling_params_list"] == {
+            "__stage_overrides__": {"0": {"max_tokens": 64}}
         }
 
     @pytest.mark.asyncio
@@ -350,6 +354,23 @@ class TestParseOmniRequest:
 
         assert result["engine_inputs"] == "<|im_start|>user\nfirst\nsecond<|im_end|>"
         assert result["original_prompt"]["prompt"] == result["engine_inputs"]
+
+    @pytest.mark.asyncio
+    async def test_chat_sampling_params_are_stage_scoped_to_comprehension(self):
+        request = {
+            "messages": [{"role": "user", "content": "say more than one word"}],
+            "max_tokens": 32,
+            "min_tokens": 8,
+            "temperature": 0.2,
+        }
+
+        result = await parse_omni_request(request, ["text"])
+
+        assert result["sampling_params_list"] == {
+            "__stage_overrides__": {
+                "0": {"max_tokens": 32, "min_tokens": 8, "temperature": 0.2}
+            }
+        }
 
     @pytest.mark.asyncio
     async def test_multimodal_chat_renderer_failure_is_returned_as_error(self):

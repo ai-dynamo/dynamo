@@ -13,6 +13,7 @@ from huggingface_hub import scan_cache_dir
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
+from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
@@ -20,6 +21,50 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
+_STAGE_OVERRIDES_KEY = "__stage_overrides__"
+_OPENAI_SAMPLING_FIELDS = {
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_tokens",
+    "min_tokens",
+    "seed",
+    "ignore_eos",
+    "stop",
+    "stop_token_ids",
+    "frequency_penalty",
+    "presence_penalty",
+}
+
+
+def load_omni_stage_configs(model: str, stage_configs_path: str | None) -> list:
+    """Load vLLM-Omni stage configs from legacy or deploy-format YAML."""
+    if not stage_configs_path:
+        return []
+
+    try:
+        from vllm_omni.engine.async_omni_engine import load_and_resolve_stage_configs
+
+        _, stage_configs = load_and_resolve_stage_configs(
+            model,
+            stage_configs_path,
+            {},
+            default_stage_cfg_factory=None,
+        )
+        return stage_configs
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Falling back to legacy vLLM-Omni stage config loader",
+            exc_info=True,
+        )
+        return load_stage_configs_from_yaml(stage_configs_path)
+
+
+def stage_configs_use_async_chunk(stage_configs: list) -> bool:
+    if not stage_configs:
+        return False
+    engine_args = getattr(stage_configs[0], "engine_args", None)
+    return bool(getattr(engine_args, "async_chunk", False))
 
 
 def shm_deserialize(shm_meta: dict) -> Any:
@@ -132,6 +177,24 @@ def _json_safe_prompt(prompt: Any) -> dict:
     return result or {"prompt": prompt.get("prompt", "")}
 
 
+def _chat_sampling_overrides(request: dict) -> dict | None:
+    """Return OpenAI sampling overrides for the comprehension stage."""
+    overrides: dict[str, Any] = {}
+    for field in _OPENAI_SAMPLING_FIELDS:
+        if field not in request:
+            continue
+        value = request.get(field)
+        if value is None:
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        overrides[field] = value
+
+    if not overrides:
+        return None
+    return {_STAGE_OVERRIDES_KEY: {"0": overrides}}
+
+
 async def _render_chat_request(
     request: dict,
     renderer: Any,
@@ -215,12 +278,12 @@ async def parse_omni_request(
             return {
                 "engine_inputs": rendered,
                 "original_prompt": _json_safe_prompt(rendered),
-                "sampling_params_list": None,
+                "sampling_params_list": _chat_sampling_overrides(chat_request),
             }
         return {
             "engine_inputs": OmniTextPrompt(prompt=text),
             "original_prompt": {"prompt": text},
-            "sampling_params_list": None,
+            "sampling_params_list": _chat_sampling_overrides(chat_request),
         }
 
     if request_type in (RequestType.VIDEO_GENERATION, RequestType.IMAGE_GENERATION):
@@ -249,7 +312,7 @@ async def parse_omni_request(
         return {
             "engine_inputs": rendered,
             "original_prompt": _json_safe_prompt(rendered),
-            "sampling_params_list": None,
+            "sampling_params_list": _chat_sampling_overrides(request),
         }
 
     text = _chat_content_to_text(
@@ -283,7 +346,7 @@ async def parse_omni_request(
     return {
         "engine_inputs": text,
         "original_prompt": {"prompt": text},
-        "sampling_params_list": None,
+        "sampling_params_list": _chat_sampling_overrides(request),
     }
 
 
@@ -300,19 +363,26 @@ def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | 
     else:
         params = dict(defaults)
     params_dict = cast(dict[str, Any], params)
+    stage_overrides = None
+    if overrides and _STAGE_OVERRIDES_KEY in overrides:
+        stage_map = overrides.get(_STAGE_OVERRIDES_KEY) or {}
+        stage_id = getattr(stage_config, "stage_id", 0)
+        stage_overrides = stage_map.get(str(stage_id), stage_map.get(stage_id))
+    else:
+        stage_overrides = overrides
 
     stage_type = getattr(stage_config, "stage_type", "llm")
     if stage_type == "diffusion":
         diffusion_params = OmniDiffusionSamplingParams(**params_dict)
-        if overrides:
-            for arg, value in overrides.items():
+        if stage_overrides:
+            for arg, value in stage_overrides.items():
                 if hasattr(diffusion_params, arg):
                     setattr(diffusion_params, arg, value)
         return [diffusion_params]
 
     llm_params = SamplingParams(**params_dict)
-    if overrides:
-        for arg, value in overrides.items():
+    if stage_overrides:
+        for arg, value in stage_overrides.items():
             if hasattr(llm_params, arg):
                 setattr(llm_params, arg, value)
     return [llm_params]

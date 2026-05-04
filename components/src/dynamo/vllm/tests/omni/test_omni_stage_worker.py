@@ -7,15 +7,19 @@ No GPU, no vllm_omni — uses mock StageEngine matching AsyncOmni.generate() sig
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 try:
     from dynamo.vllm.omni.stage_worker import (
+        _ASYNC_PREPARE_KEY,
+        _ASYNC_PREWARM_KEY,
         OmniStageWorker,
         _ensure_cumulative_token_ids,
+        _prepare_connector_payload,
         _Proxy,
+        _stage_config_to_dict,
     )
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
@@ -54,6 +58,11 @@ class _MockEngine:
         return None
 
 
+class _TokenizerEngine(_MockEngine):
+    async def get_tokenizer(self):
+        return SimpleNamespace(encode=lambda text, add_special_tokens=False: [9, 8, 7])
+
+
 class _ErrorEngine:
     def generate(self, prompt, request_id="", *, sampling_params_list=None):
         async def _gen():
@@ -74,6 +83,7 @@ def _make_stage_config(**overrides):
         final_output=False,
         final_output_type="text",
         engine_input_source=[],
+        engine_args=SimpleNamespace(async_chunk=False),
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -249,6 +259,79 @@ async def test_engine_error_yields_error_chunk():
 
 
 @pytest.mark.asyncio
+async def test_prepare_request_returns_router_prewarm_fields():
+    engine = _TokenizerEngine()
+    worker = _make_worker(engine=engine)
+
+    with patch(
+        "dynamo.vllm.omni.stage_worker.parse_omni_request",
+        AsyncMock(
+            return_value={
+                "engine_inputs": "rendered prompt",
+                "original_prompt": {"prompt": "rendered prompt"},
+                "sampling_params_list": {
+                    "__stage_overrides__": {"0": {"max_tokens": 4}}
+                },
+            }
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in worker.generate(
+                {
+                    "request_id": "req-prepare",
+                    "prompt": "hello",
+                    _ASYNC_PREPARE_KEY: True,
+                },
+                _MockContext(),
+            )
+        ]
+
+    assert chunks == [
+        {
+            "original_prompt": {"prompt": "rendered prompt"},
+            "sampling_params_list": {"__stage_overrides__": {"0": {"max_tokens": 4}}},
+            "prompt_token_ids": [9, 8, 7],
+            "finished": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_chunk_prewarm_uses_placeholder_tokens_and_skips_connector_put():
+    engine = _MockEngine()
+    engine.engine = MagicMock()
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+    worker = _make_worker(
+        engine=engine,
+        connectors={("1", "2"): out_connector},
+        stage_id=1,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True),
+            default_sampling_params={"temperature": 0.9, "max_tokens": 100},
+        ),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in worker.generate(
+            {
+                "request_id": "req-prewarm",
+                "prompt_token_ids": [0, 0, 0],
+                _ASYNC_PREWARM_KEY: True,
+            },
+            _MockContext(),
+        )
+    ]
+
+    assert engine.received_prompt.prompt_token_ids == [0, 0, 0]
+    engine.engine.output_processors[0].add_request.assert_called_once()
+    out_connector.put.assert_not_called()
+    assert chunks[0]["shm_meta"]
+
+
+@pytest.mark.asyncio
 async def test_connector_put_failure_yields_error():
     """connector.put() returning ok=False → yields error, stops."""
     mock_connector = MagicMock()
@@ -340,6 +423,17 @@ def test_ensure_cumulative_token_ids_copies_token_ids_only_when_missing():
     assert existing.cumulative_token_ids == [4]
 
 
+def test_prepare_connector_payload_uses_inner_request_output_and_serializable_tokens():
+    completion = SimpleNamespace(token_ids=[3], cumulative_token_ids=[1, 2, 3])
+    request_output = SimpleNamespace(outputs=[completion])
+    omni_output = SimpleNamespace(request_output=request_output, outputs=[completion])
+
+    payload = _prepare_connector_payload(omni_output)
+
+    assert payload is request_output
+    assert completion.token_ids == [1, 2, 3]
+
+
 def test_fetch_stage_inputs_raises_on_missing_connector():
     worker = _make_worker_at_stage(1, connectors={}, engine_input_source=[0])
     with pytest.raises(RuntimeError, match="no connector for edge"):
@@ -375,11 +469,49 @@ def test_build_sampling_params_user_overrides_yaml_defaults():
     assert sp.guidance_scale == 5.0  # YAML default preserved
 
 
+def test_build_sampling_params_applies_stage_scoped_overrides_only_to_matching_stage():
+    stage0 = SimpleNamespace(
+        stage_id=0,
+        stage_type="llm",
+        default_sampling_params={"temperature": 0.9, "max_tokens": 100},
+    )
+    stage1 = SimpleNamespace(
+        stage_id=1,
+        stage_type="llm",
+        default_sampling_params={"temperature": 0.9, "max_tokens": 100},
+    )
+    overrides = {"__stage_overrides__": {"0": {"max_tokens": 16}}}
+
+    stage0_params = _build_sampling_params(stage0, overrides)[0]
+    stage1_params = _build_sampling_params(stage1, overrides)[0]
+
+    assert stage0_params.max_tokens == 16
+    assert stage1_params.max_tokens == 100
+
+
 def test_build_sampling_params_no_defaults_returns_none():
     """No default_sampling_params on stage_config -> returns None."""
     stage_config = SimpleNamespace(stage_type="llm")
     assert _build_sampling_params(stage_config, None) is None
     assert _build_sampling_params(stage_config, {}) is None
+
+
+def test_stage_config_to_dict_preserves_async_chunk_stage_id_and_connectors():
+    cfg = _make_stage_config(
+        stage_id=1,
+        engine_input_source=[0],
+        custom_process_input_func="pkg.func",
+        input_connectors={"from_stage_0": "connector"},
+        engine_args=SimpleNamespace(async_chunk=True, model_stage="talker"),
+    )
+
+    result = _stage_config_to_dict(cfg, "llm", preserve_stage_id=True)
+
+    assert result["stage_id"] == 1
+    assert result["engine_input_source"] == [0]
+    assert result["custom_process_input_func"] == "pkg.func"
+    assert result["input_connectors"] == {"from_stage_0": "connector"}
+    assert result["engine_args"]["async_chunk"] is True
 
 
 @pytest.mark.asyncio

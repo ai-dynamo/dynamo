@@ -56,6 +56,7 @@ def _make_router(stage_configs, stage_clients, formatter=None, output_modalities
     router.config = SimpleNamespace(output_modalities=output_modalities)
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
+    router._async_chunk = False
     router._formatter = formatter or AsyncMock()
     return router
 
@@ -197,6 +198,84 @@ async def test_generate_stage_error_stops_pipeline():
 
     assert chunks == [{"error": "thinker exploded", "finished": True}]
     assert not stage1_called
+
+
+@pytest.mark.asyncio
+async def test_async_chunk_prepares_and_prewarms_downstream_stages():
+    calls: list[tuple[str, dict]] = []
+    stage1_started = asyncio.Event()
+    stage0_started = asyncio.Event()
+
+    async def stage0_handler(request):
+        calls.append(("stage0", dict(request)))
+        if request.get(stage_router._ASYNC_PREPARE_KEY):
+            return {
+                "original_prompt": {"prompt": "hi"},
+                "sampling_params_list": {
+                    "__stage_overrides__": {"0": {"max_tokens": 4}}
+                },
+                "prompt_token_ids": [1, 2, 3],
+                "finished": True,
+            }
+        stage0_started.set()
+        return {"shm_meta": {"stage": 0}, "finished": True}
+
+    async def stage1_handler(request):
+        calls.append(("stage1", dict(request)))
+        stage1_started.set()
+        await stage0_started.wait()
+        return {"shm_meta": {"final": True}, "finished": True}
+
+    formatter = AsyncMock()
+    formatter.format.return_value = {"finished": True}
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=formatter,
+    )
+    router._async_chunk = True
+
+    stage0_result = SimpleNamespace(
+        request_output=SimpleNamespace(outputs=[SimpleNamespace(text="hello")])
+    )
+    final_result = SimpleNamespace()
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, "chat"),
+    ):
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-ac"):
+            with patch.object(
+                stage_router,
+                "shm_deserialize",
+                side_effect=[stage0_result, final_result],
+            ):
+                with patch.object(
+                    stage_router,
+                    "_compute_async_prewarm_prompt_len",
+                    return_value=5,
+                ):
+                    chunks = [c async for c in router.generate({"prompt": "x"}, None)]
+
+    assert chunks == [{"finished": True}]
+    assert stage1_started.is_set()
+    stage1_request = next(req for name, req in calls if name == "stage1")
+    assert stage1_request["request_id"] == "req-ac"
+    assert stage1_request[stage_router._ASYNC_PREWARM_KEY] is True
+    assert stage1_request["prompt_token_ids"] == [0, 0, 0, 0, 0]
+    assert stage1_request["original_prompt"] == {"prompt": "hi"}
+    assert stage1_request["sampling_params_list"] == {
+        "__stage_overrides__": {"0": {"max_tokens": 4}}
+    }
+    formatter.format.assert_awaited_once_with(
+        final_result,
+        "req-ac",
+        request_type="chat",
+        text="hello",
+    )
 
 
 # ── existing tests (formatting + error paths) ────────────
