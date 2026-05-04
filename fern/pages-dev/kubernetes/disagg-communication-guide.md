@@ -230,7 +230,7 @@ NIXL supports **libfabric** as the backend for AWS EFA deployments. This is the 
 - EFA installer version **1.47.0** or later
 - Libfabric (installed via EFA installer at `/opt/amazon/efa`)
 - GDRCopy for GPU Direct RDMA operations (GPU Operator v26.x installs this automatically)
-- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-efa-amd64`)
+- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0-efa-amd64`)
 
 **Kernel Compatibility:**
 
