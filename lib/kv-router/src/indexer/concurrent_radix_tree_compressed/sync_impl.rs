@@ -59,13 +59,11 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
                 WorkerTask::Stats(sender) => {
-                    let stats = WorkerLookupStats {
-                        workers: lookup.keys().copied().collect(),
-                        block_count: lookup
-                            .values()
-                            .map(|worker_lookup| worker_lookup.len())
-                            .sum(),
-                    };
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        lookup
+                            .iter()
+                            .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
+                    );
                     let _ = sender.send(stats);
                 }
                 WorkerTask::Flush(sender) => {

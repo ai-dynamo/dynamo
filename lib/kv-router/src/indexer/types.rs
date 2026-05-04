@@ -404,13 +404,36 @@ pub struct GetWorkersRequest {
 
 #[derive(Debug, Default)]
 pub struct WorkerLookupStats {
-    pub workers: Vec<WorkerWithDpRank>,
-    pub block_count: usize,
+    pub worker_blocks: Vec<(WorkerWithDpRank, usize)>,
 }
 
 impl WorkerLookupStats {
+    pub fn from_worker_block_counts(
+        counts: impl IntoIterator<Item = (WorkerWithDpRank, usize)>,
+    ) -> Self {
+        Self {
+            worker_blocks: counts
+                .into_iter()
+                .filter(|(_, block_count)| *block_count > 0)
+                .collect(),
+        }
+    }
+
     pub fn worker_count(&self) -> usize {
-        self.workers.len()
+        self.worker_blocks.len()
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.worker_blocks
+            .iter()
+            .map(|(_, block_count)| *block_count)
+            .sum()
+    }
+
+    pub fn block_count_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.worker_blocks
+            .iter()
+            .find_map(|(candidate, block_count)| (*candidate == worker).then_some(*block_count))
     }
 }
 

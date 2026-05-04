@@ -533,13 +533,11 @@ impl SyncIndexer for LowerTierIndexer {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
                 }
                 WorkerTask::Stats(sender) => {
-                    let stats = WorkerLookupStats {
-                        workers: worker_blocks.keys().copied().collect(),
-                        block_count: worker_blocks
-                            .values()
-                            .map(|worker_map| worker_map.len())
-                            .sum(),
-                    };
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        worker_blocks
+                            .iter()
+                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                    );
                     let _ = sender.send(stats);
                 }
                 WorkerTask::Flush(sender) => {

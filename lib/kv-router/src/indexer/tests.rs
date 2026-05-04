@@ -173,20 +173,41 @@ impl TreeSizeTestIndexer {
     async fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         match self {
             Self::Single(index) => index.tree_size_for_worker(worker),
-            Self::Concurrent(index) => Self::single_worker_thread_pool_size(index).await,
-            Self::ConcurrentCompressed(index) => Self::single_worker_thread_pool_size(index).await,
+            Self::Concurrent(index) => Self::thread_pool_size_for_worker(index, worker).await,
+            Self::ConcurrentCompressed(index) => {
+                Self::thread_pool_size_for_worker(index, worker).await
+            }
         }
     }
 
-    async fn single_worker_thread_pool_size<T: SyncIndexer>(
+    async fn thread_pool_size_for_worker<T: SyncIndexer>(
         index: &ThreadPoolIndexer<T>,
+        worker: WorkerWithDpRank,
     ) -> Option<usize> {
-        let sizes = index.shard_sizes().await;
-        let worker_count: usize = sizes.iter().map(|snapshot| snapshot.worker_count).sum();
-        if worker_count == 0 {
-            return None;
+        Some(
+            index
+                .worker_lookup_stats()
+                .await
+                .block_count_for_worker(worker)
+                .unwrap_or(0),
+        )
+    }
+
+    async fn live_thread_pool_worker_count(&self) -> Option<usize> {
+        match self {
+            Self::Single(_) => None,
+            Self::Concurrent(index) => Some(Self::thread_pool_worker_count(index).await),
+            Self::ConcurrentCompressed(index) => Some(Self::thread_pool_worker_count(index).await),
         }
-        Some(sizes.iter().map(|snapshot| snapshot.block_count).sum())
+    }
+
+    async fn thread_pool_worker_count<T: SyncIndexer>(index: &ThreadPoolIndexer<T>) -> usize {
+        index
+            .shard_sizes()
+            .await
+            .iter()
+            .map(|snapshot| snapshot.worker_count)
+            .sum()
     }
 
     fn scores(&self, query: &[u64]) -> OverlapScores {
@@ -456,6 +477,9 @@ mod interface_tests {
         let empty_scores = index.scores(&[1, 2, 3, 4, 5]);
         assert!(empty_scores.scores.is_empty());
         assert_eq!(index.tree_size_for_worker(worker).await, Some(0));
+        if let Some(worker_count) = index.live_thread_pool_worker_count().await {
+            assert_eq!(worker_count, 0);
+        }
         assert!(index.snapshot_tree().await.is_empty());
 
         index.apply_event(prefix_remove).await;

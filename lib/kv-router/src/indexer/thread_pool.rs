@@ -205,7 +205,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Arc::clone(&self.backend)
     }
 
-    async fn worker_lookup_stats(&self) -> WorkerLookupStats {
+    pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
         let mut receivers = Vec::new();
         for channel in &self.worker_event_channels {
             let (resp_tx, resp_rx) = oneshot::channel();
@@ -214,27 +214,24 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             }
         }
 
-        let mut workers = BTreeSet::new();
-        let mut block_count = 0usize;
+        let mut worker_blocks = BTreeMap::new();
         for receiver in receivers {
             if let Ok(stats) = receiver.await {
-                workers.extend(stats.workers);
-                block_count += stats.block_count;
+                for (worker, block_count) in stats.worker_blocks {
+                    *worker_blocks.entry(worker).or_insert(0usize) += block_count;
+                }
             }
         }
 
-        WorkerLookupStats {
-            workers: workers.into_iter().collect(),
-            block_count,
-        }
+        WorkerLookupStats::from_worker_block_counts(worker_blocks)
     }
 
     pub async fn get_workers(&self) -> Vec<WorkerId> {
         self.worker_lookup_stats()
             .await
-            .workers
+            .worker_blocks
             .into_iter()
-            .map(|worker| worker.worker_id)
+            .map(|(worker, _)| worker.worker_id)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -724,7 +721,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         vec![ShardSizeSnapshot {
             shard_idx: 0,
             worker_count: stats.worker_count(),
-            block_count: stats.block_count,
+            block_count: stats.block_count(),
             node_count: self.backend.node_count(),
         }]
     }
