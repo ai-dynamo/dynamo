@@ -100,9 +100,7 @@ impl PrefillRouter {
             .model_manager
             .get_data_parallel_size(endpoint_id, worker_id);
         let bootstrap_room: u64 = match (dp_rank, dp_size) {
-            (Some(rank), Some(size)) if size > 0 => {
-                (r / size as u64) * size as u64 + rank as u64
-            }
+            (Some(rank), Some(size)) if size > 0 => (r / size as u64) * size as u64 + rank as u64
             _ => r,
         };
 
