@@ -4,7 +4,7 @@
 use std::sync::OnceLock;
 
 use dynamo_runtime::config::{
-    env_is_falsey, env_is_truthy, environment_names::llm::agent_trace as env_agent_trace,
+    env_is_falsey, environment_names::llm::agent_trace as env_agent_trace,
 };
 
 const DEFAULT_CAPACITY: usize = 1024;
@@ -23,7 +23,6 @@ pub struct AgentTracePolicy {
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
     pub replay_hashes_enabled: bool,
-    pub save_io_text: bool,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
 }
@@ -86,7 +85,6 @@ fn load_from_env() -> AgentTracePolicy {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0);
     let replay_hashes_enabled = !env_is_falsey(env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES);
-    let save_io_text = env_is_truthy(env_agent_trace::DYN_SAVE_IO_TEXT);
 
     AgentTracePolicy {
         enabled: !sinks.is_empty() || tool_events_zmq_endpoint.is_some(),
@@ -98,7 +96,6 @@ fn load_from_env() -> AgentTracePolicy {
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
         replay_hashes_enabled,
-        save_io_text,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
     }
@@ -165,21 +162,5 @@ mod tests {
                 assert!(load_from_env().replay_hashes_enabled);
             },
         );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn save_io_text_default_off() {
-        temp_env::with_var_unset(env_agent_trace::DYN_SAVE_IO_TEXT, || {
-            assert!(!load_from_env().save_io_text);
-        });
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn save_io_text_enabled_with_truthy_env() {
-        temp_env::with_var(env_agent_trace::DYN_SAVE_IO_TEXT, Some("true"), || {
-            assert!(load_from_env().save_io_text);
-        });
     }
 }

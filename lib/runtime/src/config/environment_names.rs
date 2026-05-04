@@ -343,9 +343,6 @@ pub mod llm {
         /// Enable replay-oriented prompt block hashes in agent request trace records.
         pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
 
-        /// Save rendered input and decoded output text in agent request trace records.
-        pub const DYN_SAVE_IO_TEXT: &str = "DYN_SAVE_IO_TEXT";
-
         /// Local ZMQ endpoint for harness tool events.
         pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
             "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
@@ -572,7 +569,6 @@ mod tests {
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
             llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
-            llm::agent_trace::DYN_SAVE_IO_TEXT,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model

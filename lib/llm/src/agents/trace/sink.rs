@@ -509,7 +509,6 @@ mod tests {
                 queue_depth: None,
                 worker: None,
                 replay: None,
-                io_text: None,
             }),
             tool: None,
         }

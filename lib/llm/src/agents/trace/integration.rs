@@ -3,16 +3,13 @@
 
 //! Dynamo LLM integration helpers for agent trace records.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 use crate::agents::trace::{
-    AgentIoText, AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy, AgentTraceRecord,
+    AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy, AgentTraceRecord,
     DEFAULT_TOOL_EVENTS_TOPIC, WorkerInfo,
 };
 use crate::local_model::LocalModel;
@@ -39,43 +36,6 @@ pub(crate) fn record_llm_metric_tokens(
         tracker.record_isl(input_tokens.unwrap_or(0), cached_tokens);
     }
     tracker.record_osl(output_tokens);
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AgentIoTextCapture {
-    input: Arc<str>,
-    output: Arc<Mutex<String>>,
-}
-
-impl AgentIoTextCapture {
-    pub(crate) fn new(input: String) -> Self {
-        Self {
-            input: Arc::from(input),
-            output: Arc::new(Mutex::new(String::new())),
-        }
-    }
-
-    pub(crate) fn append_output(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.output
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_str(text);
-    }
-
-    pub(crate) fn snapshot(&self) -> AgentIoText {
-        let output = self
-            .output
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        AgentIoText {
-            input: self.input.to_string(),
-            output,
-        }
-    }
 }
 
 static TOOL_EVENT_INGEST_STARTED: AtomicBool = AtomicBool::new(false);
@@ -121,7 +81,6 @@ pub(crate) fn request_metrics(
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
         worker,
         replay: None,
-        io_text: None,
     }
 }
 
@@ -263,19 +222,7 @@ mod tests {
 
     use crate::protocols::common::timing::{RequestTracker, WORKER_TYPE_DECODE};
 
-    use super::{AgentIoTextCapture, request_metrics};
-
-    #[test]
-    fn io_text_capture_accumulates_output() {
-        let capture = AgentIoTextCapture::new("rendered input".to_string());
-        capture.append_output("hello");
-        capture.append_output("");
-        capture.append_output(" world");
-
-        let io_text = capture.snapshot();
-        assert_eq!(io_text.input, "rendered input");
-        assert_eq!(io_text.output, "hello world");
-    }
+    use super::request_metrics;
 
     #[test]
     fn test_request_metrics_from_tracker() {
@@ -316,7 +263,6 @@ mod tests {
         assert_eq!(metrics.kv_hit_rate, Some(0.5));
         assert!(metrics.kv_transfer_estimated_latency_ms.is_some());
         assert_eq!(metrics.queue_depth, Some(3));
-        assert!(metrics.io_text.is_none());
         let worker = metrics.worker.expect("worker info should be set");
         assert_eq!(worker.prefill_worker_id, Some(17));
         assert_eq!(worker.prefill_dp_rank, Some(2));
@@ -348,7 +294,6 @@ mod tests {
         assert_eq!(metrics.kv_hit_rate, None);
         assert_eq!(metrics.kv_transfer_estimated_latency_ms, None);
         assert_eq!(metrics.queue_depth, None);
-        assert!(metrics.io_text.is_none());
         assert!(metrics.worker.is_none());
     }
 }
