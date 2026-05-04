@@ -332,22 +332,24 @@ pub enum MooncakeBenchmarkInput {
 }
 
 fn prepare_event_worker_traces(
-    artifacts: Vec<WorkerReplayArtifacts>,
+    artifacts: &[WorkerReplayArtifacts],
     benchmark_duration_ms: u64,
 ) -> Vec<Vec<WorkerTrace>> {
     let traces = artifacts
-        .into_iter()
+        .iter()
         .map(|artifact| {
             let mut merged = artifact
                 .requests
-                .into_iter()
+                .iter()
                 .map(|request| WorkerTrace {
                     timestamp_us: request.timestamp_us,
-                    entry: WorkerTraceEntry::Request(request.replay_hashes.local_block_hashes),
+                    entry: WorkerTraceEntry::Request(
+                        request.replay_hashes.local_block_hashes.clone(),
+                    ),
                 })
-                .chain(artifact.kv_events.into_iter().map(|event| WorkerTrace {
+                .chain(artifact.kv_events.iter().map(|event| WorkerTrace {
                     timestamp_us: event.timestamp_us,
-                    entry: WorkerTraceEntry::Event(event.event),
+                    entry: WorkerTraceEntry::Event(event.event.clone()),
                 }))
                 .collect::<Vec<_>>();
             merged.sort_by_key(|entry| entry.timestamp_us);
@@ -382,7 +384,7 @@ fn synthesized_tokens(
 }
 
 fn prepare_approx_worker_traces(
-    traces: Vec<Trace>,
+    traces: &[Trace],
     block_size: u32,
     benchmark_duration_ms: u64,
 ) -> anyhow::Result<Vec<Vec<WorkerTrace>>> {
@@ -390,14 +392,14 @@ fn prepare_approx_worker_traces(
     for trace in traces {
         let trace_block_size = trace.block_size;
         let mut entries = Vec::new();
-        for session in trace.sessions {
+        for session in &trace.sessions {
             let mut timestamp_ms = session.first_arrival_timestamp_ms.unwrap_or(0.0);
-            for (turn_idx, turn) in session.turns.into_iter().enumerate() {
+            for (turn_idx, turn) in session.turns.iter().enumerate() {
                 if turn_idx > 0 {
                     timestamp_ms += turn.delay_after_previous_ms;
                 }
                 let replay_hashes = turn.to_replay_hashes(trace_block_size, block_size as usize)?;
-                let tokens = synthesized_tokens(&turn, trace_block_size);
+                let tokens = synthesized_tokens(turn, trace_block_size);
                 let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
                 entries.push(WorkerTrace {
                     timestamp_us,
@@ -427,7 +429,7 @@ fn prepare_approx_worker_traces(
 }
 
 fn prepare_worker_traces(
-    input: MooncakeBenchmarkInput,
+    input: &MooncakeBenchmarkInput,
     config: MooncakeBenchmarkConfig,
 ) -> anyhow::Result<Vec<Vec<WorkerTrace>>> {
     match input {
@@ -443,7 +445,7 @@ fn prepare_worker_traces(
 
 pub async fn run_benchmark(
     indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
-    input: MooncakeBenchmarkInput,
+    input: &MooncakeBenchmarkInput,
     config: MooncakeBenchmarkConfig,
 ) -> anyhow::Result<BenchmarkRun> {
     let worker_traces = prepare_worker_traces(input, config)?;

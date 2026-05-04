@@ -15,6 +15,7 @@ use dynamo_tokens::compute_hash_v2;
 use plotters::prelude::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use tracing_subscriber::EnvFilter;
@@ -25,6 +26,113 @@ pub use shared::{
     compute_benchmark_run, default_mock_engine_args, generate_replay_artifacts, make_progress_bar,
     process_mooncake_trace, rescale_trace_timestamps,
 };
+
+#[derive(Clone, Copy, Debug)]
+pub struct PercentileStats<T> {
+    pub min: T,
+    pub p50: T,
+    pub p90: T,
+    pub p99: T,
+    pub max: T,
+    pub mean: f64,
+}
+
+impl<T> PercentileStats<T>
+where
+    T: Copy + PartialOrd,
+{
+    pub fn from_values(mut values: Vec<T>, to_f64: impl Fn(T) -> f64) -> Option<Self> {
+        if values.is_empty() {
+            return None;
+        }
+
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+        let percentile = |pct: usize| -> T {
+            let idx = (values.len().saturating_sub(1) * pct).div_ceil(100);
+            values[idx]
+        };
+        let mean = values.iter().map(|value| to_f64(*value)).sum::<f64>() / values.len() as f64;
+
+        Some(Self {
+            min: values[0],
+            p50: percentile(50),
+            p90: percentile(90),
+            p99: percentile(99),
+            max: values[values.len() - 1],
+            mean,
+        })
+    }
+}
+
+pub fn print_benchmark_results_percentiles(title: &str, results: &[BenchmarkResults]) {
+    if results.len() <= 1 {
+        return;
+    }
+
+    println!("\n=== {title} ({} runs) ===", results.len());
+    println!(
+        "{:>18} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14}",
+        "metric", "min", "p50", "p90", "p99", "max", "mean",
+    );
+
+    print_percentile_stats_row(
+        "ops/s_off",
+        PercentileStats::from_values(
+            results
+                .iter()
+                .map(|result| result.offered_ops_throughput)
+                .collect(),
+            f64::from,
+        )
+        .expect("non-empty benchmark results"),
+    );
+    print_percentile_stats_row(
+        "ops/s",
+        PercentileStats::from_values(
+            results.iter().map(|result| result.ops_throughput).collect(),
+            f64::from,
+        )
+        .expect("non-empty benchmark results"),
+    );
+    print_percentile_stats_row(
+        "blk_ops/s_off",
+        PercentileStats::from_values(
+            results
+                .iter()
+                .map(|result| result.offered_block_throughput)
+                .collect(),
+            f64::from,
+        )
+        .expect("non-empty benchmark results"),
+    );
+    print_percentile_stats_row(
+        "blk_ops/s",
+        PercentileStats::from_values(
+            results
+                .iter()
+                .map(|result| result.block_throughput)
+                .collect(),
+            f64::from,
+        )
+        .expect("non-empty benchmark results"),
+    );
+    print_percentile_stats_row(
+        "p99(us)",
+        PercentileStats::from_values(
+            results.iter().map(|result| result.latency_p99_us).collect(),
+            f64::from,
+        )
+        .expect("non-empty benchmark results"),
+    );
+}
+
+fn print_percentile_stats_row(label: &str, stats: PercentileStats<f32>) {
+    println!(
+        "{:>18} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>14.1} {:>14.1}",
+        label, stats.min, stats.p50, stats.p90, stats.p99, stats.max, stats.mean,
+    );
+}
 
 /// Shared CLI arguments for trace-based benchmarks.
 #[derive(clap::Args, Debug)]
