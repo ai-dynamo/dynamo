@@ -8,8 +8,6 @@ keywords: checkpoint restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, 
 last-updated: May 4, 2026
 ---
 
-# Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes
-
 ## The Cold-Start Problem
 The primary objective when optimizing LLM inference workloads is tokens per second — the higher the productive output per second of GPU time, the better the economics. Every second the GPU isn't producing tokens is money lost.
 
@@ -17,7 +15,7 @@ But steady-state performance numbers only tell us part of the story. When servin
 
 Here is a breakdown of the cold start time of various models for a single-GPU workload:
 
-![](./figures/cold_start_bench.svg)
+![Cold start time breakdown across model sizes on a single B200 GPU.](./figures/cold_start_bench.svg)
 
 In our setup, weights are loaded from a very fast (VAST) PVC. For smaller models, almost all of the startup time comes from other sources of overhead. Even in a "warm" start scenario where certain artifacts (e.g. from torch.compile, kernel warmup, etc.) are cached, the reduction in cold start time is still not significant enough — much of the work that is done during the earlier phases of initialization cannot easily be cached.
 
@@ -43,7 +41,7 @@ When restoring (potentially on a different node):
 1. CRIU restores the process tree according to the serialized state from the same folder (note: distributed storage like NFS/SMB allows us to fetch the checkpointed artifact from a different node).
 2. `cuda-checkpoint` restores the GPU state from what is serialized in CPU memory onto the new GPUs.
 
-![](./figures/checkpoint_restore_state_panels.svg)
+![How GPU, CPU, and disk contents change at each step of cuda-checkpoint and CRIU, then in reverse on restore.](./figures/checkpoint_restore_state_panels.svg)
 
 Since CRIU is run via an external process, **the restored workload process picks up at exactly the instruction it was at when it dumped.** This has a few implications:
 
@@ -63,7 +61,7 @@ The only portable, robust option was to spin up our own privileged DaemonSet (we
 
 At a high level, the lifecycle of a checkpoint and a restore goes pod-by-pod, with the snapshot agent reaching in from outside the workload's container.
 
-![](./figures/k8s_checkpoint_restore_lifecycle.svg)
+![On the checkpoint node, the snapshot-agent DaemonSet observes the workload pod from the host and writes the artifact to a shared PVC. On the restore node, the agent enters a placeholder pod's namespaces and restores the workload inside.](./figures/k8s_checkpoint_restore_lifecycle.svg)
 
 **Checkpoint:**
 
@@ -94,7 +92,7 @@ If we were to implement checkpoint/restore naively, without the workload knowing
 
 We remedy this by configuring the readiness probe to be the presence of a "ready for checkpoint" signal file that is written after the engine initializes but *before* distributed runtime startup. At this point, the worker polls for another "restore complete" signal file while the snapshot agent is checkpointing it from outside — the checkpointed state of the worker could be at any arbitrary point inside the polling loop. On restore, the workload resumes inside of the polling loop, detects the signal file, and starts distributed runtime setup.
 
-![](./figures/worker_agent_quiesce_resume_sequence.svg)
+![Worker initializes, signals readiness, and quiesces while the snapshot-agent dumps state; on restore, the agent signals the worker to start the distributed runtime.](./figures/worker_agent_quiesce_resume_sequence.svg)
 
 The general concept of "quiesce" and "resume" hooks — where the workload ensures it is in a quiescent state and blocks on an external signal for when the restore is complete — is a powerful abstraction for checkpoint/restore. It allows the workload to clean up its resources prior to being checkpointed for:
 
@@ -108,14 +106,14 @@ However, since our checkpoint is taken in a quiescent state *before* the replica
 
 This functionality is already given to us by vLLM's `sleep()` and `wake_up()` methods, as well as SGLang's `torch_memory_saver`. Similar functionality is also exposed in TensorRT-LLM.
 
-![](./figures/kv_cache_unmap_release.svg)
+![Unmapping and releasing the KV cache shrinks device memory at checkpoint time to just weights and the CUDA graph buffers.](./figures/kv_cache_unmap_release.svg)
 
 Unmap and release of the KV cache reduces the checkpoint size of Qwen3 0.6B for a B200 from ~192 GiB to ~6 GiB. The wins are most pronounced for large KV cache sizes (i.e. smaller model weights relative to GPU size).
 
 ## Optimization #2: Making CRIU Fast
 So, what do the restore times look like? Surprisingly, really bad. For larger models, the restore time actually exceeds that of a cold start, defeating the entire purpose of checkpoint/restore.
 
-![](./figures/regular_restore_criudev.svg)
+![Baseline snapshot restore time across model sizes — for larger models the restore exceeds cold start.](./figures/regular_restore_criudev.svg)
 
 The main reason behind this is that CRIU and `cuda-checkpoint` do not copy memory at speed-of-light (SOL) speeds. In a Linux process, there are two types of memory: anonymous memory (the heap, stack, etc. of a process) and shared memory (shared between processes). For larger models, the restore bottleneck encompasses both types of memory, so we optimize both restore paths to bring the CRIU restore time down from minutes to seconds.
 
@@ -124,11 +122,11 @@ After CRIU has restored the shared resources (files, sockets, shmem objects, mem
 
 In upstream CRIU, that fill was a synchronous `preadv` loop. The restorer pulls one job off the list, hands it to `preadv`, and waits. The kernel issues that single read to the storage device, the device DMAs the bytes into the destination VMA pages, and `preadv` returns. Only then does the restorer move on to the next job. There's exactly one read in flight at any moment, which means the storage device is idle for most of the wall-clock time — sitting there waiting for the next request between every read. A single blocking stream barely uses what fast NVMe can do, and on network-attached storage every read pays a full round-trip before the next one starts.
 
-![](./figures/preadv_serial_before.svg)
+![Synchronous preadv loop: one read in flight at a time, storage device idle between requests.](./figures/preadv_serial_before.svg)
 
 We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read jobs ahead of time — each job is an `iocb` describing a file offset, a byte count, and an iovec pointing at the destination VMA pages. The restorer creates an AIO context, which holds many distinct read transactions simultaneously, allowing the storage device to run them concurrently across its internal channels. The restorer then submits a batch of those iocbs with `io_submit`, and keeps a window of up to 128 in flight. As completions come back via `io_getevents`, new submissions backfill the window until every job is done.
 
-![](./figures/aio_pipeline_after.svg)
+![Native AIO pipeline: up to 128 reads in flight via io_submit and io_getevents, storage device runs them concurrently.](./figures/aio_pipeline_after.svg)
 
 ### Optimization #2.2: Parallel memfd Restore
 vLLM's sleep mode reduces GPU memory pressure by moving tagged GPU allocations into pinned CPU shadow buffers. Those buffers are not ordinary Python heap memory. vLLM asks PyTorch for pinned CPU tensors, PyTorch allocates them through CUDA's pinned-memory allocator, and CUDA backs them with shared anonymous memory that is then pinned through the NVIDIA driver. Inside the Linux kernel, these are memfds — anonymous, RAM-backed files that can be mapped with MAP_SHARED.
@@ -166,7 +164,7 @@ On the same setup, we saw a massive improvement in CRIU restore time, and it is 
 | GPT-OSS 120B | 129 GiB | 119 s | 15 s | 7.9x |
 | Qwen2.5 72B | 164 GiB | 127 s | 20 s | 6.4x |
 
-![](./figures/regular_restore.svg)
+![Optimized snapshot restore time after AIO and parallel memfd changes — significantly faster than cold start across all model sizes.](./figures/regular_restore.svg)
 
 At this point CRIU is no longer the bottleneck on its own, but the wall-clock time is still dominated by moving the model weights from PVC, through host memory, onto the GPU. That part is fundamentally serial: cuda-checkpoint cannot start copying weights to the GPU until CRIU has materialized them in host memory, and both halves are constrained by NFS bandwidth on one end and a single sequential `cudaMemcpy` on the other. The weights also dominate checkpoint size by a wide margin, which puts a hard ceiling on how fast restore can ever get if the weights stay inside the CRIU image.
 
@@ -205,14 +203,14 @@ On restore (potentially on a different node), CRIU brings the worker's process t
 2. Remaps all VAs. This requests previously-imported allocations from the GMS server, receives fresh FDs, imports them, and calls `cuMemMap` at the *same VAs* the worker reserved before. Because the VAs are unchanged, every captured CUDA graph and every cached tensor pointer is instantly valid again.
 3. Before mapping, it verifies a layout hash published by the server at commit time. This protects against the case where someone published a completely different model architecture's weights into GMS in between.
 
-![](./figures/gms_checkpoint_restore_flow.svg)
+![Worker releases weight mappings while GMS retains the physical pages; on restore, the worker reconnects to a freshly populated GMS to remap weights at their original addresses.](./figures/gms_checkpoint_restore_flow.svg)
 
 ### Independent Weight Restoration
 The above only works if, by the time the worker calls `wake_up()`, the GMS server on the restore node already has the weights resident on its GPU. This is what unlocks the next big optimization: the path that gets weights onto the GPU is now **completely decoupled** from CRIU and cuda-checkpoint. CRIU can stream process state from the snapshot PVC at whatever rate NFS gives us, and *in parallel*, an entirely separate `gms-loader` sidecar populates GMS with the weights for that model.
 
 However, what needs to be determined is where the loader gets the weights from. In a real cluster, weight management is its own concern: we want a single source of truth for which models are cached where, deduplicated downloads from external sources like HuggingFace, and ideally GPU-to-GPU RDMA between nodes that already have the weights resident. This is exactly what weight transfer engines like [ModelExpress](https://github.com/ai-dynamo/modelexpress) (MX) are built for, and the intended production path is to have `gms-loader` be a shim that exposes GMS's stored allocations directly to different weight transfer backends. For instance, MX figures out the fastest available source for a given model — peer GPU over NIXL/RDMA, disk over GPUDirect Storage, HuggingFace, etc. — and `gms-loader` exposes the necessary shims to plumb those bytes into GMS, where the worker imports them at its preserved VAs as described above.
 
-![](./figures/gms_combined_dataflow.svg)
+![Restored pod data flow: snapshot-agent restores the CRIU artifact into the worker while gms-loader streams weights into gms-server in parallel.](./figures/gms_combined_dataflow.svg)
 
 CRIU restore and the GMS weight load run concurrently on the restore pod, but they have to converge before the worker can resume. In particular, the worker can't `wake_up()` until the weights are actually in GMS. The snapshot agent coordinates this by waiting for both halves to finish before signaling the worker to continue, which is what turns the two parallel paths into a single join point at `wake_up()`. The same coordination runs in reverse on the checkpoint side: the snapshot agent waits for the weight dump to finish before letting the checkpoint job complete.
 
@@ -225,7 +223,7 @@ This setup isolates the parallel-restore claim from network storage variability 
 
 We saw that parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve ~5s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is now under 5 seconds.
 
-![](./figures/gms_sharded_ssd_restore_bench.svg)
+![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 5 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
 
 The CRIU checkpoint now only contains the host-side state of the container's process tree, as well as the CUDA graph and a few miscellaneous buffers that are still double-buffered. The GMS weight artifact now holds the majority of process memory.
 
