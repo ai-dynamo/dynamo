@@ -149,13 +149,13 @@ if not SKIP_CODEGEN:
 local_resource(
     'crds',
     _crd_cmd,
-    deps=['api/'],
+    deps=['api/', CRD_DIR],
     ignore=['**/zz_generated.deepcopy.go'],
     labels=['operator'],
 )
 
 # ---------------------------------------------------------------------------
-# Helm dependencies — fetch remote subcharts and package the local operator
+# Helm dependencies — update remote subcharts and package the local operator
 # subchart (file://components/operator).
 # ---------------------------------------------------------------------------
 
@@ -164,13 +164,14 @@ local(helm_cmd + ' repo add --force-update nats https://nats-io.github.io/k8s/he
 local(helm_cmd + ' repo add --force-update bitnami https://charts.bitnami.com/bitnami', quiet=True)
 local(helm_cmd + ' repo update', quiet=True)
 
-# Initial build at load time so render_helm() can succeed.
-local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
+# Initial update at load time so render_helm() can succeed even when the local
+# Chart.lock cache is stale.
+local(helm_cmd + ' dependency update ' + HELM_CHART, quiet=True)
 
-# Re-run when the local operator subchart changes.
+# Re-run when the local operator subchart or dependency list changes.
 local_resource(
     'helm-dep-build',
-    helm_cmd + ' dependency build ' + HELM_CHART,
+    helm_cmd + ' dependency update ' + HELM_CHART,
     deps=[os.path.join(HELM_CHART, 'components', 'operator'), os.path.join(HELM_CHART, 'Chart.yaml')],
     labels=['operator'],
 )
