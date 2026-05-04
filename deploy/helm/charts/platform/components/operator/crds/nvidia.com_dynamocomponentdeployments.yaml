@@ -19993,7 +19993,6 @@ spec:
                   type: string
               required:
                 - backendFramework
-                - name
               type: object
               x-kubernetes-validations:
                 - message: eppConfig may only be set when type is epp
