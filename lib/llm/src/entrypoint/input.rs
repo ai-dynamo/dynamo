@@ -101,6 +101,14 @@ pub async fn run_input(
     if let Err(e) = crate::agents::trace::init_from_env_with_shutdown(drt.child_token()).await {
         tracing::warn!(error = %e, "Agent trace initialization failed; continuing without trace sink");
     }
+    if let Err(e) = crate::agents::trace::start_tool_event_ingest_from_policy(
+        drt.clone(),
+        engine_config.local_model(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "Agent tool event ingest initialization failed; continuing without tool traces");
+    }
 
     // Initialize audit bus + sink workers (off hot path; fan-out supported)
     if crate::audit::config::policy().enabled {

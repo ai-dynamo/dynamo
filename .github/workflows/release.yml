@@ -262,7 +262,9 @@ jobs:
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
           done
 
-          # ---- EFA runtime images (amd64 only, no multi-arch manifest needed) ----
+          # ---- EFA runtime images ----
+          # vllm/trtllm EFA are amd64 only; sglang EFA is multi-arch (amd64+arm64).
+          # crane copy preserves multi-arch manifests automatically.
           echo ""
           echo "=== EFA Runtime Images ==="
 
@@ -270,6 +272,11 @@ jobs:
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+
+          # sglang EFA (CUDA 12, multi-arch)
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
 
           # trtllm EFA (CUDA 13, amd64 only)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
@@ -401,9 +408,10 @@ jobs:
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "EFA runtime images:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\` (amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\` (amd64)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY

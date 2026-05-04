@@ -931,7 +931,7 @@ mod tests {
         assert_eq!(r2.normal_text, " normal2");
     }
 
-    #[test] // CASE.8, CASE.16 — GLM-5 burst pattern
+    #[test] // CASE.8 — GLM-5 burst pattern
     fn test_glm5_pattern_a_burst_single_chunk() {
         // GLM-5 Pattern A: the entire completion arrives in one SSE event.
         // Format: <think>T1</think><tool_call>A</tool_call><think>T2</think><tool_call>B</tool_call>
@@ -1136,7 +1136,7 @@ mod tests {
             .with_tool_start_token(crate::reasoning::KIMI_K2_TOOL_SECTION_BEGIN)
     }
 
-    #[rstest] // CASE.8, CASE.16 — Kimi K2 split
+    #[rstest] // CASE.8 — Kimi K2 split
     #[case(
         "thinking text <|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
         "thinking text",
