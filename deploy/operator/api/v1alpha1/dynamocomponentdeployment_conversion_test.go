@@ -53,7 +53,7 @@ func assertOnlyKnownDCDAnnotations(t *testing.T, annotations map[string]string) 
 	t.Helper()
 	for key := range annotations {
 		switch key {
-		case annDCDHubSpec, annDCDSpokeSpec, annDCDSpokeStatus:
+		case annDCDSpec, annDCDStatus:
 		default:
 			t.Fatalf("unexpected annotation %q in %v", key, annotations)
 		}
@@ -139,12 +139,12 @@ func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
 		t.Fatalf("expected omitted serviceName to default to metadata.name, got %q", hub.Spec.ComponentName)
 	}
 	assertOnlyKnownDCDAnnotations(t, hub.Annotations)
-	raw := hub.Annotations[annDCDSpokeSpec]
+	raw := hub.Annotations[annDCDSpec]
 	if raw == "" {
-		t.Fatalf("expected empty serviceName marker in %q, got %v", annDCDSpokeSpec, hub.Annotations)
+		t.Fatalf("expected empty serviceName marker in %q, got %v", annDCDSpec, hub.Annotations)
 	}
 	if _, emptyServiceName, ok := restoreDCDSpokeSpec(raw); !ok || !emptyServiceName {
-		t.Fatalf("expected empty serviceName marker in %q payload: %s", annDCDSpokeSpec, raw)
+		t.Fatalf("expected empty serviceName marker in %q payload: %s", annDCDSpec, raw)
 	}
 
 	roundTripped := &DynamoComponentDeployment{}
@@ -190,10 +190,10 @@ func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 	if err := spoke.ConvertFrom(hub); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	if raw, ok := spoke.Annotations[annDCDHubSpec]; ok {
+	if raw, ok := spoke.Annotations[annDCDSpec]; ok {
 		preserved, ok := restoreDCDHubSpec(raw)
 		if !ok {
-			t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+			t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 		}
 		if preserved.PodTemplate != nil {
 			main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
@@ -384,13 +384,13 @@ func TestDCD_RoundTrip_PodTemplateKeepsGeneratedMainMarker(t *testing.T) {
 	if err := spoke.ConvertFrom(src); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	raw := spoke.Annotations[annDCDHubSpec]
+	raw := spoke.Annotations[annDCDSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve generated main marker", annDCDHubSpec)
+		t.Fatalf("expected %s to preserve generated main marker", annDCDSpec)
 	}
 	preserved, ok := restoreDCDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 	}
 	main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
 	if !ok || !containerHasOnlyName(main) {
@@ -436,13 +436,13 @@ func TestDCD_RoundTrip_CompilationCacheWithoutGeneratedMountKeepsMarker(t *testi
 	if err := spoke.ConvertFrom(src); err != nil {
 		t.Fatalf("ConvertFrom: %v", err)
 	}
-	raw := spoke.Annotations[annDCDHubSpec]
+	raw := spoke.Annotations[annDCDSpec]
 	if raw == "" {
-		t.Fatalf("expected %s to preserve absent generated compilation-cache mount", annDCDHubSpec)
+		t.Fatalf("expected %s to preserve absent generated compilation-cache mount", annDCDSpec)
 	}
 	preserved, ok := restoreDCDHubSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDHubSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 	}
 	main, ok := findContainerByName(preserved.PodTemplate.Spec.Containers, mainContainerName)
 	if !ok || !containerHasOnlyName(main) {
@@ -722,13 +722,13 @@ func TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields(t *testing.T) {
 		t.Fatalf("ConvertTo: %v", err)
 	}
 	assertOnlyKnownDCDAnnotations(t, b.Annotations)
-	raw := b.Annotations[annDCDSpokeSpec]
+	raw := b.Annotations[annDCDSpec]
 	if raw == "" {
-		t.Fatalf("expected sparse spoke save in %q, got %v", annDCDSpokeSpec, b.Annotations)
+		t.Fatalf("expected sparse spoke save in %q, got %v", annDCDSpec, b.Annotations)
 	}
 	saved, _, ok := restoreDCDSpokeSpec(raw)
 	if !ok {
-		t.Fatalf("failed to restore %q payload: %s", annDCDSpokeSpec, raw)
+		t.Fatalf("failed to restore %q payload: %s", annDCDSpec, raw)
 	}
 	if saved.SubComponentType != "custom-prefill" {
 		t.Fatalf("saved SubComponentType = %q, want custom-prefill", saved.SubComponentType)

@@ -41,7 +41,7 @@ func TestDCD_DivergedLegacyCarrierDoesNotOverrideSparseSpokeSave(t *testing.T) {
 			Name:      "dcd",
 			Namespace: "ns",
 			Annotations: map[string]string{
-				annDCDSpokeSpec:                   string(data),
+				annDCDSpec:                        string(data),
 				"nvidia.com/dcd-dynamo-namespace": "stale",
 			},
 		},
