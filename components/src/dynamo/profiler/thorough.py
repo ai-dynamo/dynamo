@@ -389,7 +389,6 @@ async def run_thorough(
         len(decode_candidates),
     )
 
-    
     if not prefill_candidates or not decode_candidates:
         logger.error("Enumeration returned empty candidate lists despite fits=True.")
         return {

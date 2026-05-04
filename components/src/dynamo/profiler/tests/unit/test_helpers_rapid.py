@@ -208,8 +208,8 @@ class TestRunNaiveFallback:
         assert result["dgd_config"] is None
         assert result["best_config_df"].empty
 
-    # Critical: downstream generation must NOT happen
-    mock_generate.assert_not_called()
+        # Critical: downstream generation must NOT happen
+        mock_generate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
