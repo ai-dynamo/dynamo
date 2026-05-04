@@ -29,10 +29,12 @@ fn apply_event_with_counters(
     let worker_id = event.worker_id;
     let result = trie.apply_event_with_counters(event, Some(counters));
     let result_is_ok = result.is_ok();
-    let tree_size = trie.current_size();
-    tracing::trace!(
-        "Applied KV event to global radix tree: event_type={kind}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
-    );
+    if tracing::enabled!(tracing::Level::TRACE) {
+        let tree_size = trie.current_size();
+        tracing::trace!(
+            "Applied KV event to global radix tree: event_type={kind}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
+        );
+    }
     counters.inc(kind, result);
 }
 

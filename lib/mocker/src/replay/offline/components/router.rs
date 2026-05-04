@@ -159,12 +159,6 @@ impl PendingRequest {
             tier_overlap_blocks: TierOverlapBlocks::default(),
             effective_overlap_blocks,
             effective_cached_tokens,
-            tree_sizes: self
-                .overlaps
-                .tree_sizes
-                .iter()
-                .map(|(k, v)| (*k, *v))
-                .collect(),
             decode_blocks,
             prefill_tokens,
             track_prefill_tokens: self.track_prefill_tokens,
