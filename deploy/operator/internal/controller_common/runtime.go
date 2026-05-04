@@ -28,6 +28,10 @@ type RuntimeConfig struct {
 	KaiSchedulerEnabled bool
 	// DRAEnabled indicates whether Dynamic Resource Allocation (resource.k8s.io) is available
 	DRAEnabled bool
+	// IstioAvailable indicates whether the networking.istio.io CRDs are installed.
+	// When false the operator skips DestinationRule reconciliation to avoid errors
+	// on clusters without Istio.
+	IstioAvailable bool
 	// ExcludedNamespaces for cluster-wide mode namespace filtering
 	ExcludedNamespaces ExcludedNamespacesInterface
 }

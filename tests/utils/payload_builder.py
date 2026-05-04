@@ -14,6 +14,7 @@ from tests.utils.payloads import (
     CompletionPayload,
     CompletionPayloadWithLogprobs,
     EmbeddingPayload,
+    GuidedDecodingChatPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
     ResponsesPayload,
@@ -111,6 +112,36 @@ def cached_tokens_chat_payload(
         expected_response=expected_response
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
+    )
+
+
+def guided_decoding_chat_payload_default(
+    repeat_count: int = 1,
+    max_tokens: int = 32,
+    temperature: float = 0.0,
+) -> GuidedDecodingChatPayload:
+    """Create a json_schema guided decoding chat payload."""
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    return GuidedDecodingChatPayload(
+        body={
+            "messages": [
+                {"role": "user", "content": "What is 2+2? Return only JSON."},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer_schema", "schema": schema},
+            },
+        },
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=[],
+        required_keys=["answer"],
     )
 
 
@@ -232,6 +263,7 @@ def chat_payload(
     logprobs: bool = False,
     top_logprobs: Optional[int] = None,
     extra_body: Optional[Dict[str, Any]] = None,
+    expected_num_choices: Optional[int] = None,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -263,6 +295,7 @@ def chat_payload(
             repeat_count=repeat_count,
             expected_log=expected_log or [],
             expected_response=expected_response or [],
+            expected_num_choices=expected_num_choices,
         )
     else:
         return ChatPayload(
@@ -270,6 +303,7 @@ def chat_payload(
             repeat_count=repeat_count,
             expected_log=expected_log or [],
             expected_response=expected_response or [],
+            expected_num_choices=expected_num_choices,
         )
 
 

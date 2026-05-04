@@ -35,6 +35,14 @@ pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     }
 }
 
+const fn default_host_cache_hit_weight() -> f64 {
+    0.75
+}
+
+const fn default_disk_cache_hit_weight() -> f64 {
+    0.25
+}
+
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +178,14 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
 
+    #[serde(default = "default_host_cache_hit_weight")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub host_cache_hit_weight: f64,
+
+    #[serde(default = "default_disk_cache_hit_weight")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub disk_cache_hit_weight: f64,
+
     #[validate(range(min = 0.0))]
     pub router_temperature: f64,
 
@@ -214,14 +230,6 @@ pub struct KvRouterConfig {
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
     #[validate(range(min = 0.0))]
     pub router_ttl_secs: f64,
-
-    /// Maximum tree size before pruning (only used when use_kv_events is false, default: 2^20 = 1048576)
-    #[validate(range(min = 1))]
-    pub router_max_tree_size: usize,
-
-    /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
-    #[validate(range(min = 0.0, max = 1.0))]
-    pub router_prune_target_ratio: f64,
 
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
@@ -269,6 +277,8 @@ impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
+            host_cache_hit_weight: default_host_cache_hit_weight(),
+            disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
             use_kv_events: true,
             durable_kv_events: false, // default to NATS Core (local indexer mode)
@@ -281,8 +291,6 @@ impl Default for KvRouterConfig {
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
-            router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
-            router_prune_target_ratio: 0.8,
             router_queue_threshold: Some(4.0),
             router_event_threads: 4,
             skip_initial_worker_wait: false,

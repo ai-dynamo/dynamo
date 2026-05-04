@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Tested with dynamo 1.0 (vLLM 0.16.0).
+# Tested with Dynamo v1.0.0 (vLLM 0.16.0).
 #
 # Dynamo 0.9.1 compatibility notes:
-#   - Change image tags from :1.0.0 to :0.9.1
+#   - Change image tags from :1.1.0 to :0.9.1
 #   - Add `--connector none` to args (required in 0.9.1, rejected in 1.0)
 #   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
 #     (nemotron_nano reasoning parser is broken in 0.9.1)
@@ -35,7 +35,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           # Approximate KV-aware routing: uses prefix hashing to route
           # requests to workers likely to have relevant KV cache, without
           # requiring KV events from the backend.
@@ -67,7 +67,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 120
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           env:
             - name: HF_HOME
               value: "/opt/models"

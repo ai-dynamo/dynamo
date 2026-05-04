@@ -12,6 +12,7 @@ use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
 use dynamo_kv_router::protocols::{BlockHashOptions, OverlapScores, RouterEvent, WorkerId};
+use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -132,7 +133,7 @@ impl KvReplayRouter {
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config);
-        let policy = replay_policy(&config, args);
+        let policy = replay_policy(&config);
         let scheduler_cancel = CancellationToken::new();
         let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
@@ -190,6 +191,21 @@ impl KvReplayRouter {
             .indexer
             .find_matches_for_request(&request.tokens, None)
             .await?;
+        let effective_overlap_blocks = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as f64))
+            .collect();
+        let effective_cached_tokens = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| {
+                (
+                    *worker,
+                    (*overlap as usize) * usize::try_from(self.block_size).unwrap_or(0),
+                )
+            })
+            .collect();
         let token_seq = self.config.compute_seq_hashes_for_tracking(
             &request.tokens,
             self.block_size,
@@ -203,7 +219,9 @@ impl KvReplayRouter {
                 Some(uuid.to_string()),
                 request.tokens.len(),
                 token_seq,
-                overlaps,
+                TierOverlapBlocks::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
                 None,
                 true,
                 None,
@@ -256,7 +274,7 @@ impl KvReplayRouter {
         self.scheduler.get_potential_loads(
             None,
             isl_tokens,
-            OverlapScores::default(),
+            std::collections::HashMap::new(),
             track_prefill_tokens,
         )
     }
