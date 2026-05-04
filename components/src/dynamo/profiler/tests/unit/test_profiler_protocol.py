@@ -569,9 +569,9 @@ def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:
         hf_homes = [
             e for e in env_list if isinstance(e, dict) and e.get("name") == "HF_HOME"
         ]
-        assert len(hf_homes) == 1, (
-            f"Expected exactly one HF_HOME env on {svc_name}, got {len(hf_homes)}"
-        )
+        assert (
+            len(hf_homes) == 1
+        ), f"Expected exactly one HF_HOME env on {svc_name}, got {len(hf_homes)}"
         assert hf_homes[0]["value"] == mount, f"HF_HOME on {svc_name} should be {mount}"
 
 
@@ -602,6 +602,6 @@ def test_build_dgd_config_pvc_with_model_path_no_hf_home() -> None:
         hf_homes = [
             e for e in env_list if isinstance(e, dict) and e.get("name") == "HF_HOME"
         ]
-        assert len(hf_homes) == 0, (
-            f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"
-        )
+        assert (
+            len(hf_homes) == 0
+        ), f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"
