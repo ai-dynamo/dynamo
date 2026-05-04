@@ -1822,10 +1822,10 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueToRequests(ctx context.Con
 // mapPodCliqueScalingGroupToRequests maps a PodCliqueScalingGroup to reconcile
 // requests for its owning DGD.
 //
-// The PCSG is owned by a PodCliqueSet (controller ownerRef). The PCS name may
-// differ from the DGD name when auto-truncation is applied (see PCSNameForDGD),
-// so we look up the PCS and read its KubeLabelDynamoGraphDeploymentName label
-// to find the actual DGD name.
+// The PCSG is owned by a PodCliqueSet (controller ownerRef), which is in turn
+// owned by the DynamoGraphDeployment. The PCS name may differ from the DGD name
+// when auto-truncation is applied (see PCSNameForDGD), so we walk the ownerRef
+// chain (PCSG -> PCS -> DGD) to find the actual DGD name.
 func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
 	pcsg, ok := obj.(*grovev1alpha1.PodCliqueScalingGroup)
 	if !ok {
@@ -1842,8 +1842,8 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx
 		return nil
 	}
 
-	// Look up the PCS to find the DGD name via label, since PCS name may be
-	// truncated and no longer match the DGD name.
+	// Look up the PCS to walk the ownerRef chain to the DGD, since PCS name
+	// may be truncated and no longer match the DGD name.
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	if err := r.Client.Get(ctx, types.NamespacedName{
 		Name:      controllerRef.Name,
@@ -1856,17 +1856,18 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx
 		return nil
 	}
 
-	dgdName, ok := pcs.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	if !ok || dgdName == "" {
-		log.FromContext(ctx).V(1).Info("PodCliqueSet missing DGD name label",
-			"pcsName", controllerRef.Name,
-			"namespace", pcsg.Namespace)
+	pcsOwnerRef := metav1.GetControllerOf(pcs)
+	if pcsOwnerRef == nil ||
+		pcsOwnerRef.Kind != "DynamoGraphDeployment" {
+		log.FromContext(ctx).V(1).Info("PodCliqueSet missing DynamoGraphDeployment controller ownerReference",
+			"pcsName", pcs.Name,
+			"namespace", pcs.Namespace)
 		return nil
 	}
 
 	return []ctrl.Request{{
 		NamespacedName: types.NamespacedName{
-			Name:      dgdName,
+			Name:      pcsOwnerRef.Name,
 			Namespace: pcsg.Namespace,
 		},
 	}}
