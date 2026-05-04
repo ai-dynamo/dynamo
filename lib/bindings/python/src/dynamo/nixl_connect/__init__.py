@@ -946,6 +946,10 @@ class Descriptor:
 
         # Data is `torch.Tensor`.
         if isinstance(data, torch.Tensor):
+            # XPU tensors must be contiguous for pointer+size registration.
+            if hasattr(data, "is_xpu") and data.is_xpu and not data.is_contiguous():
+                data = data.contiguous()
+
             self._data_ptr = data.data_ptr()
             self._data_size = data.numel() * data.element_size()
             if data.is_cuda:
@@ -1160,8 +1164,6 @@ class Descriptor:
             return
 
         # Register the memory with NIXL.
-        self._connection = connection
-
         if isinstance(self._data_ref, torch.Tensor):
             if hasattr(self._data_ref, "is_xpu") and self._data_ref.is_xpu:
                 # XPU tensors: register via explicit pointer/size so NIXL maps
@@ -1170,15 +1172,19 @@ class Descriptor:
                 reg_list = [
                     (self._data_ptr, self._data_size, self._data_device.id, mem_type)
                 ]
-                self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+                nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
             else:
-                self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
+                nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
             mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [
                 (self._data_ptr, self._data_size, self._data_device.id, mem_type)
             ]
-            self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+
+        # Mark as bound after successful registration.
+        self._nixl_hndl = nixl_hndl
+        self._connection = connection
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
