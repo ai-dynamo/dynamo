@@ -58,6 +58,16 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats {
+                        workers: lookup.keys().copied().collect(),
+                        block_count: lookup
+                            .values()
+                            .map(|worker_lookup| worker_lookup.len())
+                            .sum(),
+                    };
+                    let _ = sender.send(stats);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
@@ -146,17 +156,6 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         let mut cleanup_guard = CleanupGuard::new(&self.cleanup);
         self.sweep_stale_children();
         cleanup_guard.mark_completed();
-    }
-
-    fn worker_count(&self) -> usize {
-        self.tree_sizes.len()
-    }
-
-    fn block_count(&self) -> usize {
-        self.tree_sizes
-            .iter()
-            .map(|e| e.value().load(Ordering::Relaxed))
-            .sum()
     }
 
     fn timing_report(&self) -> String {

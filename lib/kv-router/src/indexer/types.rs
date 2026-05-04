@@ -402,6 +402,18 @@ pub struct GetWorkersRequest {
     pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
+#[derive(Debug, Default)]
+pub struct WorkerLookupStats {
+    pub workers: Vec<WorkerWithDpRank>,
+    pub block_count: usize,
+}
+
+impl WorkerLookupStats {
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+}
+
 pub enum WorkerTask {
     Event(RouterEvent),
     EventWithAck {
@@ -419,6 +431,7 @@ pub enum WorkerTask {
     /// Best-effort maintenance task for shared-state backends.
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
+    Stats(oneshot::Sender<WorkerLookupStats>),
     Flush(oneshot::Sender<()>),
     Terminate,
 }

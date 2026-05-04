@@ -20,7 +20,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::{KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
@@ -531,6 +531,16 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
+                }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats {
+                        workers: worker_blocks.keys().copied().collect(),
+                        block_count: worker_blocks
+                            .values()
+                            .map(|worker_map| worker_map.len())
+                            .sum(),
+                    };
+                    let _ = sender.send(stats);
                 }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());

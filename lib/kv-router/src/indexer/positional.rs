@@ -24,10 +24,10 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
+    WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
@@ -114,8 +114,6 @@ pub type LevelIndex = FxHashMap<ExternalSequenceBlockHash, (usize, LocalBlockHas
 pub struct PositionalIndexer {
     index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
 
-    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
-
     jump_size: usize,
 }
 
@@ -131,7 +129,6 @@ impl PositionalIndexer {
 
         Self {
             index: DashMap::with_hasher(FxBuildHasher),
-            tree_sizes: DashMap::with_hasher(FxBuildHasher),
             jump_size,
         }
     }
@@ -194,6 +191,16 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!("Failed to send events: {:?}", e);
                     }
                 }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats {
+                        workers: worker_blocks.keys().copied().collect(),
+                        block_count: worker_blocks
+                            .values()
+                            .map(|worker_map| worker_map.len())
+                            .sum(),
+                    };
+                    let _ = sender.send(stats);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
@@ -209,17 +216,6 @@ impl SyncIndexer for PositionalIndexer {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.jump_search_matches(sequence, early_exit)
-    }
-
-    fn worker_count(&self) -> usize {
-        self.tree_sizes.len()
-    }
-
-    fn block_count(&self) -> usize {
-        self.tree_sizes
-            .iter()
-            .map(|e| e.value().load(Ordering::Relaxed))
-            .sum()
     }
 }
 
@@ -300,7 +296,6 @@ impl PositionalIndexer {
 
         let worker_blocks_entry = worker_blocks.entry(worker).or_default();
 
-        let mut num_blocks_added = 0usize;
         let mut duplicate_store = !blocks.is_empty();
 
         for (i, block_data) in blocks.into_iter().enumerate() {
@@ -325,19 +320,8 @@ impl PositionalIndexer {
                 Some(existing) if existing == (position, local_hash) => {}
                 Some(_) => duplicate_store = false,
                 None => {
-                    num_blocks_added += 1;
                     duplicate_store = false;
                 }
-            }
-        }
-
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_add(num_blocks_added, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_blocks_added));
             }
         }
 
@@ -366,8 +350,6 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
-        let mut num_removed_blocks = 0;
-
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
@@ -378,22 +360,12 @@ impl PositionalIndexer {
                     "Failed to find block to remove; skipping remove operation"
                 );
 
-                if let Some(size) = self.tree_sizes.get(&worker) {
-                    size.fetch_sub(num_removed_blocks, Ordering::Relaxed);
-                }
-
                 return Err(KvCacheEventError::BlockNotFound);
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
-
-            num_removed_blocks += 1;
-        }
-
-        if let Some(size) = self.tree_sizes.get(&worker) {
-            size.fetch_sub(num_removed_blocks, Ordering::Relaxed);
         }
 
         Ok(())
@@ -422,7 +394,6 @@ impl PositionalIndexer {
                     let _ = entry.remove(*seq_hash, key);
                 }
             }
-            self.tree_sizes.remove(&key);
         }
     }
 
@@ -453,13 +424,6 @@ impl PositionalIndexer {
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
                 worker_blocks.insert(worker, FxHashMap::default());
-                // Reset tree size to 0 but keep the entry so scoring remains consistent.
-                if let Some(size) = self.tree_sizes.get(&worker) {
-                    size.store(0, Ordering::Relaxed);
-                }
-            } else {
-                // Fully remove the worker from tree_sizes.
-                self.tree_sizes.remove(&worker);
             }
         }
     }
