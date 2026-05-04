@@ -113,7 +113,13 @@ pub struct DecodeBits {
 
 /// Prefill-side state.
 pub struct PrefillBits {
-    pub num_external_tokens: usize,
+    /// External tokens currently reported to vLLM via
+    /// `get_num_new_matched_tokens`. Updated on retry when vLLM
+    /// passes a new `num_computed_tokens`; the value is always
+    /// `total_position_end_tokens - prefill_num_computed_tokens`
+    /// (clamped). `AtomicUsize` so retries update without rebuilding
+    /// `PrefillBits`.
+    pub num_external_tokens: std::sync::atomic::AtomicUsize,
     pub expected_hashes: Vec<SequenceHash>,
     /// Decode-side `computed_blocks` offset; lets prefill translate
     /// `expected_hashes[i]` back to absolute token-block indices —
@@ -144,6 +150,26 @@ pub struct PrefillBits {
     /// `ConditionalDecodeG2Observer::pending`.  No explicit untrack
     /// needed in any failure path.
     pub observer_handle: ObserverHandle,
+    /// Pre-USAA failure stash. Set by `cleanup_failed_request` when
+    /// the request fails before USAA installed G1 destinations
+    /// (`g1_block_ids` is None). vLLM's connector contract treats an
+    /// empty `failed_block_ids` plus `finished_recving` as a
+    /// successful async load, so we cannot emit
+    /// `mark_failed_onboarding(rid, [])` to surface a pre-USAA
+    /// failure. The failure is replayed at USAA time with the
+    /// just-arrived external G1 ids; if the request is torn down
+    /// before USAA arrives, no notification is emitted (vLLM owns
+    /// the cancellation path in that case).
+    pub pending_failure: Mutex<Option<String>>,
+    /// Absolute end-of-loaded-range in token space:
+    /// `decode_offset_tokens + len(expected_hashes) * block_size`.
+    /// Fixed at first `ensure_started`; used to recompute
+    /// `num_external_tokens` on idempotent retries when vLLM passes
+    /// a different `num_computed_tokens` (e.g., chunked-prefill
+    /// continuation or prefix-cache hit on retry).
+    /// `num_external_tokens = total_position_end_tokens - prefill_P`
+    /// (clamped to [0, ..]).
+    pub total_position_end_tokens: usize,
 }
 
 /// Per-position metadata for a remote-prefill block decode expects

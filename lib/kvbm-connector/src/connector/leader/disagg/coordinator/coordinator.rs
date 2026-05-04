@@ -239,6 +239,28 @@ impl ConditionalDisaggCoordinator {
         self.states.contains_key(request_id)
     }
 
+    /// Whether the coordinator owns USAA for this prefill request.
+    ///
+    /// True iff a prefill-role request is tracked AND it has non-zero
+    /// external tokens to onboard. The zero-hash case (decode forwarded
+    /// no local-match hashes) returns false: the coordinator's state
+    /// exists only to receive output via the observer; vLLM's USAA
+    /// must flow through the inner connector so an inner cache hit's
+    /// `num_external_tokens` is honored without colliding with the
+    /// coordinator's `bits.num_external_tokens == 0`.
+    pub fn prefill_owns_usaa(&self, request_id: &str) -> bool {
+        self.states
+            .get(request_id)
+            .and_then(|e| {
+                e.value().as_prefill().map(|b| {
+                    b.num_external_tokens
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        > 0
+                })
+            })
+            .unwrap_or(false)
+    }
+
     fn state_for(&self, request_id: &str) -> Option<Arc<CdRequest>> {
         self.states.get(request_id).map(|e| Arc::clone(e.value()))
     }
@@ -315,6 +337,39 @@ impl ConditionalDisaggCoordinator {
             "prefill cleanup_failed_request: surfacing to vLLM"
         );
 
+        if pre_usaa {
+            // Pre-USAA failure: no G1 destinations to report yet.
+            // vLLM's connector contract treats `mark_failed_onboarding(
+            // rid, [])` as a successful async load. Stash the failure
+            // on `PrefillBits.pending_failure` so `on_usaa` can replay
+            // it at the next USAA call with the just-arrived G1 ids.
+            // If USAA never arrives (e.g. vLLM cancels), the stash is
+            // dropped via the slot's RAII payload — no notification is
+            // emitted (vLLM owns cancellation).
+            if let Some(bits) = state.as_prefill() {
+                let mut slot = bits.pending_failure.lock();
+                if slot.is_none() {
+                    *slot = Some(reason.clone());
+                }
+            }
+            crate::audit!(
+                "prefill_cleanup_pending_usaa",
+                role = "prefill",
+                request_id = %request_id,
+                reason = %reason
+            );
+            // Close the session so the peer learns of the failure.
+            // Do NOT remove `self.states[request_id]` — `on_usaa` needs
+            // it to find the stashed failure.
+            if let Some(session) = state.session.lock().clone() {
+                session.close(Some(reason));
+            }
+            return;
+        }
+
+        // Post-USAA failure: emit the failed external G1 ids and tear
+        // down. `failed_g1_block_ids` already returns the external
+        // window only (g1_block_ids stashed at first non-no-op USAA).
         if let Err(err) = self
             .worker_hook
             .mark_failed_onboarding(request_id.to_string(), g1_ids)
@@ -357,7 +412,9 @@ impl ConditionalDisaggCoordinator {
 
         tracing::info!(
             num_expected_hashes = bits.expected_hashes.len(),
-            num_external_tokens = bits.num_external_tokens,
+            num_external_tokens = bits
+                .num_external_tokens
+                .load(std::sync::atomic::Ordering::Acquire),
             "prefill run_setup: start"
         );
 
@@ -531,9 +588,12 @@ impl ConditionalDisaggCoordinator {
         Ok(())
     }
 
-    /// Pull a chunk of available blocks into P's G2, register them, and
-    /// append to `bits.registered_g2`.  Maintains positional order matching
-    /// `bits.expected_hashes`.
+    /// Pull, register, and append blocks for a possibly non-contiguous
+    /// availability delta. Splits the input into maximal contiguous runs
+    /// (by `expected_hashes` index) and processes each run via
+    /// [`Self::pull_and_register_contiguous_chunk`]. The session API does
+    /// not guarantee that a single `Available(blocks)` covers a
+    /// contiguous slot range — sparse or coalesced deltas are valid.
     async fn pull_and_register_chunk(
         self: &Arc<Self>,
         request_id: &str,
@@ -563,6 +623,39 @@ impl ConditionalDisaggCoordinator {
             .collect();
         indexed.sort_by_key(|(idx, _)| *idx);
 
+        // Group into maximal contiguous runs; each run is one
+        // pull/register transaction (positional order required by
+        // `MutableBlock::complete`).
+        let mut runs: Vec<Vec<(usize, CommittedBlock)>> = Vec::new();
+        for entry in indexed {
+            match runs.last_mut() {
+                Some(run) if run.last().unwrap().0 + 1 == entry.0 => run.push(entry),
+                _ => runs.push(vec![entry]),
+            }
+        }
+
+        for run in runs {
+            self.pull_and_register_contiguous_chunk(request_id, state, bits, run, filled_index)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Inner helper: ONE contiguous run of expected-hash positions.
+    async fn pull_and_register_contiguous_chunk(
+        self: &Arc<Self>,
+        request_id: &str,
+        state: &Arc<CdRequest>,
+        bits: &PrefillBits,
+        indexed: Vec<(usize, CommittedBlock)>,
+        filled_index: &mut usize,
+    ) -> Result<()> {
+        debug_assert!(!indexed.is_empty());
+        debug_assert!(
+            indexed.windows(2).all(|w| w[1].0 == w[0].0 + 1),
+            "pull_and_register_contiguous_chunk requires contiguous indices"
+        );
+
         let hashes: Vec<SequenceHash> = indexed.iter().map(|(_, b)| b.hash).collect();
         let chunk_size = hashes.len();
         let dst = self.inner.allocate_g2_blocks(chunk_size)?;
@@ -573,24 +666,32 @@ impl ConditionalDisaggCoordinator {
             .clone()
             .ok_or_else(|| anyhow!("pull: session missing for {}", request_id))?;
         let filled = session.pull(hashes.clone(), dst).await?;
+        // Transport must return exactly `chunk_size` blocks; a short or
+        // long result would silently truncate the zip below.
+        if filled.len() != chunk_size {
+            anyhow::bail!(
+                "session.pull returned {} blocks, expected {} (request_id={})",
+                filled.len(),
+                chunk_size,
+                request_id
+            );
+        }
 
         let token_range_start = indexed.first().map(|(i, _)| *i).unwrap_or(0);
         let token_range_end = indexed.last().map(|(i, _)| *i + 1).unwrap_or(0);
-        for (i, (idx, _)) in indexed.iter().enumerate() {
-            if *idx != token_range_start + i {
-                anyhow::bail!(
-                    "non-contiguous chunk: expected idx {}, got {} (chunk: {:?})",
-                    token_range_start + i,
-                    idx,
-                    indexed.iter().map(|(i, _)| *i).collect::<Vec<_>>()
-                );
-            }
-        }
         let abs_start = bits.computed_blocks_offset + token_range_start;
         let abs_end = bits.computed_blocks_offset + token_range_end;
         let token_blocks = self
             .inner
             .token_blocks_for_range(request_id, abs_start..abs_end)?;
+        if token_blocks.len() != chunk_size {
+            anyhow::bail!(
+                "token_blocks_for_range returned {} blocks, expected {} (request_id={})",
+                token_blocks.len(),
+                chunk_size,
+                request_id
+            );
+        }
         let mut completes: Vec<CompleteBlock<G2>> = Vec::with_capacity(chunk_size);
         for (mutable, token_block) in filled.into_iter().zip(token_blocks.iter()) {
             completes.push(
@@ -600,6 +701,14 @@ impl ConditionalDisaggCoordinator {
             );
         }
         let registered = self.inner.register_g2_blocks(completes)?;
+        if registered.len() != chunk_size {
+            anyhow::bail!(
+                "register_g2_blocks returned {} blocks, expected {} (request_id={})",
+                registered.len(),
+                chunk_size,
+                request_id
+            );
+        }
         bits.registered_g2.lock().extend(registered);
         *filled_index += chunk_size;
         Ok(())
@@ -610,7 +719,7 @@ impl ConditionalDisaggCoordinator {
         self: &Arc<Self>,
         request_id: &str,
         state: &Arc<CdRequest>,
-        g1_dst_local_match_prefix: Vec<BlockId>,
+        g1_dst_external: Vec<BlockId>,
     ) -> Result<()> {
         let bits = state
             .as_prefill()
@@ -621,7 +730,10 @@ impl ConditionalDisaggCoordinator {
         }
         *bits.status.lock() = PrefillStatus::OnboardingScheduled;
 
-        if bits.num_external_tokens == 0 {
+        let bits_external_tokens = bits
+            .num_external_tokens
+            .load(std::sync::atomic::Ordering::Acquire);
+        if bits_external_tokens == 0 {
             tracing::info!(
                 "kick_onboard: num_external_tokens=0 — \
                  no G2→G1 onboard needed (cold-cache CD); \
@@ -631,26 +743,34 @@ impl ConditionalDisaggCoordinator {
             return Ok(());
         }
 
+        // We pull all `expected_hashes.len()` blocks into G2; vLLM
+        // gave us only `external_blocks` G1 destinations (the
+        // external suffix beyond the local-prefix blocks vLLM
+        // already has cached). Onboard the SUFFIX of registered_g2
+        // matching the external_blocks count.
+        let registered_count = bits.registered_g2.lock().len();
+        let external_blocks = g1_dst_external.len();
+        if external_blocks > registered_count {
+            anyhow::bail!(
+                "kick_onboard: external_blocks {} > registered_g2 count {} \
+                 (num_external_tokens={}, expected_hashes.len()={})",
+                external_blocks,
+                registered_count,
+                bits_external_tokens,
+                bits.expected_hashes.len(),
+            );
+        }
+        let suffix_start = registered_count - external_blocks;
         let g2_src_block_ids: Vec<BlockId> = bits
             .registered_g2
             .lock()
             .iter()
+            .skip(suffix_start)
             .map(|b| b.block_id())
             .collect();
 
-        if g2_src_block_ids.len() != g1_dst_local_match_prefix.len() {
-            anyhow::bail!(
-                "kick_onboard: G2 src count {} != local-match G1 dst prefix count {} \
-                 (num_external_tokens={}, expected_hashes.len()={})",
-                g2_src_block_ids.len(),
-                g1_dst_local_match_prefix.len(),
-                bits.num_external_tokens,
-                bits.expected_hashes.len(),
-            );
-        }
-
         self.transport
-            .local_g2_to_g1(g2_src_block_ids, g1_dst_local_match_prefix)
+            .local_g2_to_g1(g2_src_block_ids, g1_dst_external)
             .await?;
 
         *bits.status.lock() = PrefillStatus::OnboardingComplete;
@@ -769,14 +889,28 @@ impl ConditionalDisaggCoordinator {
         *self.failure_sink.lock() = Some(sink);
     }
 
-    pub fn begin_remote_prefill(
+    /// Begin a remote-prefill session.
+    ///
+    /// `install_payload` is invoked synchronously after coordinator state
+    /// is inserted but BEFORE the enqueue task is spawned. This ordering
+    /// closes a race where a fast queue-enqueue failure could fire
+    /// `mark_failed` (and via the failure sink, cleanup) before the
+    /// caller had a chance to install the slot's RAII payload — leaving
+    /// the wrapper holding a payload referencing a state that had
+    /// already been cleaned up. With the install in-line, by the time
+    /// the spawned task can run, the payload is already on the slot.
+    pub fn begin_remote_prefill<F>(
         &self,
         request_id: &str,
         inputs: &PolicyInputs,
         initiator_instance_id: InstanceId,
         local_match_g2: Vec<ImmutableBlock<G2>>,
         prefill_token_ids: Vec<u32>,
-    ) -> Result<BeginOutcome> {
+        install_payload: F,
+    ) -> Result<BeginOutcome>
+    where
+        F: FnOnce(&str) -> Result<()>,
+    {
         if self.states.contains_key(request_id) {
             anyhow::bail!(
                 "begin_remote_prefill called twice for request_id={}",
@@ -825,6 +959,16 @@ impl ConditionalDisaggCoordinator {
         );
         *state.session.lock() = Some(Arc::clone(&session));
         self.states.insert(request_id.to_string(), Arc::clone(&state));
+
+        // Install the slot RAII payload BEFORE spawning the enqueue task.
+        // If install fails, roll back coordinator state and close the
+        // session — the wrapper has not yet committed to returning
+        // (Some(N), true) for this request, so we abort cleanly.
+        if let Err(err) = install_payload(request_id) {
+            self.states.remove(request_id);
+            session.close(Some(format!("payload install failed: {err}")));
+            return Err(err);
+        }
 
         // Spawn lifecycle watcher.
         let watcher_coord = self.weak_self.clone();
@@ -914,7 +1058,9 @@ impl ConditionalDisaggCoordinator {
     }
 
     pub fn mark_failed(&self, request_id: &str, reason: String) {
+        let mut found = false;
         if let Some(state) = self.states.get(request_id) {
+            found = true;
             let session_opt = state.value().session.lock().clone();
             let mut status = state.value().status.lock();
             *status = CdRequestStatus::Released;
@@ -925,7 +1071,25 @@ impl ConditionalDisaggCoordinator {
             }
             drop(state);
             if let Some(session) = session_opt {
-                session.close(Some(reason));
+                session.close(Some(reason.clone()));
+            }
+        }
+
+        // Drive the failure sink directly so vLLM unblocks promptly,
+        // not after the lifecycle watcher's Failed-event roundtrip
+        // (which can take up to the watchdog deadline if the session
+        // emits no terminal event for any reason). The sink and the
+        // watcher path are both idempotent (HashSet inserts and
+        // DashMap removes), so a duplicate invocation is safe.
+        if found {
+            let sink_handle = self.failure_sink.lock().clone();
+            if let Some(sink_weak) = sink_handle {
+                if let Some(sink) = sink_weak.upgrade() {
+                    let request_id_owned = request_id.to_string();
+                    self.runtime.spawn(async move {
+                        sink.on_session_failure(request_id_owned, reason).await;
+                    });
+                }
             }
         }
     }
@@ -936,17 +1100,89 @@ impl ConditionalDisaggCoordinator {
 // ============================================================================
 
 impl ConditionalDisaggCoordinator {
-    pub fn ensure_started(&self, request_id: &str, params: &RemotePrefillParams) -> Result<usize> {
+    /// Idempotent per-request init for the prefill side.
+    ///
+    /// `install_payload` is invoked synchronously after coordinator state
+    /// is inserted but BEFORE the run_setup task is spawned, and ONLY
+    /// when this is the first call (idempotent retries return cached
+    /// `num_external_tokens` without re-installing). It is also skipped
+    /// when `num_external_tokens == 0` (zero-hash CD case where the
+    /// wrapper falls through to the inner connector and inner owns the
+    /// async-load slot transaction).
+    ///
+    /// This ordering closes a race where a fast `run_setup` failure
+    /// could fire `cleanup_failed_request` before the wrapper had a
+    /// chance to install the slot's RAII payload. It also makes the
+    /// install non-idempotent at the wrapper layer (vLLM may call gnmt
+    /// multiple times without an intervening USAA; the production slot
+    /// rejects a second install).
+    pub fn ensure_started<F>(
+        &self,
+        request_id: &str,
+        params: &RemotePrefillParams,
+        prefill_num_computed_tokens: usize,
+        install_payload: F,
+    ) -> Result<usize>
+    where
+        F: FnOnce(&str) -> Result<()>,
+    {
         if let Some(state) = self.state_for(request_id) {
             let bits = state
                 .as_prefill()
                 .expect("ensure_started: existing request must be prefill-role");
-            return Ok(bits.num_external_tokens);
+            // Idempotent retry: vLLM may call gnmt multiple times with
+            // a different `num_computed_tokens` (e.g., chunked prefill
+            // continuation, prefix-cache hit on retry, allocation
+            // failure between gnmt + USAA). Recompute and update the
+            // reported external_tokens; the underlying
+            // `expected_hashes` and pulled blocks are unchanged — the
+            // caller's USAA path slices the external SUFFIX of the
+            // pulled blocks based on the freshly-computed value.
+            let new_external = bits
+                .total_position_end_tokens
+                .saturating_sub(prefill_num_computed_tokens);
+            bits.num_external_tokens
+                .store(new_external, std::sync::atomic::Ordering::Release);
+            crate::audit!(
+                "ensure_started_idempotent_recompute",
+                role = "prefill",
+                request_id = %request_id,
+                prefill_num_computed_tokens = prefill_num_computed_tokens,
+                total_position_end_tokens = bits.total_position_end_tokens,
+                num_external_tokens = new_external
+            );
+            return Ok(new_external);
         }
 
         let block_size = self.inner.block_size();
-        let num_external_tokens = params.sequence_hashes.len() * block_size;
-        let computed_blocks_offset = params.num_computed_tokens / block_size;
+        // Decode forwarded `params.sequence_hashes` covering positions
+        // [D, D + N*BS) where D = `params.num_computed_tokens` (decode
+        // side). The connector pulls all N hashes into G2 regardless
+        // of `prefill_num_computed_tokens` (P) — this lets retries
+        // with a new P just re-derive the external count without
+        // re-slicing in-flight pulls. The slot-side onboard at USAA
+        // takes the SUFFIX of the pulled blocks corresponding to
+        // [P, D + N*BS).
+        let decode_offset_tokens = params.num_computed_tokens;
+        let total_position_end_tokens = decode_offset_tokens + params.sequence_hashes.len() * block_size;
+        let num_external_tokens =
+            total_position_end_tokens.saturating_sub(prefill_num_computed_tokens);
+        let expected_hashes: Vec<SequenceHash> = params.sequence_hashes.clone();
+        // `expected_hashes[i]` lands at absolute token-block index
+        // `D/BS + i`; `pull_and_register_*` uses this to translate to
+        // `token_blocks_for_range`.
+        let computed_blocks_offset = decode_offset_tokens / block_size;
+        if prefill_num_computed_tokens > decode_offset_tokens {
+            crate::audit!(
+                "prefill_local_prefix_overlap",
+                role = "prefill",
+                request_id = %request_id,
+                decode_offset_tokens = decode_offset_tokens,
+                prefill_num_computed_tokens = prefill_num_computed_tokens,
+                total_position_end_tokens = total_position_end_tokens,
+                num_external_tokens = num_external_tokens
+            );
+        }
 
         // Compute expected output hashes and install the observer entry.
         let split = self.inner.slot_match_split(request_id)?;
@@ -961,8 +1197,8 @@ impl ConditionalDisaggCoordinator {
             self.observer.track(request_id.to_string(), expected_outputs);
 
         let bits = PrefillBits {
-            num_external_tokens,
-            expected_hashes: params.sequence_hashes.clone(),
+            num_external_tokens: std::sync::atomic::AtomicUsize::new(num_external_tokens),
+            expected_hashes,
             computed_blocks_offset,
             pending_g1: Mutex::new(None),
             g1_block_ids: Mutex::new(None),
@@ -972,6 +1208,8 @@ impl ConditionalDisaggCoordinator {
             onboarding_scheduled: std::sync::atomic::AtomicBool::new(false),
             status: Mutex::new(PrefillStatus::Attaching),
             observer_handle,
+            pending_failure: Mutex::new(None),
+            total_position_end_tokens,
         };
 
         // Use the top-level CdRequest constructor.  `session_id` is
@@ -984,6 +1222,18 @@ impl ConditionalDisaggCoordinator {
         );
         self.states
             .insert(request_id.to_string(), Arc::clone(&state));
+
+        // Install the slot RAII payload BEFORE spawning run_setup,
+        // and only when there's CD-bound work to onboard. Zero-hash
+        // requests (decode forwarded no local-match hashes) leave
+        // payload install to the wrapper's inner-passthrough path; the
+        // coordinator state still tracks for observer-side output flow.
+        if num_external_tokens > 0 {
+            if let Err(err) = install_payload(request_id) {
+                self.states.remove(request_id);
+                return Err(err);
+            }
+        }
 
         let coord = self
             .arc_self()
@@ -1036,38 +1286,97 @@ impl ConditionalDisaggCoordinator {
             .as_prefill()
             .expect("on_usaa: CdRequest must be prefill-role");
 
-        // Post-onboard follow-up USAAs are no-ops.
-        if num_external_tokens == 0 && bits.num_external_tokens > 0 {
+        let bits_external_tokens = bits
+            .num_external_tokens
+            .load(std::sync::atomic::Ordering::Acquire);
+        let block_size = self.inner.block_size();
+        let external_blocks = if block_size > 0 {
+            bits_external_tokens / block_size
+        } else {
+            0
+        };
+
+        // Replay any pre-USAA failure stash: if `cleanup_failed_request`
+        // ran before USAA installed G1 ids, it stashed the reason
+        // instead of emitting `mark_failed_onboarding(rid, [])` (which
+        // vLLM treats as success). USAA is the first point we have
+        // real G1 destinations to report — emit them as failed (the
+        // EXTERNAL suffix only, not the local-prefix blocks vLLM
+        // already has cached) and tear down without continuing the
+        // USAA bookkeeping.
+        let pending = bits.pending_failure.lock().clone();
+        if let Some(reason) = pending {
+            let external_slice_start = block_ids.len().saturating_sub(external_blocks);
+            let external_g1_ids: Vec<BlockId> = block_ids[external_slice_start..].to_vec();
+            crate::audit!(
+                "prefill_usaa_replay_pending_failure",
+                role = "prefill",
+                request_id = %request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len()
+            );
+            let coord = self
+                .arc_self()
+                .ok_or_else(|| anyhow!("coordinator weak_self upgrade failed"))?;
+            let request_id_owned = request_id.to_string();
+            self.runtime.spawn(async move {
+                if let Err(err) = coord
+                    .worker_hook
+                    .mark_failed_onboarding(request_id_owned.clone(), external_g1_ids)
+                    .await
+                {
+                    tracing::error!(
+                        request_id = request_id_owned,
+                        error = %err,
+                        "prefill on_usaa: mark_failed_onboarding RPC failed"
+                    );
+                }
+                coord.states.remove(&request_id_owned);
+            });
             return Ok(());
         }
 
-        if num_external_tokens != bits.num_external_tokens {
+        // Post-onboard follow-up USAAs are no-ops.
+        if num_external_tokens == 0 && bits_external_tokens > 0 {
+            return Ok(());
+        }
+
+        if num_external_tokens != bits_external_tokens {
             anyhow::bail!(
                 "on_usaa: num_external_tokens mismatch (got {}, expected {})",
                 num_external_tokens,
-                bits.num_external_tokens
+                bits_external_tokens
             );
         }
 
-        // Stash the FULL G1 window for failure paths.
+        if block_ids.len() < external_blocks {
+            anyhow::bail!(
+                "on_usaa: block_ids len {} < external_blocks {} (num_external_tokens={})",
+                block_ids.len(),
+                external_blocks,
+                bits_external_tokens
+            );
+        }
+
+        // vLLM lays out USAA's `block_ids` as `[local_computed_prefix |
+        // external]`. The connector loads the EXTERNAL suffix only;
+        // taking `block_ids[..external_blocks]` would copy remote KV
+        // into vLLM's already-computed prefix block AND miss the last
+        // external block. Correct slice is the suffix.
+        let external_slice_start = block_ids.len().saturating_sub(external_blocks);
+        let g1_ids: Vec<BlockId> = block_ids[external_slice_start..].to_vec();
+
+        // Stash ONLY the external suffix for failure paths so
+        // post-USAA cleanup reports just the external blocks (not the
+        // local-prefix blocks vLLM already has).
         {
             let mut stash = bits.g1_block_ids.lock();
             if stash.is_none() {
-                *stash = Some(block_ids.to_vec());
+                *stash = Some(g1_ids.clone());
             }
         }
 
-        let block_size = self.inner.block_size();
-        let local_match_blocks = bits.num_external_tokens / block_size;
-        if block_ids.len() < local_match_blocks {
-            anyhow::bail!(
-                "on_usaa: block_ids len {} < local_match_blocks {} (num_external_tokens={})",
-                block_ids.len(),
-                local_match_blocks,
-                bits.num_external_tokens
-            );
-        }
-        let g1_ids: Vec<BlockId> = block_ids[..local_match_blocks].to_vec();
         let pulls_complete = bits.pulls_complete.load(Ordering::Acquire);
 
         if pulls_complete {

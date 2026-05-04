@@ -200,6 +200,18 @@ struct CdRequestState {
 
     remote_pipeline_complete: AtomicBool,
     completed: AtomicBool,
+
+    /// Pre-USAA failure stash. Set by `cleanup_failed_request` when
+    /// the request fails before USAA had a chance to install G1
+    /// destinations (no `local_match_g1_block_ids` and no
+    /// `remote_slots`). vLLM's connector contract treats an empty
+    /// `failed_block_ids` plus `finished_recving` as a successful
+    /// async load, so we cannot emit `mark_failed_onboarding(rid, [])`
+    /// to surface a pre-USAA failure. Instead the failure is stashed
+    /// here and replayed at USAA time with the now-known G1 ids; if
+    /// the request is torn down before USAA arrives, no notification
+    /// is emitted (vLLM owns the cancellation path in that case).
+    pending_failure: Mutex<Option<String>>,
 }
 
 impl CdRequestState {
@@ -341,11 +353,12 @@ impl DecodeDisaggLeader {
         request_id: &str,
         num_computed_tokens: usize,
     ) -> Result<(Option<usize>, bool)> {
-        let inner_result = self
-            .inner
-            .get_num_new_matched_tokens(request_id, num_computed_tokens)?;
-        tracing::info!(?inner_result, "decode_gnmt: inner returned");
-
+        // Idempotent retry: vLLM may call gnmt multiple times for the
+        // same request without an intervening USAA (e.g. allocation
+        // failed and the scheduler re-runs gnmt). Check our CD state
+        // BEFORE calling inner so we don't double-invoke inner's gnmt
+        // on retries — inner is contractually idempotent but skipping
+        // the call avoids unnecessary work and tightens the surface.
         if let Some(state) = self.cd_request_state.get(request_id) {
             tracing::info!(
                 reserved_tokens = state.reserved_tokens,
@@ -359,6 +372,11 @@ impl DecodeDisaggLeader {
             );
             return Ok((Some(state.reserved_tokens), true));
         }
+
+        let inner_result = self
+            .inner
+            .get_num_new_matched_tokens(request_id, num_computed_tokens)?;
+        tracing::info!(?inner_result, "decode_gnmt: inner returned");
 
         let (count, _async_flag) = inner_result;
         let Some(matched_tokens) = count else {
@@ -518,6 +536,7 @@ impl DecodeDisaggLeader {
             remote_slot_index: HashMap::new(),
             remote_pipeline_complete: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            pending_failure: Mutex::new(None),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&new_state));
@@ -539,54 +558,36 @@ impl DecodeDisaggLeader {
             full_block_external_tokens,
             base_offset
         );
+        // Closure invoked synchronously inside begin_remote_prefill,
+        // BEFORE the enqueue task is spawned — closes the race where
+        // a fast queue failure could clean up coordinator state before
+        // the wrapper installed its slot RAII payload.
+        let coordinator_weak: Weak<ConditionalDisaggCoordinator> =
+            Arc::downgrade(&self.coordinator);
+        let inner_for_install = Arc::clone(&self.inner);
+        let weak_self_for_install = self.weak_self.clone();
+        let install_payload = move |rid: &str| -> Result<()> {
+            let payload = Box::new(CdRequestStatePayload {
+                request_id: rid.to_string(),
+                reserved_tokens: full_block_external_tokens,
+                wrapper: weak_self_for_install,
+                coordinator: coordinator_weak,
+            });
+            inner_for_install.install_cd_onboarding_payload(rid, payload)
+        };
         match self.coordinator.begin_remote_prefill(
             request_id,
             inputs,
             initiator,
             session_local_g2,
             prefill_token_ids,
+            install_payload,
         ) {
             Ok(outcome) => {
                 tracing::info!(
                     session_id = %outcome.session_id,
                     "commit_gnmt_remote: begin_remote_prefill ok"
                 );
-                // Install the RAII payload on the slot's
-                // OnboardingState. This is what brings the slot's
-                // canonical transaction state machine in sync with
-                // the (Some(N), true) async-load promise we're
-                // about to return to vLLM. When
-                // process_finished_onboarding takes the
-                // OnboardingState, the payload's Drop runs the
-                // canonical cleanup chain.
-                let coordinator_weak: Weak<ConditionalDisaggCoordinator> =
-                    Arc::downgrade(&self.coordinator);
-                let payload = Box::new(CdRequestStatePayload {
-                    request_id: request_id.to_string(),
-                    reserved_tokens: full_block_external_tokens,
-                    wrapper: self.weak_self.clone(),
-                    coordinator: coordinator_weak,
-                });
-                if let Err(err) =
-                    self.inner.install_cd_onboarding_payload(request_id, payload)
-                {
-                    tracing::error!(
-                        error = %err,
-                        "commit_gnmt_remote: install_cd_onboarding_payload failed; \
-                         rolling back cd_request_state"
-                    );
-                    crate::audit!(
-                        "cd_payload_install_failed",
-                        role = "decode",
-                        request_id,
-                        error = %err
-                    );
-                    // Roll back cd_request_state and coordinator; the
-                    // RAII Drop never gets to run for this request.
-                    self.cd_request_state.remove(request_id);
-                    self.coordinator.release(request_id);
-                    return Err(err);
-                }
                 crate::audit!(
                     "cd_payload_installed",
                     role = "decode",
@@ -597,6 +598,9 @@ impl DecodeDisaggLeader {
             }
             Err(err) => {
                 tracing::error!(error = %err, "commit_gnmt_remote: begin_remote_prefill failed");
+                // Coordinator state was already rolled back inside
+                // begin_remote_prefill on payload-install failure; we
+                // also drop our wrapper-side cd_request_state.
                 self.cd_request_state.remove(request_id);
                 Err(err)
             }
@@ -630,6 +634,73 @@ impl DecodeDisaggLeader {
             return self
                 .inner
                 .update_state_after_alloc(request_id, block_ids, num_external_tokens);
+        }
+
+        // Replay any pre-USAA failure stash: if `cleanup_failed_request`
+        // ran before USAA installed G1 ids, it stashed the reason
+        // instead of emitting `mark_failed_onboarding(rid, [])` (which
+        // vLLM treats as success). USAA is the first point we have
+        // real G1 destinations to report — emit them as failed and
+        // tear down without continuing the USAA bookkeeping.
+        let pending = self
+            .cd_request_state
+            .get(request_id)
+            .and_then(|e| e.pending_failure.lock().clone());
+        if let Some(reason) = pending {
+            // Only the EXTERNAL slice should be reported failed.
+            // vLLM truncates `request.num_computed_tokens` at the
+            // first invalid block; reporting the entire `block_ids`
+            // (including the already-computed prefix) would force
+            // recomputation from token 0. The external load covers
+            // exactly `num_external_tokens / block_size` blocks at
+            // the tail of `block_ids`.
+            let block_size = self.inner.block_size();
+            let external_blocks = if block_size > 0 {
+                num_external_tokens / block_size
+            } else {
+                0
+            };
+            let external_slice_start = block_ids.len().saturating_sub(external_blocks);
+            let external_g1_ids: Vec<BlockId> = block_ids[external_slice_start..].to_vec();
+            crate::audit!(
+                "usaa_replay_pending_failure",
+                role = "decode",
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len()
+            );
+            tracing::warn!(
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len(),
+                "decode_usaa: replaying pre-USAA failure with external G1 slice"
+            );
+            // Spawn the worker notification (async) and the wrapper-
+            // side cleanup. Returning Ok lets vLLM's USAA bookkeeping
+            // complete; the failure surfaces via finished_recving with
+            // the failed_block_ids in the same forward pass.
+            let weak_self = self.weak_self.clone();
+            let request_id_owned = request_id.to_string();
+            self.tokio_handle.spawn(async move {
+                if let Some(this) = weak_self.upgrade() {
+                    if let Err(err) = this
+                        .worker_hook
+                        .mark_failed_onboarding(request_id_owned.clone(), external_g1_ids)
+                        .await
+                    {
+                        tracing::error!(
+                            request_id = request_id_owned,
+                            error = %err,
+                            "mark_failed_onboarding failed during USAA replay"
+                        );
+                    }
+                    this.release_request(&request_id_owned);
+                    this.coordinator.release(&request_id_owned);
+                }
+            });
+            return Ok(());
         }
 
         self.commit_usaa1(request_id, block_ids, num_external_tokens)
@@ -729,6 +800,9 @@ impl DecodeDisaggLeader {
             remote_slot_index,
             remote_pipeline_complete: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            // Carry over any pre-USAA stash from the gnmt-time state;
+            // commit_usaa1 replaces the Arc entry so we must thread it.
+            pending_failure: Mutex::new(existing.pending_failure.lock().clone()),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
@@ -900,14 +974,18 @@ impl DecodeDisaggLeader {
         while let Some(d) = avail.next().await {
             match d {
                 AvailabilityDelta::Available(blocks) => {
-                    // Validate every incoming hash is expected.
-                    // Any unexpected hash is a protocol violation
-                    // — panic loud (mirrors prefill_coordinator).
+                    // Validate every incoming hash is expected. Any
+                    // unexpected hash is a protocol violation — return
+                    // an error so the caller's `?` routes to
+                    // `cleanup_failed_request`, surfacing the failure to
+                    // vLLM instead of hanging the request via a panic in
+                    // a spawned task.
                     for b in &blocks {
                         if !state.remote_slot_index.contains_key(&b.hash) {
-                            panic!(
+                            anyhow::bail!(
                                 "availability carried hash {:?} not in expected_remote_hashes for {}",
-                                b.hash, request_id
+                                b.hash,
+                                request_id
                             );
                         }
                     }
@@ -959,10 +1037,13 @@ impl DecodeDisaggLeader {
         Ok(())
     }
 
-    /// Pull a chunk into freshly-allocated G2 mutables, complete
-    /// + register, and run the G2→G1 onboard for the chunk's
-    /// slice in one shot.  Maintains positional ordering against
-    /// `remote_slots` via `sequence_index`.
+    /// Pull, register, and onboard a set of remote hashes — possibly
+    /// non-contiguous in slot-index space. Splits the input into
+    /// maximal contiguous runs (by slot index) and processes each run
+    /// via [`Self::pull_register_onboard_contiguous_chunk`]. The
+    /// session API does not guarantee that a single
+    /// `AvailabilityDelta::Available(blocks)` covers a contiguous slot
+    /// range — sparse or coalesced deltas are valid shapes.
     async fn pull_register_onboard_chunk(
         self: &Arc<Self>,
         request_id: &str,
@@ -970,16 +1051,8 @@ impl DecodeDisaggLeader {
         hashes: Vec<SequenceHash>,
         session: Arc<dyn Session>,
     ) -> Result<()> {
-        crate::audit!(
-            "worker_pull_chunk_start",
-            role = "decode",
-            request_id,
-            num_hashes = hashes.len()
-        );
-        // Reorder hashes by their slot position so chunks pair
-        // with the correct G1 destination + token block.  Chunks
-        // may arrive in any order on the wire, but positional
-        // order is required for `MutableBlock::complete`.
+        // Reorder hashes by their slot position; slot order is required
+        // by `MutableBlock::complete` per contiguous run.
         let mut indexed: Vec<(usize, SequenceHash)> = hashes
             .into_iter()
             .map(|h| {
@@ -992,18 +1065,45 @@ impl DecodeDisaggLeader {
             .collect();
         indexed.sort_by_key(|(slot_idx, _)| *slot_idx);
 
-        // Require contiguous chunk (slot-index space).
-        let first_slot = indexed[0].0;
-        for (i, (slot_idx, _)) in indexed.iter().enumerate() {
-            if *slot_idx != first_slot + i {
-                anyhow::bail!(
-                    "non-contiguous chunk: expected slot {}, got {} (chunk: {:?})",
-                    first_slot + i,
-                    slot_idx,
-                    indexed.iter().map(|(i, _)| *i).collect::<Vec<_>>()
-                );
+        // Group into maximal contiguous runs (slot_idx[i+1] ==
+        // slot_idx[i] + 1). Each run is one onboard transaction.
+        let mut runs: Vec<Vec<(usize, SequenceHash)>> = Vec::new();
+        for entry in indexed {
+            match runs.last_mut() {
+                Some(run) if run.last().unwrap().0 + 1 == entry.0 => run.push(entry),
+                _ => runs.push(vec![entry]),
             }
         }
+
+        for run in runs {
+            self.pull_register_onboard_contiguous_chunk(request_id, state, run, Arc::clone(&session))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Inner helper that handles ONE contiguous run of slot indices.
+    /// Splits + dispatch is the caller's job; see
+    /// [`Self::pull_register_onboard_chunk`].
+    async fn pull_register_onboard_contiguous_chunk(
+        self: &Arc<Self>,
+        request_id: &str,
+        state: &Arc<CdRequestState>,
+        indexed: Vec<(usize, SequenceHash)>,
+        session: Arc<dyn Session>,
+    ) -> Result<()> {
+        debug_assert!(!indexed.is_empty());
+        debug_assert!(
+            indexed.windows(2).all(|w| w[1].0 == w[0].0 + 1),
+            "pull_register_onboard_contiguous_chunk requires contiguous slot indices"
+        );
+
+        crate::audit!(
+            "worker_pull_chunk_start",
+            role = "decode",
+            request_id,
+            num_hashes = indexed.len()
+        );
 
         let chunk_size = indexed.len();
         let ordered_hashes: Vec<SequenceHash> = indexed.iter().map(|(_, h)| *h).collect();
@@ -1032,6 +1132,17 @@ impl DecodeDisaggLeader {
             request_id,
             num_filled = filled.len()
         );
+        // Transport must return exactly `chunk_size` blocks; a short or
+        // long result would silently truncate the zip below and copy
+        // mismatched G2/G1 blocks.
+        if filled.len() != chunk_size {
+            anyhow::bail!(
+                "session.pull returned {} blocks, expected {} (request_id={})",
+                filled.len(),
+                chunk_size,
+                request_id
+            );
+        }
 
         // 2. Pull token blocks for the chunk's positions to
         //    drive `MutableBlock::complete`.
@@ -1040,6 +1151,14 @@ impl DecodeDisaggLeader {
         let token_blocks = self
             .inner
             .token_blocks_for_range(request_id, token_range_start..token_range_end)?;
+        if token_blocks.len() != chunk_size {
+            anyhow::bail!(
+                "token_blocks_for_range returned {} blocks, expected {} (request_id={})",
+                token_blocks.len(),
+                chunk_size,
+                request_id
+            );
+        }
 
         let mut completes: Vec<CompleteBlock<G2>> = Vec::with_capacity(chunk_size);
         for (mutable, token_block) in filled.into_iter().zip(token_blocks.iter()) {
@@ -1052,6 +1171,14 @@ impl DecodeDisaggLeader {
 
         // 3. Register with the leader's G2 manager.
         let registered = self.inner.register_g2_blocks(completes)?;
+        if registered.len() != chunk_size {
+            anyhow::bail!(
+                "register_g2_blocks returned {} blocks, expected {} (request_id={})",
+                registered.len(),
+                chunk_size,
+                request_id
+            );
+        }
         let chunk_g2_block_ids: Vec<BlockId> = registered.iter().map(|b| b.block_id()).collect();
 
         // 4. Local G2→G1 onboard for this chunk's slice.
@@ -1149,25 +1276,63 @@ impl DecodeDisaggLeader {
     }
 
     async fn cleanup_failed_request(self: &Arc<Self>, request_id: &str, reason: String) {
-        tracing::warn!(request_id, reason, "CD request failed; cleaning up");
+        tracing::warn!(request_id, reason = %reason, "CD request failed; cleaning up");
         let unfilled_ids = self
             .cd_request_state
             .get(request_id)
             .map(|e| e.unfilled_g1_block_ids())
             .unwrap_or_default();
 
-        if !unfilled_ids.is_empty() {
-            if let Err(err) = self
-                .worker_hook
-                .mark_failed_onboarding(request_id.to_string(), unfilled_ids)
-                .await
-            {
-                tracing::error!(
+        if unfilled_ids.is_empty() {
+            // Pre-USAA failure: no G1 destinations to report yet.
+            // vLLM's connector contract treats `mark_failed_onboarding(
+            // rid, [])` as a successful async load (it surfaces the
+            // request_id in `finished_recving` with no failed blocks),
+            // which is the wrong signal here. Stash the failure on
+            // cd_request_state so `decode_usaa` can replay it once
+            // USAA arrives with the G1 ids. If USAA never arrives
+            // (e.g. vLLM cancels the request first), the stash is
+            // dropped via the slot's RAII payload — no notification
+            // is needed.
+            if let Some(state) = self.cd_request_state.get(request_id) {
+                let mut slot = state.pending_failure.lock();
+                if slot.is_none() {
+                    *slot = Some(reason.clone());
+                }
+                // Do NOT release cd_request_state: USAA needs it.
+                // Do NOT call coordinator.release here either; the
+                // coordinator's session has already been closed by
+                // mark_failed (caller path), and the wrapper's
+                // pending_failure is the source of truth for vLLM
+                // notification.
+            } else {
+                tracing::warn!(
                     request_id,
-                    error = %err,
-                    "mark_failed_onboarding failed during cleanup"
+                    "cleanup_failed_request: no cd_request_state and no G1 ids — \
+                     request unknown to wrapper, dropping"
                 );
             }
+            crate::audit!(
+                "cleanup_pending_usaa",
+                role = "decode",
+                request_id,
+                reason = %reason
+            );
+            return;
+        }
+
+        // Post-USAA failure (or partial completion): emit failed
+        // block_ids so vLLM can surface the failure to the request.
+        if let Err(err) = self
+            .worker_hook
+            .mark_failed_onboarding(request_id.to_string(), unfilled_ids)
+            .await
+        {
+            tracing::error!(
+                request_id,
+                error = %err,
+                "mark_failed_onboarding failed during cleanup"
+            );
         }
 
         self.release_request(request_id);

@@ -184,8 +184,25 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         );
         // Idempotent: first call installs state and spawns
         // attach/diff/pull; subsequent calls just return the
-        // cached external-token count.
-        let n = self.coordinator.ensure_started(request_id, remote)?;
+        // cached external-token count. Pass a synchronous payload-
+        // install closure so the slot's RAII payload lands BEFORE
+        // run_setup is spawned (race-free) and only on the first
+        // call (production slot rejects double-install).
+        let inner_for_install = Arc::clone(&self.inner);
+        let coord_weak_for_install = Arc::downgrade(&self.coordinator);
+        let install_payload = move |rid: &str| -> Result<()> {
+            let payload = Box::new(PrefillCdOnboardingPayload {
+                request_id: rid.to_string(),
+                coordinator: coord_weak_for_install,
+            });
+            inner_for_install.install_cd_onboarding_payload(rid, payload)
+        };
+        let n = self.coordinator.ensure_started(
+            request_id,
+            remote,
+            num_computed_tokens,
+            install_payload,
+        )?;
 
         // On-policy invariant (mirrors `Slot::finalize_match_check` in
         // `connector/leader/slot.rs`, which encodes the same rule for
@@ -229,33 +246,8 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
             request_id,
             external_tokens = n
         );
-        // Install a CD onboarding payload so the slot's
-        // transaction state machine matches the
-        // `(Some(n), true)` async-load promise we're about to
-        // return to vLLM. Without this, vLLM's eventual
-        // `finished_recving` runs `process_finished_onboarding`
-        // against an Inactive slot and ERRORs (mirror of the
-        // decode-side fix landed earlier).
-        let payload = Box::new(PrefillCdOnboardingPayload {
-            request_id: request_id.to_string(),
-            coordinator: Arc::downgrade(&self.coordinator),
-        });
-        if let Err(err) = self
-            .inner
-            .install_cd_onboarding_payload(request_id, payload)
-        {
-            tracing::error!(
-                error = %err,
-                "prefill_gnmt: install_cd_onboarding_payload failed"
-            );
-            crate::audit!(
-                "prefill_cd_payload_install_failed",
-                role = "prefill",
-                request_id,
-                error = %err
-            );
-            return Err(err);
-        }
+        // The slot RAII payload was installed inside ensure_started
+        // (race-free, idempotent). Just emit the audit + return.
         crate::audit!(
             "prefill_cd_payload_installed",
             role = "prefill",
@@ -273,32 +265,29 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
-        let cd_bound = self.coordinator.has_active_request(request_id);
+        // The coordinator owns USAA only when there's CD-bound work to
+        // onboard (prefill-role tracked AND `bits.num_external_tokens > 0`).
+        // The zero-hash case (decode forwarded no local-match hashes) leaves
+        // the coordinator tracking the request for observer-side output flow
+        // but with no onboarding work; in that case the inner connector owns
+        // USAA, so an inner-cache-hit's `num_external_tokens` doesn't collide
+        // with the coordinator's expected zero.
+        let coord_owns_usaa = self.coordinator.prefill_owns_usaa(request_id);
         crate::audit!(
             "usaa_entry",
             role = "prefill",
             request_id,
             num_block_ids = block_ids.len(),
             num_external_tokens,
-            cd_bound
+            coord_owns_usaa
         );
-        // For CD-bound requests, the coordinator owns the
-        // onboarding state machine. The inner's
-        // update_state_after_alloc would call
-        // `start_onboarding` which expects a `PreparingToOnboard`
-        // slot state — the prefill CD wrapper never installs that
-        // (the CD coordinator's RequestState is the parallel
-        // bookkeeping). Bypass the inner here; the coordinator's
-        // `on_usaa` handles G1 destinations + the kick.
-        //
-        // Non-CD requests still flow through the canonical inner
-        // path.
-        if !cd_bound {
-            self.inner.update_state_after_alloc(
-                request_id,
-                block_ids.clone(),
-                num_external_tokens,
-            )?;
+        if !coord_owns_usaa {
+            // Inner owns USAA. Either non-CD, or CD-bound zero-hash
+            // passthrough where the inner connector may have its own
+            // local cache hit driving USAA.
+            return self
+                .inner
+                .update_state_after_alloc(request_id, block_ids, num_external_tokens);
         }
 
         let r = self

@@ -518,6 +518,528 @@ async fn cd_prefill_no_g2_hits_passes_through_inner_gnmt() -> Result<()> {
     Ok(())
 }
 
+/// Bug fix (review round 4 #P1): prefill GNMT must honor vLLM's
+/// `num_computed_tokens` argument.
+///
+/// vLLM contract: gnmt returns ONLY the external tokens BEYOND the
+/// local prefix (`num_computed_tokens`). Decode forwarded TOTAL_BLOCKS
+/// (4) hashes covering positions [0, 4*BS). If vLLM tells prefill it
+/// already has the first BS tokens locally (e.g., from chunked
+/// prefill continuation or a prefix-cache hit), the connector must
+/// only ask vLLM to externally load the remaining 3 blocks. Returning
+/// the full 4*BS would force `num_computed_tokens + external_tokens >
+/// num_total_tokens` and trigger vLLM's scheduler assert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_honors_num_computed_tokens() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    // 1 block of vLLM-side local prefix on prefill.
+    let prefill_local_prefix_tokens = BLOCK_SIZE;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", prefill_local_prefix_tokens)?;
+
+    let expected_external = (TOTAL_BLOCKS - 1) * BLOCK_SIZE;
+    assert_eq!(
+        count,
+        Some(expected_external),
+        "external_tokens must drop by num_computed_tokens prefix"
+    );
+    assert!(async_flag);
+
+    // Design (round 5): the wrapper still pulls ALL decoded hashes
+    // into G2 (so retries with a different `num_computed_tokens` can
+    // re-derive the external count without re-slicing in-flight
+    // pulls). The external SUFFIX is selected at USAA time — see
+    // `cd_prefill_usaa_uses_external_suffix_g1_with_local_prefix`.
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
+    session.inject_peer_drained();
+
+    session.wait_pull_count(1).await;
+    let pull = session.pull_calls()[0].clone();
+    assert_eq!(
+        pull.0.len(),
+        TOTAL_BLOCKS,
+        "pull always covers all decoded hashes; suffix-selection happens at USAA"
+    );
+    Ok(())
+}
+
+/// Bug fix (review round 5 #P1#1): USAA must onboard the external
+/// SUFFIX of `block_ids`, not the prefix.
+///
+/// vLLM lays USAA's `block_ids` out as `[local_computed_prefix |
+/// external]`. With a 1-block local prefix, taking
+/// `block_ids[..external_blocks]` would copy remote KV into vLLM's
+/// already-computed prefix block AND miss the last external block.
+/// The fix takes the suffix and slices `registered_g2` accordingly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_usaa_uses_external_suffix_g1_with_local_prefix() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    // 1 block of vLLM local prefix → external = 3 blocks.
+    let prefill_local_prefix_tokens = BLOCK_SIZE;
+    let (count, _) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", prefill_local_prefix_tokens)?;
+    assert_eq!(count, Some((TOTAL_BLOCKS - 1) * BLOCK_SIZE));
+
+    // Drive the pull (full TOTAL_BLOCKS hashes go into G2).
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // vLLM allocates TOTAL_BLOCKS slot blocks, layout is
+    // [local_prefix_g1 | external_g1...]; passes the full set to
+    // USAA along with `num_external_tokens = 3 * BS` (count the
+    // wrapper just returned).
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (TOTAL_BLOCKS - 1) * BLOCK_SIZE,
+    )?;
+
+    // The G2→G1 onboard must operate on the EXTERNAL SUFFIX of
+    // both block_ids and registered_g2 — so the local-prefix block
+    // (`g1_block_ids[0]`) is left alone, and the trailing 3 G1
+    // ids receive the trailing 3 G2 blocks.
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(
+        onboard.dst_g1_block_ids,
+        h.g1_block_ids[1..].to_vec(),
+        "onboard must target the EXTERNAL SUFFIX of g1_block_ids \
+         (not the prefix; not all of them)"
+    );
+    assert_eq!(
+        onboard.src_g2_block_ids.len(),
+        TOTAL_BLOCKS - 1,
+        "onboard must source exactly external_blocks ({}) registered G2 blocks",
+        TOTAL_BLOCKS - 1
+    );
+
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    // Drop session to silence unused-var warning.
+    let _ = session;
+    Ok(())
+}
+
+// =========================================================================
+// num_computed_tokens retry matrix (review round 5 #P1#2 + followup)
+// =========================================================================
+//
+// vLLM allows gnmt to be called multiple times for the same request
+// without an intervening USAA (e.g., allocation fails after gnmt;
+// scheduler retries with a different `num_computed_tokens`). The
+// connector must report `total_position_end_tokens - new_P` on every
+// call, not the cached first-call value.
+
+/// Retry shape A: P=0 → P=BS (chunked-prefill continuation, prefix-cache
+/// hit appearing on second scheduling tick).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_increases_num_computed_tokens() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(r1, (Some(TOTAL_BLOCKS * BLOCK_SIZE), true));
+
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    assert_eq!(
+        r2,
+        (Some((TOTAL_BLOCKS - 1) * BLOCK_SIZE), true),
+        "retry with P=BLOCK_SIZE must drop external by one block"
+    );
+
+    Ok(())
+}
+
+/// Retry shape B: P=BS → P=0 (rare: scheduler resets the request's
+/// computed-token attribution between retries).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_decreases_num_computed_tokens() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    assert_eq!(r1, (Some((TOTAL_BLOCKS - 1) * BLOCK_SIZE), true));
+
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(
+        r2,
+        (Some(TOTAL_BLOCKS * BLOCK_SIZE), true),
+        "retry with smaller P must grow external_tokens back"
+    );
+
+    Ok(())
+}
+
+/// Retry shape C: P=0 → P=full coverage. External should drop to 0;
+/// the wrapper's zero-passthrough path should trigger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_full_prefix_returns_zero() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(r1, (Some(TOTAL_BLOCKS * BLOCK_SIZE), true));
+
+    // Retry with P covering everything decode offered.
+    let r2 = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", TOTAL_BLOCKS * BLOCK_SIZE)?;
+    // Wrapper returns whatever inner.gnmt returns when external = 0
+    // (zero-passthrough). For this harness, inner returns
+    // `gnmt_result = (Some(7*BS), false)` — see build_harness. The
+    // critical assertion: external is NOT > 0 / async is NOT true.
+    let (count, async_flag) = r2;
+    assert!(
+        !(matches!(count, Some(c) if c > 0) && async_flag),
+        "retry with P at total coverage must NOT return a non-zero \
+         async-load promise (got {:?})",
+        r2
+    );
+
+    Ok(())
+}
+
+/// Retry shape D: same P twice (no change). Pure idempotency baseline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_unchanged_p_returns_same() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    assert_eq!(r1, r2, "same P must yield identical tuples");
+
+    Ok(())
+}
+
+/// Retry shape E: USAA after a P-change retry uses the UPDATED count.
+/// First gnmt P=0 returns external=4*BS; retry P=BS returns 3*BS;
+/// USAA arrives with `num_external_tokens = 3*BS` (matching the
+/// SECOND, more recent return). The wrapper's bits.num_external_tokens
+/// must equal the second value, not stale 4*BS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_then_usaa_uses_updated_count() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA passes external_tokens matching the SECOND gnmt call.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (TOTAL_BLOCKS - 1) * BLOCK_SIZE,
+    )?;
+
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(
+        onboard.dst_g1_block_ids.len(),
+        TOTAL_BLOCKS - 1,
+        "onboard size must match the retry's external count"
+    );
+    assert_eq!(
+        onboard.dst_g1_block_ids,
+        h.g1_block_ids[1..].to_vec(),
+        "onboard must use the external SUFFIX of g1_block_ids"
+    );
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+    let _ = session;
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P1#2): prefill GNMT must be idempotent.
+///
+/// vLLM may call gnmt twice without an intervening USAA. Production
+/// slot state rejects a second `install_cd_onboarding_payload`. The
+/// fix moves payload install INSIDE `ensure_started`, which already
+/// short-circuits idempotently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_called_twice_payload_install_once() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(r1, r2, "idempotent gnmt must return identical tuples");
+
+    // Payload install is exactly once. The slot mock records each
+    // install in `installed_cd_payloads`.
+    let slot = h.inner.slot("req-1").unwrap();
+    let installs = slot.installed_cd_payloads.lock().clone();
+    assert_eq!(
+        installs.len(),
+        1,
+        "install_cd_onboarding_payload must run exactly once across two gnmt calls (got {:?})",
+        installs
+    );
+
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P1#3): payload install must precede the
+/// async-setup spawn. A fast `run_setup` failure must not race ahead
+/// of payload installation, leaving the wrapper to install a payload
+/// against already-cleaned-up state.
+///
+/// The fix moves `install_payload` into `ensure_started`, called
+/// synchronously after state insert and before `runtime.spawn`. This
+/// test verifies the install completes during gnmt return (not after
+/// any spawn could fire cleanup).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_setup_failure_payload_installed_before_spawn() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    // gnmt: synchronous from the test's POV. By the time it returns,
+    // the slot payload must already be installed — no race window
+    // for run_setup to win.
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let slot = h.inner.slot("req-1").unwrap();
+    let installs = slot.installed_cd_payloads.lock().clone();
+    assert_eq!(
+        installs.len(),
+        1,
+        "payload must be installed by the time gnmt returns (not after run_setup spawn)"
+    );
+
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P2): prefill pull path must mirror
+/// decode's non-contiguous-aware split. Drive a sparse availability
+/// shape and verify the request completes (rather than bailing on
+/// "non-contiguous chunk").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_sparse_availability_succeeds() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+
+    // First Available: positions [0, 2] — skipping position 1.
+    // Splits into runs [0] and [2]. Each is one pull.
+    session.inject_peer_available(vec![
+        CommittedBlock {
+            hash: h.all_hashes[0],
+            peer_block_id: h.decode_g2_block_ids[0],
+        },
+        CommittedBlock {
+            hash: h.all_hashes[2],
+            peer_block_id: h.decode_g2_block_ids[2],
+        },
+    ]);
+
+    session.wait_pull_count(1).await;
+    session.resolve_pull(0, Ok(()));
+    session.wait_pull_count(2).await;
+    session.resolve_pull(1, Ok(()));
+
+    // Second Available: positions [1, 3] — also non-contiguous.
+    session.inject_peer_available(vec![
+        CommittedBlock {
+            hash: h.all_hashes[1],
+            peer_block_id: h.decode_g2_block_ids[1],
+        },
+        CommittedBlock {
+            hash: h.all_hashes[3],
+            peer_block_id: h.decode_g2_block_ids[3],
+        },
+    ]);
+    session.inject_peer_drained();
+
+    session.wait_pull_count(3).await;
+    session.resolve_pull(2, Ok(()));
+    session.wait_pull_count(4).await;
+    session.resolve_pull(3, Ok(()));
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P2): prefill `session.pull` length
+/// validation. Exercises the real length-check path (Ok with short
+/// result), not just the cleanup chain. `resolve_pull_short` returns
+/// fewer mutables than requested; the helper's `filled.len() !=
+/// chunk_size` guard must bail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_session_pull_length_mismatch_errors_clean() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
+    session.inject_peer_drained();
+
+    // Real short-OK: pull asked for TOTAL_BLOCKS, gets TOTAL_BLOCKS-1.
+    session.wait_pull_count(1).await;
+    session.resolve_pull_short(0, TOTAL_BLOCKS - 1);
+
+    // Drive USAA so we have G1 destinations to fail. Pre-USAA stash
+    // (review round 3 #P0) replays at USAA with the external slice.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").unwrap();
+    assert!(
+        !failed.block_ids.is_empty(),
+        "external G1 slice must be marked failed"
+    );
+    Ok(())
+}
+
+/// Bug fix (review round 3 #P0): prefill pre-USAA failures must NOT
+/// emit `mark_failed_onboarding(rid, [])`. Stash the failure and
+/// replay at USAA time with the external G1 slice (excluding any
+/// computed prefix vLLM passed in).
+///
+/// Before the fix, prefill's `cleanup_failed_request` always emitted
+/// `mark_failed_onboarding(rid, g1_ids)` even when `g1_ids` was empty
+/// (pre-USAA), and removed coordinator state. vLLM treats empty
+/// `failed_block_ids` as success; subsequent USAA hit the `coord_owns_usaa
+/// = false` path → routed nonzero `num_external_tokens` to the inner
+/// connector, which had no Expected-state slot → panic via
+/// `find_session`.
+///
+/// After the fix, prefill mirrors decode: stash on `PrefillBits.
+/// pending_failure`, keep state alive, replay at `on_usaa` with the
+/// external G1 slice and tear down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_pre_usaa_failure_stashes_until_usaa() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    // Simulate a setup-time failure directly via cleanup_failed_request
+    // (the same path run_setup takes on Err). Pre-USAA: state exists
+    // but no g1_block_ids stashed yet.
+    h.coordinator
+        .cleanup_failed_request("req-1", "induced pre-USAA failure".to_string())
+        .await;
+
+    assert!(
+        h.workers.failed_for("req-1").is_none(),
+        "pre-USAA cleanup must NOT emit mark_failed_onboarding"
+    );
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "pre-USAA cleanup must NOT release coordinator state — on_usaa needs it"
+    );
+
+    // Drive USAA — the replay path emits mark_failed_onboarding with
+    // the external G1 slice and tears down.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").unwrap();
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    // For this harness, all g1_block_ids are external (no computed
+    // prefix on the prefill side in this test config). Assert the
+    // full set is reported.
+    let mut want: Vec<_> = h.g1_block_ids.clone();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "USAA replay must emit external G1 slice (here: full block_ids)"
+    );
+
+    Ok(())
+}
+
+/// Bug fix (R-B Slice 7-B post-review #5): zero-hash CD prefill must
+/// not collide with an inner-connector cache hit at USAA.
+///
+/// Scenario: decode forwarded no local-match hashes (empty
+/// `sequence_hashes`), so prefill's `ensure_started` returns 0 and the
+/// wrapper falls through to `inner.gnmt`, which can return
+/// `(Some(M>0), true)` — vLLM moves the request into
+/// `WAITING_FOR_REMOTE_KVS` for the INNER connector's async load and
+/// later calls USAA with `M` external tokens.
+///
+/// Before the fix, `update_state_after_alloc` checked
+/// `coordinator.has_active_request(request_id)` (true because
+/// `ensure_started` installed observer-tracking state) and routed USAA
+/// to the coordinator, which expects `bits.num_external_tokens == 0`.
+/// `coordinator.on_usaa(M)` errored with a `num_external_tokens`
+/// mismatch and the request hung.
+///
+/// After the fix, the wrapper checks `coordinator.prefill_owns_usaa`
+/// (true only when `bits.num_external_tokens > 0`). For zero-hash
+/// requests this returns false, so USAA flows through `inner` and the
+/// inner's cache-hit `num_external_tokens` is honored without
+/// colliding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_zero_hash_with_inner_cache_hit_takes_inner_usaa() -> Result<()> {
+    // Inner returns a 2-block CD-async-load tuple even though the CD
+    // wrapper said "no G2 hits" — emulates a non-CD connector layered
+    // beneath that has its own cache hit.
+    let inner_external_tokens = 2 * BLOCK_SIZE;
+    let inner_gnmt = (Some(inner_external_tokens), true);
+    let h = build_harness_cd_no_g2_hits(inner_gnmt);
+    h.wrapper.create_slot(make_request())?;
+
+    let result = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(result, inner_gnmt);
+
+    // CD state IS tracked (for observer-side output flow); but
+    // `prefill_owns_usaa` must be false because bits.num_external_tokens == 0.
+    assert!(h.coordinator.has_active_request("req-1"));
+
+    // USAA with the inner's nonzero count must flow through `inner`,
+    // NOT through `coordinator.on_usaa` (which would bail with
+    // "num_external_tokens mismatch (got M, expected 0)").
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), inner_external_tokens)?;
+
+    // Inner shim recorded the passthrough USAA with the correct count.
+    let slot = h.inner.slot("req-1").unwrap();
+    let calls = slot.usaa_passthrough_calls.lock();
+    assert_eq!(calls.len(), 1, "inner USAA must be called exactly once");
+    assert_eq!(
+        calls[0].1, inner_external_tokens,
+        "inner USAA must receive the inner-cache-hit's num_external_tokens, \
+         not the coordinator's expected zero"
+    );
+    Ok(())
+}
+
 /// Pin the `(Some(n>0), true)` half of the same invariant — the
 /// existing `cd_prefill_happy_path` already covers this implicitly
 /// (NUM_EXTERNAL > 0), but make the rule explicit alongside the n=0
@@ -697,38 +1219,32 @@ async fn cd_prefill_cleanup_post_usaa_surfaces_full_g1_window() -> Result<()> {
     Ok(())
 }
 
-/// Slice A — pre-USAA failure surfaces the request_id with empty
-/// block_ids; the worker-side handler still pairs the request_id
-/// with `get_finished()`'s onboard set so vLLM moves the request
-/// out of `WAITING_FOR_REMOTE_KVS`. Documented limitation per
-/// `cd-error-path-design.md` §6 Q2: failed blocks cannot be
-/// reported because no G1 ids exist before USAA.
+/// Bug fix (review round 3 #P0): pre-USAA failure must STASH and not
+/// emit `mark_failed_onboarding(rid, [])`. State stays alive so the
+/// stash can be replayed at USAA. Replaces the old behavior (which
+/// emitted empty block_ids that vLLM treats as success).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cd_prefill_cleanup_pre_usaa_surfaces_request_id_only() -> Result<()> {
+async fn cd_prefill_cleanup_pre_usaa_stashes_no_emit() -> Result<()> {
     let h = build_harness(true);
 
     h.wrapper.create_slot(make_request())?;
     let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
     assert_eq!(h.coordinator.active_count(), 1);
 
-    // No drive_setup, no USAA — state is installed but g1_block_ids
-    // is still None.  Simulate an early failure (e.g. attach error,
-    // peer-resolve error, hub queue dispatch error).
     h.coordinator
         .cleanup_failed_request("req-1", "induced pre-USAA failure".to_string())
         .await;
 
-    let failed = h
-        .workers
-        .failed_for("req-1")
-        .expect("mark_failed_onboarding must fire even pre-USAA");
-    assert_eq!(failed.request_id, "req-1");
     assert!(
-        failed.block_ids.is_empty(),
-        "pre-USAA failure has no G1 ids (worker handler pairs request_id regardless)"
+        h.workers.failed_for("req-1").is_none(),
+        "pre-USAA cleanup must NOT emit mark_failed_onboarding (vLLM treats \
+         empty failed_block_ids as success)"
     );
-
-    assert_eq!(h.coordinator.active_count(), 0);
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "pre-USAA cleanup must keep coordinator state alive for USAA replay"
+    );
 
     Ok(())
 }
@@ -736,7 +1252,8 @@ async fn cd_prefill_cleanup_pre_usaa_surfaces_request_id_only() -> Result<()> {
 /// Slice A — cleanup is idempotent against state-already-evicted.
 /// Multiple failure-detection paths (run_setup Err, lifecycle
 /// escalation, deadline timer) may converge on the same request;
-/// only the first call propagates.
+/// only the first call's pending_failure stash sticks (and at most
+/// one mark_failed_onboarding fires when USAA later replays).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cd_prefill_cleanup_is_idempotent() -> Result<()> {
     let h = build_harness(true);
@@ -744,12 +1261,25 @@ async fn cd_prefill_cleanup_is_idempotent() -> Result<()> {
     h.wrapper.create_slot(make_request())?;
     let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
 
+    // Two pre-USAA cleanups land — both stash, no emit. Then USAA
+    // arrives and replays exactly once.
     h.coordinator
         .cleanup_failed_request("req-1", "first call".to_string())
         .await;
     h.coordinator
         .cleanup_failed_request("req-1", "second call".to_string())
         .await;
+    assert!(
+        h.workers.failed_for("req-1").is_none(),
+        "pre-USAA cleanup must not emit"
+    );
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    // USAA replays the stashed failure — exactly one
+    // mark_failed_onboarding call.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
 
     let failed_calls: Vec<_> = h
         .workers
@@ -760,7 +1290,7 @@ async fn cd_prefill_cleanup_is_idempotent() -> Result<()> {
     assert_eq!(
         failed_calls.len(),
         1,
-        "cleanup must not double-fire mark_failed_onboarding"
+        "USAA replay must fire mark_failed_onboarding exactly once"
     );
 
     Ok(())

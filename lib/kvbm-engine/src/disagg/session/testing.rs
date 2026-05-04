@@ -438,6 +438,40 @@ impl MockSession {
         }
     }
 
+    /// Resolve the Nth `pull` call with a SHORT (`returned_len <
+    /// dst.len()`) or LONG (`returned_len > dst.len()`) result.
+    ///
+    /// Used to exercise the caller's length-mismatch guards. The
+    /// pull future receives a `MutableBlock` vec of `returned_len`
+    /// elements (truncated from the original `dst` for short, or
+    /// padded by allocating extras for long — out of scope here;
+    /// short is the realistic case).
+    ///
+    /// Panics if `returned_len > dst.len()` (long-result mocking
+    /// would require allocating fresh mutables outside the original
+    /// slot, which the harness does not support).
+    pub fn resolve_pull_short(&self, index: usize, returned_len: usize) {
+        let pending = {
+            let mut inner = self.inner.lock();
+            inner
+                .pending_pulls
+                .get_mut(index)
+                .expect("resolve_pull_short: index out of bounds")
+                .take()
+                .expect("resolve_pull_short: already resolved")
+        };
+        let mut dst = pending.dst;
+        assert!(
+            returned_len <= dst.len(),
+            "resolve_pull_short: returned_len ({}) > dst.len() ({})",
+            returned_len,
+            dst.len()
+        );
+        dst.truncate(returned_len);
+        let _ = pending.dst_tx.send(dst);
+        let _ = pending.resolver.send(Ok(()));
+    }
+
     // ---- recorders ----
 
     pub fn commit_calls(&self) -> Vec<Vec<SequenceHash>> {
@@ -840,6 +874,8 @@ pub struct MockSessionFactory {
     /// retain factory-side refs, but tests must clear them
     /// (or drop the factory) to assert the gauge.
     active_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Cumulative count of `open` calls (lifetime, never decremented).
+    open_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockSessionFactory {
@@ -868,6 +904,7 @@ impl MockSessionFactory {
                 attach_records: Mutex::new(Vec::new()),
                 paired_registry: Some(Arc::clone(&registry)),
                 active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }),
             Arc::new(Self {
                 last_opened: Mutex::new(None),
@@ -875,6 +912,7 @@ impl MockSessionFactory {
                 attach_records: Mutex::new(Vec::new()),
                 paired_registry: Some(registry),
                 active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }),
         )
     }
@@ -898,6 +936,12 @@ impl MockSessionFactory {
             .map(|r| (r.session_id, r.peer_instance_id, r.peer_endpoint.clone()))
             .collect()
     }
+
+    /// Cumulative count of `open` calls. Idempotency tests assert this
+    /// stays at 1 across repeat wrapper calls.
+    pub fn open_count(&self) -> usize {
+        self.open_count.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 impl Default for MockSessionFactory {
@@ -908,6 +952,7 @@ impl Default for MockSessionFactory {
             attach_records: Mutex::new(Vec::new()),
             paired_registry: None,
             active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
@@ -925,6 +970,7 @@ impl SessionFactory for MockSessionFactory {
     }
 
     fn open(&self, session_id: SessionId) -> Result<Arc<dyn Session>> {
+        self.open_count.fetch_add(1, Ordering::AcqRel);
         let session = MockSession::new_with_peer(
             session_id,
             Some(mock_endpoint()),

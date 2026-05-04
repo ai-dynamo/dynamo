@@ -269,6 +269,10 @@ pub struct MockInnerLeaderShim {
     local_id: crate::InstanceId,
     g2_manager: Arc<BlockManager<G2>>,
     slots: Mutex<std::collections::HashMap<String, Arc<MockSlot>>>,
+    /// Per-request invocation counter for `get_num_new_matched_tokens`.
+    /// Used by idempotency tests to assert the wrapper short-circuits
+    /// repeat gnmt calls without re-invoking inner.
+    gnmt_call_counts: Mutex<std::collections::HashMap<String, usize>>,
 }
 
 impl MockInnerLeaderShim {
@@ -278,7 +282,14 @@ impl MockInnerLeaderShim {
             local_id: uuid::Uuid::new_v4().into(),
             g2_manager,
             slots: Mutex::new(std::collections::HashMap::new()),
+            gnmt_call_counts: Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// How many times `get_num_new_matched_tokens` was called for
+    /// `request_id`. Used by idempotency tests.
+    pub fn gnmt_call_count(&self, request_id: &str) -> usize {
+        *self.gnmt_call_counts.lock().get(request_id).unwrap_or(&0)
     }
 
     pub fn local_id(&self) -> crate::InstanceId {
@@ -317,6 +328,11 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         request_id: &str,
         _num_computed_tokens: usize,
     ) -> Result<(Option<usize>, bool)> {
+        *self
+            .gnmt_call_counts
+            .lock()
+            .entry(request_id.to_string())
+            .or_insert(0) += 1;
         Ok(self.require_slot(request_id)?.gnmt_result)
     }
 
