@@ -29,8 +29,6 @@ use uuid::Uuid;
 use rustc_hash::FxHashSet;
 
 use super::block_tracker::BlockTracker;
-#[cfg(test)]
-use super::prefill_tracker::added_prefill_tokens;
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
@@ -293,29 +291,13 @@ impl ActiveSequences {
         membership_delta
     }
 
-    pub fn new_tokens(&self, isl: usize, cached_tokens: usize) -> usize {
-        isl.checked_sub(cached_tokens).unwrap_or_else(|| {
-            tracing::error!(
-                "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens}, returning 0"
-            );
-            0
-        })
-    }
-
     pub fn potential_blocks_and_tokens(
         &self,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        cached_tokens: usize,
+        prefill_token_delta: usize,
         decay_now: Instant,
     ) -> (usize, usize) {
-        self.potential_blocks_and_tokens_with_prefill_tracking(
-            token_sequence,
-            isl,
-            cached_tokens,
-            true,
-            decay_now,
-        )
+        self.potential_blocks_and_tokens_at(token_sequence, prefill_token_delta, decay_now)
     }
 
     /// Add an output block with a random hash and optional fractional decay weight.
@@ -349,12 +331,10 @@ impl ActiveSequences {
         acquire.became_present_on_worker.then_some(random_hash)
     }
 
-    pub fn potential_blocks_and_tokens_with_prefill_tracking(
+    pub fn potential_blocks_and_tokens_at(
         &self,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        cached_tokens: usize,
-        track_prefill_tokens: bool,
+        prefill_token_delta: usize,
         decay_now: Instant,
     ) -> (usize, usize) {
         let potential_blocks = if let Some(token_seq) = token_sequence {
@@ -363,11 +343,7 @@ impl ActiveSequences {
             self.active_blocks()
         };
         let active_tokens = self.active_tokens(decay_now);
-        let potential_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, cached_tokens) + active_tokens
-        } else {
-            active_tokens
-        };
+        let potential_tokens = active_tokens + prefill_token_delta;
 
         (potential_blocks, potential_tokens)
     }
@@ -378,11 +354,6 @@ impl ActiveSequences {
             .iter()
             .filter(|block| !self.blocks.unique_blocks.contains_key(block))
             .count()
-    }
-
-    /// Return the total number of blocks that would be used if the token sequence was added.
-    pub(super) fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        self.new_blocks(token_sequence) + self.active_blocks()
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -467,8 +438,7 @@ mod tests {
         }
     }
 
-    fn tracking_hint(block_size: usize, isl: usize, overlap: u32) -> Option<PrefillLoadHint> {
-        let tokens = added_prefill_tokens(block_size, isl, overlap);
+    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
         (tokens > 0).then_some(PrefillLoadHint {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
@@ -485,7 +455,7 @@ mod tests {
             Some(vec![1, 2]),
             None,
             true,
-            tracking_hint(4, 8, 0),
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(
@@ -505,7 +475,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(4, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(
@@ -543,7 +513,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(4, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(
@@ -593,7 +563,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(block_size, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -604,7 +574,7 @@ mod tests {
             Some(vec![4]),
             None,
             true,
-            tracking_hint(block_size, 4, 0),
+            tracking_hint(4),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -615,7 +585,7 @@ mod tests {
             Some(vec![1, 2, 3, 4]),
             None,
             true,
-            tracking_hint(block_size, 16, 4),
+            tracking_hint(0),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -645,7 +615,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(block_size, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -662,7 +632,7 @@ mod tests {
             Some(vec![1, 2]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 2);
@@ -691,7 +661,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(block_size, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 12);
@@ -707,7 +677,7 @@ mod tests {
             Some(vec![4, 5]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 8);
@@ -753,13 +723,8 @@ mod tests {
             decay_now,
         );
 
-        let (blocks, tokens) = seq_manager.potential_blocks_and_tokens_with_prefill_tracking(
-            Some(&[1, 2, 3, 4]),
-            16,
-            0,
-            false,
-            decay_now,
-        );
+        let (blocks, tokens) =
+            seq_manager.potential_blocks_and_tokens_at(Some(&[1, 2, 3, 4]), 0, decay_now);
         assert_eq!(blocks, 4);
         assert_eq!(tokens, 0);
     }
@@ -824,7 +789,7 @@ mod tests {
             Some(vec![1, 2]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             Instant::now(),
         );
         seq_manager.add_request_with_prefill_tracking(
@@ -832,7 +797,7 @@ mod tests {
             Some(vec![3, 4]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             Instant::now(),
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -870,7 +835,7 @@ mod tests {
             Some(vec![5]),
             None,
             true,
-            tracking_hint(block_size, 4, 0),
+            tracking_hint(4),
             Instant::now(),
         );
         assert!(expired.expired_request_ids.is_empty());

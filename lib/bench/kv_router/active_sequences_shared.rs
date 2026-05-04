@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceRequest};
 use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use tokio::time::{Duration, Instant};
@@ -302,7 +302,10 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens(Some(&block_hashes), isl, HashMap::new());
+            let _ = multi.potential_blocks_and_tokens(
+                Some(&block_hashes),
+                &PrefillTokenDeltas::uniform(isl),
+            );
             let _ = multi.add_request(
                 SequenceRequest {
                     request_id,
