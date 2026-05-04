@@ -184,6 +184,33 @@ class TestRunNaiveFallback:
         assert "k8s_pvc_name" not in k8s
         assert "k8s_pvc_mount_path" not in k8s
 
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_model_does_not_fit_returns_error_and_skips_generation(self):
+        """If ModelConfig.fits_in_memory=False, function returns early and skips artifact generation."""
+        dgdr = _make_dgdr()
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value={
+                    "ModelConfig": {
+                        "fits_in_memory": False,
+                        "required_tp": 8,
+                    }
+                },
+            ),
+            patch("dynamo.profiler.rapid.generate_backend_artifacts") as mock_generate,
+        ):
+            result = _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 2, "l40s", "vllm")
+
+        assert result["error"] == "insufficient_gpus_for_model"
+        assert result["dgd_config"] is None
+        assert result["best_config_df"].empty
+
+    # Critical: downstream generation must NOT happen
+    mock_generate.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _run_default_sim

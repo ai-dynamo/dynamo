@@ -149,11 +149,13 @@ async def _execute_strategy(
     search_strategy: SearchStrategy,
 ) -> tuple[dict, PickedParallelConfig, PickedParallelConfig, float, float]:
     """Dispatch dry-run / RAPID / THOROUGH; extract configs; update SLA targets."""
+
     if ops.dry_run:
         logger.info("Dry run mode — skipping deployment and benchmarking.")
         best_prefill_config = PickedParallelConfig(tp=1)
         best_decode_config = PickedParallelConfig(tp=1)
         pick_result: dict = {}
+
     else:
         if search_strategy == SearchStrategy.RAPID:
             pick_result = run_rapid(
@@ -185,6 +187,24 @@ async def _execute_strategy(
                 target_tpot,
                 request_latency,
                 deployment_clients,
+            )
+
+        # early exit if model doesn't fit
+        if not pick_result.get("fits", True):
+            required_tp = pick_result.get("required_tp")
+            logger.error(
+                "Profiling aborted: model does not fit GPU budget "
+                "(required_tp=%s, available=%s)",
+                required_tp,
+                total_gpus,
+            )
+
+            return (
+                pick_result,
+                PickedParallelConfig(tp=1),
+                PickedParallelConfig(tp=1),
+                target_ttft,
+                target_tpot,
             )
 
         ops.current_phase = ProfilingPhase.SelectingConfig
@@ -231,6 +251,7 @@ async def _execute_strategy(
         best_decode_config.moe_tp,
         best_decode_config.moe_ep,
     )
+
     return (
         pick_result,
         best_prefill_config,
@@ -408,6 +429,29 @@ async def run_profile(
             deployment_clients,
             search_strategy,
         )
+
+        # early exit if model doesn't fit
+        if not pick_result.get("fits", True):
+            required_tp = pick_result.get("required_tp")
+
+            write_profiler_status(
+                ops.output_dir,
+                status=ProfilerStatus.FAILED,
+                message=(
+                    f"Model does not fit in available GPUs. "
+                    f"Required TP: {required_tp}, Available GPUs: {total_gpus}"
+                ),
+                phase=ops.current_phase,
+            )
+
+            logger.error(
+                "Stopping profiling pipeline: insufficient GPU capacity "
+                "(required_tp=%s, available=%s)",
+                required_tp,
+                total_gpus,
+            )
+
+            return
 
         dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)

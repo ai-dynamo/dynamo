@@ -141,6 +141,26 @@ def _run_naive_fallback(
         system_name=system,
         backend_name=backend,
     )
+    model_cfg = generator_params.get("ModelConfig", {})
+    fits = model_cfg.get("fits_in_memory", True)
+    required_tp = model_cfg.get("required_tp")
+
+    if not fits:
+        logger.error(
+            "Model '%s' requires at least %d GPUs to fit, but only %d available. "
+            "Skipping DGD generation to avoid guaranteed failure.",
+            model,
+            required_tp,
+            total_gpus,
+        )
+        return {
+            "best_config_df": pd.DataFrame(),
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": None,
+            "chosen_exp": None,
+            "resolved_backend": backend,
+            "error": "insufficient_gpus_for_model",
+        }
 
     k8s_overrides = _build_k8s_overrides(dgdr, backend)
     generator_params.setdefault("K8sConfig", {}).update(k8s_overrides)

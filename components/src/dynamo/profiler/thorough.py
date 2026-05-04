@@ -348,7 +348,13 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
-    prefill_candidates, decode_candidates = enumerate_profiling_configs(
+
+    (
+        prefill_candidates,
+        decode_candidates,
+        fits,
+        required_tp,
+    ) = enumerate_profiling_configs(
         model_path=model,
         system=system,
         backend=backend,
@@ -362,12 +368,40 @@ async def run_thorough(
         k8s_model_path_in_pvc=model_cache.pvcModelPath,
     )
 
+    if not fits:
+        logger.error(
+            "Model does not fit in available GPUs (required_tp=%d, available=%d)",
+            required_tp,
+            total_gpus,
+        )
+        return {
+            "best_config_df": pd.DataFrame(),
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": None,
+            "chosen_exp": None,
+            "fits": False,
+            "required_tp": required_tp,
+        }
+
     logger.info(
         "Enumerated %d prefill candidates, %d decode candidates",
         len(prefill_candidates),
         len(decode_candidates),
     )
 
+    
+    if not prefill_candidates or not decode_candidates:
+        logger.error("Enumeration returned empty candidate lists despite fits=True.")
+        return {
+            "best_config_df": pd.DataFrame(),
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": None,
+            "chosen_exp": None,
+            "fits": fits,
+            "required_tp": required_tp,
+        }
+
+    # --- Overrides ---
     if dgdr.overrides and dgdr.overrides.dgd:
         for candidate in prefill_candidates:
             candidate.dgd_config = apply_dgd_overrides(
@@ -411,6 +445,7 @@ async def run_thorough(
         message="Sweeping parallelization strategies for prefill, measuring TTFT",
         phase=ops.current_phase,
     )
+
     prefill_df = await _benchmark_prefill_candidates(
         prefill_candidates,
         ops,
@@ -422,6 +457,7 @@ async def run_thorough(
         deployment_clients,
         config_modifier,
     )
+
     ops.current_phase = ProfilingPhase.SweepingDecode
     write_profiler_status(
         ops.output_dir,
@@ -429,6 +465,7 @@ async def run_thorough(
         message="Sweeping parallelization strategies for decode, measuring ITL",
         phase=ops.current_phase,
     )
+
     decode_df = await _benchmark_decode_candidates(
         decode_candidates,
         ops,
@@ -449,7 +486,10 @@ async def run_thorough(
             "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
             "dgd_config": None,
             "chosen_exp": None,
+            "fits": True,
+            "required_tp": required_tp,
         }
+
     if decode_df.empty:
         logger.error("No decode results produced in THOROUGH mode.")
         return {
@@ -457,6 +497,8 @@ async def run_thorough(
             "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
             "dgd_config": None,
             "chosen_exp": None,
+            "fits": True,
+            "required_tp": required_tp,
         }
 
     result = _pick_thorough_best_config(
@@ -485,6 +527,7 @@ async def run_thorough(
         tpot=target_tpot,
         request_latency=request_latency,
     )
+
     dgd_config = _generate_dgd_from_pick(
         dgdr, best_config_df, "disagg", {"disagg": task}
     )
@@ -492,8 +535,11 @@ async def run_thorough(
     return {
         "best_config_df": best_config_df,
         "best_latencies": result.get(
-            "best_latencies", {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
+            "best_latencies",
+            {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
         ),
         "dgd_config": dgd_config,
         "chosen_exp": "disagg",
+        "fits": True,
+        "required_tp": required_tp,
     }
