@@ -765,8 +765,7 @@ impl ModelManager {
             Entry::Occupied(mut o) => {
                 // Atomically swap the value to a fresh PrefillReady. The old
                 // value tells us which transition we just performed.
-                let new_value =
-                    PrefillActivationState::PrefillReady(Box::new(endpoint.clone()));
+                let new_value = PrefillActivationState::PrefillReady(Box::new(endpoint.clone()));
                 let old = o.insert(new_value);
                 // Drop the OccupiedEntry to release the shard lock before any
                 // potentially-non-trivial work (e.g. nested DashMap accesses
