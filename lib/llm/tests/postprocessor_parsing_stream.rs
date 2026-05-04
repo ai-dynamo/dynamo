@@ -631,6 +631,126 @@ async fn postprocessor_parsing_stream_minimax_required_bypasses_reasoning() {
     );
 }
 
+/// Regression: Nemotron Nano/Super + the smoke-test required tool-call case.
+///
+/// Mirrors dynamo-deploy smoke_test.py::case_completions_tool_call_required:
+/// "What is the weather in San Francisco?" with `tool_choice="required"` and
+/// the `get_weather` tool. The backend emits a bare guided-decoding JSON
+/// payload, so the postprocessor must bypass reasoning extraction even when
+/// both a Nemotron reasoning parser and a Nemotron tool parser are configured.
+/// The JSON must be consumed by the tool jail, not surfaced as content or
+/// `reasoning_content`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_required_smoke_case() {
+    for (case, parser) in [("nano", "nemotron_nano"), ("super/deci", "nemotron_deci")] {
+        let preprocessor = build_preprocessor(Some(parser), Some(parser));
+
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
+                "messages": [
+                    {"role": "user", "content": "What is the weather in San Francisco?"}
+                ],
+                "stream": true,
+                "temperature": 0.0
+            }))
+            .unwrap();
+        let tools: Vec<dynamo_protocols::types::ChatCompletionTool> =
+            serde_json::from_value(serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather for a location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "City name"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }]))
+            .unwrap();
+        request.inner.tools = Some(tools);
+        request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+        let input_chunks = vec![mock_content_chunk(bare_json), mock_final_chunk()];
+
+        let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true)
+            .expect("postprocessor_parsing_stream should build");
+
+        let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+            output_stream.collect().await;
+
+        let mut reasoning = String::new();
+        let mut content = String::new();
+        let mut merged_tool_calls: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+        let mut finish_reasons = Vec::new();
+
+        for output in &output_chunks {
+            let Some(data) = output.data.as_ref() else {
+                continue;
+            };
+            for choice in &data.inner.choices {
+                if let Some(r) = &choice.delta.reasoning_content {
+                    reasoning.push_str(r);
+                }
+                if let Some(c) = &choice.delta.content {
+                    content.push_str(get_text(c));
+                }
+                if let Some(tcs) = &choice.delta.tool_calls {
+                    for tc in tcs {
+                        merged_tool_calls
+                            .entry(tc.index)
+                            .or_default()
+                            .merge_from(tc);
+                    }
+                }
+                if let Some(fr) = choice.finish_reason {
+                    finish_reasons.push(fr);
+                }
+            }
+        }
+
+        assert!(
+            reasoning.is_empty(),
+            "{case}: reasoning_content must be empty when tool_choice=required forces bare JSON, got: {reasoning:?}"
+        );
+        assert!(
+            !content.contains("get_weather"),
+            "{case}: tool-call JSON must not leak into content, got: {content:?}"
+        );
+        assert!(
+            !content.contains("<tool_call>"),
+            "{case}: raw <tool_call> XML must not leak into content, got: {content:?}"
+        );
+
+        let tool_calls: Vec<MergedToolCall> = merged_tool_calls.values().cloned().collect();
+        assert_eq!(tool_calls.len(), 1, "{case}: expected one tool call");
+        assert_eq!(
+            tool_calls[0].name.as_deref(),
+            Some("get_weather"),
+            "{case}: wrong tool name"
+        );
+        let args: Value = serde_json::from_str(&tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"location": "San Francisco"}),
+            "{case}: wrong arguments"
+        );
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
+}
+
 /// Regression: MiniMax + tool_choice=named + SGLang guided decoding.
 /// Same constraint as the required variant, but OpenAI spec says named
 /// keeps finish_reason=Stop.
