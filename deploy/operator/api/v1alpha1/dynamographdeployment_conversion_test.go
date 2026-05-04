@@ -717,8 +717,8 @@ func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 	}
 }
 
-// TestDGD_FromV1alpha1_SubComponentType verifies that a v1alpha1-only
-// subComponentType string survives via sparse spec preservation.
+// TestDGD_FromV1alpha1_SubComponentType verifies that a subComponentType string
+// without a v1beta1 first-class component type survives via sparse preservation.
 func TestDGD_FromV1alpha1_SubComponentType(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sub", Namespace: "ns"},
@@ -726,7 +726,7 @@ func TestDGD_FromV1alpha1_SubComponentType(t *testing.T) {
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType:    "worker",
-					SubComponentType: "prefill",
+					SubComponentType: "custom-prefill",
 				},
 			},
 		},

@@ -149,11 +149,9 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 		return nil
 	}
 
-	// ComponentType: in v1alpha1 this is a free-form string; in v1beta1 it is
-	// a strict enum. The conversion is a value copy; unknown strings become
-	// the empty enum on the v1beta1 side and will be rejected by the CRD
-	// validator, which matches the intended behaviour.
-	dst.ComponentType = v1beta1.ComponentType(src.ComponentType)
+	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
+	// values to first-class component types.
+	dst.ComponentType = sharedComponentTypeToHub(src)
 
 	// v1alpha1 ServiceName <-> v1beta1 ComponentName: the same logical
 	// identifier, renamed at v1beta1 to align with the
@@ -301,7 +299,7 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 	}
 	hasSave := false
 
-	if src.SubComponentType != "" {
+	if sharedSubComponentTypeNeedsSave(src) {
 		save.SubComponentType = src.SubComponentType
 		hasSave = true
 	}
@@ -376,6 +374,38 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 
 func sharedAlphaSpecSaveIsZero(save *DynamoComponentDeploymentSharedSpec) bool {
 	return save == nil || apiequality.Semantic.DeepEqual(*save, DynamoComponentDeploymentSharedSpec{})
+}
+
+func sharedComponentTypeToHub(src *DynamoComponentDeploymentSharedSpec) v1beta1.ComponentType {
+	if src == nil {
+		return ""
+	}
+	if sharedSubComponentTypePromotesToHubComponentType(src) {
+		return v1beta1.ComponentType(src.SubComponentType)
+	}
+	return v1beta1.ComponentType(src.ComponentType)
+}
+
+func sharedComponentTypeFromHub(src v1beta1.ComponentType) (componentType string, subComponentType string) {
+	switch src {
+	case v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode:
+		return string(v1beta1.ComponentTypeWorker), string(src)
+	default:
+		return string(src), ""
+	}
+}
+
+func sharedSubComponentTypeNeedsSave(src *DynamoComponentDeploymentSharedSpec) bool {
+	return src != nil &&
+		src.SubComponentType != "" &&
+		!sharedSubComponentTypePromotesToHubComponentType(src)
+}
+
+func sharedSubComponentTypePromotesToHubComponentType(src *DynamoComponentDeploymentSharedSpec) bool {
+	return src != nil &&
+		src.ComponentType == string(v1beta1.ComponentTypeWorker) &&
+		(src.SubComponentType == string(v1beta1.ComponentTypePrefill) ||
+			src.SubComponentType == string(v1beta1.ComponentTypeDecode))
 }
 
 func sharedMainContainerFieldOriginsNeedSave(src *DynamoComponentDeploymentSharedSpec) bool {
@@ -486,7 +516,7 @@ func convertSharedSpecFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, 
 		return nil
 	}
 
-	dst.ComponentType = string(src.ComponentType)
+	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
 

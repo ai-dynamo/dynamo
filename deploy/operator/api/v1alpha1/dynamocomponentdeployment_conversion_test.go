@@ -703,7 +703,7 @@ func TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields(t *testing.T) {
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ComponentType:    "worker",
-				SubComponentType: "prefill",
+				SubComponentType: "custom-prefill",
 				ServiceName:      "worker-svc",
 				DynamoNamespace:  &dynNs,
 				Annotations:      map[string]string{"team": "alpha"},
@@ -730,8 +730,8 @@ func TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("failed to restore %q payload: %s", annDCDSpokeSpec, raw)
 	}
-	if saved.SubComponentType != "prefill" {
-		t.Fatalf("saved SubComponentType = %q, want prefill", saved.SubComponentType)
+	if saved.SubComponentType != "custom-prefill" {
+		t.Fatalf("saved SubComponentType = %q, want custom-prefill", saved.SubComponentType)
 	}
 	if saved.DynamoNamespace == nil || *saved.DynamoNamespace != dynNs {
 		t.Fatalf("saved DynamoNamespace = %v, want %q", saved.DynamoNamespace, dynNs)

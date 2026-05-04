@@ -62,3 +62,46 @@ func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestBugDGD_BetaPrefillDecodeConvertFromUsesAlphaSubComponentType(t *testing.T) {
+	hub := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "disaggregated", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypePrefill,
+				},
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	for _, name := range []string{"prefill", "decode"} {
+		component := spoke.Spec.Services[name]
+		if component == nil {
+			t.Fatalf("expected %q service after ConvertFrom: %#v", name, spoke.Spec.Services)
+		}
+		if component.ComponentType != string(v1beta1.ComponentTypeWorker) {
+			t.Fatalf("%s componentType = %q, want worker", name, component.ComponentType)
+		}
+		if component.SubComponentType != name {
+			t.Fatalf("%s subComponentType = %q, want %q", name, component.SubComponentType, name)
+		}
+	}
+
+	restored := &v1beta1.DynamoGraphDeployment{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if diff := cmp.Diff(hub.Spec.Components, restored.Spec.Components, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("components mismatch (-want +got):\n%s", diff)
+	}
+}
