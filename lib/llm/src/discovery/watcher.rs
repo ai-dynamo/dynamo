@@ -80,6 +80,8 @@ pub struct ModelWatcher {
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
+    /// Frontend's `--model-path` card, used to override worker MDC paths.
+    local_card: Option<ModelDeploymentCard>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
     /// Wakes tasks blocked in `recover_concurrent_registration` when a
@@ -164,10 +166,15 @@ impl ModelWatcher {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
+            local_card: None,
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
         }
+    }
+
+    pub fn set_local_card(&mut self, local: Option<ModelDeploymentCard>) {
+        self.local_card = local;
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
@@ -248,6 +255,12 @@ impl ModelWatcher {
                             "Skipping model due to namespace filter"
                         );
                         continue;
+                    }
+
+                    if let Some(local) = self.local_card.as_ref()
+                        && local.display_name == card.display_name
+                    {
+                        card.override_files_with(local);
                     }
 
                     // If a WorkerSet already exists for this (model, namespace, type),

@@ -91,3 +91,68 @@ async fn test_chat_template_json_fallback() {
         other => panic!("Expected HfChatTemplateJson, got {:?}", other),
     }
 }
+
+const HF_PATH_CHAT: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+fn tokenizer_path(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
+    mdc.tokenizer
+        .as_ref()
+        .and_then(|t| match t {
+            TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => cf.path(),
+        })
+        .map(|p| p.to_path_buf())
+}
+
+#[tokio::test]
+async fn test_override_files_with_replaces_slots() {
+    let mut worker = ModelDeploymentCard::load_from_disk(HF_PATH_CHAT, None).unwrap();
+    let local = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
+    let before = tokenizer_path(&worker);
+
+    worker.override_files_with(&local);
+
+    let after = tokenizer_path(&worker).expect("tokenizer slot populated");
+    assert_ne!(before, Some(after.clone()));
+    assert!(after.starts_with(HF_PATH));
+}
+
+#[tokio::test]
+async fn test_override_files_with_preserves_runtime_fields() {
+    let mut worker = ModelDeploymentCard::load_from_disk(HF_PATH_CHAT, None).unwrap();
+    worker.set_name("served-name");
+    worker.kv_cache_block_size = 32;
+    worker.context_length = 4096;
+
+    worker.override_files_with(&ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap());
+
+    assert_eq!(worker.display_name, "served-name");
+    assert_eq!(worker.kv_cache_block_size, 32);
+    assert_eq!(worker.context_length, 4096);
+}
+
+#[tokio::test]
+async fn test_override_files_with_clears_slots_from_empty_source() {
+    let mut worker = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
+    assert!(worker.tokenizer.is_some());
+    assert!(worker.model_info.is_some());
+
+    worker.override_files_with(&ModelDeploymentCard::with_name_only("x"));
+
+    assert!(worker.tokenizer.is_none());
+    assert!(worker.model_info.is_none());
+}
+
+#[tokio::test]
+async fn test_override_files_with_invalidates_mdcsum_cache() {
+    let mut worker = ModelDeploymentCard::load_from_disk(HF_PATH_CHAT, None).unwrap();
+    let before = worker.mdcsum().to_string();
+
+    let local = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
+    worker.override_files_with(&local);
+
+    let after = worker.mdcsum();
+    assert_ne!(
+        before, after,
+        "mdcsum cache must be invalidated so a fresh checksum reflects the new files"
+    );
+}

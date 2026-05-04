@@ -47,6 +47,7 @@ pub async fn run(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            let local_card = (!model.path().as_os_str().is_empty()).then(|| model.card().clone());
             run_watcher(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
@@ -55,6 +56,7 @@ pub async fn run(
                 migration_max_seq_len,
                 namespace_filter,
                 prefill_load_estimator.clone(),
+                local_card,
             )
             .await?;
             grpc_service
@@ -112,6 +114,7 @@ pub async fn run(
 
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
@@ -120,10 +123,11 @@ async fn run_watcher(
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_card: Option<crate::model_card::ModelDeploymentCard>,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new());
-    let watch_obj = ModelWatcher::new(
+    let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
@@ -133,6 +137,7 @@ async fn run_watcher(
         prefill_load_estimator,
         metrics,
     );
+    watch_obj.set_local_card(local_card);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

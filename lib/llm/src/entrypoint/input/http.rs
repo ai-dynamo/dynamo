@@ -83,6 +83,7 @@ pub async fn run(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            let local_card = (!model.path().as_os_str().is_empty()).then(|| model.card().clone());
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -94,6 +95,7 @@ pub async fn run(
                 http_service.state().metrics_clone(),
                 chat_engine_factory.clone(),
                 prefill_load_estimator.clone(),
+                local_card,
             )
             .await?;
             http_service
@@ -173,6 +175,7 @@ async fn run_watcher(
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_card: Option<crate::model_card::ModelDeploymentCard>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
@@ -184,6 +187,7 @@ async fn run_watcher(
         prefill_load_estimator,
         metrics.clone(),
     );
+    watch_obj.set_local_card(local_card);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

@@ -598,6 +598,18 @@ impl ModelDeploymentCard {
         out
     }
 
+    /// Replace all metadata-file slots with `other`'s. Used when the frontend's
+    /// `--model-path` is the source of truth for tokenizer/config metadata.
+    /// Resets the cached `mdcsum` since its inputs change.
+    pub fn override_files_with(&mut self, other: &ModelDeploymentCard) {
+        self.model_info = other.model_info.clone();
+        self.tokenizer = other.tokenizer.clone();
+        self.prompt_formatter = other.prompt_formatter.clone();
+        self.chat_template_file = other.chat_template_file.clone();
+        self.gen_config = other.gen_config.clone();
+        self.checksum = OnceLock::new();
+    }
+
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.
     pub async fn download_config(&mut self) -> anyhow::Result<()> {
         if self.has_local_files() {
