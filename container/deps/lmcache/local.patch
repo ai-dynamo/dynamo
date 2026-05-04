@@ -1,5 +1,5 @@
 diff --git a/lmcache/integration/vllm/vllm_v1_adapter.py b/lmcache/integration/vllm/vllm_v1_adapter.py
-index ecb7af86..048bb656 100644
+index 2e369a6..30aa7ba 100644
 --- a/lmcache/integration/vllm/vllm_v1_adapter.py
 +++ b/lmcache/integration/vllm/vllm_v1_adapter.py
 @@ -31,6 +31,7 @@ from lmcache.integration.vllm.utils import (
@@ -10,7 +10,7 @@ index ecb7af86..048bb656 100644
      lmcache_get_or_create_config,
  )
  from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
-@@ -140,6 +141,13 @@ class RequestTracker:
+@@ -139,6 +140,13 @@ class RequestTracker:
      # The number of tokens that are cached in LMCache for this request
      num_lmcache_cached_tokens: int = 0
  
@@ -24,7 +24,7 @@ index ecb7af86..048bb656 100644
      @_lmcache_nvtx_annotate
      @staticmethod
      def from_new_request(
-@@ -698,6 +706,141 @@ class LMCacheConnectorV1Impl:
+@@ -697,6 +705,141 @@ class LMCacheConnectorV1Impl:
          """
          return VLLM_VERSION
  
@@ -163,10 +163,10 @@ index ecb7af86..048bb656 100644
 +
 +        return self._estimated_transfer_stats_to_dict(tracker)
 +
-     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
-     #  to init self.kv_caches, we keep it in order to be compatible with old versions
-     #  and will be removed in the future.
-@@ -1578,6 +1721,7 @@ class LMCacheConnectorV1Impl:
+     def _build_kv_layer_groups(self):
+         # Build KV layer groups structure if not already built
+         if self.lmcache_engine is not None:
+@@ -1486,6 +1629,7 @@ class LMCacheConnectorV1Impl:
                  save_decode_cache=self.config.save_decode_cache,
              )
              if req_meta is not None:
@@ -174,7 +174,7 @@ index ecb7af86..048bb656 100644
                  meta.add_request(req_meta)
  
          cached_reqs = scheduler_output.scheduled_cached_reqs
-@@ -1624,6 +1768,7 @@ class LMCacheConnectorV1Impl:
+@@ -1532,6 +1676,7 @@ class LMCacheConnectorV1Impl:
                      save_decode_cache=self.config.save_decode_cache,
                  )
                  if req_meta is not None:
@@ -182,7 +182,7 @@ index ecb7af86..048bb656 100644
                      meta.add_request(req_meta)
              return meta
  
-@@ -1747,6 +1892,7 @@ class LMCacheConnectorV1Impl:
+@@ -1655,6 +1800,7 @@ class LMCacheConnectorV1Impl:
                  save_decode_cache=self.config.save_decode_cache,
              )
              if req_meta is not None:
@@ -190,7 +190,7 @@ index ecb7af86..048bb656 100644
                  meta.add_request(req_meta)
  
          return meta
-@@ -1786,10 +1932,35 @@ class LMCacheConnectorV1Impl:
+@@ -1694,10 +1840,35 @@ class LMCacheConnectorV1Impl:
                  "first_tok": request._output_token_ids[0],
              }
  
@@ -228,7 +228,7 @@ index ecb7af86..048bb656 100644
                  return_params = return_params or {}
                  return_params["num_lmcache_cached_tokens"] = (
 diff --git a/lmcache/observability.py b/lmcache/observability.py
-index 8a9a3a15..fd01809c 100644
+index 8a9a3a1..fd01809 100644
 --- a/lmcache/observability.py
 +++ b/lmcache/observability.py
 @@ -246,6 +246,100 @@ class P2PTransferRequestStats:
@@ -382,7 +382,7 @@ index 8a9a3a15..fd01809c 100644
      def on_chunk_reuse(self, time_interval: float):
          """
 diff --git a/lmcache/v1/cache_engine.py b/lmcache/v1/cache_engine.py
-index 6fb2733e..33aefb56 100644
+index 6fb2733..33aefb5 100644
 --- a/lmcache/v1/cache_engine.py
 +++ b/lmcache/v1/cache_engine.py
 @@ -261,6 +261,45 @@ class LMCacheEngine:
@@ -529,7 +529,7 @@ index 6fb2733e..33aefb56 100644
              logger.info(
                  "[req_id=%s] Retrieved %d out of %d out of total %d tokens",
 diff --git a/tests/test_observability.py b/tests/test_observability.py
-index 6f41ae88..889b91b4 100644
+index 6f41ae8..889b91b 100644
 --- a/tests/test_observability.py
 +++ b/tests/test_observability.py
 @@ -118,6 +118,41 @@ def test_remote_time_metrics(stats_monitor):
