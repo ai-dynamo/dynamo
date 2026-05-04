@@ -344,16 +344,20 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
 {% endif %}
 
 # Install runtime dependencies (common + vllm-specific + benchmarks).
-# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+# Full test and dev dependencies are NOT installed here — they go in the test
+# and dev images. requirements.validation.txt is the minimal compute-session
+# validation substrate.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
+    --mount=type=bind,source=./container/deps/requirements.validation.txt,target=/tmp/requirements.validation.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
-        --requirement /tmp/requirements.benchmark.txt
+        --requirement /tmp/requirements.benchmark.txt \
+        --requirement /tmp/requirements.validation.txt
 
 # Copy tests, deploy, lib, and the vllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>

@@ -135,10 +135,12 @@ RUN git lfs install
 # Install runtime dependencies (common + planner + frontend).
 # Frontend deps (tritonclient + grpcio/protobuf pins) are installed here so the resolver
 # sees all constraints in one pass, avoiding grpcio downgrades in the test layer.
-# Test and dev dependencies are NOT installed here — they go in the test and dev images.
+# Full test and dev dependencies are NOT installed here — they go in the test and dev images.
+# requirements.validation.txt is the minimal compute-session validation substrate.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
+    --mount=type=bind,source=./container/deps/requirements.validation.txt,target=/tmp/requirements.validation.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
@@ -146,7 +148,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.planner.txt \
-        --requirement /tmp/requirements.frontend.txt
+        --requirement /tmp/requirements.frontend.txt \
+        --requirement /tmp/requirements.validation.txt
 
 # TODO: skip /workspace COPY for dev/local-dev (bind-mounted from host, gets shadowed)
 # Copy workspace source code

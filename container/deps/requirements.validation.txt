@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Minimal validation substrate for compute-session runtime images.
+# Full test/dev dependencies stay in requirements.test.txt and requirements.dev.txt.
+pytest==8.4.2

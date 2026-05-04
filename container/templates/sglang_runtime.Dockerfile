@@ -58,6 +58,12 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps "accelerate==1.13.0"
 
+# Minimal compute-session validation substrate. Full test/dev dependencies stay
+# in the test and dev images, but runtime images still need the pytest launcher
+# when the factory validates source-mounted focused Python checks.
+RUN --mount=type=bind,source=./container/deps/requirements.validation.txt,target=/tmp/requirements.validation.txt \
+    pip install --break-system-packages --requirement /tmp/requirements.validation.txt
+
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
