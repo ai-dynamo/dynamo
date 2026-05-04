@@ -21,6 +21,7 @@
 mod anthropic;
 mod openai;
 
+pub mod asr;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;

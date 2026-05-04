@@ -114,7 +114,7 @@ pub mod openai {
 
 pub mod generic {
     use super::*;
-    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
+    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine, BidirectionalStreamingEngine};
 
     pub mod tensor {
         use super::*;
@@ -127,5 +127,28 @@ pub mod generic {
         /// A [`ServerStreamingEngine`] implementation for the generic Tensor API
         pub type TensorStreamingEngine =
             ServerStreamingEngine<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>;
+    }
+
+    pub mod asr {
+        use super::*;
+
+        pub use protocols::openai::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
+
+        /// [gluo WIP] NOTE that reusing chat completions request and response
+        /// as request can carry audio data and response can carry text data,
+        /// which is what needed for ASR.
+        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI Chat
+        /// Completions API.
+        ///
+        /// Many-in / many-out: the client streams a sequence of `NvCreateChatCompletionRequest`
+        /// chunks for the same logical session and receives a stream of
+        /// `NvCreateChatCompletionStreamResponse` chunks back. Used by the experimental
+        /// `/v1/asr` WebSocket endpoint — see DIS-1858 / parent design
+        /// "Streaming Request Support". The canonical concrete implementor of the
+        /// input side is [`crate::types::RequestStream`].
+        pub type ASRBidirectionalEngine = BidirectionalStreamingEngine<
+            NvCreateChatCompletionRequest,
+            Annotated<NvCreateChatCompletionStreamResponse>,
+        >;
     }
 }

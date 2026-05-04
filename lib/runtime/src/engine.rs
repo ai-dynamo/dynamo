@@ -83,9 +83,24 @@ impl<T: Send + Sync + 'static> Data for T {}
 pub type DataUnary<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
+/// `Send + Sync` flavor of [`DataStream`] — used as the inner stream of [`RequestStream`].
+///
+/// Required because input-side stream values flow through the `Req` slot of
+/// [`AsyncEngine`], which is bounded `Req: Send + Sync + 'static`. [`DataStream`]'s
+/// trait object carries only `+ Send` and is therefore not eligible. The response
+/// side has no analogous bound (responses don't traverse `AsyncEngine::Req`), so
+/// [`DataStream`] stays `Send`-only and continues to back [`ResponseStream`].
+pub type SyncDataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+
 pub type Engine<Req, Resp, E> = Arc<dyn AsyncEngine<Req, Resp, E>>;
 pub type EngineUnary<Resp> = Pin<Box<dyn AsyncEngineUnary<Resp>>>;
 pub type EngineStream<Resp> = Pin<Box<dyn AsyncEngineStream<Resp>>>;
+/// Trait-object alias for an input-side streaming pipeline value — the input-side
+/// mirror of [`EngineStream`]. Reuses [`AsyncEngineStream`] as the trait (a single
+/// trait covers both directions); the extra `+ Sync` bound (vs `EngineStream`) is
+/// added at the alias level because values of this type are passed through the
+/// `Req` slot of [`AsyncEngine`], which is bounded `Req: Send + Sync + 'static`.
+pub type RequestEngineStream<Req> = Pin<Box<dyn AsyncEngineStream<Req> + Sync>>;
 pub type Context = Arc<dyn AsyncEngineContext>;
 
 impl<T: Data> From<EngineStream<T>> for DataStream<T> {
@@ -175,9 +190,17 @@ pub trait AsyncEngineUnary<Resp: Data>:
 /// A streaming asynchronous engine operation.
 ///
 /// This trait combines `Stream` semantics with context provider capabilities,
-/// representing a continuous async operation that produces multiple results over time.
-pub trait AsyncEngineStream<Resp: Data>:
-    Stream<Item = Resp> + AsyncEngineContextProvider + Send
+/// representing a continuous async operation that produces multiple messages over time.
+///
+/// - **Output side:** wrapped as [`EngineStream<Resp>`] = `crate::pipeline::ManyOut<Resp>`
+///   — the stream of response chunks an engine emits. [`ResponseStream`] is the
+///   canonical concrete implementor.
+/// - **Input side:** wrapped as [`RequestEngineStream<Req>`] =
+///   `crate::pipeline::ManyIn<Req>` — the stream of request chunks an engine
+///   consumes. [`RequestStream`] is the canonical concrete
+///   implementor on the input side.
+pub trait AsyncEngineStream<T: Data>:
+    Stream<Item = T> + AsyncEngineContextProvider + Send
 {
 }
 
@@ -247,6 +270,56 @@ impl<R: Data> Debug for ResponseStream<R> {
             // todo: add debug for stream - possibly propagate some information about what
             // engine created the stream
             // .field("stream", &self.stream)
+            .field("ctx", &self.ctx)
+            .finish()
+    }
+}
+
+/// Input-side mirror of [`ResponseStream`] — pairs a `Send + Sync` stream of request
+/// items with an [`AsyncEngineContext`] for cancellation propagation.
+///
+/// Field layout matches [`ResponseStream`] exactly: `(stream, ctx)` siblings, no
+/// nesting. Implements [`Stream`] (so engines can poll it directly), [`AsyncEngineContextProvider`]
+/// (so engines can reach the cancellation surface), and [`AsyncEngineStream`]
+/// (so a `Pin<Box<RequestStream<R>>>` coerces implicitly to [`RequestEngineStream`]).
+///
+/// Used as the canonical concrete implementor for the `Req` side of bidirectional
+/// engines — engines that consume a sequence of requests within one logical session
+/// and emit a corresponding response stream.
+pub struct RequestStream<R: Data> {
+    stream: SyncDataStream<R>,
+    ctx: Arc<dyn AsyncEngineContext>,
+}
+
+impl<R: Data> RequestStream<R> {
+    pub fn new(stream: SyncDataStream<R>, ctx: Arc<dyn AsyncEngineContext>) -> Pin<Box<Self>> {
+        Box::pin(Self { stream, ctx })
+    }
+}
+
+impl<R: Data> Stream for RequestStream<R> {
+    type Item = R;
+
+    #[inline]
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        Pin::new(&mut self.stream).poll_next(cx)
+    }
+}
+
+impl<R: Data> AsyncEngineStream<R> for RequestStream<R> {}
+
+impl<R: Data> AsyncEngineContextProvider for RequestStream<R> {
+    fn context(&self) -> Arc<dyn AsyncEngineContext> {
+        self.ctx.clone()
+    }
+}
+
+impl<R: Data> Debug for RequestStream<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestStream")
             .field("ctx", &self.ctx)
             .finish()
     }

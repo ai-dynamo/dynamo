@@ -549,6 +549,13 @@ impl HttpServiceConfigBuilder {
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
         }
+        // Experimental WebSocket endpoint (`/v1/asr`) — DIS-1858 / "Streaming Request Support".
+        // Registered unconditionally; the underlying engine is opt-in via
+        // `crate::http::service::asr::install_engine`. If no engine is installed when
+        // a connection arrives, the handler closes with an error frame.
+        let (asr_docs, asr_route) = super::asr::asr_router(state.clone(), None);
+        inference_router = inference_router.merge(asr_route);
+        all_docs.extend(asr_docs);
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
