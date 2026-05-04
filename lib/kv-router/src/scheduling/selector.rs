@@ -283,21 +283,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
 
             if min_workers.len() > 1 {
-                tracing::debug!(
-                    "Multiple workers tied with same logit, using tree size as tie-breaker"
-                );
-                let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = min_workers
-                    .iter()
-                    .map(|w| (request.tree_sizes.get(w).copied().unwrap_or(0), w))
-                    .collect();
-
-                if tree_sizes.iter().all(|(s, _)| *s == tree_sizes[0].0) {
-                    let idx = rand::rng().random_range(0..min_workers.len());
-                    (min_workers[idx], min_score)
-                } else {
-                    let (_, worker) = *tree_sizes.iter().min_by_key(|(s, _)| *s).unwrap();
-                    (*worker, min_score)
-                }
+                let idx = rand::rng().random_range(0..min_workers.len());
+                (min_workers[idx], min_score)
             } else {
                 (min_workers[0], min_score)
             }
@@ -370,10 +357,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .map(|blocks| format!(", total blocks: {}", blocks))
             .unwrap_or_default();
 
-        let tree_size = request.tree_sizes.get(&best_worker).copied().unwrap_or(0);
-
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}, tree size: {}{}",
+            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}{}",
             self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,
@@ -381,7 +366,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             best_overlap,
             best_host_pinned_overlap_blocks,
             best_disk_overlap_blocks,
-            tree_size,
             total_blocks_info
         );
 
@@ -553,7 +537,6 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,
             effective_cached_tokens: HashMap::new(),
-            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -604,7 +587,6 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,
             effective_cached_tokens: HashMap::new(),
-            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,

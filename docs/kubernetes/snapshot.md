@@ -119,7 +119,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -
 
 ### 4. Create a `DynamoCheckpoint`
 
-The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, the first container in `spec.containers`, and the placeholder image; the rest of the pod template should mirror your normal worker config.
+The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, a container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config. Extra containers are allowed, but only `main` is checkpointed.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -140,7 +140,7 @@ spec:
       spec:
         ...
         containers:
-          - name: worker
+          - name: main
             image: registry.example.com/dynamo/vllm-placeholder:1.0.0
             ...
 ```
@@ -293,6 +293,12 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
   -p '{"spec":{"services":{"VllmDecodeWorker":{"replicas":2}}}}'
 ```
 
+## Failover Restore
+
+Dynamo supports both intra-pod and inter-pod failover restore topologies. In
+operator-managed deployments, the operator prepares the restore workload
+automatically. Users enable failover in the `DynamoGraphDeployment` spec.
+
 ## Lower-Level Testing With `snapshotctl`
 
 It is possible to checkpoint and restore pods without the Dynamo operator via the lower-level `snapshotctl` utility. However, the snapshot helm chart must be installed, with a running `snapshot-agent` DaemonSet in the namespace with the checkpoint PVC mounted.
@@ -304,10 +310,12 @@ It is possible to checkpoint and restore pods without the Dynamo operator via th
 ```bash
 snapshotctl checkpoint \
   --manifest ./worker-pod.yaml \
+  --container main \
   --namespace ${NAMESPACE}
 ```
 
-The checkpoint manifest must be for a pod, contain exactly one worker container, and use a placeholder image.
+The checkpoint manifest must be for a pod and use a placeholder image. `--container` names the workload container to checkpoint.
+
 If you do not pass `--checkpoint-id`, `snapshotctl` generates one and prints it:
 
 ```text
@@ -325,10 +333,11 @@ checkpoint_location=/checkpoints/...
 snapshotctl restore \
   --manifest ./worker-pod.yaml \
   --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-...
+  --checkpoint-id manual-snapshot-... \
+  --containers main
 ```
 
-This creates a new restore pod from the manifest and waits for the restore annotation to reach `completed`.
+This creates a new restore pod and returns after the request is submitted. Observe progress through Kubernetes readiness, events, and logs.
 
 ### Restore an existing pod in place
 
@@ -336,10 +345,11 @@ This creates a new restore pod from the manifest and waits for the restore annot
 snapshotctl restore \
   --pod existing-restore-target \
   --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-...
+  --checkpoint-id manual-snapshot-... \
+  --containers main
 ```
 
-This patches restore metadata onto an existing pod that is already snapshot-compatible.
+This patches restore metadata onto an existing pod that is already snapshot-compatible and returns after the patch is accepted.
 
 ## Checkpoint Identity
 
@@ -440,12 +450,14 @@ This is also the path that `snapshotctl` uses when it resolves checkpoint storag
 
 ### `snapshotctl` manifest is rejected or the restore target is wrong
 
-`snapshotctl` only accepts a single-container `Pod` manifest.
+`snapshotctl` requires a `Pod` manifest and a target-container list. Multi-container manifests are supported as long as every name passed via `--container` or `--containers` exists in the pod spec.
 
 ```bash
-snapshotctl checkpoint --manifest ./worker-pod.yaml --namespace ${NAMESPACE}
-snapshotctl restore --manifest ./worker-pod.yaml --namespace ${NAMESPACE} --checkpoint-id <checkpoint-id>
+snapshotctl checkpoint --manifest ./worker-pod.yaml --container main --namespace ${NAMESPACE}
+snapshotctl restore  --manifest ./worker-pod.yaml --containers main --namespace ${NAMESPACE} --checkpoint-id <checkpoint-id>
 ```
+
+If the manifest already carries snapshot target metadata, it must agree with the CLI flag; `snapshotctl` rejects mismatches instead of silently picking one.
 
 ## Planned Features
 

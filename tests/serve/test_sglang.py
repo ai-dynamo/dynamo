@@ -418,7 +418,12 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(
                 128
             ),  # KV cache cap (2x safety over min=64)
-            pytest.mark.timeout(147),  # profiled 24s on RTX 6000 Ada
+            # Qwen3-Embedding-4B (~8 GB bf16) cold-loads + warms up in 130-150s
+            # on L4 CI before the first request; the 24s "profiled" figure is
+            # the steady-state run only. 147s left no headroom for startup and
+            # blew up 100% of recent amd64 runs in `_check_url`. 300s aligns
+            # with sibling 4B-class agg configs in this file.
+            pytest.mark.timeout(300),  # profiled 24s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
