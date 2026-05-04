@@ -21,13 +21,14 @@ use std::path::Path;
 
 /// One row of a Mooncake replay trace.
 ///
-/// `timestamp` is an absolute request arrival offset in milliseconds. Some
-/// legacy producers emit it only on the first row in a session and use `delay`
-/// for subsequent closed-loop turns. Agent traces should emit `timestamp` on
-/// every row so replay can preserve concurrent LLM arrivals inside one session.
+/// `timestamp` is an absolute request arrival offset in milliseconds. Rows
+/// without a `session_id` are independent request arrivals. Rows that share a
+/// `session_id` are interpreted as closed-loop turns; later turns use `delay`
+/// or timestamp deltas relative to the previous row in that session.
 #[derive(Debug, Clone, Serialize)]
 pub struct MooncakeRow {
-    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub input_length: usize,
     pub output_length: usize,
     pub hash_ids: Vec<u64>,
@@ -318,7 +319,7 @@ mod tests {
     #[test]
     fn row_omits_timestamp_and_delay_when_absent() {
         let row = MooncakeRow {
-            session_id: "s".to_string(),
+            session_id: Some("s".to_string()),
             input_length: 4,
             output_length: 1,
             hash_ids: vec![0, 1],
@@ -334,7 +335,7 @@ mod tests {
     #[test]
     fn row_serializes_optional_fields_when_set() {
         let with_timestamp = MooncakeRow {
-            session_id: "s".to_string(),
+            session_id: Some("s".to_string()),
             input_length: 4,
             output_length: 1,
             hash_ids: vec![],
@@ -342,7 +343,7 @@ mod tests {
             delay: None,
         };
         let with_delay = MooncakeRow {
-            session_id: "s".to_string(),
+            session_id: Some("s".to_string()),
             input_length: 4,
             output_length: 1,
             hash_ids: vec![],
@@ -366,7 +367,7 @@ mod tests {
         let mut writer = MooncakeJsonlWriter::create(&output, Some(&sidecar)).unwrap();
         writer
             .write_row(&MooncakeRow {
-                session_id: "s".to_string(),
+                session_id: Some("s".to_string()),
                 input_length: 2,
                 output_length: 1,
                 hash_ids: vec![0],

@@ -24,17 +24,14 @@ struct SessionRuntime {
     next_turn_index: usize,
     next_ready_at_ms: Option<f64>,
     in_flight: Vec<Uuid>,
-    open_loop: bool,
 }
 
 #[derive(Debug)]
 struct TurnRuntime {
     tokens: Vec<u32>,
     max_output_tokens: usize,
-    arrival_timestamp_ms: Option<f64>,
     delay_after_previous_ms: f64,
     replay_hashes: ReplayRequestHashes,
-    dispatched: bool,
 }
 
 #[derive(Debug)]
@@ -100,12 +97,7 @@ impl WorkloadDriver {
             .sessions
             .into_iter()
             .map(|session| -> Result<SessionRuntime> {
-                let open_loop = matches!(mode, DriverMode::Trace)
-                    && session
-                        .turns
-                        .iter()
-                        .all(|turn| turn.arrival_timestamp_ms.is_some());
-                let next_ready_at_ms = (!open_loop).then_some(match mode {
+                let next_ready_at_ms = Some(match mode {
                     DriverMode::Trace => session.first_arrival_timestamp_ms.unwrap_or(0.0),
                     DriverMode::Concurrency => 0.0,
                 });
@@ -116,11 +108,9 @@ impl WorkloadDriver {
                         Ok(TurnRuntime {
                             tokens: turn.synthesize_tokens(trace_block_size)?,
                             max_output_tokens: turn.max_output_tokens,
-                            arrival_timestamp_ms: turn.arrival_timestamp_ms,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
                             replay_hashes: turn
                                 .to_replay_hashes(trace_block_size, engine_block_size)?,
-                            dispatched: false,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -130,24 +120,13 @@ impl WorkloadDriver {
                     next_turn_index: 0,
                     next_ready_at_ms,
                     in_flight: Vec::new(),
-                    open_loop,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
         let mut ready_sessions = BinaryHeap::new();
         for (session_index, session) in sessions.iter().enumerate() {
-            if session.open_loop {
-                for (turn_index, turn) in session.turns.iter().enumerate() {
-                    ready_sessions.push(ReadySession {
-                        ready_at_ms: turn
-                            .arrival_timestamp_ms
-                            .expect("open-loop turns must carry absolute arrival timestamps"),
-                        session_index,
-                        turn_index,
-                    });
-                }
-            } else if let Some(ready_at_ms) = session.next_ready_at_ms {
+            if let Some(ready_at_ms) = session.next_ready_at_ms {
                 ready_sessions.push(ReadySession {
                     ready_at_ms,
                     session_index,
@@ -195,9 +174,6 @@ impl WorkloadDriver {
             .position(|in_flight| *in_flight == request_uuid)
         {
             session.in_flight.swap_remove(position);
-            for turn in &mut session.turns {
-                turn.dispatched = true;
-            }
             session.next_turn_index = session.turns.len();
             session.next_ready_at_ms = None;
         }
@@ -227,13 +203,9 @@ impl WorkloadDriver {
             if ready_session.turn_index >= session.turns.len() {
                 continue;
             }
-            let stale = if session.open_loop {
-                session.turns[ready_session.turn_index].dispatched
-            } else {
-                !session.in_flight.is_empty()
-                    || session.next_turn_index != ready_session.turn_index
-                    || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
-            };
+            let stale = !session.in_flight.is_empty()
+                || session.next_turn_index != ready_session.turn_index
+                || session.next_ready_at_ms != Some(ready_session.ready_at_ms);
             if stale {
                 continue;
             }
@@ -252,11 +224,8 @@ impl WorkloadDriver {
                 dp_rank: 0,
                 arrival_timestamp_ms,
             };
-            turn.dispatched = true;
             session.in_flight.push(request_uuid);
-            if !session.open_loop {
-                session.next_ready_at_ms = None;
-            }
+            session.next_ready_at_ms = None;
             self.in_flight.insert(
                 request_uuid,
                 InFlightTurn {
@@ -299,9 +268,6 @@ impl WorkloadDriver {
         };
 
         session.in_flight.swap_remove(position);
-        if session.open_loop {
-            return Ok(());
-        }
         session.next_turn_index = in_flight.turn_index + 1;
         if session.next_turn_index < session.turns.len() {
             let ready_at_ms =
@@ -331,13 +297,9 @@ impl WorkloadDriver {
                 self.ready_sessions.pop();
                 continue;
             }
-            let stale = if session.open_loop {
-                session.turns[ready_session.turn_index].dispatched
-            } else {
-                !session.in_flight.is_empty()
-                    || session.next_turn_index != ready_session.turn_index
-                    || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
-            };
+            let stale = !session.in_flight.is_empty()
+                || session.next_turn_index != ready_session.turn_index
+                || session.next_ready_at_ms != Some(ready_session.ready_at_ms);
             if stale {
                 self.ready_sessions.pop();
                 continue;
@@ -348,13 +310,10 @@ impl WorkloadDriver {
 
     pub fn is_drained(&self) -> bool {
         self.in_flight.is_empty()
-            && self.sessions.iter().all(|session| {
-                if session.open_loop {
-                    session.turns.iter().all(|turn| turn.dispatched)
-                } else {
-                    session.next_turn_index >= session.turns.len()
-                }
-            })
+            && self
+                .sessions
+                .iter()
+                .all(|session| session.next_turn_index >= session.turns.len())
     }
 
     pub fn total_turns(&self) -> usize {

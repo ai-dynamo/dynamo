@@ -38,6 +38,17 @@ fn load_trace_from_file(
     }
 }
 
+fn single_turn_mooncake_requests(
+    trace_format: TraceFileFormat,
+    trace: &Trace,
+) -> Result<Option<Vec<DirectRequest>>> {
+    if trace_format == TraceFileFormat::Mooncake && trace.is_single_turn() {
+        Ok(Some(trace.to_single_turn_requests()?))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn generate_trace_worker_artifacts_offline(
     args: MockEngineArgs,
     trace: Trace,
@@ -122,14 +133,26 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
     let started_at = Instant::now();
-    let report = crate::replay::offline::simulate_trace_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        num_workers,
-        router_mode,
-    )?;
+    let report = if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
+        crate::replay::offline::simulate_trace(
+            args,
+            router_config,
+            prefill_load_estimator,
+            requests,
+            num_workers,
+            1.0,
+            router_mode,
+        )?
+    } else {
+        crate::replay::offline::simulate_trace_workload(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+        )?
+    };
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -186,13 +209,24 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
     let started_at = Instant::now();
-    let report = crate::replay::offline::simulate_trace_workload_disagg(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        router_mode,
-    )?;
+    let report = if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
+        crate::replay::offline::simulate_trace_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            requests,
+            1.0,
+            router_mode,
+        )?
+    } else {
+        crate::replay::offline::simulate_trace_workload_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+        )?
+    };
     Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
 }
 
@@ -271,14 +305,26 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
-    online::simulate_trace_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        num_workers,
-        router_mode,
-    )
+    if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
+        online::simulate_trace_requests(
+            args,
+            router_config,
+            prefill_load_estimator,
+            requests,
+            num_workers,
+            1.0,
+            router_mode,
+        )
+    } else {
+        online::simulate_trace_workload(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+        )
+    }
 }
 
 pub fn simulate_trace_requests(
@@ -910,4 +956,82 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
         num_workers,
         router_mode,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loadgen::{SessionTrace, TurnTrace};
+
+    #[test]
+    fn single_turn_mooncake_trace_uses_request_path() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "request_1".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        arrival_timestamp_ms: Some(0.0),
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+                SessionTrace {
+                    session_id: "request_2".to_string(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![2],
+                        arrival_timestamp_ms: Some(0.0),
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        };
+
+        let requests = single_turn_mooncake_requests(TraceFileFormat::Mooncake, &trace)
+            .unwrap()
+            .expect("single-turn Mooncake traces should become request traces");
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].arrival_timestamp_ms, Some(0.0));
+        assert_eq!(requests[1].arrival_timestamp_ms, Some(0.0));
+    }
+
+    #[test]
+    fn multi_turn_mooncake_trace_stays_on_workload_path() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "session-a".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        arrival_timestamp_ms: Some(0.0),
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![2],
+                        arrival_timestamp_ms: None,
+                        delay_after_previous_ms: 10.0,
+                    },
+                ],
+            }],
+        };
+
+        assert!(
+            single_turn_mooncake_requests(TraceFileFormat::Mooncake, &trace)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

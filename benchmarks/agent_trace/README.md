@@ -47,18 +47,19 @@ cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
 
 The converter accepts `.jsonl`, `.jsonl.gz`, repeated `--input-path` flags, and
 recorder-envelope records of the form `{"timestamp": ..., "event": ...}`. It
-groups turns by `workflow_id:program_id` and emits an absolute `timestamp` on
-every Mooncake row from Dynamo's request-arrival time. Stable trace
+emits one independent Mooncake request row per Dynamo `request_end`, with an
+absolute `timestamp` from Dynamo's request-arrival time and no `session_id`.
+Stable trace
 `input_sequence_hashes` are compacted to Mooncake `hash_ids` during conversion.
 The `hash_ids` are request-level cache keys: they describe the cumulative input
 blocks for each LLM request, not cache movement or observed reuse.
 
-Agent-converted traces are wall-clock traces. When every turn in a session has
-an explicit `timestamp`, replay/mocker treats the session as open-loop and does
-not wait for turn `n` to complete before turn `n+1` can arrive. This preserves
-agent fanout patterns such as multiple summarizer LLM calls issued by the same
-program. Delay-only Mooncake traces keep the legacy closed-loop behavior where
-later turns wait for the previous turn to complete plus `delay`.
+Agent-converted traces are request-level wall-clock traces. Because converted
+rows do not share `session_id`, replay/mocker uses the existing timestamped
+request path and can preserve concurrent LLM fanout, including multiple
+summarizer calls issued by the same program. Mooncake rows that do share a
+`session_id` keep closed-loop behavior: later turns wait for the previous turn
+to complete plus the explicit `delay` or timestamp delta.
 
 Replay/mocker uses these request rows as reads and simulates KV writes/events
 from the configured engine, router, capacity, admission, and timing model. This

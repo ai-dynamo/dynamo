@@ -441,7 +441,7 @@ fn test_driver_requires_completion_before_follow_up_turn() {
 }
 
 #[test]
-fn test_trace_driver_allows_same_session_parallel_arrivals_when_timestamps_are_explicit() {
+fn test_trace_driver_keeps_same_session_timestamps_closed_loop() {
     let trace = Trace {
         block_size: 4,
         sessions: vec![SessionTrace {
@@ -469,16 +469,17 @@ fn test_trace_driver_allows_same_session_parallel_arrivals_when_timestamps_are_e
     let mut driver = trace.into_trace_driver().unwrap();
     let ready = driver.pop_ready(0.0, usize::MAX);
 
-    assert_eq!(ready.len(), 2);
+    assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].session_id, "s");
-    assert_eq!(ready[1].session_id, "s");
-    assert_ne!(ready[0].request_uuid, ready[1].request_uuid);
     assert_eq!(ready[0].request.arrival_timestamp_ms, Some(0.0));
-    assert_eq!(ready[1].request.arrival_timestamp_ms, Some(0.0));
+    assert!(driver.pop_ready(100.0, usize::MAX).is_empty());
 
     driver.on_complete(ready[0].request_uuid, 100.0).unwrap();
-    assert!(!driver.is_drained());
-    driver.on_complete(ready[1].request_uuid, 100.0).unwrap();
+    let next = driver.pop_ready(100.0, usize::MAX);
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].session_id, "s");
+    assert_eq!(next[0].request.arrival_timestamp_ms, Some(100.0));
+    driver.on_complete(next[0].request_uuid, 100.0).unwrap();
     assert!(driver.is_drained());
 }
 
