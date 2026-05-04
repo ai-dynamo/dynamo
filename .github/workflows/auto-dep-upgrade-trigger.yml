@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# TEMP - REVERT BEFORE MERGE
+# Push trigger on the phase 2 branch + checkout from the phase 2 branch so
+# the dep_upgrade scripts are available pre-merge. schedule + workflow_dispatch
+# only fire from the default branch; this push trigger is the only way to
+# exercise the workflow before phase 2 lands on main.
 
 name: Auto Dependency Upgrade - Trigger
 
 on:
+  push:
+    branches: [anants/auto-dep-upgrade-trtllm]
   schedule:
     - cron: '0 10 * * *'
   workflow_dispatch:
@@ -27,10 +35,10 @@ jobs:
       matrix:
         framework: [trtllm]
     steps:
-      - name: Checkout main
+      - name: Checkout phase 2 branch (TEMP - revert to main before merge)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: main
+          ref: anants/auto-dep-upgrade-trtllm
           fetch-depth: 0
           token: ${{ secrets.OPS_BOT_PAT }}
 
