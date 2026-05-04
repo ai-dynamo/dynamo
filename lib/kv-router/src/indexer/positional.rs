@@ -174,6 +174,11 @@ impl SyncIndexer for PositionalIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
                 }
@@ -641,11 +646,10 @@ impl PositionalIndexer {
     ///      - None match: Scan range with linear_scan_drain
     ///      - Partial match: Scan range to find exact drain points
     /// 4. Record final scores for remaining active workers
-    /// 5. Populate tree_sizes from worker_blocks
     ///
     /// # Arguments
     /// * `index` - The position -> local_hash -> SeqEntry index
-    /// * `worker_blocks` - Per-worker reverse lookup for tree sizes
+    /// * `worker_blocks` - Per-worker reverse lookup for event removals
     /// * `local_hashes` - Sequence of LocalBlockHash to match
     /// * `jump_size` - Number of positions to jump at a time
     /// * `early_exit` - If true, stop after finding any match
@@ -680,14 +684,6 @@ impl PositionalIndexer {
             // For early exit, just record that these workers matched at least position 0
             for worker in &active {
                 scores.scores.insert(*worker, 1);
-            }
-            // Populate tree_sizes
-            for worker in scores.scores.keys() {
-                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-                }
             }
             return scores;
         }
@@ -732,14 +728,6 @@ impl PositionalIndexer {
         let final_score = len as u32;
         for worker in active {
             scores.scores.insert(worker, final_score);
-        }
-
-        for worker in scores.scores.keys() {
-            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                scores
-                    .tree_sizes
-                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-            }
         }
 
         scores

@@ -25,8 +25,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge],
+                # TODO: re-enable GPU-parallel scheduling with
+                # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
                 timeout_s=220,
-                profiled_vram_gib=9.6,
             ),
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.post_merge],
@@ -113,8 +114,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge],
+                # TODO: re-enable GPU-parallel scheduling with
+                # profiled_vram_gib=12.0 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
-                profiled_vram_gib=12.0,
             ),
         },
         request_payloads=[make_image_payload(["green"])],

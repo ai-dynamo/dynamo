@@ -180,6 +180,39 @@ async fn collect_overlap_scores_for_replay(
     Ok(scores)
 }
 
+async fn collect_overlap_scores_for_supported_modes(
+    config: &MooncakeIndexerConfig,
+    traces: &[Trace],
+    artifacts: &[WorkerReplayArtifacts],
+) -> anyhow::Result<Vec<(String, Vec<NormalizedOverlapScores>)>> {
+    let mut results = vec![(
+        format!(
+            "{} ({})",
+            config.short_name(),
+            MooncakeReplayMode::KvEvents.name()
+        ),
+        collect_overlap_scores_for_replay(config, traces, artifacts, MooncakeReplayMode::KvEvents)
+            .await?,
+    )];
+    if config.supports_approximate() {
+        results.push((
+            format!(
+                "{} ({})",
+                config.short_name(),
+                MooncakeReplayMode::Approx.name()
+            ),
+            collect_overlap_scores_for_replay(
+                config,
+                traces,
+                artifacts,
+                MooncakeReplayMode::Approx,
+            )
+            .await?,
+        ));
+    }
+    Ok(results)
+}
+
 async fn assert_overlap_score_parity(
     variants: &[MooncakeIndexerConfig],
     traces: &[Trace],
@@ -188,11 +221,10 @@ async fn assert_overlap_score_parity(
     let mut expected_name = None;
     let mut expected_scores = Vec::new();
 
-    for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
-        for config in variants {
-            let actual_scores =
-                collect_overlap_scores_for_replay(config, traces, artifacts, mode).await?;
-            let actual_name = format!("{} ({})", config.short_name(), mode.name());
+    for config in variants {
+        for (actual_name, actual_scores) in
+            collect_overlap_scores_for_supported_modes(config, traces, artifacts).await?
+        {
             if expected_name.is_none() {
                 expected_name = Some(actual_name);
                 expected_scores = actual_scores;
@@ -363,6 +395,7 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Result<()> {
+    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
     let ttl = Duration::from_millis(250);
     let variants = [
         MooncakeIndexerConfig::radix_tree(),
@@ -373,6 +406,7 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
 
     for config in &variants {
         let label = config.short_name();
+        support::reset_warning_count(&warning_count);
         let indexer = config.build_approximate_with_prune_config(
             BLOCK_SIZE,
             Arc::new(KvIndexerMetrics::new_unregistered()),
@@ -396,6 +430,13 @@ async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Resul
         );
 
         indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            warning_count.load(Ordering::Relaxed),
+            0,
+            "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+        );
     }
 
     Ok(())
@@ -415,10 +456,14 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
 
     for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
         for config in &variants {
+            if matches!(mode, MooncakeReplayMode::Approx) && !config.supports_approximate() {
+                continue;
+            }
             support::reset_warning_count(&warning_count);
             let label = format!("{} ({})", config.short_name(), mode.name());
 

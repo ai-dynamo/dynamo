@@ -21,9 +21,9 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 - one LLM request slice per Dynamo `request_end`
 - prefill wait, prefill, and decode stage slices stacked under the request by
   default
-- one tool slice per harness `tool_end`/`tool_error` when tool duration is
-  available; otherwise the converter pairs `tool_start` with the terminal tool
-  event when both records are present
+- one tool slice per harness `tool_end`/`tool_error`; explicit
+  `started_at_unix_ms`/`ended_at_unix_ms` are preferred, then `duration_ms`,
+  then paired `tool_start` timing when both records are present
 - optional first-token markers with `--include-markers`
 
 Use `--no-stages` for a compact request-only view. Use
