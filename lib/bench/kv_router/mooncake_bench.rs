@@ -665,8 +665,7 @@ async fn run_single_trial(
             block_size: args.common.block_size,
         },
     )
-    .await?;
-    warn_if_bench_did_not_keep_up(run.kept_up);
+    .await;
 
     shard_cancel.cancel();
     if let Some(handle) = shard_sampler {
@@ -683,6 +682,8 @@ async fn run_single_trial(
         plot_shard_metrics(&rows, &svg)?;
     }
 
+    let run = run?;
+    warn_if_bench_did_not_keep_up(run.kept_up);
     print_indexer_report(&indexer);
     Ok(run.results)
 }
