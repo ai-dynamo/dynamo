@@ -89,7 +89,8 @@ impl PrefillRouter {
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
-        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        let r: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());                                                                                                                                                                                                                                                                                                         
+        let bootstrap_room: u64 = (r / dp_size as u64) * dp_size as u64 + dp_rank as u64;
 
         tracing::debug!(
             worker_id = worker_id,
