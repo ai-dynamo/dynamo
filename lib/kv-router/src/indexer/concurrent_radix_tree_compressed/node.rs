@@ -16,8 +16,6 @@ mod node_state;
 use node_state::NodeState;
 
 type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
-const SHAPE_PLAN_RETRIES: usize = 4;
-
 pub(super) struct RemoveOutcome {
     pub(super) removed: usize,
     pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
@@ -127,27 +125,12 @@ impl Node {
 
     fn with_shape_plan<R>(
         &self,
-        mut plan: impl FnMut(&NodeState, &NodeChildren, u64) -> R,
+        plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R,
     ) -> Option<R> {
-        for attempt in 0..SHAPE_PLAN_RETRIES {
-            let _gate = self.shape_gate.read();
-            let shape_version = self.shape_version.load(Ordering::Acquire);
-            let state = self.state.read();
-            let result = plan(&state, &self.children, shape_version);
-            drop(state);
-
-            if self.shape_version.load(Ordering::Acquire) == shape_version {
-                return Some(result);
-            }
-
-            if attempt > 1 {
-                std::thread::yield_now();
-            } else {
-                std::hint::spin_loop();
-            }
-        }
-
-        None
+        let _gate = self.shape_gate.read();
+        let shape_version = self.shape_version.load(Ordering::Acquire);
+        let state = self.state.read();
+        Some(plan(&state, &self.children, shape_version))
     }
 
     fn validate_shape_read<R>(&self, expected_version: u64, f: impl FnOnce() -> R) -> Option<R> {
