@@ -972,13 +972,21 @@ mod tests {
         );
         #[cfg(feature = "bench")]
         assert_eq!(
-            indexer.metrics.counters.shallow_fallback.load(Ordering::Relaxed),
+            indexer
+                .metrics
+                .counters
+                .shallow_fallback
+                .load(Ordering::Relaxed),
             1,
             "shallow fallback counter should be incremented"
         );
         #[cfg(feature = "bench")]
         assert_eq!(
-            indexer.metrics.counters.find_match_early_returns.load(Ordering::Relaxed),
+            indexer
+                .metrics
+                .counters
+                .find_match_early_returns
+                .load(Ordering::Relaxed),
             0,
             "true miss counter should not be incremented"
         );
@@ -997,14 +1005,23 @@ mod tests {
             .apply_event(stored_event(
                 1,
                 None,
-                vec![block(101, 11), block(102, 22), block(103, 33), block(104, 44)],
+                vec![
+                    block(101, 11),
+                    block(102, 22),
+                    block(103, 33),
+                    block(104, 44),
+                ],
             ))
             .await;
         indexer.flush().await;
 
         // Query shares blocks 0 and 1 but diverges at depth 2.
         let overlap = indexer
-            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(99)])
+            .find_matches(vec![
+                LocalBlockHash(11),
+                LocalBlockHash(22),
+                LocalBlockHash(99),
+            ])
             .await
             .expect("query should succeed");
         let best = overlap.scores.values().copied().max().unwrap_or(0);
@@ -1081,10 +1098,13 @@ mod tests {
         );
         #[cfg(feature = "bench")]
         assert_eq!(
-            indexer.metrics.counters.shallow_fallback.load(Ordering::Relaxed),
+            indexer
+                .metrics
+                .counters
+                .shallow_fallback
+                .load(Ordering::Relaxed),
             1,
             "intermediate-depth query must route via shallow fallback, not direct lookup"
         );
     }
-
 }
