@@ -148,8 +148,7 @@ class TestRoundtripHashes:
                 failure_details = ""
                 if generation_failures:
                     preview = "; ".join(
-                        f"trace {i}: {error}"
-                        for i, error in generation_failures[:5]
+                        f"trace {i}: {error}" for i, error in generation_failures[:5]
                     )
                     failure_details = f" Generation failures: {preview}"
                 pytest.fail(
