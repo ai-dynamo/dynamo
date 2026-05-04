@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -14,7 +13,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.utils import record_function_or_nullcontext
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -22,7 +23,9 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = logging.getLogger(__name__)
+# init_logger so we land in the vllm-handler tree inside the EngineCore
+# subprocess; logging.getLogger(__name__) drops INFO records there.
+logger = init_logger("vllm.dynamo_ec_connector")
 
 
 @dataclass
@@ -45,6 +48,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     This mirrors vLLM's EncoderCacheManager pattern: the scheduler is the
     single source of truth for cache state; the worker is a plain dict storage.
     """
+
+    _log_every_n_steps: int = 100
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole) -> None:
         if Version(_vllm_version) < Version(MINIMUM_VLLM_VERSION):
@@ -89,12 +94,22 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._saves_this_step: set[str] = set()
         self._evicts_this_step: set[str] = set()
 
+        # --- Scheduler-side cumulative counters (for periodic logging) ---
+        self._total_hits: int = 0
+        self._total_misses: int = 0
+        self._total_evictions: int = 0
+        self._total_loads: int = 0
+        self._total_saves: int = 0
+        self._log_step: int = 0
+
         # --- Worker-side: dumb CPU tensor store ---
         self._cpu_store: dict[str, torch.Tensor] = {}
+        self._step_counter: int = 0
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
-            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d",
+            "role=%s, capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d",
+            role.name,
             capacity_gb,
             self._capacity_bytes,
             self._bytes_per_embed,
@@ -125,10 +140,13 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         a miss. A True return tells the scheduler to skip encoder compute and
         load the embedding from the CPU store instead.
         """
-        if identifier in self._cache_order:
-            self._cache_order.move_to_end(identifier)
-            return True
-        return False
+        with record_function_or_nullcontext("ec_connector: scheduler_has_cache_item"):
+            if identifier in self._cache_order:
+                self._cache_order.move_to_end(identifier)
+                self._total_hits += 1
+                return True
+            self._total_misses += 1
+            return False
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         """Record a load or save command for a multimodal feature.
@@ -141,45 +159,80 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             then mark for GPU→CPU save so the worker persists the newly
             computed embedding. Silently skips items larger than total capacity.
         """
-        mm_hash: str = request.mm_features[index].identifier
-        num_embeds: int = request.get_num_encoder_embeds(index)
-        size_bytes: int = num_embeds * self._bytes_per_embed
-
-        if mm_hash in self._cache_order:
-            self._cache_order.move_to_end(mm_hash)
-            self._loads_this_step.add(mm_hash)
-            return
-
-        if size_bytes > self._capacity_bytes:
-            return
-
-        self._saves_this_step.add(mm_hash)
-
-        while (
-            self._num_used_bytes + size_bytes > self._capacity_bytes
-            and self._cache_order
+        with record_function_or_nullcontext(
+            "ec_connector: scheduler_update_state_after_alloc"
         ):
-            evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
-            self._num_used_bytes -= evicted_bytes
-            self._evicts_this_step.add(evicted_hash)
+            mm_hash: str = request.mm_features[index].identifier
+            num_embeds: int = request.get_num_encoder_embeds(index)
+            size_bytes: int = num_embeds * self._bytes_per_embed
 
-        self._cache_order[mm_hash] = size_bytes
-        self._num_used_bytes += size_bytes
+            if mm_hash in self._cache_order:
+                self._cache_order.move_to_end(mm_hash)
+                self._loads_this_step.add(mm_hash)
+                return
+
+            if size_bytes > self._capacity_bytes:
+                return
+
+            self._saves_this_step.add(mm_hash)
+
+            if self._num_used_bytes + size_bytes > self._capacity_bytes:
+                with record_function_or_nullcontext("ec_connector: scheduler_evict"):
+                    while (
+                        self._num_used_bytes + size_bytes > self._capacity_bytes
+                        and self._cache_order
+                    ):
+                        evicted_hash, evicted_bytes = self._cache_order.popitem(
+                            last=False
+                        )
+                        self._num_used_bytes -= evicted_bytes
+                        self._evicts_this_step.add(evicted_hash)
+                        self._total_evictions += 1
+
+            self._cache_order[mm_hash] = size_bytes
+            self._num_used_bytes += size_bytes
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
         """Flush accumulated load/save/evict commands into metadata for the worker."""
-        meta = MultimodalEmbeddingCacheConnectorMetadata(
-            loads=list(self._loads_this_step),
-            saves=list(self._saves_this_step),
-            evicts=list(self._evicts_this_step),
-        )
+        with record_function_or_nullcontext("ec_connector: build_connector_meta"):
+            meta = MultimodalEmbeddingCacheConnectorMetadata(
+                loads=list(self._loads_this_step),
+                saves=list(self._saves_this_step),
+                evicts=list(self._evicts_this_step),
+            )
 
-        self._loads_this_step.clear()
-        self._saves_this_step.clear()
-        self._evicts_this_step.clear()
-        return meta
+            self._total_loads += len(self._loads_this_step)
+            self._total_saves += len(self._saves_this_step)
+
+            self._loads_this_step.clear()
+            self._saves_this_step.clear()
+            self._evicts_this_step.clear()
+
+            self._log_step += 1
+            if self._log_step % self._log_every_n_steps == 0:
+                total_lookups = self._total_hits + self._total_misses
+                hit_rate = (
+                    100.0 * self._total_hits / total_lookups if total_lookups else 0.0
+                )
+                used_gb = self._num_used_bytes / 1024**3
+                cap_gb = self._capacity_bytes / 1024**3
+                logger.info(
+                    "ec_connector stats: hits=%d misses=%d hit_rate=%.1f%% "
+                    "loads=%d saves=%d evicts=%d entries=%d used=%.2f/%.2f GB",
+                    self._total_hits,
+                    self._total_misses,
+                    hit_rate,
+                    self._total_loads,
+                    self._total_saves,
+                    self._total_evictions,
+                    len(self._cache_order),
+                    used_gb,
+                    cap_gb,
+                )
+
+            return meta
 
     # ==============================
     # Worker-side methods
@@ -199,35 +252,48 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
         for mm_hash in metadata.loads:
-            if mm_hash in encoder_cache:
-                continue
-            if mm_hash in self._cpu_store:
-                encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    "cuda", non_blocking=True
-                )
-            else:
-                logger.warning(
-                    "start_load_caches: hash %s not in cpu_store, skipping", mm_hash
-                )
+            with record_function_or_nullcontext("ec_connector: load_item"):
+                if mm_hash in encoder_cache:
+                    continue
+                if mm_hash in self._cpu_store:
+                    with record_function_or_nullcontext("ec_connector: load_h2d"):
+                        encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
+                            "cuda", non_blocking=True
+                        )
+                else:
+                    logger.warning(
+                        "start_load_caches: hash %s not in cpu_store, skipping",
+                        mm_hash,
+                    )
 
-        for mm_hash in metadata.evicts:
-            self._cpu_store.pop(mm_hash, None)
+        if metadata.evicts:
+            with record_function_or_nullcontext("ec_connector: load_evict"):
+                for mm_hash in metadata.evicts:
+                    self._cpu_store.pop(mm_hash, None)
+
+        self._step_counter += 1
+        if self._step_counter % self._log_every_n_steps == 0:
+            logger.info(
+                "ec_connector worker: cpu_store entries=%d", len(self._cpu_store)
+            )
 
     def save_caches(
         self, encoder_cache: dict[str, torch.Tensor], mm_hash: str, **kwargs
     ) -> None:
         """Copy a newly computed embedding from GPU encoder_cache to CPU store."""
-        metadata = self._get_connector_metadata()
-        assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
+        with record_function_or_nullcontext("ec_connector: save_caches"):
+            metadata = self._get_connector_metadata()
+            assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
-        if mm_hash not in metadata.saves:
-            return
-        if mm_hash in self._cpu_store:
-            return
-        if mm_hash not in encoder_cache:
-            logger.warning(
-                "save_caches: hash %s in metadata.saves but not in encoder_cache",
-                mm_hash,
-            )
-            return
-        self._cpu_store[mm_hash] = encoder_cache[mm_hash].cpu()
+            if mm_hash not in metadata.saves:
+                return
+            if mm_hash in self._cpu_store:
+                return
+            if mm_hash not in encoder_cache:
+                logger.warning(
+                    "save_caches: hash %s in metadata.saves but not in encoder_cache",
+                    mm_hash,
+                )
+                return
+            with record_function_or_nullcontext("ec_connector: save_d2h"):
+                self._cpu_store[mm_hash] = encoder_cache[mm_hash].cpu()
