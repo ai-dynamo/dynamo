@@ -460,25 +460,38 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                     Some(self.accumulated_completion_token_ids.clone());
             }
 
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                stream_response.nvext = Some(nvext_json);
-                if let Some(ref info) = nvext_response.worker_id {
-                    tracing::debug!(
-                        "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                        info.prefill_worker_id,
-                        info.decode_worker_id
-                    );
+            // CR-9 closure: emit a tracing::warn! when serialization fails
+            // instead of silently dropping the nvext payload. A dropped nvext
+            // means promoted token_ids / weight_version / etc. never reach the
+            // RL trainer, which silently corrupts training (off-policy delta).
+            match serde_json::to_value(&nvext_response) {
+                Ok(nvext_json) => {
+                    stream_response.nvext = Some(nvext_json);
+                    if let Some(ref info) = nvext_response.worker_id {
+                        tracing::debug!(
+                            "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                            info.prefill_worker_id,
+                            info.decode_worker_id
+                        );
+                    }
+                    if let Some(ref tokens) = nvext_response.token_ids {
+                        tracing::debug!(
+                            "Injected token_ids into chat completion nvext: {} tokens",
+                            tokens.len()
+                        );
+                    }
+                    if let Some(ref tokens) = nvext_response.completion_token_ids {
+                        tracing::debug!(
+                            "Injected completion_token_ids into chat completion nvext: {} tokens",
+                            tokens.len()
+                        );
+                    }
                 }
-                if let Some(ref tokens) = nvext_response.token_ids {
-                    tracing::debug!(
-                        "Injected token_ids into chat completion nvext: {} tokens",
-                        tokens.len()
-                    );
-                }
-                if let Some(ref tokens) = nvext_response.completion_token_ids {
-                    tracing::debug!(
-                        "Injected completion_token_ids into chat completion nvext: {} tokens",
-                        tokens.len()
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "chat completion nvext: serde_json::to_value failed, dropping nvext payload \
+                         (RL trainer will not receive token_ids / weight_version this chunk)",
                     );
                 }
             }

@@ -686,6 +686,12 @@ class WorkerFactory:
         )
         runtime.register_engine_route("get_weight_version", handler.get_weight_version)
 
+        # RL state + liveness — drive /v1/rl/state and /v1/rl/liveness in the
+        # Rust frontend. /v1/rl/state aggregates these per-worker snapshots
+        # into the composite RlStateResponse (rl-support.md Phase 1).
+        runtime.register_engine_route("get_state", handler.get_state)
+        runtime.register_engine_route("liveness_probe", handler.liveness_probe)
+
         # RL LoRA adapter routes: filesystem-native hot-swap used by Prime-RL
         # every training step to broadcast new adapter weights into the engine.
         runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
@@ -697,5 +703,6 @@ class WorkerFactory:
             "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
             "start_profile, stop_profile, pause_generation, resume_generation, "
             "flush_cache, update_weights_from_path, get_weight_version, "
+            "get_state, liveness_probe, "
             "load_lora_adapter, unload_lora_adapter"
         )

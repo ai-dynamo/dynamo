@@ -204,11 +204,11 @@ impl ErrorMessage {
         )
     }
 
-    /// Not Implemented Error
-    /// Return this error when the client requests a feature that is not yet implemented.
-    /// This should be used for features that are planned but not available.
-    /// Bad Request Error
-    /// Return this error when the client sends an invalid request.
+    /// Bad Request Error.
+    /// Return this error when the client sends an invalid request — malformed
+    /// JSON, schema mismatch, or fields that fail `validate.rs` gating.
+    /// (CR-8 closure: stale doc-block lines about "Not Implemented" removed.)
+    #[allow(dead_code)] // exposed for downstream crates; not directly called in lib/llm
     pub fn bad_request(msg: &str) -> ErrorResponse {
         let code = StatusCode::BAD_REQUEST;
         let error_type = map_error_code_to_error_type(code);
@@ -2098,6 +2098,10 @@ fn resolve_model_card(
     Ok((model, card))
 }
 
+// Phase 5: handler kept (no callers) until jthomson04 PR #7699 lands
+// `/tokenize` and `/detokenize` at root paths. Re-mount via
+// `tokenization_router` in `service_v2.rs` if needed standalone.
+#[allow(dead_code)]
 async fn tokenize(
     State(state): State<Arc<service_v2::State>>,
     Json(request): Json<TokenizeRequest>,
@@ -2185,6 +2189,7 @@ async fn tokenize(
     .into_response())
 }
 
+#[allow(dead_code)] // see tokenize() above
 async fn detokenize(
     State(state): State<Arc<service_v2::State>>,
     Json(request): Json<DetokenizeRequest>,
@@ -2203,6 +2208,7 @@ async fn detokenize(
     Ok(Json(DetokenizeResponse { prompt }).into_response())
 }
 
+#[allow(dead_code)] // see tokenize() above; not mounted in service_v2 v2 surface
 pub fn tokenization_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
     let tokenize_path = "/v1/tokenize";
     let detokenize_path = "/v1/detokenize";
@@ -2337,7 +2343,14 @@ pub fn chat_completions_router(
 /// to the standard chat_completions handler -- all in Rust, eliminating the
 /// Python rl-admin proxy from the hot inference path.
 ///
-/// If no path is provided, the default path is `/v1/chat/completions/tokens`
+/// If no path is provided, the default path is `/v1/chat/completions/tokens`.
+///
+/// Phase 5: dropped from the v2 surface (see `service_v2.rs`). TITO callers
+/// retarget to `/v1/chat/completions` with `prompt_token_ids` extension —
+/// vLLM 0.20+ skips chat templating when that field is present, identical
+/// behavior. The handler is kept as `#[allow(dead_code)]` until prime-rl
+/// `bis/prime-rl-merged` migration P1 lands.
+#[allow(dead_code)]
 pub fn chat_completions_tokens_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
@@ -2363,6 +2376,7 @@ pub fn chat_completions_tokens_router(
 /// 4. Forces `logprobs = true` (RL always needs logprobs)
 /// 5. Ensures `messages` is non-empty (Dynamo requires it for chat template selection)
 /// 6. Delegates to the standard `chat_completions()` internal function (zero HTTP proxy)
+#[allow(dead_code)] // see chat_completions_tokens_router above
 async fn handler_chat_completions_tokens(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -3200,15 +3214,58 @@ async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 }
 
 /// `POST /v1/rl/pause` — fan out `pause_generation` to all workers.
-async fn rl_pause(State(state): State<Arc<RlState>>) -> impl IntoResponse {
+///
+/// Query params (both optional):
+/// - `mode`: `keep` | `wait` | `abort` (default `keep`)
+/// - `clear_cache`: `true` | `false` (default `false`)
+///
+/// Closes hhzhang16 HH-21 (3-mode pause: vLLM exposes abort/wait/keep).
+/// Default is `mode=keep&clear_cache=false` to match prime-rl
+/// `client.py:_pause_engines` so existing callers keep working.
+#[derive(Debug, serde::Deserialize)]
+struct RlPauseQuery {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    clear_cache: Option<bool>,
+}
+
+async fn rl_pause(
+    State(state): State<Arc<RlState>>,
+    axum::extract::Query(q): axum::extract::Query<RlPauseQuery>,
+) -> impl IntoResponse {
+    let mode = q.mode.as_deref().unwrap_or("keep").to_string();
+    let clear_cache = q.clear_cache.unwrap_or(false);
+    if !matches!(mode.as_str(), "keep" | "wait" | "abort") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!(
+                    "Invalid mode '{mode}'; expected one of keep|wait|abort"
+                ),
+            })),
+        );
+    }
     let results = state
-        .fan_out("pause_generation", serde_json::json!({}))
+        .fan_out(
+            "pause_generation",
+            serde_json::json!({"mode": mode, "clear_cache": clear_cache}),
+        )
         .await;
     if RlState::all_ok(&results) {
-        tracing::info!("RL pause: all {} worker(s) paused", results.len());
+        tracing::info!(
+            "RL pause: all {} worker(s) paused (mode={mode}, clear_cache={clear_cache})",
+            results.len()
+        );
         (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "workers": results})),
+            Json(serde_json::json!({
+                "status": "ok",
+                "mode": mode,
+                "clear_cache": clear_cache,
+                "workers": results,
+            })),
         )
     } else {
         tracing::warn!("RL pause: some workers failed: {:?}", results);
@@ -3241,49 +3298,81 @@ async fn rl_resume(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 
 /// `POST /v1/rl/update_weights` — atomic `flush_cache → update_weights_from_path` across all workers.
 ///
-/// Expected body: `{"weight_dir": "/path/to/checkpoint"}` or `{"weight_dir": null}` for NCCL mode.
+/// Body schema (`reset_prefix_cache` defaults to `true` — the v1 sequence
+/// always flushed before reload, this just makes it explicit):
+/// ```json
+/// {
+///   "weight_dir": "/path/to/checkpoint" | null,   // null → NCCL mode no-op
+///   "weight_version": "step_42",                   // optional; derived from
+///                                                  //   weight_dir basename if missing
+///   "reset_prefix_cache": true
+/// }
+/// ```
 ///
-/// The sequence per worker is: `flush_cache → update_weights_from_path`.
-/// The pause/resume envelope is left to Prime-RL, which can call `/v1/rl/pause` and
-/// `/v1/rl/resume` explicitly for full drain-and-swap semantics.
+/// Returns `{ "status": "ok", "applied_weight_version": "step_42", "workers": [...] }` on success.
+///
+/// The pause/resume envelope is left to the caller; full-FT updates MUST
+/// bracket this call with `/v1/rl/pause` and `/v1/rl/resume`.
+#[derive(Debug, serde::Deserialize)]
+struct RlUpdateWeightsBody {
+    weight_dir: Option<String>,
+    #[serde(default)]
+    weight_version: Option<String>,
+    #[serde(default = "default_reset_prefix_cache")]
+    reset_prefix_cache: bool,
+}
+
+fn default_reset_prefix_cache() -> bool {
+    true
+}
+
 async fn rl_update_weights(
     State(state): State<Arc<RlState>>,
-    body: axum::extract::Json<serde_json::Value>,
+    body: axum::extract::Json<RlUpdateWeightsBody>,
 ) -> impl IntoResponse {
-    let weight_dir = body
-        .get("weight_dir")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let weight_dir = body.weight_dir.clone();
+    let reset_prefix_cache = body.reset_prefix_cache;
 
     if weight_dir.is_none() {
         tracing::info!("RL update_weights: weight_dir=null (NCCL mode, no-op on Dynamo side)");
         return (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "message": "NCCL mode, no-op on Dynamo side"})),
+            Json(serde_json::json!({
+                "status": "ok",
+                "message": "NCCL mode, no-op on Dynamo side"
+            })),
         );
     }
 
     let weight_dir = weight_dir.unwrap();
-    tracing::info!("RL update_weights: weight_dir={weight_dir}");
+    let version = body.weight_version.clone().unwrap_or_else(|| {
+        std::path::Path::new(&weight_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
+    tracing::info!(
+        "RL update_weights: weight_dir={weight_dir} version={version} reset_prefix_cache={reset_prefix_cache}"
+    );
 
-    // Step 1: flush_cache across all workers
-    let flush_results = state.fan_out("flush_cache", serde_json::json!({})).await;
-    if !RlState::all_ok(&flush_results) {
-        tracing::warn!("RL update_weights: flush_cache failed: {:?}", flush_results);
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(
-                serde_json::json!({"status": "error", "stage": "flush_cache", "workers": flush_results}),
-            ),
-        );
+    // Step 1 (optional): flush_cache across all workers.
+    if reset_prefix_cache {
+        let flush_results = state.fan_out("flush_cache", serde_json::json!({})).await;
+        if !RlState::all_ok(&flush_results) {
+            tracing::warn!("RL update_weights: flush_cache failed: {:?}", flush_results);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "stage": "flush_cache",
+                    "workers": flush_results
+                })),
+            );
+        }
     }
 
-    // Step 2: update_weights_from_path across all workers
-    let version = std::path::Path::new(&weight_dir)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    // Step 2: update_weights_from_path across all workers.
     let load_body = serde_json::json!({"path": weight_dir, "version": version});
     let load_results = state.fan_out("update_weights_from_path", load_body).await;
     if RlState::all_ok(&load_results) {
@@ -3293,7 +3382,11 @@ async fn rl_update_weights(
         );
         (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "workers": load_results})),
+            Json(serde_json::json!({
+                "status": "ok",
+                "applied_weight_version": version,
+                "workers": load_results,
+            })),
         )
     } else {
         tracing::warn!(
@@ -3302,9 +3395,11 @@ async fn rl_update_weights(
         );
         (
             StatusCode::BAD_GATEWAY,
-            Json(
-                serde_json::json!({"status": "error", "stage": "update_weights_from_path", "workers": load_results}),
-            ),
+            Json(serde_json::json!({
+                "status": "error",
+                "stage": "update_weights_from_path",
+                "workers": load_results
+            })),
         )
     }
 }
@@ -3461,11 +3556,6 @@ async fn rl_weight_version(State(state): State<Arc<RlState>>) -> impl IntoRespon
     }
 }
 
-/// Promote token IDs from the Dynamo `nvext` response object to the top-level
-/// locations that Prime-RL / verifiers expects:
-///
-///   response.nvext.completion_token_ids  →  response.choices[i].token_ids
-///
 /// Tokenize chat messages using the model's tokenizer and return prompt token IDs.
 /// Used by the RL post-processing path to populate `response.prompt_token_ids`.
 fn rl_tokenize_prompt(
@@ -3502,9 +3592,15 @@ fn rl_tokenize_prompt(
     Some(encoding.token_ids().to_vec())
 }
 
+/// Promote token IDs from the Dynamo `nvext` response object to the top-level
+/// locations that Prime-RL / verifiers expects:
+///
+///   response.nvext.completion_token_ids  →  response.choices[i].token_ids
+///
 /// This lets Prime-RL read `choice.token_ids` without knowing about the `nvext`
 /// extension structure. Called on non-streaming responses when RL token ID mode
-/// is active.
+/// is active. (CR-10 closure: doc-block was previously misattached to
+/// `rl_tokenize_prompt`.)
 fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
     // Move completion_token_ids from response-level nvext to each choice.
     // Prime-RL / verifiers expects:
@@ -3545,8 +3641,204 @@ fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
 /// `admin_base_url = ["http://dynamo:8000/v1/rl"]` the request arrives here.
 /// Returns 200 OK if the frontend process is running (no deep probe needed —
 /// the frontend's own `/health` endpoint handles that separately).
+///
+/// **Deprecated in favor of `/v1/rl/state.ingress_alive`** (rl-support.md
+/// Phase 1 / Phase 5). Kept for prime-rl `bis/prime-rl-merged` until the
+/// AdminAPI migration lands; will be removed once prime-rl P2 commits.
 async fn rl_health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
+/// `GET /v1/rl/liveness` — engine event-loop probe via `liveness_probe`
+/// engine route. Closes hhzhang16 HH-23 (the v1 `/v1/rl/health` returns OK
+/// no matter what; this endpoint round-trips through the engine so a hung
+/// event loop or wedged worker surfaces as 503).
+///
+/// Each per-worker call carries a 5s timeout (override via
+/// `DYN_RL_LIVENESS_TIMEOUT_MS`). Returns 200 only when every worker
+/// reports `alive: true` within the deadline; 503 otherwise.
+async fn rl_liveness(State(state): State<Arc<RlState>>) -> impl IntoResponse {
+    if state.worker_system_urls.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "error",
+                "alive": false,
+                "message": "no workers registered"
+            })),
+        );
+    }
+    let timeout_ms = std::env::var("DYN_RL_LIVENESS_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5000);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+
+    let futures: Vec<_> = state
+        .worker_system_urls
+        .iter()
+        .map(|url| {
+            let client = state.http_client.clone();
+            let endpoint = format!("{url}/engine/liveness_probe");
+            async move {
+                tokio::time::timeout(
+                    timeout,
+                    async {
+                        match client.post(&endpoint).json(&serde_json::json!({})).send().await {
+                            Ok(resp) => resp
+                                .json::<serde_json::Value>()
+                                .await
+                                .unwrap_or_else(|e| serde_json::json!({
+                                    "status": "error",
+                                    "alive": false,
+                                    "message": format!("decode failed: {e}")
+                                })),
+                            Err(e) => serde_json::json!({
+                                "status": "error",
+                                "alive": false,
+                                "message": format!("request failed: {e}")
+                            }),
+                        }
+                    },
+                )
+                .await
+                .unwrap_or_else(|_| serde_json::json!({
+                    "status": "error",
+                    "alive": false,
+                    "message": format!("liveness_probe timed out after {timeout_ms}ms")
+                }))
+            }
+        })
+        .collect();
+    let results = futures::future::join_all(futures).await;
+    let all_alive = results
+        .iter()
+        .all(|r| r.get("alive").and_then(|v| v.as_bool()) == Some(true));
+    if all_alive {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "alive": true,
+                "workers": results,
+            })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "error",
+                "alive": false,
+                "workers": results,
+            })),
+        )
+    }
+}
+
+/// `GET /v1/rl/state` — composite RL fleet state snapshot.
+///
+/// Replaces three v1 endpoints (`/v1/rl/health` + `/v1/rl/ready` +
+/// `/v1/rl/weight_version`) with a single composite. Closes hhzhang16
+/// HH-19 (single state endpoint), HH-25 (RL-specific vs broader Dynamo
+/// readiness), HH-27 (weight_version folded in).
+///
+/// Aggregates per-worker `get_state` engine-route responses into:
+///
+/// ```json
+/// {
+///   "ready": bool,
+///   "ingress_alive": true,
+///   "engine_alive": bool,            // every worker's engine.check_health() ok
+///   "pause_state": "running"|"paused"|"mixed",
+///   "applied_weight_version": str,   // when consistent across workers; null if mixed
+///   "loras": [{name, loaded_on: [worker_idx]}],
+///   "workers": [<per-worker get_state payloads>]
+/// }
+/// ```
+///
+/// `ingress_alive` is unconditionally `true` because reaching this handler
+/// means the frontend HTTP listener is up. `ready = ingress_alive AND
+/// engine_alive AND len(workers) > 0`.
+async fn rl_state(State(state): State<Arc<RlState>>) -> impl IntoResponse {
+    if state.worker_system_urls.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ready": false,
+                "ingress_alive": true,
+                "engine_alive": false,
+                "pause_state": "running",
+                "applied_weight_version": null,
+                "loras": [],
+                "workers": [],
+                "status": "error",
+                "message": "no workers registered"
+            })),
+        );
+    }
+    let results = state.fan_out("get_state", serde_json::json!({})).await;
+
+    let engine_alive = results
+        .iter()
+        .all(|r| r.get("engine_alive").and_then(|v| v.as_bool()) == Some(true));
+
+    // Aggregate pause_state: if all workers agree, surface that; else "mixed".
+    let pause_states: std::collections::HashSet<&str> = results
+        .iter()
+        .filter_map(|r| r.get("pause_state").and_then(|v| v.as_str()))
+        .collect();
+    let pause_state = if pause_states.len() == 1 {
+        pause_states.into_iter().next().unwrap_or("running").to_string()
+    } else if pause_states.is_empty() {
+        "running".to_string()
+    } else {
+        "mixed".to_string()
+    };
+
+    // applied_weight_version is reported only when consistent.
+    let weight_versions: std::collections::HashSet<&str> = results
+        .iter()
+        .filter_map(|r| r.get("applied_weight_version").and_then(|v| v.as_str()))
+        .collect();
+    let applied_weight_version: Option<String> = if weight_versions.len() == 1 {
+        weight_versions.into_iter().next().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    // LoRA name → list of worker indices that have it loaded.
+    let mut lora_loaded_on: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (idx, worker) in results.iter().enumerate() {
+        if let Some(loras) = worker.get("loras").and_then(|v| v.as_array()) {
+            for lora in loras {
+                if let Some(name) = lora.get("name").and_then(|v| v.as_str()) {
+                    lora_loaded_on.entry(name.to_string()).or_default().push(idx);
+                }
+            }
+        }
+    }
+    let loras: Vec<serde_json::Value> = lora_loaded_on
+        .into_iter()
+        .map(|(name, loaded_on)| serde_json::json!({"name": name, "loaded_on": loaded_on}))
+        .collect();
+
+    let ready = engine_alive && !results.is_empty();
+    let body = serde_json::json!({
+        "ready": ready,
+        "ingress_alive": true,
+        "engine_alive": engine_alive,
+        "pause_state": pause_state,
+        "applied_weight_version": applied_weight_version,
+        "loras": loras,
+        "workers": results,
+    });
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body))
 }
 
 /// Create an Axum [`Router`] for the RL admin endpoints at `/v1/rl/*`.
@@ -3560,28 +3852,41 @@ async fn rl_health() -> impl IntoResponse {
 /// in the orchestrator config. Prime-RL strips the trailing `/v1` suffix only
 /// if present, so `/v1/rl` is preserved and all routes resolve correctly.
 pub fn rl_router() -> (Vec<RouteDoc>, Router) {
-    let rl_state = Arc::new(RlState::from_env());
+    let rl_state_arc = Arc::new(RlState::from_env());
     let docs = vec![
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/health"),
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/ready"),
+        // Phase 1: composite endpoints.
+        RouteDoc::new(axum::http::Method::GET, "/v1/rl/state"),
+        RouteDoc::new(axum::http::Method::GET, "/v1/rl/liveness"),
+        // Pause / resume / update_weights bracket.
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/pause"),
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/resume"),
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/update_weights"),
+        // LoRA hot-swap.
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/load_lora_adapter"),
-        RouteDoc::new(axum::http::Method::POST, "/v1/rl/unload_lora_adapter"),
+        // Legacy (deprecated; subsumed by /v1/rl/state — Phase 5 will drop):
+        RouteDoc::new(axum::http::Method::GET, "/v1/rl/health"),
+        RouteDoc::new(axum::http::Method::GET, "/v1/rl/ready"),
         RouteDoc::new(axum::http::Method::GET, "/v1/rl/weight_version"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/rl/unload_lora_adapter"),
     ];
     let router = Router::new()
-        .route("/v1/rl/health", get(rl_health))
-        .route("/v1/rl/ready", get(rl_ready))
+        // Phase 1: composite read-only endpoints.
+        .route("/v1/rl/state", get(rl_state))
+        .route("/v1/rl/liveness", get(rl_liveness))
+        // Pause / resume / update_weights bracket.
         .route("/v1/rl/pause", post(rl_pause))
         .route("/v1/rl/resume", post(rl_resume))
         .route("/v1/rl/update_weights", post(rl_update_weights))
+        // LoRA hot-swap.
         .route("/v1/rl/load_lora_adapter", post(rl_load_lora_adapter))
-        .route("/v1/rl/unload_lora_adapter", post(rl_unload_lora_adapter))
+        // Legacy endpoints — kept until prime-rl `bis/prime-rl-merged` AdminAPI
+        // migration P2 lands; Phase 5 of rl-support.md drops them.
+        .route("/v1/rl/health", get(rl_health))
+        .route("/v1/rl/ready", get(rl_ready))
         .route("/v1/rl/weight_version", get(rl_weight_version))
+        .route("/v1/rl/unload_lora_adapter", post(rl_unload_lora_adapter))
         .layer(middleware::from_fn(smart_json_error_middleware))
-        .with_state(rl_state);
+        .with_state(rl_state_arc);
     (docs, router)
 }
 

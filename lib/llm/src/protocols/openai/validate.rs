@@ -98,10 +98,45 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 //
 
 /// Fields that Prime-RL / verifiers may send as extra_body hints which Dynamo
-/// does not implement but should not reject with a 400.  They are silently
-/// accepted and ignored so the RL client stack is forward-compatible.
+/// does not implement but should not reject with a 400. They are silently
+/// accepted (the chat-completions handler reads what it understands and
+/// ignores the rest) so the RL client stack is forward-compatible with new
+/// extension fields without churning Dynamo.
+///
+/// Per `bis-dev/design-docs/rl-support.md` Phase 4, this is the canonical
+/// home for the typed RL extension fields; the prior `nvext.extra_fields`
+/// `["completion_token_ids", ...]` opt-in mechanism still works alongside it
+/// but the named fields here are the recommended path.
 const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
-    "cache_salt", // KV prefix-cache isolation hint from prime-rl orchestrator
+    // KV prefix-cache isolation hint from prime-rl orchestrator. Coordinated
+    // with PR #8197 (which moves this to the X-Tenant-Id header); both forms
+    // accepted for one release, header takes precedence.
+    "cache_salt",
+    // Pre-tokenized prompt for the RL TITO path. Mutually exclusive with
+    // `messages`; when present, vLLM 0.20+ skips chat templating. Closes
+    // hhzhang16 HH-22 / HH-26 — the "tokens variant of /v1/chat/completions"
+    // collapses into the same URI with this extension field instead of a
+    // forked /v1/chat/completions/tokens. Today RL clients pre-tokenize
+    // and pass via `nvext.token_data` (preprocessor.rs handles that
+    // already); the typed top-level field shipped here is the long-term
+    // canonical entry for clients written against the vLLM 0.20 schema.
+    "prompt_token_ids",
+    // RL routing filter — only dispatch to workers reporting this applied
+    // weight version. Used by IS-correction strict-version mode and by
+    // NeMo RL eval-on-subset. Today accepted-and-ignored at the request
+    // level; the routing-side filter lands in a follow-up.
+    "weight_version",
+    // Per-request gate for MoE Routing Replay capture. Honored by
+    // `nvext.extra_fields = ["routed_experts"]` already (see
+    // `NvExtResponseFieldSelection`); accepted here as a typed alias.
+    "return_routed_experts",
+    // Per-request opt-in for `nvext.completion_token_ids` on the response.
+    // Today the `extra_fields = ["completion_token_ids"]` mechanism is the
+    // canonical; this typed alias is the long-term form.
+    "return_token_ids",
+    // Opt-in for `nvext.prompt_logprobs` on the response. Aliased through
+    // to vLLM's `sampling_params.prompt_logprobs` in a follow-up.
+    "return_prompt_logprobs",
 ];
 
 /// Validates that no unsupported fields are present in the request

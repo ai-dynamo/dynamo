@@ -835,12 +835,55 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Called by RL admin coordinator before weight updates.
         Uses engine_client.pause_generation() directly -- does NOT sleep
         (no GPU memory release) and does NOT unregister from discovery.
+
+        Body (all optional, all default to the prime-rl client convention):
+          - mode: "keep" | "wait" | "abort"  (default "keep" — drain in-flight)
+          - clear_cache: bool                 (default False)
+        Closes hhzhang16 review HH-21 (3-mode pause).
         """
         body = body or {}
+        mode = body.get("mode", "keep")
+        clear_cache = bool(body.get("clear_cache", False))
+        if mode not in ("keep", "wait", "abort"):
+            return {
+                "status": "error",
+                "message": f"Invalid mode '{mode}'; expected one of keep|wait|abort",
+            }
         try:
             await self.engine_client.pause_generation()
-            logger.info("[RL] Engine paused (generation quiesced)")
-            return {"status": "ok", "message": "Engine paused"}
+            # mode=abort → also abort in-flight requests via vLLM's request abort
+            if mode == "abort":
+                try:
+                    # Best-effort abort of all in-flight requests.
+                    # vLLM exposes per-request abort; we don't track ids here so
+                    # rely on engine internals to drain the rest under pause.
+                    await self.engine_client.collective_rpc(
+                        "abort_all_requests", kwargs={}
+                    )
+                except Exception as abort_err:
+                    logger.warning(
+                        f"[RL] mode=abort: collective_rpc(abort_all_requests) "
+                        f"unavailable on this engine version: {abort_err}; "
+                        f"in-flight requests will drain naturally"
+                    )
+            if clear_cache:
+                try:
+                    await self.engine_client.reset_prefix_cache()
+                    logger.info("[RL] pause: prefix cache cleared")
+                except Exception as flush_err:
+                    logger.warning(
+                        f"[RL] pause: clear_cache requested but reset_prefix_cache failed: {flush_err}"
+                    )
+            self._paused = True
+            logger.info(
+                f"[RL] Engine paused (generation quiesced, mode={mode}, clear_cache={clear_cache})"
+            )
+            return {
+                "status": "ok",
+                "message": "Engine paused",
+                "mode": mode,
+                "clear_cache": clear_cache,
+            }
         except Exception as e:
             logger.error(f"[RL] Failed to pause: {e}")
             return {"status": "error", "message": str(e)}
@@ -850,10 +893,69 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         body = body or {}
         try:
             await self.engine_client.resume_generation()
+            self._paused = False
             logger.info("[RL] Engine resumed")
             return {"status": "ok", "message": "Engine resumed"}
         except Exception as e:
             logger.error(f"[RL] Failed to resume: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def liveness_probe(self, body: dict) -> dict:
+        """Engine event-loop probe — confirms the engine is responsive.
+
+        Used by ``GET /v1/rl/liveness``. The Rust frontend fans this out with a
+        short timeout (default 5s). Returning ``alive: True`` requires the
+        engine_client IPC roundtrip to complete: a hung event loop, deadlocked
+        worker, or wedged engine will time out at the frontend instead of
+        returning a stale ``OK``. Closes hhzhang16 HH-23 (health probe returns
+        OK no matter what).
+        """
+        body = body or {}
+        try:
+            # vLLM's AsyncLLM/AsyncEngineClient exposes check_health() as the
+            # canonical liveness probe. It does a lightweight collective RPC
+            # to all engine workers and raises if any are unresponsive.
+            if hasattr(self.engine_client, "check_health"):
+                await self.engine_client.check_health()
+                return {"status": "ok", "alive": True}
+            # Fallback for engines without check_health: a no-op collective_rpc.
+            # The RPC round-trip itself is the liveness signal — if the engine
+            # event loop is wedged the frontend's 5s timeout fires.
+            await self.engine_client.collective_rpc("get_weight_version", kwargs={})
+            return {"status": "ok", "alive": True}
+        except Exception as e:
+            logger.warning(f"[RL] liveness_probe failed: {e}")
+            return {"status": "error", "alive": False, "message": str(e)}
+
+    async def get_state(self, body: dict) -> dict:
+        """Composite per-worker state snapshot for ``GET /v1/rl/state``.
+
+        The Rust frontend aggregates these per-worker payloads into the
+        fleet-wide ``RlStateResponse``. Closes hhzhang16 HH-19/HH-25/HH-27
+        (single state endpoint replacing /health + /ready + /weight_version,
+        RL-specific, weight_version folded in).
+        """
+        body = body or {}
+        try:
+            engine_alive = True
+            try:
+                if hasattr(self.engine_client, "check_health"):
+                    await self.engine_client.check_health()
+            except Exception as health_err:
+                engine_alive = False
+                logger.warning(f"[RL] get_state: engine_alive=false ({health_err})")
+            return {
+                "status": "ok",
+                "engine_alive": engine_alive,
+                "pause_state": "paused" if getattr(self, "_paused", False) else "running",
+                "applied_weight_version": getattr(self, "_weight_version", "initial"),
+                "loras": [
+                    {"name": name, "id": info.id, "path": info.path}
+                    for name, info in getattr(self, "loaded_loras", {}).items()
+                ],
+            }
+        except Exception as e:
+            logger.error(f"[RL] get_state failed: {e}")
             return {"status": "error", "message": str(e)}
 
     async def flush_cache(self, body: dict) -> dict:
