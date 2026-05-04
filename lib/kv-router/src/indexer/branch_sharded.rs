@@ -308,9 +308,10 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     ///
     /// A. Parent tail found in `block_to_fnv_state` (depth < prefix_depth):
     ///    Extend the FNV accumulator with leading blocks from this batch.
-    ///    Once the accumulated depth reaches `prefix_depth`, call
-    ///    `assign_shard` with the finalized key so that distinct
-    ///    continuations receive distinct shard assignments.
+    ///    Inherit the parent's shard (sticky routing) so the chain stays
+    ///    on one shard.  Once the accumulated depth reaches `prefix_depth`,
+    ///    call `register_prefix_keys` to record finalized prefix aliases and
+    ///    increment `branch_counts` for the inherited shard.
     ///    Record the updated state on the last block of this batch if the
     ///    chain is still shallow after processing.
     ///
@@ -327,10 +328,16 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     /// record it on the last block of the batch so the next continuation can
     /// extend it.  The shard in the state tuple is the sticky shard so that
     /// continuations never cross shards mid-chain.
+    /// Returns `(shard_idx, fnv_state, parent_found)`.
+    ///
+    /// `parent_found` is `false` only for Case C OOO (continuation whose parent
+    /// is absent from both routing maps).  The caller uses this to strip the
+    /// parent hash before dispatching so the CRTC stores the blocks as an orphan
+    /// root rather than dropping them with a "parent not found" warning.
     fn compute_stored_routing(
         &self,
         store_data: &KvCacheStoreData,
-    ) -> (usize, Option<(u64, usize, usize)>) {
+    ) -> (usize, Option<(u64, usize, usize)>, bool) {
         if let Some(parent_hash) = &store_data.parent_hash {
             if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
                 // Case A: parent is shallow — extend FNV accumulator.
@@ -350,16 +357,20 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                 let shard = parent_shard;
                 if new_depth >= self.prefix_depth {
                     self.register_prefix_keys(shard, prefix_keys);
+                    // Mirror the branch_counts increment that assign_shard would
+                    // have done in the pre-sticky-routing code path, so the
+                    // tiebreaker accounting stays accurate.
+                    self.branch_counts.lock().unwrap()[shard] += 1;
                 }
                 let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth, shard));
-                (shard, state)
+                (shard, state, true)
             } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
                 // Case B: deep chain — inherit shard.
-                (shard, None)
+                (shard, None, true)
             } else {
                 // Case C (OOO): parent not in either map; best-effort key from this batch.
                 let key = self.branch_key_for_stored_blocks(&store_data.blocks);
-                (self.assign_shard(key), None)
+                (self.assign_shard(key), None, false)
             }
         } else {
             // Case C (root): start FNV accumulation from scratch.
@@ -374,16 +385,16 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             let shard = self.assign_shard(fnv);
             self.register_prefix_keys(shard, prefix_keys);
             let state = (depth < self.prefix_depth).then_some((fnv, depth, shard));
-            (shard, state)
+            (shard, state, true)
         }
     }
 
-    async fn apply_stored(&self, event: RouterEvent) {
+    async fn apply_stored(&self, mut event: RouterEvent) {
         let KvCacheEventData::Stored(store_data) = &event.event.data else {
             return;
         };
 
-        let (shard_idx, new_fnv_state) = self.compute_stored_routing(store_data);
+        let (shard_idx, new_fnv_state, parent_found) = self.compute_stored_routing(store_data);
 
         // Update eager block count before dispatching.
         self.shard_block_counts[shard_idx].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
@@ -401,6 +412,16 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         if let (Some(fnv_state), Some(last_block)) = (new_fnv_state, store_data.blocks.last()) {
             self.block_to_fnv_state
                 .insert(last_block.block_hash.0, fnv_state);
+        }
+        // store_data borrow ends here.
+
+        // OOO event: parent is unknown so the target CRTC cannot chain these
+        // blocks.  Strip parent_hash so they are stored as an orphan root
+        // rather than being silently dropped by the CRTC with a warning.
+        if !parent_found {
+            if let KvCacheEventData::Stored(ref mut data) = event.event.data {
+                data.parent_hash = None;
+            }
         }
 
         self.shards[shard_idx].apply_event(event).await;
@@ -845,6 +866,50 @@ mod tests {
         assert_eq!(
             best, 2,
             "continuation must land on the same shard as its root so the CRTC has the full chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_hop_sticky_routing_preserves_shard_through_intermediate_lookups() {
+        // prefix_depth=4, 2 shards.  The chain is built in three hops:
+        //   hop 0 (root):     1 block  → depth 1, stored in block_to_fnv_state
+        //   hop 1 (cont):     1 block  → depth 2, still in block_to_fnv_state
+        //   hop 2 (cont):     1 block  → depth 3, still in block_to_fnv_state
+        //   hop 3 (cont):     1 block  → depth 4, finalized → block_to_shard
+        //
+        // Each hop is a Case A lookup.  A bug that drops the shard field on any
+        // intermediate lookup would cause the finalization hop to call assign_shard
+        // instead of inheriting, potentially landing on a different shard than the root.
+        let indexer = make_indexer(2, 4);
+
+        indexer
+            .apply_event(stored_event(1, None, vec![block(401, 41)]))
+            .await;
+        indexer
+            .apply_event(stored_event(1, Some(401), vec![block(402, 42)]))
+            .await;
+        indexer
+            .apply_event(stored_event(1, Some(402), vec![block(403, 43)]))
+            .await;
+        indexer
+            .apply_event(stored_event(1, Some(403), vec![block(404, 44)]))
+            .await;
+
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![
+                LocalBlockHash(41),
+                LocalBlockHash(42),
+                LocalBlockHash(43),
+                LocalBlockHash(44),
+            ])
+            .await
+            .expect("query should succeed");
+        let best = overlap.scores.values().copied().max().unwrap_or(0);
+        assert_eq!(
+            best, 4,
+            "all hops must land on the same shard so the full 4-block chain is visible"
         );
     }
 }

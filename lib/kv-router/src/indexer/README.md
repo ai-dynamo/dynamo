@@ -379,7 +379,7 @@ There are five production indexer variants. This section maps deployment scenari
 **`BranchShardedIndexer<CRTC>` (BSI)**
 - Routes each conversation to one shard via a fixed-depth FNV prefix hash. Read path only scans one shard.
 - Enables *approximate pruning*: a shard can evict its least-recently-used entries independently without coordinating with others.
-- Use when: worker count > ~1 000, you need per-shard approximate pruning, and you accept a small risk of shard crossing for very short conversations (< `prefix_depth` blocks in the root segment).
+- Use when: worker count > ~1 000, you need per-shard approximate pruning, and you can tolerate the residual shard-crossing risk from out-of-order events (rare in practice).
 - **Shard-crossing**: short chains (root shorter than `prefix_depth` blocks) use *sticky routing* — continuations inherit the root's shard from `block_to_fnv_state`, so the full chain always lands on one shard.
 - Not the right choice if you need a guarantee that every conversation stays on one shard even under out-of-order events (use anchor-aware BSI for that).
 
