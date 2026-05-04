@@ -83,6 +83,14 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
   branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 4
 ```
 
+**Anchor-aware branch-sharded depth=2 (2 shards × 4 workers):**
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench -- \
+  $(git rev-parse --show-toplevel)/lib/kv-router/traces/conversation_trace.jsonl \
+  --trace-simulation-duration-ms 10000 --benchmark-duration-ms 30000 -d 7 \
+  anchor-aware-branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 2
+```
+
 ### Peak throughput sweep
 
 **CRTC baseline — sweep:**
@@ -101,6 +109,15 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
   --trace-simulation-duration-ms 10000 -d 7 \
   --sweep --sweep-min-ms 1000 --sweep-max-ms 30000 --sweep-steps 8 \
   branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 2
+```
+
+**Anchor-aware branch-sharded depth=2 — sweep:**
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench -- \
+  $(git rev-parse --show-toplevel)/lib/kv-router/traces/conversation_trace.jsonl \
+  --trace-simulation-duration-ms 10000 -d 7 \
+  --sweep --sweep-min-ms 1000 --sweep-max-ms 30000 --sweep-steps 8 \
+  anchor-aware-branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 2
 ```
 
 ### Worker scaling
@@ -165,6 +182,16 @@ done
 | `--num-event-workers-per-shard` | 4 | OS threads per shard for KV event processing |
 | `--prefix-depth` | 2 | Blocks hashed to compute the branch routing key |
 
+### `anchor-aware-branch-sharded-crtc` flags
+
+| Flag | Default | What it does |
+|------|---------|-------------|
+| `--num-shards` | 2 | Number of independent CRTC shards |
+| `--num-event-workers-per-shard` | 4 | OS threads per shard for KV event processing |
+| `--prefix-depth` | 2 | Maximum routing-trie depth before dispatching to one shard |
+
+Note: `anchor-aware-branch-sharded-crtc` does not support approximate pruning. It provides a stronger routing-correctness guarantee for out-of-order events, at the cost of higher routing latency and a hot-branch shard collapse risk on dominant-prefix workloads (see Known Issues).
+
 ---
 
 ## Results
@@ -173,13 +200,18 @@ Trace: `conversation_trace.jsonl` (Mooncake FAST25). Config: 2 shards × 4 worke
 
 ### Steady-state — p99 at real-world request rate (~11,860 ops/s offered)
 
-| Indexer | Achieved ops/s | p99 | Early-exit | Avg routing | Avg shard |
-|---------|---------------|-----|------------|-------------|-----------|
+| Indexer | Achieved ops/s | p99 | Early-exit / TRIE-only | Avg routing | Avg shard |
+|---------|---------------|-----|------------------------|-------------|-----------|
 | CRTC baseline (8w) | 11,540 | 5,768 µs | — | — | — |
 | Branch-sharded depth=2 (2×4w) | 11,706 | **1,387 µs** | 85.4% | 433 ns | 521 µs |
 | Branch-sharded depth=4 (2×4w) | 11,775 | **727 µs** | 87.0% | 299 ns | 397 µs |
+| Anchor-aware BSI depth=2 (2×4w) | 11,740 | 1,006 µs | 18.5% TRIE-only | 394 µs | 8 µs |
 
 Branch-sharded depth=2 p99 is **4.2× lower** than CRTC; depth=4 is **7.9× lower**. The deeper key resolves more unique branches (1,038 vs 831), raising the early-exit rate slightly and reducing average shard traversal time.
+
+Anchor-aware BSI sits between CRTC and branch-sharded in p99 on this trace. Avg routing is 394 µs — the routing TRIE traversal is much heavier than old BSI's flat FNV lookup (433 ns). Avg shard is only 8 µs because most blocks are handled by the TRIE and never reach the CRTC. 18.5% of queries resolved entirely within the TRIE (no CRTC dispatch).
+
+> **Shard imbalance warning (this trace):** `conversation_trace.jsonl` has highly similar conversation prefixes (shared system prompts). Nearly all traffic fell on one shard — shard 0: 63 blocks (0.0%), shard 1: 2,036,902 blocks (100.0%). This is a known limitation of the static divergent-shard assignment in the routing TRIE when there is a single hot branch. See Known Issues.
 
 Shard block distribution:
 ```text
@@ -231,6 +263,21 @@ Full sweep data:
 | 1,626 ms ⚠ | 218,834 | 182,005 | 569 µs |
 | 1,000 ms ⚠ | 355,824 | 255,190 | 573 µs |
 
+**Anchor-aware BSI depth=2:**
+
+| Benchmark window | Offered ops/s | Achieved ops/s | p99 |
+|-----------------|--------------|----------------|-----|
+| 30,000 ms | 11,861 | 11,797 | 2,069 µs |
+| 18,455 ms | 19,281 | 18,777 | 1,454 µs |
+| 11,352 ms | 31,345 | 30,778 | 1,376 µs |
+| 6,983 ms | 50,956 | 47,684 | **1,228 µs** |
+| 4,296 ms | 82,827 | 77,039 | 1,496 µs |
+| 2,643 ms ⚠ | 134,629 | 114,488 | 1,984 µs |
+| 1,626 ms ⚠ | 218,834 | 114,587 | 2,042 µs |
+| 1,000 ms ⚠ | 355,824 | 106,663 | 2,427 µs |
+
+Anchor-aware BSI saturates at ~77k ops/s (no warning at 4,296 ms; first warning at 2,643 ms), comparable to branch-sharded. Best p99 is 1,228 µs at moderate load, vs 583 µs for branch-sharded. The TRIE routing overhead sets a floor: avg routing is ~394 µs regardless of throughput. The caveat on this trace (single hot shard) means these numbers do not represent ideal anchor-aware performance — on a trace with more diverse prefixes the shard load would distribute.
+
 ⚠ = bench warned it could not keep up with the offered rate.
 
 ### Worker scaling — branch-sharded depth=2
@@ -270,3 +317,11 @@ Observed on `conversation_trace.jsonl`: 415 vs 416 branches (balanced) but 1,061
 ### `prefix_depth` must be tuned per workload
 
 If most requests share a long system prompt, all conversations may hash to the same first `prefix_depth` blocks → single branch key → one shard gets all traffic. Set `prefix_depth` to span the shared prefix plus at least 1–2 unique blocks.
+
+Note: `anchor-aware-branch-sharded-crtc` avoids FNV routing-key collisions (different conversations with the same prefix still get distinct TRIE paths) but has its own hot-branch collapse issue on dominant-prefix workloads (see below). Neither variant is unconditionally better here — tune `prefix_depth` regardless of which you use.
+
+### Anchor-aware BSI: hot-branch shard collapse
+
+`AnchorAwareBranchShardedIndexer` uses static divergent-shard assignment: the first conversation under a new parent node stays on the parent's shard; only subsequent divergent siblings are hashed to a different shard. On workloads with a dominant shared prefix (e.g. one system prompt used by >99% of conversations), nearly all traffic ends up as the "first child" of the same TRIE node and routes to one shard. Observed on `conversation_trace.jsonl`: 100% of blocks on shard 1.
+
+The code has an open TODO for adaptive hot-branch splitting. Until that is resolved, `branch-sharded-crtc` (with sticky routing) is the safer choice for traces with narrow prefix diversity.
