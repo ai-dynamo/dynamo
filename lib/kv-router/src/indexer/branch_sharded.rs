@@ -458,11 +458,10 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                 let fnv = prefix_keys.last().copied().unwrap_or(parent_fnv);
                 let new_depth = parent_depth + to_process;
                 let shard = self.assign_shard(fnv);
-                // Register all intermediate prefix keys regardless of whether we
-                // have crossed prefix_depth yet.  A future query with depth <
-                // prefix_depth can then find the key via direct lookup instead of
-                // needing the progressive fallback search.
-                self.register_prefix_keys(shard, prefix_keys);
+                // Only register prefix keys once the chain has crossed prefix_depth.
+                if new_depth >= self.prefix_depth {
+                    self.register_prefix_keys(shard, prefix_keys);
+                }
                 let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth));
                 (shard, state)
             } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
@@ -657,6 +656,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 block_mm_infos: None,
             },
         );
+        let t_routing = std::time::Instant::now();
         let branch_key = self.branch_key_for_local_hashes(&sequence);
         let shard_idx = match self.lookup_shard(branch_key) {
             Some(idx) => idx,
@@ -671,8 +671,17 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 }
             },
         };
+        let routing_ns = t_routing.elapsed().as_nanos() as u64;
+
+        let t_shard = std::time::Instant::now();
         let result = self.shards[shard_idx].find_matches(sequence).await;
+        let shard_ns = t_shard.elapsed().as_nanos() as u64;
+
         self.timing_calls.fetch_add(1, Ordering::Relaxed);
+        self.timing_sum_routing_ns
+            .fetch_add(routing_ns, Ordering::Relaxed);
+        self.timing_sum_shard_ns
+            .fetch_add(shard_ns, Ordering::Relaxed);
         result
     }
 
@@ -970,18 +979,18 @@ mod tests {
         );
     }
 
-    /// Case A always registers intermediate prefix keys even when the chain has
-    /// not yet reached `prefix_depth` (new_depth < prefix_depth).  A query
-    /// whose length equals the in-progress chain depth then hits the routing
-    /// table directly rather than falling through to the progressive fallback.
+    /// Case A does NOT register intermediate prefix keys when new_depth < prefix_depth,
+    /// because the continuation may be on a different shard than its ancestors.
+    /// A query at intermediate depth routes correctly via shallow_fallback_shard,
+    /// which finds the shorter key registered at root time.
     ///
-    /// Single shard is used so root and continuation are always co-located on
-    /// the same CRTC (the shallow-chain-replay limitation does not apply here).
+    /// Single shard: root (b0) and continuation (b1,b2) are always co-located,
+    /// so the fallback routes to the right shard and CRTC returns the correct score.
     #[tokio::test]
-    async fn case_a_intermediate_keys_registered_before_crossing_prefix_depth() {
-        // prefix_depth=4; root stores 1 block (depth=1), continuation adds 2
-        // more (depth=3, still shallow).  fnv(b0,b1) must land in branch_to_shard
-        // after the continuation so that query [b0,b1] is a direct table hit.
+    async fn case_a_intermediate_query_routes_via_fallback_before_crossing_prefix_depth() {
+        // prefix_depth=4; root stores 1 block (depth=1) → hash(b0) registered.
+        // Continuation adds 2 more (depth=3 < 4) → intermediate keys NOT registered.
+        // Query [b0,b1] misses on exact key, falls back to hash(b0) → shard 0 → overlap=2.
         let indexer = make_indexer(1, 4);
         indexer
             .apply_event(stored_event(1, None, vec![block(100, 10)]))
@@ -1002,15 +1011,12 @@ mod tests {
         let best = overlap.scores.values().copied().max().unwrap_or(0);
         assert_eq!(
             best, 2,
-            "query matching the in-progress chain depth should get overlap=2"
+            "intermediate-depth query should get correct overlap via shallow fallback"
         );
-        // Crucial: the intermediate key fnv(b0,b1) must be in branch_to_shard so
-        // the query routes via direct lookup.  Without unconditional case-A
-        // registration the key is absent and shallow_fallback fires instead.
         assert_eq!(
             indexer.shallow_fallback_count.load(Ordering::Relaxed),
-            0,
-            "intermediate key fnv(b0,b1) must be found via direct lookup, not fallback"
+            1,
+            "intermediate-depth query must route via shallow fallback, not direct lookup"
         );
     }
 
