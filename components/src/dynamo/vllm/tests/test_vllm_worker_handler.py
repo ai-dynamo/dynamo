@@ -35,6 +35,33 @@ pytestmark = [
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def test_build_engine_data_from_lmcache_transfer_stats():
+    params = {
+        "lmcache_transfer_stats": {
+            "connector": "lmcache",
+            "estimated": False,
+            "total": {
+                "transferred_tokens": 128,
+                "transferred_bytes": 4096,
+                "time_ms": 12.5,
+                "speed_gb_s": 0.3,
+            },
+        },
+        "kv_transfer_bytes": 4096,
+    }
+
+    engine_data = mod.BaseWorkerHandler._build_engine_data_from_kv_transfer_params(
+        params
+    )
+
+    assert engine_data is not None
+    assert engine_data["kv_transfer_tokens"] == 128
+    assert engine_data["kv_transfer_bytes"] == 4096
+    assert engine_data["kv_transfer_time_ms"] == 12.5
+    assert engine_data["kv_transfer_speed_gb_s"] == 0.3
+    assert engine_data["lmcache_transfer_stats"]["connector"] == "lmcache"
+
+
 def _make_config(
     model: str = "test-model",
     is_prefill_worker: bool = False,

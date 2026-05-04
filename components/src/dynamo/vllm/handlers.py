@@ -1850,6 +1850,40 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _build_engine_data_from_kv_transfer_params(
+        kv_transfer_params,
+    ) -> Dict[str, Any] | None:
+        if not isinstance(kv_transfer_params, dict):
+            return None
+
+        stats = kv_transfer_params.get("lmcache_transfer_stats")
+        if not isinstance(stats, dict):
+            return None
+
+        engine_data: Dict[str, Any] = {
+            "lmcache_transfer_stats": stats,
+        }
+
+        total = stats.get("total")
+        if isinstance(total, dict):
+            engine_data["kv_transfer_tokens"] = total.get("transferred_tokens", 0)
+            engine_data["kv_transfer_bytes"] = total.get("transferred_bytes", 0)
+            if not stats.get("estimated", False):
+                engine_data["kv_transfer_time_ms"] = total.get("time_ms", 0.0)
+                engine_data["kv_transfer_speed_gb_s"] = total.get("speed_gb_s", 0.0)
+
+        for key in (
+            "kv_transfer_tokens",
+            "kv_transfer_bytes",
+            "kv_transfer_time_ms",
+            "kv_transfer_speed_gb_s",
+        ):
+            if key in kv_transfer_params:
+                engine_data[key] = kv_transfer_params[key]
+
+        return engine_data
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -2026,6 +2060,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             embedding_sequence_length=embedding_sequence_length,
                         )
+                        engine_data = (
+                            BaseWorkerHandler._build_engine_data_from_kv_transfer_params(
+                                getattr(res, "kv_transfer_params", None)
+                            )
+                        )
+                        if engine_data is not None:
+                            out["engine_data"] = engine_data
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -2551,6 +2592,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         embedding_sequence_length=embedding_sequence_length,
                     ),
                 }
+                engine_data = BaseWorkerHandler._build_engine_data_from_kv_transfer_params(
+                    res.kv_transfer_params
+                )
+                if engine_data is not None:
+                    output["engine_data"] = engine_data
 
                 # Log prefill completion with LoRA info
                 self._log_with_lora_context(

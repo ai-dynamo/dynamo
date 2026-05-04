@@ -134,6 +134,7 @@ class StandaloneRouterHandler:
                 "disaggregated_params": worker_output.get("disaggregated_params"),  # type: ignore[attr-defined]
                 "extra_args": worker_output.get("extra_args"),  # type: ignore[attr-defined]
                 "completion_usage": worker_output.get("completion_usage"),  # type: ignore[attr-defined]
+                "engine_data": worker_output.get("engine_data"),  # type: ignore[attr-defined]
             }
             yield llm_engine_output
 
