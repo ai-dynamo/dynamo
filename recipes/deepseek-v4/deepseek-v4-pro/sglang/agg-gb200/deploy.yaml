@@ -94,6 +94,11 @@ spec:
             - --watchdog-timeout
             - "3600"
           env:
+            # TODO: Remove LD_PRELOAD + NCCL Socket overrides once the image
+            # bundles a working NCCL for multi-node. Current image ships
+            # pynccl 2.27.7 which lacks Socket transport; LD_PRELOAD forces
+            # system NCCL 2.28.9. The NCCL_NET=Socket block is required for
+            # multi-node TP over TCP (no RDMA/NVLink between nodes).
             - name: LD_PRELOAD
               value: /usr/lib/aarch64-linux-gnu/libnccl.so.2
             - name: NCCL_NET
