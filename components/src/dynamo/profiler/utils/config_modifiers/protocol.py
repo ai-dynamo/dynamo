@@ -571,7 +571,10 @@ class BaseConfigModifier:
             # known path inside the PVC.  Let update_model_from_pvc handle
             # volume mount + CLI patching.
             pvc_path = ""
-            if effective_model_path and effective_model_path.startswith(pvc_mount_path):
+            if effective_model_path and (
+                effective_model_path == pvc_mount_path
+                or effective_model_path.startswith(pvc_mount_path + "/")
+            ):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
             if pvc_path:
                 result = cls.update_model_from_pvc(
