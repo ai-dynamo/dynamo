@@ -12,6 +12,7 @@ from typing import Optional
 from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
+from dynamo.planner.core import budget
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -355,18 +356,16 @@ class ScaleRequestHandler:
         asymmetry where a single worker on one side can't exactly cancel
         a single worker on the other side.
         """
-        gpus = [p.gpu_per_replica for p in request_pools if p.gpu_per_replica > 0]
-        if partner_spec.gpu_per_replica > 0:
-            gpus.append(partner_spec.gpu_per_replica)
-        return max(gpus, default=0)
+        return budget.compute_tolerance(
+            [p.gpu_per_replica for p in request_pools] + [partner_spec.gpu_per_replica]
+        )
 
     def _internal_pair_tolerance(
         self,
         changing_pools: list[PoolSpec],
     ) -> int:
         """Tolerance for an internally-paired request (no external partner)."""
-        gpus = [p.gpu_per_replica for p in changing_pools if p.gpu_per_replica > 0]
-        return max(gpus, default=0)
+        return budget.compute_tolerance(p.gpu_per_replica for p in changing_pools)
 
     def _find_pair_partner(
         self,
@@ -484,25 +483,18 @@ class ScaleRequestHandler:
     ) -> tuple[bool, str]:
         """Check whether ``total`` is within the active budget bounds.
 
-        Returns (is_in_bounds, reason_if_out_of_bounds).
+        Returns ``(is_in_bounds, reason_if_out_of_bounds)``.
+
+        Standalone (non-paired) requests use strict bounds; paired transfers
+        get the tolerance band. Delegates the in-band math to
+        ``budget.bounds_for_total``.
         """
-        if self.max_total_gpus >= 0:
-            hi = self.max_total_gpus + (tolerance if paired else 0)
-            if total > hi:
-                return (
-                    False,
-                    f"total {total} exceeds ceiling "
-                    f"({self.max_total_gpus}{' + tol ' + str(tolerance) if paired else ''})",
-                )
-        if self.min_total_gpus >= 0:
-            lo = self.min_total_gpus - (tolerance if paired else 0)
-            if total < lo:
-                return (
-                    False,
-                    f"total {total} below floor "
-                    f"({self.min_total_gpus}{' - tol ' + str(tolerance) if paired else ''})",
-                )
-        return (True, "")
+        return budget.bounds_for_total(
+            total,
+            self.min_total_gpus,
+            self.max_total_gpus,
+            tolerance if paired else 0,
+        )
 
     @dynamo_endpoint(ScaleRequest, ScaleResponse)
     async def scale_request(self, request: ScaleRequest):
