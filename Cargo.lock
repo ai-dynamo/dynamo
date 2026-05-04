@@ -2371,7 +2371,6 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
- "http 1.4.0",
  "hyper-util",
  "k8s-openapi",
  "kube",
