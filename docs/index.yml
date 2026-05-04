@@ -61,6 +61,9 @@ navigation:
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: blogs/flash-indexer/flash-indexer.md
         slug: flash-indexer
+      - page: "Dynamo Snapshot: Fast Startup on Kubernetes"
+        path: blogs/dynamo-snapshot/dynamo-snapshot.md
+        slug: dynamo-snapshot
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment

@@ -1,0 +1,229 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1578" viewBox="0 0 1900 1578" style="background:#f8fafc;color-scheme:light">
+<style><![CDATA[
+      text { font-family: Arial, Helvetica, sans-serif; fill: #0f172a; }
+      .title { font-size: 50px; font-weight: 800; }
+      .subtitle { font-size: 26px; font-weight: 500; fill: #1e293b; }
+      .model-label { font-size: 24px; font-weight: 800; }
+      .lane-label { font-size: 20px; font-weight: 700; fill: #475569; }
+      .axis-label { font-size: 21px; font-weight: 700; fill: #334155; }
+      .legend-label { font-size: 22px; font-weight: 700; fill: #111827; }
+      .bar-label { font-size: 19px; font-weight: 800; fill: #0f172a; }
+    ]]></style>
+<rect width="100%" height="100%" fill="#f8fafc"/>
+<rect x="228" y="240" width="1666" height="1232" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
+<text class="title" x="240" y="64">Dynamo vLLM Snapshot Restore (baseline)</text>
+<text class="subtitle" x="240" y="110">Single-GPU B200 (VAST), TP=1</text>
+<line x1="240.0" y1="262" x2="240.0" y2="1484" stroke="#e5e7eb"/>
+<line x1="240.0" y1="256" x2="240.0" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="240.0" y="252" text-anchor="middle">0s</text>
+<text class="axis-label" x="240.0" y="1510" text-anchor="middle">0s</text>
+<line x1="350.9" y1="262" x2="350.9" y2="1484" stroke="#e5e7eb"/>
+<line x1="350.9" y1="256" x2="350.9" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="350.9" y="252" text-anchor="middle">10s</text>
+<text class="axis-label" x="350.9" y="1510" text-anchor="middle">10s</text>
+<line x1="461.9" y1="262" x2="461.9" y2="1484" stroke="#e5e7eb"/>
+<line x1="461.9" y1="256" x2="461.9" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="461.9" y="252" text-anchor="middle">20s</text>
+<text class="axis-label" x="461.9" y="1510" text-anchor="middle">20s</text>
+<line x1="572.8" y1="262" x2="572.8" y2="1484" stroke="#e5e7eb"/>
+<line x1="572.8" y1="256" x2="572.8" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="572.8" y="252" text-anchor="middle">30s</text>
+<text class="axis-label" x="572.8" y="1510" text-anchor="middle">30s</text>
+<line x1="683.8" y1="262" x2="683.8" y2="1484" stroke="#e5e7eb"/>
+<line x1="683.8" y1="256" x2="683.8" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="683.8" y="252" text-anchor="middle">40s</text>
+<text class="axis-label" x="683.8" y="1510" text-anchor="middle">40s</text>
+<line x1="794.7" y1="262" x2="794.7" y2="1484" stroke="#e5e7eb"/>
+<line x1="794.7" y1="256" x2="794.7" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="794.7" y="252" text-anchor="middle">50s</text>
+<text class="axis-label" x="794.7" y="1510" text-anchor="middle">50s</text>
+<line x1="905.7" y1="262" x2="905.7" y2="1484" stroke="#e5e7eb"/>
+<line x1="905.7" y1="256" x2="905.7" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="905.7" y="252" text-anchor="middle">60s</text>
+<text class="axis-label" x="905.7" y="1510" text-anchor="middle">60s</text>
+<line x1="1016.6" y1="262" x2="1016.6" y2="1484" stroke="#e5e7eb"/>
+<line x1="1016.6" y1="256" x2="1016.6" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1016.6" y="252" text-anchor="middle">70s</text>
+<text class="axis-label" x="1016.6" y="1510" text-anchor="middle">70s</text>
+<line x1="1127.6" y1="262" x2="1127.6" y2="1484" stroke="#e5e7eb"/>
+<line x1="1127.6" y1="256" x2="1127.6" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1127.6" y="252" text-anchor="middle">80s</text>
+<text class="axis-label" x="1127.6" y="1510" text-anchor="middle">80s</text>
+<line x1="1238.5" y1="262" x2="1238.5" y2="1484" stroke="#e5e7eb"/>
+<line x1="1238.5" y1="256" x2="1238.5" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1238.5" y="252" text-anchor="middle">90s</text>
+<text class="axis-label" x="1238.5" y="1510" text-anchor="middle">90s</text>
+<line x1="1349.5" y1="262" x2="1349.5" y2="1484" stroke="#e5e7eb"/>
+<line x1="1349.5" y1="256" x2="1349.5" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1349.5" y="252" text-anchor="middle">100s</text>
+<text class="axis-label" x="1349.5" y="1510" text-anchor="middle">100s</text>
+<line x1="1460.4" y1="262" x2="1460.4" y2="1484" stroke="#e5e7eb"/>
+<line x1="1460.4" y1="256" x2="1460.4" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1460.4" y="252" text-anchor="middle">110s</text>
+<text class="axis-label" x="1460.4" y="1510" text-anchor="middle">110s</text>
+<line x1="1571.4" y1="262" x2="1571.4" y2="1484" stroke="#e5e7eb"/>
+<line x1="1571.4" y1="256" x2="1571.4" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1571.4" y="252" text-anchor="middle">120s</text>
+<text class="axis-label" x="1571.4" y="1510" text-anchor="middle">120s</text>
+<line x1="1682.3" y1="262" x2="1682.3" y2="1484" stroke="#e5e7eb"/>
+<line x1="1682.3" y1="256" x2="1682.3" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1682.3" y="252" text-anchor="middle">130s</text>
+<text class="axis-label" x="1682.3" y="1510" text-anchor="middle">130s</text>
+<line x1="1793.2" y1="262" x2="1793.2" y2="1484" stroke="#e5e7eb"/>
+<line x1="1793.2" y1="256" x2="1793.2" y2="262" stroke="#64748b"/>
+<text class="axis-label" x="1793.2" y="252" text-anchor="middle">140s</text>
+<text class="axis-label" x="1793.2" y="1510" text-anchor="middle">140s</text>
+<line x1="240" y1="262" x2="1882" y2="262" stroke="#64748b" stroke-width="1"/>
+<line x1="240.0" y1="240" x2="240.0" y2="1484" stroke="#0f172a" stroke-width="1.2"/>
+<text class="model-label" x="230" y="278.0" text-anchor="end">Qwen3 0.6B</text>
+<text class="lane-label" x="230" y="321" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="344" x2="1882" y2="344" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="385" text-anchor="end">worker main</text>
+<line x1="240" y1="408" x2="1882" y2="408" stroke="#f1f5f9"/>
+<rect x="240.0" y="290" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B agent setup: 0.070s (0.000s -&gt; 0.070s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.8" y="290" width="75.4" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B CRIU restore: 6.793s (0.069s -&gt; 6.862s); raw=criu_restore</title>
+</rect>
+<rect x="255.4" y="299.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="278.4" y="322.0" text-anchor="middle">6.8s</text>
+<rect x="316.1" y="290" width="11.0" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B CUDA restore: 0.989s (6.863s -&gt; 7.852s); raw=cuda_restore</title>
+</rect>
+<rect x="327.2" y="354" width="1.8" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 0.6B wake / remap: 0.166s (7.861s -&gt; 8.027s); raw=worker_wake_up</title>
+</rect>
+<text class="model-label" x="230" y="448.0" text-anchor="end">Qwen3 8B</text>
+<text class="lane-label" x="230" y="491" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="514" x2="1882" y2="514" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="555" text-anchor="end">worker main</text>
+<line x1="240" y1="578" x2="1882" y2="578" stroke="#f1f5f9"/>
+<rect x="240.0" y="460" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B agent setup: 0.073s (0.000s -&gt; 0.073s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.8" y="460" width="270.5" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B CRIU restore: 24.383s (0.073s -&gt; 24.456s); raw=criu_restore</title>
+</rect>
+<rect x="357.1" y="469.0" width="38.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="376.1" y="492.0" text-anchor="middle">24s</text>
+<rect x="511.3" y="460" width="33.7" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B CUDA restore: 3.039s (24.457s -&gt; 27.496s); raw=cuda_restore</title>
+</rect>
+<rect x="545.2" y="524" width="5.0" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 8B wake / remap: 0.452s (27.508s -&gt; 27.960s); raw=worker_wake_up</title>
+</rect>
+<text class="model-label" x="230" y="618.0" text-anchor="end">Qwen3 14B</text>
+<text class="lane-label" x="230" y="661" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="684" x2="1882" y2="684" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="725" text-anchor="end">worker main</text>
+<line x1="240" y1="748" x2="1882" y2="748" stroke="#f1f5f9"/>
+<rect x="240.0" y="630" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B agent setup: 0.071s (0.000s -&gt; 0.071s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.8" y="630" width="492.4" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B CRIU restore: 44.385s (0.071s -&gt; 44.456s); raw=criu_restore</title>
+</rect>
+<rect x="468.0" y="639.0" width="38.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="487.0" y="662.0" text-anchor="middle">44s</text>
+<rect x="733.2" y="630" width="53.3" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B CUDA restore: 4.800s (44.456s -&gt; 49.256s); raw=cuda_restore</title>
+</rect>
+<rect x="736.8" y="639.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="759.8" y="662.0" text-anchor="middle">4.8s</text>
+<rect x="786.5" y="694" width="7.7" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 14B wake / remap: 0.691s (49.259s -&gt; 49.950s); raw=worker_wake_up</title>
+</rect>
+<text class="model-label" x="230" y="788.0" text-anchor="end">Qwen3 32B</text>
+<text class="lane-label" x="230" y="831" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="854" x2="1882" y2="854" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="895" text-anchor="end">worker main</text>
+<line x1="240" y1="918" x2="1882" y2="918" stroke="#f1f5f9"/>
+<rect x="240.0" y="800" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B agent setup: 0.076s (0.000s -&gt; 0.076s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.8" y="800" width="772.3" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B CRIU restore: 69.610s (0.076s -&gt; 69.686s); raw=criu_restore</title>
+</rect>
+<rect x="608.0" y="809.0" width="38.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="627.0" y="832.0" text-anchor="middle">70s</text>
+<rect x="1013.1" y="800" width="82.8" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B CUDA restore: 7.466s (69.686s -&gt; 77.152s); raw=cuda_restore</title>
+</rect>
+<rect x="1031.6" y="809.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="1054.6" y="832.0" text-anchor="middle">7.5s</text>
+<rect x="1096.4" y="864" width="15.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen3 32B wake / remap: 1.365s (77.193s -&gt; 78.558s); raw=worker_wake_up</title>
+</rect>
+<text class="model-label" x="230" y="958.0" text-anchor="end">Llama 3.3 70B FP8</text>
+<text class="lane-label" x="230" y="1001" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1024" x2="1882" y2="1024" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1065" text-anchor="end">worker main</text>
+<line x1="240" y1="1088" x2="1882" y2="1088" stroke="#f1f5f9"/>
+<rect x="240.0" y="970" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 agent setup: 0.080s (0.000s -&gt; 0.080s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.9" y="970" width="904.4" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 CRIU restore: 81.517s (0.080s -&gt; 81.597s); raw=criu_restore</title>
+</rect>
+<rect x="674.1" y="979.0" width="38.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="693.1" y="1002.0" text-anchor="middle">82s</text>
+<rect x="1145.3" y="970" width="104.0" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 CUDA restore: 9.378s (81.597s -&gt; 90.975s); raw=cuda_restore</title>
+</rect>
+<rect x="1174.3" y="979.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="1197.3" y="1002.0" text-anchor="middle">9.4s</text>
+<rect x="1249.7" y="1034" width="16.8" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Llama 3.3 70B FP8 wake / remap: 1.514s (91.006s -&gt; 92.520s); raw=worker_wake_up</title>
+</rect>
+<text class="model-label" x="230" y="1128.0" text-anchor="end">GPT-OSS 120B</text>
+<text class="lane-label" x="230" y="1171" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1194" x2="1882" y2="1194" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1235" text-anchor="end">worker main</text>
+<line x1="240" y1="1258" x2="1882" y2="1258" stroke="#f1f5f9"/>
+<rect x="240.0" y="1140" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B agent setup: 0.082s (0.000s -&gt; 0.082s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.9" y="1140" width="1323.8" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B CRIU restore: 119.317s (0.082s -&gt; 119.399s); raw=criu_restore</title>
+</rect>
+<rect x="879.8" y="1149.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="902.8" y="1172.0" text-anchor="middle">119s</text>
+<rect x="1564.7" y="1140" width="157.1" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B CUDA restore: 14.162s (119.399s -&gt; 133.561s); raw=cuda_restore</title>
+</rect>
+<rect x="1624.2" y="1149.0" width="38.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="1643.2" y="1172.0" text-anchor="middle">14s</text>
+<rect x="1721.9" y="1204" width="17.8" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>GPT-OSS 120B wake / remap: 1.605s (133.568s -&gt; 135.173s); raw=worker_wake_up</title>
+</rect>
+<text class="model-label" x="230" y="1298.0" text-anchor="end">Qwen2.5 72B</text>
+<text class="lane-label" x="230" y="1341" text-anchor="end">snapshot agent</text>
+<line x1="240" y1="1364" x2="1882" y2="1364" stroke="#f1f5f9"/>
+<text class="lane-label" x="230" y="1405" text-anchor="end">worker main</text>
+<line x1="240" y1="1428" x2="1882" y2="1428" stroke="#f1f5f9"/>
+<rect x="240.0" y="1310" width="1.0" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B agent setup: 0.063s (0.000s -&gt; 0.063s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+</rect>
+<rect x="240.7" y="1310" width="1404.7" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B CRIU restore: 126.613s (0.063s -&gt; 126.676s); raw=criu_restore</title>
+</rect>
+<rect x="920.1" y="1319.0" width="46.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="943.1" y="1342.0" text-anchor="middle">127s</text>
+<rect x="1645.4" y="1310" width="199.7" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B CUDA restore: 18.000s (126.677s -&gt; 144.677s); raw=cuda_restore</title>
+</rect>
+<rect x="1726.3" y="1319.0" width="38.0" height="32" rx="5" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.35"/>
+<text class="bar-label" x="1745.3" y="1342.0" text-anchor="middle">18s</text>
+<rect x="1845.4" y="1374" width="32.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<title>Qwen2.5 72B wake / remap: 2.893s (144.697s -&gt; 147.590s); raw=worker_wake_up</title>
+</rect>
+<rect x="240" y="136" width="21" height="21" rx="2" fill="#111827" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="271" y="154">agent setup</text>
+<rect x="532" y="136" width="21" height="21" rx="2" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="563" y="154">CRIU restore</text>
+<rect x="824" y="136" width="21" height="21" rx="2" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="855" y="154">CUDA restore</text>
+<rect x="1116" y="136" width="21" height="21" rx="2" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.25"/>
+<text class="legend-label" x="1147" y="154">wake / remap</text>
+</svg>
