@@ -37,6 +37,7 @@ use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
+use crate::agents::context::AgentContext;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -145,6 +146,13 @@ struct ReasoningState {
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
 }
 
+struct AgentTraceRequestEndState {
+    agent_context: AgentContext,
+    request_model: String,
+    request_tracker: Option<Arc<RequestTracker>>,
+    x_request_id: Option<String>,
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -210,6 +218,45 @@ impl OpenAIPreprocessor {
             context_length,
         }))
     }
+
+    fn wrap_agent_trace_request_end_stream<Resp>(
+        stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
+        trace_state: Option<AgentTraceRequestEndState>,
+        request_id: String,
+    ) -> Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>
+    where
+        Resp: Send + 'static,
+    {
+        let Some(AgentTraceRequestEndState {
+            agent_context,
+            request_model,
+            request_tracker,
+            x_request_id,
+        }) = trace_state
+        else {
+            return stream;
+        };
+
+        let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(stream);
+        tokio::spawn(async move {
+            done_fut.await;
+            if request_tracker.is_none() {
+                tracing::warn!(
+                    request_id,
+                    "agent_context present but request tracker is missing; emitting partial trace"
+                );
+            }
+            let metrics = crate::agents::trace::request_metrics(
+                request_id,
+                x_request_id,
+                request_model,
+                request_tracker.as_deref(),
+            );
+            crate::agents::trace::emit_request_end(agent_context, metrics);
+        });
+        stream
+    }
+
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
@@ -1475,7 +1522,12 @@ impl
                             .ok()
                             .map(|value| value.as_ref().clone())
                     });
-                (agent_context, request_model, request_tracker, x_request_id)
+                AgentTraceRequestEndState {
+                    agent_context,
+                    request_model,
+                    request_tracker,
+                    x_request_id,
+                }
             })
         } else {
             None
@@ -1552,34 +1604,8 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = if let Some((
-            agent_context,
-            request_model,
-            request_tracker,
-            x_request_id,
-        )) = trace_state
-        {
-            let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
-            tokio::spawn(async move {
-                done_fut.await;
-                if request_tracker.is_none() {
-                    tracing::warn!(
-                        request_id,
-                        "agent_context present but request tracker is missing; emitting partial trace"
-                    );
-                }
-                let metrics = crate::agents::trace::request_metrics(
-                    request_id,
-                    x_request_id,
-                    request_model,
-                    request_tracker.as_deref(),
-                );
-                crate::agents::trace::emit_request_end(agent_context, metrics);
-            });
-            stream
-        } else {
-            final_stream
-        };
+        let final_stream =
+            Self::wrap_agent_trace_request_end_stream(final_stream, trace_state, request_id);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -1609,6 +1635,7 @@ impl
 
         // unpack the request
         let (mut request, context) = request.into_parts();
+        let request_id = context.id().to_string();
 
         // Preserve original streaming flag
         let original_stream_flag = request.inner.stream.unwrap_or(false);
@@ -1621,7 +1648,7 @@ impl
         request.inner.stream = Some(true);
 
         // create a response generator
-        let response_generator = request.response_generator(context.id().to_string());
+        let response_generator = request.response_generator(request_id.clone());
         let mut response_generator = Box::new(response_generator);
         let tracker = response_generator.tracker();
         // convert the chat completion request to a common completion request
@@ -1644,6 +1671,30 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+
+        let trace_state = if crate::agents::trace::is_enabled() {
+            common_request.agent_context.clone().map(|agent_context| {
+                let request_model = common_request.model.clone();
+                let request_tracker = tracker.clone();
+                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
+                    .and_then(|context| context.x_request_id)
+                    .or_else(|| {
+                        context
+                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
+                            .ok()
+                            .map(|value| value.as_ref().clone())
+                    });
+                AgentTraceRequestEndState {
+                    agent_context,
+                    request_model,
+                    request_tracker,
+                    x_request_id,
+                }
+            })
+        } else {
+            None
+        };
+        let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1678,8 +1729,11 @@ impl
             response_stream,
             response_generator,
             context.clone(),
-            false,
+            trace_tokens_enabled,
         );
+
+        let stream =
+            Self::wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
