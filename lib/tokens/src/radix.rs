@@ -1,14 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Positionally-sparse radix tree keyed by any [`PositionalHash`].
+//!
+//! Re-exported from `dynamo_tokens` so downstream crates can keep importing
+//! `dynamo_tokens::PositionalRadixTree` (e.g. `kvbm-logical`'s
+//! `BlockRegistry`).
+
 use dashmap::DashMap;
 use std::hash::Hash;
 
-use crate::{PositionalHash, PositionalSequenceHash};
+use crate::PositionalHash;
 
-/// Positionally sparse radix tree for efficient indexing of [PositionalSequenceHashes][`crate::PositionalSequenceHash`].
+/// Positionally sparse radix tree for efficient indexing of position-keyed hashes.
 #[derive(Clone)]
-pub struct PositionalRadixTree<V, K = PositionalSequenceHash>
+pub struct PositionalRadixTree<V, K>
 where
     K: PositionalHash + Hash + Eq + Clone,
 {

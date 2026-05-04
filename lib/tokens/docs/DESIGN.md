@@ -343,30 +343,55 @@ No pointer chasing, no Arc references, just integer comparisons.
 
 ### PositionalLineageHash
 
+PLH is constructed via two canonical paths (`root_with_salt` then zero or more
+`extend`), one transitional escape hatch (`synthetic_unique`), and one
+deserialization door (`from_raw_parts`). There is intentionally no public
+constructor that accepts arbitrary `current` / `parent` u64 values.
+
 ```rust
 impl PositionalLineageHash {
-    /// Create from sequence hashes and position
-    pub fn new(
-        current_seq_hash: SequenceHash,
-        parent_seq_hash: Option<SequenceHash>,
-        position: u64,
+    /// Canonical chain root. `current = xxh3([salt.0, local_block_hash.0], 0)`.
+    /// Pass `SaltHash(0)` for an unsalted root — there is no separate
+    /// `root(local, bs)` shortcut, so the "no salt" case has exactly one
+    /// canonical form.
+    pub fn root_with_salt(
+        local_block_hash: LocalBlockHash,
+        salt: SaltHash,
+        block_size: u32,
     ) -> Self;
 
-    /// Get the block position
-    pub fn position(&self) -> u64;
+    /// Canonical chain step. `current = xxh3([self.current, child_block_hash.0], 0)`,
+    /// `position += 1` (panics on u32::MAX wrap), inherits flags.
+    pub fn extend(&self, child_block_hash: LocalBlockHash) -> Self;
 
-    /// Get the current block's hash fragment
-    pub fn current_hash_fragment(&self) -> u64;
+    /// Transitional, non-canonical mint: random `current`, `parent = 0`,
+    /// stamped with `PLH_SCHEMA_SYNTHETIC = 0x80` so downstream consumers can
+    /// detect it via `is_synthetic()` / `is_canonical_schema()`. Sole intended
+    /// caller is the mocker's prefix-caching-disabled path.
+    pub fn synthetic_unique(position: u32, block_size: u32) -> Self;
 
-    /// Get the parent block's hash fragment
-    pub fn parent_hash_fragment(&self) -> u64;
+    /// Reconstruct from raw fields, no validation. Serde door.
+    pub fn from_raw_parts(current: u64, parent: u64, position: u32, flags: u32) -> Self;
 
-    /// Get the encoding mode (0, 1, or 2)
-    pub fn mode(&self) -> u8;
-
-    /// Get the raw u128 value
-    pub fn as_u128(&self) -> u128;
+    // Accessors
+    pub fn position(&self) -> u32;
+    pub fn current_sequence_hash(&self) -> SequenceHash;            // full u64
+    pub fn parent_sequence_hash(&self) -> Option<SequenceHash>;     // None at root
+    pub fn parent_raw(&self) -> u64;
+    pub fn parent_hash_fragment(&self) -> u64;                      // == parent_raw (full width post-refactor)
+    pub fn flags(&self) -> PlhFlags;
+    pub fn flags_raw(&self) -> u32;
+    pub fn block_size(&self) -> u32;
+    pub fn schema(&self) -> u8;
+    pub fn feature_flags(&self) -> u32;
+    pub fn is_canonical_schema(&self) -> bool;                      // schema == PLH_SCHEMA_V1
+    pub fn is_synthetic(&self) -> bool;                             // schema == PLH_SCHEMA_SYNTHETIC
+    pub fn as_u128(&self) -> u128;                                  // (current << 64) | parent
 }
+
+// Schema tags
+pub const PLH_SCHEMA_V1: u8 = 0x01;        // canonical, chain-derived
+pub const PLH_SCHEMA_SYNTHETIC: u8 = 0x80; // synthetic_unique mint
 ```
 
 ### PositionalSequenceHash

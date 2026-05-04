@@ -3,8 +3,8 @@
 
 
 [package]
-name = "dynamo-tokens"
-description = "Token management tools"
+name = "dynamo-kv-hashing"
+description = "Universal Request → PositionalLineageHash contract for KV cache identity across Dynamo (router, consolidator, kvbm, frameworks)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -12,18 +12,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dashmap = { workspace = true }
-derive-getters = { workspace = true }
-rand = { workspace = true }
+dynamo-tokens = { workspace = true }
+derive_builder = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
-xxhash-rust = { workspace = true }
-bs58 = "0.5"
-
-bytemuck = "1.22"
 
 [dev-dependencies]
-itertools = "0.14"
-rmp-serde = { workspace = true }
-serde_json = { workspace = true }
+rmp-serde = "1.3"
