@@ -114,7 +114,9 @@ pub mod openai {
 
 pub mod generic {
     use super::*;
-    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine, BidirectionalStreamingEngine};
+    use dynamo_runtime::pipeline::{
+        BidirectionalStreamingEngine, ServerStreamingEngine, UnaryEngine,
+    };
 
     pub mod tensor {
         use super::*;
@@ -132,7 +134,9 @@ pub mod generic {
     pub mod asr {
         use super::*;
 
-        pub use protocols::openai::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
+        pub use protocols::openai::chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+        };
 
         /// [gluo WIP] NOTE that reusing chat completions request and response
         /// as request can carry audio data and response can carry text data,

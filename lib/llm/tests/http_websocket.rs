@@ -63,7 +63,9 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
         "model": "echo",
         "messages": [{ "role": "user", "content": "hi" }],
     });
-    ws.send(Message::Text(body.to_string())).await.expect("send");
+    ws.send(Message::Text(body.to_string()))
+        .await
+        .expect("send");
 
     // Read until we see two finish_reason="stop" or a normal close.
     let mut text = String::new();
@@ -160,5 +162,8 @@ async fn asr_websocket_rejects_binary_frame() {
     token.cancel();
     let _ = handle.await;
 
-    assert!(got_close, "server should close the connection on a binary frame");
+    assert!(
+        got_close,
+        "server should close the connection on a binary frame"
+    );
 }

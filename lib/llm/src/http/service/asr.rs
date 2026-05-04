@@ -74,7 +74,12 @@ async fn asr_ws_handler(
 async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
         tracing::error!("/v1/asr connection rejected: bidirectional engine not installed");
-        let _ = close_with(socket, close_code::ERROR, "bidirectional engine not installed").await;
+        let _ = close_with(
+            socket,
+            close_code::ERROR,
+            "bidirectional engine not installed",
+        )
+        .await;
         return;
     };
 
@@ -100,10 +105,12 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
             tracing::error!(%err, "/v1/asr engine.generate() failed");
             let mut sink = ws_tx;
             let _ = send_error(&mut sink, &err.to_string()).await;
-            let _ = sink.send(Message::Close(Some(close_frame(
-                close_code::ERROR,
-                "engine error",
-            )))).await;
+            let _ = sink
+                .send(Message::Close(Some(close_frame(
+                    close_code::ERROR,
+                    "engine error",
+                ))))
+                .await;
             return;
         }
     };
@@ -147,25 +154,25 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
             }
         };
         match msg {
-            Message::Text(text) => match serde_json::from_str::<NvCreateChatCompletionRequest>(
-                text.as_str(),
-            ) {
-                Ok(req) => {
-                    if req_tx.send(req).is_err() {
-                        tracing::debug!("/v1/asr engine receiver dropped; ending inbound");
+            Message::Text(text) => {
+                match serde_json::from_str::<NvCreateChatCompletionRequest>(text.as_str()) {
+                    Ok(req) => {
+                        if req_tx.send(req).is_err() {
+                            tracing::debug!("/v1/asr engine receiver dropped; ending inbound");
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "/v1/asr malformed JSON frame; closing");
+                        close_request_side(&req_tx);
+                        resp_ctx.stop_generating();
                         break;
                     }
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "/v1/asr malformed JSON frame; closing");
-                    let _ = close_request_side(&req_tx);
-                    resp_ctx.stop_generating();
-                    break;
-                }
-            },
+            }
             Message::Binary(_) => {
                 tracing::warn!("/v1/asr received binary frame; not supported in this slice");
-                let _ = close_request_side(&req_tx);
+                close_request_side(&req_tx);
                 resp_ctx.stop_generating();
                 break;
             }

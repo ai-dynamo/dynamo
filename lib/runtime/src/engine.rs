@@ -199,10 +199,7 @@ pub trait AsyncEngineUnary<Resp: Data>:
 ///   `crate::pipeline::ManyIn<Req>` — the stream of request chunks an engine
 ///   consumes. [`RequestStream`] is the canonical concrete
 ///   implementor on the input side.
-pub trait AsyncEngineStream<T: Data>:
-    Stream<Item = T> + AsyncEngineContextProvider + Send
-{
-}
+pub trait AsyncEngineStream<T: Data>: Stream<Item = T> + AsyncEngineContextProvider + Send {}
 
 /// Engine is a trait that defines the interface for a streaming engine.
 /// The synchronous Engine version is does not need to be awaited.

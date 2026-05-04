@@ -470,7 +470,9 @@ mod tests {
         serde_json::from_value(body).expect("valid chat completion request")
     }
 
-    fn collect_text(annotated_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
+    fn collect_text(
+        annotated_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> String {
         use dynamo_protocols::types::ChatCompletionMessageContent;
         annotated_chunks
             .iter()
@@ -498,10 +500,7 @@ mod tests {
     fn make_input(
         requests: Vec<NvCreateChatCompletionRequest>,
     ) -> ManyIn<NvCreateChatCompletionRequest> {
-        RequestStream::new(
-            Box::pin(stream::iter(requests)),
-            Context::new(()).context(),
-        )
+        RequestStream::new(Box::pin(stream::iter(requests)), Context::new(()).context())
     }
 
     /// Drive a fixed sequence of two requests through the bidirectional echo engine
