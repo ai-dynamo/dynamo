@@ -128,7 +128,9 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     /// FNV accumulator for chain tails that have not yet reached `prefix_depth` blocks.
     ///
     /// Maps the `ExternalSequenceBlockHash.0` of the **last stored block** in a
-    /// shallow chain to `(accumulated_fnv, depth)`, where `depth < prefix_depth`.
+    /// shallow chain to `(accumulated_fnv, depth, shard_idx)`, where `depth < prefix_depth`.
+    /// The shard is carried forward so continuations inherit the root's shard (sticky
+    /// routing) and never cross to a shard that lacks the parent chain.
     ///
     /// # Why this exists
     ///
@@ -139,27 +141,13 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     /// each conversation extends the hash with its own unique blocks (positions
     /// 15 and 16) and thereby receives a distinct, balanced shard assignment.
     ///
-    /// # CRTC chain / lookup notes
-    ///
-    /// When a continuation's finalized FNV routes it to a different shard than its
-    /// parent, the CRTC on the new shard will not find the parent and will drop the
-    /// event.  Fixing this fully requires replaying the shallow prefix to the new
-    /// shard ("shallow chain replay"), which is left as a future improvement.  For
-    /// now the routing table is correct — `find_matches` routes to the right shard —
-    /// but the underlying CRTC may have no data there until replay is implemented.
-    ///
-    /// Separately, `find_matches` hashes only the available prefix
-    /// (`min(prefix_depth, len)`). A query shorter than `prefix_depth` would
-    /// therefore probe with a shorter key than the key registered by a root
-    /// `Stored` event. This is addressed by `register_prefix_keys`, which
-    /// records intermediate FNV values (depths 1 … prefix_depth) at store time
-    /// so short queries route to the correct shard instead of receiving a false
-    /// miss.
+    /// `find_matches` hashes only the available prefix (`min(prefix_depth, len)`).
+    /// A query shorter than `prefix_depth` is handled by `register_prefix_keys`,
+    /// which records intermediate FNV values (depths 1 … prefix_depth) at store
+    /// time so short queries route to the correct shard instead of a false miss.
     ///
     /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
     /// `Cleared` events; only `Removed` events prune them.
-    /// Third element is the shard index chosen when the chain root was first seen,
-    /// kept so continuations stay on the same shard (sticky routing).
     block_to_fnv_state: DashMap<u64, (u64, usize, usize), FxBuildHasher>,
 
     kv_block_size: u32,
