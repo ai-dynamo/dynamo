@@ -2683,6 +2683,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-bridge"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap 4.6.1",
+ "dynamo-backend-common",
+ "futures",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "1.2.0"
 dependencies = [

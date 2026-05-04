@@ -22,6 +22,7 @@ members = [
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
+    "lib/backend/sglang_bridge",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
 ]
