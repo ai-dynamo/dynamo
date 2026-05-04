@@ -29,7 +29,8 @@ use axum::{
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, RequestStream};
 use dynamo_runtime::pipeline::Context;
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{Mutex, mpsc::unbounded_channel};
+use tokio::sync::mpsc::unbounded_channel;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::{RouteDoc, service_v2};
 use crate::engines::EchoBidirectionalEngine;
@@ -86,17 +87,7 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (req_tx, req_rx) = unbounded_channel::<NvCreateChatCompletionRequest>();
 
-    // Wrap the receiver in `Arc<Mutex>` so the engine-bound stream can be `Send + Sync`,
-    // which `RequestStream` requires (its inner `SyncDataStream` carries `+ Sync`).
-    let rx_handle = Arc::new(Mutex::new(req_rx));
-    let rx_clone = rx_handle.clone();
-    let request_stream = Box::pin(async_stream::stream! {
-        let mut rx = rx_clone.lock().await;
-        while let Some(item) = rx.recv().await {
-            yield item;
-        }
-    });
-
+    let request_stream = Box::pin(UnboundedReceiverStream::new(req_rx));
     let input = RequestStream::new(request_stream, Context::new(()).context());
 
     let mut response_stream = match engine.generate(input).await {

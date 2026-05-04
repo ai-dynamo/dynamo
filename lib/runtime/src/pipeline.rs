@@ -20,8 +20,7 @@ pub mod registry;
 
 pub use crate::engine::{
     self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream,
-    Engine, EngineStream, EngineUnary, RequestEngineStream, RequestStream, ResponseStream,
-    SyncDataStream, async_trait,
+    Engine, EngineStream, EngineUnary, RequestStream, ResponseStream, async_trait,
 };
 pub use anyhow::Error;
 pub use context::Context;
@@ -31,16 +30,18 @@ pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 /// about the request. This information propagates through the stages, both local and distributed.
 pub type SingleIn<T> = Context<T>;
 
-/// Pipeline input for streaming-request engines: a trait-object alias around an
-/// input-side stream that carries its own cancellation context (via the
+/// Pipeline input for streaming-request engines: a trait-object alias around a
+/// stream that carries its own cancellation context (via the
 /// [`AsyncEngineContextProvider`] half of [`AsyncEngineStream`]).
 ///
-/// This is the input-side mirror of [`ManyOut`]. Earlier definitions wrapped the
-/// stream in a `Context<…>` (`Context<DataStream<T>>`); that shape was
-/// uninstantiable because `DataStream<T>` is `!Sync` while `Context<T: Data>`
-/// requires `Sync`. The trait-object form solves that cleanly: the cancellation
-/// surface is part of the trait contract rather than an outer wrapper.
-pub type ManyIn<T> = RequestEngineStream<T>;
+/// This is the input-side mirror of [`ManyOut`]. Both aliases resolve to the
+/// same underlying [`EngineStream<T>`] type; the directional names are
+/// documentary. Earlier definitions wrapped the stream in a `Context<…>`
+/// (`Context<DataStream<T>>`); that shape was uninstantiable because
+/// `DataStream<T>` is `!Sync` while `Context<T: Data>` requires `Sync`. The
+/// trait-object form solves that cleanly: the cancellation surface is part of
+/// the trait contract rather than an outer wrapper.
+pub type ManyIn<T> = EngineStream<T>;
 
 /// Type alias for the output of pipeline that returns a single value
 pub type SingleOut<T> = EngineUnary<T>;

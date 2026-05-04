@@ -83,24 +83,14 @@ impl<T: Send + Sync + 'static> Data for T {}
 pub type DataUnary<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
-/// `Send + Sync` flavor of [`DataStream`] — used as the inner stream of [`RequestStream`].
-///
-/// Required because input-side stream values flow through the `Req` slot of
-/// [`AsyncEngine`], which is bounded `Req: Send + Sync + 'static`. [`DataStream`]'s
-/// trait object carries only `+ Send` and is therefore not eligible. The response
-/// side has no analogous bound (responses don't traverse `AsyncEngine::Req`), so
-/// [`DataStream`] stays `Send`-only and continues to back [`ResponseStream`].
-pub type SyncDataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
-
 pub type Engine<Req, Resp, E> = Arc<dyn AsyncEngine<Req, Resp, E>>;
 pub type EngineUnary<Resp> = Pin<Box<dyn AsyncEngineUnary<Resp>>>;
-pub type EngineStream<Resp> = Pin<Box<dyn AsyncEngineStream<Resp>>>;
-/// Trait-object alias for an input-side streaming pipeline value — the input-side
-/// mirror of [`EngineStream`]. Reuses [`AsyncEngineStream`] as the trait (a single
-/// trait covers both directions); the extra `+ Sync` bound (vs `EngineStream`) is
-/// added at the alias level because values of this type are passed through the
-/// `Req` slot of [`AsyncEngine`], which is bounded `Req: Send + Sync + 'static`.
-pub type RequestEngineStream<Req> = Pin<Box<dyn AsyncEngineStream<Req> + Sync>>;
+/// Trait-object alias for an [`AsyncEngineStream`] — used on both sides of an
+/// engine: the input side via [`crate::pipeline::ManyIn`] and the output side via
+/// [`crate::pipeline::ManyOut`]. The two are structurally identical now that
+/// [`AsyncEngine`]'s `Req` bound is `Send + 'static`; the directional names exist
+/// at the [`crate::pipeline`] alias layer for documentary clarity at use sites.
+pub type EngineStream<T> = Pin<Box<dyn AsyncEngineStream<T>>>;
 pub type Context = Arc<dyn AsyncEngineContext>;
 
 impl<T: Data> From<EngineStream<T>> for DataStream<T> {
@@ -192,13 +182,13 @@ pub trait AsyncEngineUnary<Resp: Data>:
 /// This trait combines `Stream` semantics with context provider capabilities,
 /// representing a continuous async operation that produces multiple messages over time.
 ///
-/// - **Output side:** wrapped as [`EngineStream<Resp>`] = `crate::pipeline::ManyOut<Resp>`
-///   — the stream of response chunks an engine emits. [`ResponseStream`] is the
-///   canonical concrete implementor.
-/// - **Input side:** wrapped as [`RequestEngineStream<Req>`] =
-///   `crate::pipeline::ManyIn<Req>` — the stream of request chunks an engine
-///   consumes. [`RequestStream`] is the canonical concrete
-///   implementor on the input side.
+/// - **Output side:** wrapped as [`EngineStream<T>`] = `crate::pipeline::ManyOut<T>`
+///   — the stream of response chunks an engine emits.
+/// - **Input side:** same `EngineStream<T>` shape, exposed as
+///   `crate::pipeline::ManyIn<T>` for documentary clarity at the call site.
+///
+/// [`ResponseStream`] is the canonical concrete implementor; [`RequestStream`]
+/// is a type alias of it for the input side.
 pub trait AsyncEngineStream<T: Data>: Stream<Item = T> + AsyncEngineContextProvider + Send {}
 
 /// Engine is a trait that defines the interface for a streaming engine.
@@ -210,15 +200,21 @@ pub trait AsyncEngineStream<T: Data>: Stream<Item = T> + AsyncEngineContextProvi
 /// - Thread-safe design with `Send + Sync` bounds
 ///
 /// ## Type Parameters
-/// - `Req`: The request type that implements `Data`
-/// - `Resp`: The response type that implements both `Data` and `AsyncEngineContextProvider`
+/// - `Req`: The request type — required to be `Send + 'static`. The `Sync`
+///   bound was removed from `Req` for convenience: forcing `Sync` on `Req`
+///   propagates a `+ Sync` constraint onto every type that flows in (in
+///   particular, every input-side trait-object alias), and no
+///   existing implementation of `AsyncEngine` relies on the `Sync` nature of
+///   the request. Revisit if a future implementation genuinely needs
+///   shared-reference access to a request value across threads.
+/// - `Resp`: The response type that implements `AsyncEngineContextProvider`
 /// - `E`: The error type that implements `Data`
 ///
 /// ## Implementation Notes
 /// Implementations should ensure proper error handling and resource management.
 /// The `generate` method should be cancellable via the response's context provider.
 #[async_trait]
-pub trait AsyncEngine<Req: Send + Sync + 'static, Resp: AsyncEngineContextProvider, E: Data>:
+pub trait AsyncEngine<Req: Send + 'static, Resp: AsyncEngineContextProvider, E: Data>:
     Send + Sync
 {
     /// Generate a stream of completion responses.
@@ -272,55 +268,15 @@ impl<R: Data> Debug for ResponseStream<R> {
     }
 }
 
-/// Input-side mirror of [`ResponseStream`] — pairs a `Send + Sync` stream of request
-/// items with an [`AsyncEngineContext`] for cancellation propagation.
+/// Input-side type alias of [`ResponseStream`] — same struct, different name to
+/// signal role at the call site.
 ///
-/// Field layout matches [`ResponseStream`] exactly: `(stream, ctx)` siblings, no
-/// nesting. Implements [`Stream`] (so engines can poll it directly), [`AsyncEngineContextProvider`]
-/// (so engines can reach the cancellation surface), and [`AsyncEngineStream`]
-/// (so a `Pin<Box<RequestStream<R>>>` coerces implicitly to [`RequestEngineStream`]).
-///
-/// Used as the canonical concrete implementor for the `Req` side of bidirectional
-/// engines — engines that consume a sequence of requests within one logical session
-/// and emit a corresponding response stream.
-pub struct RequestStream<R: Data> {
-    stream: SyncDataStream<R>,
-    ctx: Arc<dyn AsyncEngineContext>,
-}
-
-impl<R: Data> RequestStream<R> {
-    pub fn new(stream: SyncDataStream<R>, ctx: Arc<dyn AsyncEngineContext>) -> Pin<Box<Self>> {
-        Box::pin(Self { stream, ctx })
-    }
-}
-
-impl<R: Data> Stream for RequestStream<R> {
-    type Item = R;
-
-    #[inline]
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        Pin::new(&mut self.stream).poll_next(cx)
-    }
-}
-
-impl<R: Data> AsyncEngineStream<R> for RequestStream<R> {}
-
-impl<R: Data> AsyncEngineContextProvider for RequestStream<R> {
-    fn context(&self) -> Arc<dyn AsyncEngineContext> {
-        self.ctx.clone()
-    }
-}
-
-impl<R: Data> Debug for RequestStream<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RequestStream")
-            .field("ctx", &self.ctx)
-            .finish()
-    }
-}
+/// The shape is identical: a `(stream, ctx)` pair that implements [`Stream`],
+/// [`AsyncEngineContextProvider`], and [`AsyncEngineStream`]. Use `RequestStream`
+/// when you're constructing a value to feed into the `Req` slot of an engine,
+/// and [`ResponseStream`] when constructing a value to emit from the `Resp` slot.
+/// Functionally interchangeable.
+pub type RequestStream<R> = ResponseStream<R>;
 
 impl<T: Data> AsyncEngineContextProvider for Pin<Box<dyn AsyncEngineUnary<T>>> {
     fn context(&self) -> Arc<dyn AsyncEngineContext> {
