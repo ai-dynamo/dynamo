@@ -11,7 +11,7 @@ This skill is most appropriate for these areas. Be strict if the code touches th
 - `components/src/dynamo/`
 - `lib/bindings/` — Python/Rust FFI surface
 
-Use normal Codex code-review behavior and output conventions; this skill only adds Graham- and Dynamo-specific review preferences and project heuristics.
+Use your normal code-review behavior and output conventions; this skill only adds Graham- and Dynamo-specific review preferences and project heuristics.
 
 ## Core Review Philosophy
 
@@ -50,7 +50,7 @@ Process:
 2. **`tracing` crate, never `log`.** The interface is subtly different. Delete `use tracing as log;` because that is confusing.
 3. **Structured tracing fields, not formatted strings.** Example: `tracing::error!(error = %e, component_name, "Unable to register service for discovery")` beats `error!("Unable to register service for discovery: {}", e)`. Use `%` for `to_string()`, `?` for `Debug`.
 4. **Right log level.** `info!` is for logs we think end-users will want to see. Routine internal events should be `debug!`. Hot paths are `trace!` or remove. Logging is relatively expensive, it takes a lock on the output channel.
-5. **Don't add `Arc<Mutex<…>>` reflexively.** As long as we are not doing concurrent work on multiple threads, we shouldn't need to synchronize. We never need both `Arc` and `Box` because they are both pointers. Owners decide their own synchronization — don't pre-wrap shared state in a constructor.
+5. **Don't add `Arc<Mutex<…>>` reflexively.** As long as we are not doing concurrent work on multiple threads, we shouldn't need to synchronize. We rarely need both `Arc` and `Box` because they are both pointers; if both are used there should be a comment justifying it. Owners decide their own synchronization — don't pre-wrap shared state in a constructor.
 6. **`DistributedRuntime` is already `Clone`.** Don't wrap it in another `Arc`. Same for other types that derive `Clone` cheaply.
 7. **Drop unnecessary `.clone()`.** This reduces memory copies. Can we pass a reference, move it, or make it `Copy` instead? Also, `Copy` types don't need `.clone()`.
 8. **Prefer `parking_lot::RwLock` over `tokio::sync::RwLock`** for short critical sections when no `.await` is held across the lock. It is faster and fairer.
@@ -79,7 +79,7 @@ Process:
 
 - Names should not imply more than they do. Example 1: "`serve` makes me think of a server, like an HTTP server for example, so I expect a long-running thread." Example 2: "This doesn't do DNS resolution, but the name implies it does."
 - Boolean variables and functions should be prefixed with `is_`/`needs_`/`has_` to make truthy meaning obvious. Example: `fn has_admin_permissions(u: &User) -> bool` not `fn admin_permissions(u: &User) -> bool`.
-- `mod.rs` is deprecated. Use a file with the same name as the module at the parent level. Example: for a `name/` module use `name.rs` at the parent level.
+- `mod.rs` is an older convention. Prefer using a file with the same name as the module at the parent level. Example: for a `name/` module use `name.rs` at the parent level instead of `mod.rs`.
 - Don't preserve underscore prefixes on variables that *are* used. `_text` → `text`.
 
 ## Tests
