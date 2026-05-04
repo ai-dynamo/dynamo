@@ -14,15 +14,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dynamo.global_router.handler import GlobalRouterHandler, _setup_with_fallback
-from dynamo.global_router.pool_selection import (
-    AggPoolSelectionStrategy,
-    DecodePoolSelectionStrategy,
-    GlobalRouterConfig,
-    PrefillPoolSelectionStrategy,
-    PriorityPoolOverride,
-    load_config,
-)
+try:
+    from dynamo.global_router.handler import GlobalRouterHandler, _setup_with_fallback
+    from dynamo.global_router.pool_selection import (
+        AggPoolSelectionStrategy,
+        DecodePoolSelectionStrategy,
+        GlobalRouterConfig,
+        PrefillPoolSelectionStrategy,
+        PriorityPoolOverride,
+        load_config,
+    )
+except ImportError as e:
+    pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.gpu_0,
