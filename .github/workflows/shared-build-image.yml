@@ -121,6 +121,7 @@ jobs:
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
