@@ -260,6 +260,12 @@ echo "\n=== Installing LMCache from source ==="
 if [ "$DEVICE" = "cuda" ]; then
     git clone --depth 1 --branch v${LMCACHE_REF} https://github.com/LMCache/LMCache.git ${INSTALLATION_DIR}/lmcache
     cd ${INSTALLATION_DIR}/lmcache
+    LMCACHE_PATCH="${LMCACHE_PATCH:-/tmp/deps/lmcache/local.patch}"
+    if [ -f "$LMCACHE_PATCH" ]; then
+        echo "Applying local LMCache patch: ${LMCACHE_PATCH}"
+        git apply --check "$LMCACHE_PATCH"
+        git apply "$LMCACHE_PATCH"
+    fi
     uv pip install -r requirements/build.txt
     # Get torch lib dir and embed it as RPATH so c_ops.so finds torch libs at runtime
     TORCH_LIB=$(python3 -c "import torch, os; print(os.path.dirname(torch.__file__) + '/lib')")

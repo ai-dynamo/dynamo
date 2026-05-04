@@ -1,0 +1,576 @@
+diff --git a/lmcache/integration/vllm/vllm_v1_adapter.py b/lmcache/integration/vllm/vllm_v1_adapter.py
+index ecb7af86..048bb656 100644
+--- a/lmcache/integration/vllm/vllm_v1_adapter.py
++++ b/lmcache/integration/vllm/vllm_v1_adapter.py
+@@ -31,6 +31,7 @@ from lmcache.integration.vllm.utils import (
+     ENGINE_NAME,
+     apply_mm_hashes_to_token_ids,
+     extract_mm_features,
++    get_size_bytes,
+     lmcache_get_or_create_config,
+ )
+ from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
+@@ -140,6 +141,13 @@ class RequestTracker:
+     # The number of tokens that are cached in LMCache for this request
+     num_lmcache_cached_tokens: int = 0
+ 
++    # Request-level transfer accounting. These are scheduler-side estimates
++    # used when worker-side timing stats are not visible in this process.
++    num_lmcache_retrieved_tokens: int = 0
++    num_lmcache_retrieved_bytes: int = 0
++    num_lmcache_stored_tokens: int = 0
++    num_lmcache_stored_bytes: int = 0
++
+     @_lmcache_nvtx_annotate
+     @staticmethod
+     def from_new_request(
+@@ -698,6 +706,141 @@ class LMCacheConnectorV1Impl:
+         """
+         return VLLM_VERSION
+ 
++    def _estimate_kv_bytes(self, num_tokens: int) -> int:
++        """Estimate KV payload bytes for ``num_tokens`` across all layers."""
++        if num_tokens <= 0:
++            return 0
++
++        metadata = self.lmcache_engine_metadata
++        if metadata is None:
++            return 0
++
++        try:
++            return get_size_bytes(
++                metadata.get_shapes(num_tokens),
++                metadata.get_dtypes(),
++            )
++        except Exception:
++            logger.exception(
++                "Failed to estimate LMCache KV bytes for %d tokens", num_tokens
++            )
++            return 0
++
++    def _record_planned_transfer_stats(
++        self,
++        tracker: RequestTracker,
++        req_meta: ReqMeta,
++    ) -> None:
++        load_spec = req_meta.load_spec
++        if load_spec is not None and load_spec.can_load:
++            masked_token_count = (
++                load_spec.vllm_cached_tokens
++                // self._lmcache_chunk_size
++                * self._lmcache_chunk_size
++            )
++            retrieved_tokens = max(
++                load_spec.lmcache_cached_tokens - masked_token_count,
++                0,
++            )
++            tracker.num_lmcache_retrieved_tokens += retrieved_tokens
++            tracker.num_lmcache_retrieved_bytes += self._estimate_kv_bytes(
++                retrieved_tokens
++            )
++
++        save_spec = req_meta.save_spec
++        can_save = (
++            save_spec is not None and save_spec.can_save
++        ) or self.kv_role == "kv_producer"
++        if can_save:
++            skip_leading_tokens = 0
++            if self.kv_role != "kv_producer":
++                assert save_spec is not None
++                skip_leading_tokens = (
++                    save_spec.skip_leading_tokens
++                    // self._lmcache_chunk_size
++                    * self._lmcache_chunk_size
++                )
++            stored_tokens = max(len(req_meta.token_ids) - skip_leading_tokens, 0)
++            tracker.num_lmcache_stored_tokens += stored_tokens
++            tracker.num_lmcache_stored_bytes += self._estimate_kv_bytes(stored_tokens)
++
++    @staticmethod
++    def _empty_direction_transfer_stats() -> dict[str, Union[int, float]]:
++        return {
++            "requests": 0,
++            "requested_tokens": 0,
++            "transferred_tokens": 0,
++            "transferred_bytes": 0,
++            "time_ms": 0.0,
++            "speed_gb_s": 0.0,
++        }
++
++    def _estimated_transfer_stats_to_dict(
++        self,
++        tracker: RequestTracker,
++    ) -> Optional[dict[str, Any]]:
++        retrieve_tokens = tracker.num_lmcache_retrieved_tokens
++        store_tokens = tracker.num_lmcache_stored_tokens
++        retrieve_bytes = tracker.num_lmcache_retrieved_bytes
++        store_bytes = tracker.num_lmcache_stored_bytes
++
++        if retrieve_tokens == 0 and store_tokens == 0 and retrieve_bytes == 0:
++            return None
++
++        retrieve = self._empty_direction_transfer_stats()
++        retrieve.update(
++            {
++                "requests": 1 if retrieve_tokens > 0 else 0,
++                "requested_tokens": retrieve_tokens,
++                "transferred_tokens": retrieve_tokens,
++                "transferred_bytes": retrieve_bytes,
++            }
++        )
++
++        store = self._empty_direction_transfer_stats()
++        store.update(
++            {
++                "requests": 1 if store_tokens > 0 else 0,
++                "requested_tokens": store_tokens,
++                "transferred_tokens": store_tokens,
++                "transferred_bytes": store_bytes,
++            }
++        )
++
++        total = self._empty_direction_transfer_stats()
++        total.update(
++            {
++                "requests": int(retrieve["requests"]) + int(store["requests"]),
++                "requested_tokens": retrieve_tokens + store_tokens,
++                "transferred_tokens": retrieve_tokens + store_tokens,
++                "transferred_bytes": retrieve_bytes + store_bytes,
++            }
++        )
++
++        return {
++            "connector": "lmcache",
++            "estimated": True,
++            "retrieve": retrieve,
++            "store": store,
++            "total": total,
++        }
++
++    def _get_transfer_stats_for_response(
++        self,
++        request_id: str,
++        tracker: Optional[RequestTracker],
++    ) -> Optional[dict[str, Any]]:
++        actual_stats = self._stats_monitor.pop_request_transfer_stats(request_id)
++        if actual_stats is not None:
++            actual_stats["connector"] = "lmcache"
++            actual_stats["estimated"] = False
++            return actual_stats
++
++        if tracker is None:
++            return None
++
++        return self._estimated_transfer_stats_to_dict(tracker)
++
+     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
+     #  to init self.kv_caches, we keep it in order to be compatible with old versions
+     #  and will be removed in the future.
+@@ -1578,6 +1721,7 @@ class LMCacheConnectorV1Impl:
+                 save_decode_cache=self.config.save_decode_cache,
+             )
+             if req_meta is not None:
++                self._record_planned_transfer_stats(request_tracker, req_meta)
+                 meta.add_request(req_meta)
+ 
+         cached_reqs = scheduler_output.scheduled_cached_reqs
+@@ -1624,6 +1768,7 @@ class LMCacheConnectorV1Impl:
+                     save_decode_cache=self.config.save_decode_cache,
+                 )
+                 if req_meta is not None:
++                    self._record_planned_transfer_stats(request_tracker, req_meta)
+                     meta.add_request(req_meta)
+             return meta
+ 
+@@ -1747,6 +1892,7 @@ class LMCacheConnectorV1Impl:
+                 save_decode_cache=self.config.save_decode_cache,
+             )
+             if req_meta is not None:
++                self._record_planned_transfer_stats(request_tracker, req_meta)
+                 meta.add_request(req_meta)
+ 
+         return meta
+@@ -1786,10 +1932,35 @@ class LMCacheConnectorV1Impl:
+                 "first_tok": request._output_token_ids[0],
+             }
+ 
++        request_tracker = self._request_trackers.get(request.request_id)
++
++        transfer_stats = self._get_transfer_stats_for_response(
++            request.request_id,
++            request_tracker,
++        )
++        if transfer_stats is not None:
++            return_params = return_params or {}
++            return_params["lmcache_transfer_stats"] = transfer_stats
++
++            total_stats = transfer_stats.get("total", {})
++            if isinstance(total_stats, dict):
++                return_params["kv_transfer_tokens"] = total_stats.get(
++                    "transferred_tokens", 0
++                )
++                return_params["kv_transfer_bytes"] = total_stats.get(
++                    "transferred_bytes", 0
++                )
++                if not transfer_stats.get("estimated", False):
++                    return_params["kv_transfer_time_ms"] = total_stats.get(
++                        "time_ms", 0.0
++                    )
++                    return_params["kv_transfer_speed_gb_s"] = total_stats.get(
++                        "speed_gb_s", 0.0
++                    )
++
+         if self.config.get_extra_config_value(
+             "enable_cache_usage_details_in_response", False
+         ):
+-            request_tracker = self._request_trackers.get(request.request_id)
+             if request_tracker:
+                 return_params = return_params or {}
+                 return_params["num_lmcache_cached_tokens"] = (
+diff --git a/lmcache/observability.py b/lmcache/observability.py
+index 8a9a3a15..fd01809c 100644
+--- a/lmcache/observability.py
++++ b/lmcache/observability.py
+@@ -246,6 +246,100 @@ class P2PTransferRequestStats:
+         return self.num_tokens / self.time_to_transfer()
+ 
+ 
++@dataclass
++class RequestTransferStats:
++    retrieve_requests: int = 0
++    retrieve_requested_tokens: int = 0
++    retrieve_transferred_tokens: int = 0
++    retrieve_transferred_bytes: int = 0
++    retrieve_time_ms: float = 0.0
++    store_requests: int = 0
++    store_requested_tokens: int = 0
++    store_transferred_tokens: int = 0
++    store_transferred_bytes: int = 0
++    store_time_ms: float = 0.0
++
++    def add(
++        self,
++        direction: str,
++        requested_tokens: int,
++        transferred_tokens: int,
++        transferred_bytes: int,
++        transfer_time_s: float,
++    ) -> None:
++        requested_tokens = max(int(requested_tokens), 0)
++        transferred_tokens = max(int(transferred_tokens), 0)
++        transferred_bytes = max(int(transferred_bytes), 0)
++        transfer_time_ms = max(float(transfer_time_s), 0.0) * 1000.0
++
++        if direction == "retrieve":
++            self.retrieve_requests += 1
++            self.retrieve_requested_tokens += requested_tokens
++            self.retrieve_transferred_tokens += transferred_tokens
++            self.retrieve_transferred_bytes += transferred_bytes
++            self.retrieve_time_ms += transfer_time_ms
++        elif direction == "store":
++            self.store_requests += 1
++            self.store_requested_tokens += requested_tokens
++            self.store_transferred_tokens += transferred_tokens
++            self.store_transferred_bytes += transferred_bytes
++            self.store_time_ms += transfer_time_ms
++        else:
++            raise ValueError(f"Unsupported transfer direction: {direction}")
++
++    @staticmethod
++    def _speed_gb_s(num_bytes: int, time_ms: float) -> float:
++        if num_bytes <= 0 or time_ms <= 0:
++            return 0.0
++        return num_bytes / (time_ms / 1000.0) / 1024**3
++
++    def to_dict(self) -> Dict[str, Any]:
++        total_requests = self.retrieve_requests + self.store_requests
++        total_requested_tokens = (
++            self.retrieve_requested_tokens + self.store_requested_tokens
++        )
++        total_transferred_tokens = (
++            self.retrieve_transferred_tokens + self.store_transferred_tokens
++        )
++        total_transferred_bytes = (
++            self.retrieve_transferred_bytes + self.store_transferred_bytes
++        )
++        total_time_ms = self.retrieve_time_ms + self.store_time_ms
++
++        return {
++            "retrieve": {
++                "requests": self.retrieve_requests,
++                "requested_tokens": self.retrieve_requested_tokens,
++                "transferred_tokens": self.retrieve_transferred_tokens,
++                "transferred_bytes": self.retrieve_transferred_bytes,
++                "time_ms": self.retrieve_time_ms,
++                "speed_gb_s": self._speed_gb_s(
++                    self.retrieve_transferred_bytes, self.retrieve_time_ms
++                ),
++            },
++            "store": {
++                "requests": self.store_requests,
++                "requested_tokens": self.store_requested_tokens,
++                "transferred_tokens": self.store_transferred_tokens,
++                "transferred_bytes": self.store_transferred_bytes,
++                "time_ms": self.store_time_ms,
++                "speed_gb_s": self._speed_gb_s(
++                    self.store_transferred_bytes, self.store_time_ms
++                ),
++            },
++            "total": {
++                "requests": total_requests,
++                "requested_tokens": total_requested_tokens,
++                "transferred_tokens": total_transferred_tokens,
++                "transferred_bytes": total_transferred_bytes,
++                "time_ms": total_time_ms,
++                "speed_gb_s": self._speed_gb_s(
++                    total_transferred_bytes, total_time_ms
++                ),
++            },
++        }
++
++
+ class LMCStatsMonitor:
+     def __init__(self):
+         # Interval metrics that will be reset after each log
+@@ -305,6 +399,7 @@ class LMCStatsMonitor:
+         self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
+         self.store_requests: Dict[int, StoreRequestStats] = {}
+         self.lookup_requests: Dict[int, LookupRequestStats] = {}
++        self.request_transfer_stats: Dict[str, RequestTransferStats] = {}
+ 
+         self.retrieve_request_id = 0
+         self.store_request_id = 0
+@@ -506,6 +601,40 @@ class LMCStatsMonitor:
+         self.interval_p2p_transferred_tokens += p2p_stats.num_tokens
+         p2p_stats.end_time = curr_time
+ 
++    @thread_safe
++    def record_request_transfer_stats(
++        self,
++        req_id: Optional[str],
++        direction: str,
++        requested_tokens: int,
++        transferred_tokens: int,
++        transferred_bytes: int,
++        transfer_time_s: float,
++    ) -> None:
++        if req_id is None:
++            return
++
++        stats = self.request_transfer_stats.setdefault(
++            req_id, RequestTransferStats()
++        )
++        stats.add(
++            direction,
++            requested_tokens,
++            transferred_tokens,
++            transferred_bytes,
++            transfer_time_s,
++        )
++
++    @thread_safe
++    def pop_request_transfer_stats(
++        self,
++        req_id: str,
++    ) -> Optional[Dict[str, Any]]:
++        stats = self.request_transfer_stats.pop(req_id, None)
++        if stats is None:
++            return None
++        return stats.to_dict()
++
+     @thread_safe
+     def on_chunk_reuse(self, time_interval: float):
+         """
+diff --git a/lmcache/v1/cache_engine.py b/lmcache/v1/cache_engine.py
+index 6fb2733e..33aefb56 100644
+--- a/lmcache/v1/cache_engine.py
++++ b/lmcache/v1/cache_engine.py
+@@ -261,6 +261,45 @@ class LMCacheEngine:
+         """Extracts request ID from kwargs for logging."""
+         return kwargs.get("req_id", "unspecified")
+ 
++    def _log_connector_transfer_complete(
++        self,
++        direction: str,
++        transferred_tokens: int,
++        staging_time_s: float,
++        xfer_time_s: float,
++        total_time_s: float,
++    ) -> None:
++        if transferred_tokens <= 0:
++            return
++
++        blocks = (
++            transferred_tokens + self.config.chunk_size - 1
++        ) // self.config.chunk_size
++        staging_us = max(int(staging_time_s * 1_000_000), 0)
++        xfer_us = max(int(xfer_time_s * 1_000_000), 0)
++        total_us = max(int(total_time_s * 1_000_000), 0)
++
++        if xfer_us == 0 and total_us > staging_us:
++            xfer_us = total_us - staging_us
++
++        if direction == "store":
++            src = "lmcache::G2"
++            dst = "lmcache::G1"
++        else:
++            src = "lmcache::G1"
++            dst = "lmcache::G2"
++
++        logger.info(
++            'Onboard transfer complete blocks=%d staging_us=%d xfer_us=%d '
++            'total_us=%d src="%s" dst="%s"',
++            blocks,
++            staging_us,
++            xfer_us,
++            total_us,
++            src,
++            dst,
++        )
++
+     def mark_init_failed(self, reason: str = "") -> None:
+         """
+         Mark the engine as having failed initialization.
+@@ -548,6 +587,21 @@ class LMCacheEngine:
+             tot_token_num,
+         )
+         tot_time = store_stats.time_to_store()
++        self.stats_monitor.record_request_transfer_stats(
++            kwargs.get("req_id"),
++            "store",
++            num_to_store_tokens,
++            tot_token_num,
++            tot_kv_size,
++            tot_time,
++        )
++        self._log_connector_transfer_complete(
++            "store",
++            tot_token_num,
++            store_stats.process_tokens_time,
++            store_stats.from_gpu_time + store_stats.put_time,
++            tot_time,
++        )
+ 
+         logger.info(
+             "[req_id=%s] Stored %d out of total %d tokens. "
+@@ -740,6 +794,21 @@ class LMCacheEngine:
+                 tot_time * 1000,
+                 tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
+             )
++            self.stats_monitor.record_request_transfer_stats(
++                kwargs.get("req_id"),
++                "store",
++                num_to_store_tokens,
++                tot_token_num,
++                tot_kv_size,
++                tot_time,
++            )
++            self._log_connector_transfer_complete(
++                "store",
++                tot_token_num,
++                0.0,
++                tot_time,
++                tot_time,
++            )
+         else:
+             # If no cache are found, we still need to yield to avoid
+             # `StopIteration`
+@@ -870,6 +939,21 @@ class LMCacheEngine:
+             retrieved_tokens,
+         )
+         onload_time = retrieve_stats.time_to_retrieve()
++        self.stats_monitor.record_request_transfer_stats(
++            kwargs.get("req_id"),
++            "retrieve",
++            num_required_tokens,
++            int(retrieved_tokens.item()),
++            tot_kv_size,
++            onload_time,
++        )
++        self._log_connector_transfer_complete(
++            "retrieve",
++            int(retrieved_tokens.item()),
++            retrieve_stats.process_tokens_time,
++            retrieve_stats.broadcast_time + retrieve_stats.to_gpu_time,
++            onload_time,
++        )
+         # The retrieved may be larger than the need_to_load
+         # Example (page_size=16, chunk_size=256):
+         #
+@@ -1043,6 +1127,30 @@ class LMCacheEngine:
+ 
+         retrieved_tokens = torch.sum(ret_mask)
+         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
++        retrieved_token_count = int(retrieved_tokens.item())
++        retrieved_bytes = sum(
++            shape.numel() * dtype.itemsize
++            for shape, dtype in zip(
++                self.metadata.get_shapes(retrieved_token_count),
++                self.metadata.get_dtypes(),
++                strict=True,
++            )
++        )
++        self.stats_monitor.record_request_transfer_stats(
++            kwargs.get("req_id"),
++            "retrieve",
++            num_required_tokens,
++            retrieved_token_count,
++            retrieved_bytes,
++            monitor_req_id.time_to_retrieve(),
++        )
++        self._log_connector_transfer_complete(
++            "retrieve",
++            retrieved_token_count,
++            0.0,
++            monitor_req_id.time_to_retrieve(),
++            monitor_req_id.time_to_retrieve(),
++        )
+         if not self._is_passive():
+             logger.info(
+                 "[req_id=%s] Retrieved %d out of %d out of total %d tokens",
+diff --git a/tests/test_observability.py b/tests/test_observability.py
+index 6f41ae88..889b91b4 100644
+--- a/tests/test_observability.py
++++ b/tests/test_observability.py
+@@ -118,6 +118,41 @@ def test_remote_time_metrics(stats_monitor):
+     assert stats.interval_remote_time_to_get_sync == [12.3]
+ 
+ 
++def test_request_transfer_stats(stats_monitor):
++    stats_monitor.record_request_transfer_stats(
++        req_id="req-1",
++        direction="retrieve",
++        requested_tokens=128,
++        transferred_tokens=96,
++        transferred_bytes=1024,
++        transfer_time_s=0.01,
++    )
++    stats_monitor.record_request_transfer_stats(
++        req_id="req-1",
++        direction="store",
++        requested_tokens=64,
++        transferred_tokens=64,
++        transferred_bytes=2048,
++        transfer_time_s=0.02,
++    )
++
++    stats = stats_monitor.pop_request_transfer_stats("req-1")
++    assert stats is not None
++    assert stats["retrieve"]["requested_tokens"] == 128
++    assert stats["retrieve"]["transferred_tokens"] == 96
++    assert stats["retrieve"]["transferred_bytes"] == 1024
++    assert stats["retrieve"]["time_ms"] == pytest.approx(10.0)
++    assert stats["store"]["requested_tokens"] == 64
++    assert stats["store"]["transferred_tokens"] == 64
++    assert stats["store"]["transferred_bytes"] == 2048
++    assert stats["store"]["time_ms"] == pytest.approx(20.0)
++    assert stats["total"]["requested_tokens"] == 192
++    assert stats["total"]["transferred_tokens"] == 160
++    assert stats["total"]["transferred_bytes"] == 3072
++    assert stats["total"]["time_ms"] == pytest.approx(30.0)
++    assert stats_monitor.pop_request_transfer_stats("req-1") is None
++
++
+ def test_remote_ping_metrics(stats_monitor):
+     # Test successful ping
+     stats_monitor.update_remote_ping_latency(latency=25.5)

@@ -71,6 +71,7 @@ ARG TARGETARCH
 ARG VLLM_REF
 ARG VLLM_GIT_URL
 ARG LMCACHE_REF
+ARG LMCACHE_PATCH_SHA
 ARG VLLM_OMNI_REF
 
 {% if device == "cuda" %}
@@ -110,6 +111,7 @@ ARG VLLM_CPU_AMXBF16=true          # Support for building with AMXBF16 ISA
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    echo "LMCACHE_PATCH_SHA=${LMCACHE_PATCH_SHA}" && \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     if [ "$DEVICE" = "cpu" ] && [ "$TARGETARCH" = "amd64" ]; then \
