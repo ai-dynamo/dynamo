@@ -788,6 +788,11 @@ func registerWebhooks(
 
 	setupLog.Info("Registering defaulting webhooks")
 
+	dcdDefaulter := webhookdefaulting.NewDCDDefaulter()
+	if err := dcdDefaulter.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
+	}
+
 	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
 	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
