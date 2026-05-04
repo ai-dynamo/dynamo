@@ -180,7 +180,9 @@ class TestValidationDisagg:
         _disagg_config().validate()
 
     def test_empty_chain_rejected(self):
-        with pytest.raises(ValueError, match="Prefill routing_priority must be non-empty"):
+        with pytest.raises(
+            ValueError, match="Prefill routing_priority must be non-empty"
+        ):
             _disagg_config(prefill_routing_priority=[]).validate()
 
     def test_out_of_range_rejected(self):
@@ -416,8 +418,7 @@ class TestHandlerFallback:
             prefill_chain=[0, 1],
         )
         outputs = [
-            chunk
-            async for chunk in handler.handle_prefill({"token_ids": [1, 2, 3]})
+            chunk async for chunk in handler.handle_prefill({"token_ids": [1, 2, 3]})
         ]
         assert outputs == [{"text": "hi"}]
         bad.generate.assert_awaited_once()
