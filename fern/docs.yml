@@ -24,16 +24,20 @@ agents:
 products:
   - display-name: Dynamo
     slug: /
-    path: ./versions/v1.0.2.yml
+    path: ./versions/v1.1.0.yml
     versions:
-      - display-name: Latest (v1.0.2)
-        path: ./versions/v1.0.2.yml
+      - display-name: Latest (v1.1.0)
+        path: ./versions/v1.1.0.yml
         slug: latest
         availability: stable
       - display-name: dev
         path: ./versions/dev.yml
         slug: dev
         availability: beta
+      - display-name: v1.1.0
+        path: ./versions/v1.1.0.yml
+        slug: v1.1.0
+        availability: stable
       - display-name: v1.0.2
         path: ./versions/v1.0.2.yml
         slug: v1.0.2

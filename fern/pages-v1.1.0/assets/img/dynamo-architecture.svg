@@ -1,0 +1,119 @@
+<svg viewBox="0 0 1000 550" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="5.5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#234CDA" />
+    </marker>
+    <marker id="arrowhead-dashed" markerWidth="6" markerHeight="4" refX="5.5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#234CDA" />
+    </marker>
+  </defs>
+
+  <rect width="1000" height="550" fill="#FFFFFF"/>
+
+  <rect x="170" y="30" width="300" height="220" fill="#D2DBFD" stroke="#234CDA" stroke-width="0.7"/>
+  <rect x="610" y="30" width="370" height="430" fill="#D2DBFD" stroke="#234CDA" stroke-width="0.7"/>
+  <rect x="90" y="320" width="410" height="210" fill="#D2DBFD" stroke="#234CDA" stroke-width="0.7"/>
+
+  <rect x="170" y="30" width="300" height="30" fill="#A6B8F8" stroke="#234CDA" stroke-width="0.7"/>
+  <rect x="610" y="30" width="370" height="30" fill="#A6B8F8" stroke="#234CDA" stroke-width="0.7"/>
+  <rect x="90" y="320" width="410" height="35" fill="#A6B8F8" stroke="#234CDA" stroke-width="0.7"/>
+
+  <g font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#000">
+    <text x="180" y="50">REQUEST PLANE</text>
+    <text x="620" y="50">CONTROL PLANE</text>
+    <text x="100" y="343">STORAGE &amp; EVENTS PLANE</text>
+  </g>
+
+  <rect x="10" y="30" width="80" height="150" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="25" y="110" font-family="Helvetica" font-size="12">CLIENT</text>
+
+  <rect x="190" y="80" width="90" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="205" y="102" font-family="Helvetica" font-size="11">Frontend</text>
+
+  <rect x="330" y="80" width="90" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="355" y="102" font-family="Helvetica" font-size="11">Router</text>
+
+  <rect x="210" y="170" width="80" height="50" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="225" y="190" font-family="Helvetica" font-size="10">Prefill</text>
+  <text x="225" y="202" font-family="Helvetica" font-size="10">workers</text>
+
+  <rect x="370" y="170" width="80" height="50" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="390" y="190" font-family="Helvetica" font-size="10">Decode</text>
+  <text x="390" y="202" font-family="Helvetica" font-size="10">workers</text>
+
+  <rect x="630" y="75" width="140" height="90" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="640" y="95" font-family="Helvetica" font-size="11">Planner</text>
+  <rect x="640" y="105" width="120" height="40" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="650" y="130" font-family="Helvetica" font-size="11">AIConfigurator</text>
+
+  <rect x="820" y="75" width="120" height="50" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="830" y="105" font-family="Helvetica" font-size="11">Dynamo Operator</text>
+
+  <rect x="810" y="210" width="100" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="820" y="232" font-family="Helvetica" font-size="11">Dynamo Graph</text>
+
+  <rect x="870" y="280" width="70" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="890" y="302" font-family="Helvetica" font-size="11">Grove</text>
+
+  <rect x="650" y="390" width="110" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="665" y="412" font-family="Helvetica" font-size="11">Model Express</text>
+
+  <rect x="105" y="375" width="70" height="30" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="125" y="395" font-family="Helvetica" font-size="11">KVBM</text>
+
+  <rect x="310" y="375" width="70" height="35" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="330" y="397" font-family="Helvetica" font-size="11">NIXL</text>
+
+  <rect x="280" y="460" width="110" height="50" fill="#E7ECFF" stroke="#234CDA" stroke-width="0.7"/>
+  <text x="295" y="480" font-family="Helvetica" font-size="9">Local SSD/NFS/</text>
+  <text x="295" y="495" font-family="Helvetica" font-size="9">Remote Storage</text>
+
+  <g stroke="#234CDA" stroke-width="1" fill="none">
+    <path d="M 90 60 L 168 60" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 170 140 L 92 140" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 470 140 L 608 140" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 610 200 L 472 200" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 195 250 L 195 318" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 315 320 L 315 252" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 425 320 L 425 252" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+    <path d="M 705 425 L 705 480 L 502 480" stroke-dasharray="4,4" marker-end="url(#arrowhead-dashed)" />
+
+    <path d="M 280 97 L 328 97" marker-end="url(#arrowhead)" />
+    <path d="M 375 115 L 375 140 L 250 140 L 250 168" marker-end="url(#arrowhead)" />
+    <path d="M 375 140 L 410 140 L 410 168" marker-end="url(#arrowhead)" />
+
+    <path d="M 290 195 L 368 195" marker-end="url(#arrowhead)" />
+
+    <path d="M 770 115 L 818 115" marker-end="url(#arrowhead)" />
+    <path d="M 880 125 L 880 208" marker-end="url(#arrowhead)" />
+    <path d="M 860 245 L 860 358" marker-end="url(#arrowhead)" />
+    <path d="M 900 245 L 900 278" marker-end="url(#arrowhead)" />
+    <path d="M 900 315 L 900 358" marker-end="url(#arrowhead)" />
+    <path d="M 175 390 L 308 390" marker-end="url(#arrowhead)" />
+    <path d="M 325 410 L 325 458" marker-end="url(#arrowhead)" />
+    <path d="M 355 460 L 355 412" marker-end="url(#arrowhead)" />
+  </g>
+
+  <g font-family="Helvetica" font-size="10" fill="#000">
+    <text x="100" y="55">request</text>
+    <text x="100" y="130">response</text>
+    <text x="485" y="130">observability</text>
+    <text x="485" y="190">capacity, placement</text>
+    <text x="485" y="215">fault tolerance</text>
+    <text x="100" y="285">lifecycle, handoff,</text>
+    <text x="100" y="300">blocks (KVBM)</text>
+    <text x="320" y="285">model</text>
+    <text x="320" y="300">weights</text>
+    <text x="435" y="285">cache visibility/</text>
+    <text x="435" y="300">KV events to router</text>
+    <text x="890" y="180">(Reconcile)</text>
+    <text x="845" y="375">Runtime Resources</text>
+    <text x="270" y="430">KV block</text>
+    <text x="270" y="445">offload</text>
+    <text x="365" y="445">Model weights,</text>
+    <text x="365" y="430">KV block onboard</text>
+
+    <text x="330" y="190" font-size="9" text-anchor="middle">KV state</text>
+    <text x="330" y="208" font-size="9" text-anchor="middle">Checkpoints</text>
+  </g>
+</svg>

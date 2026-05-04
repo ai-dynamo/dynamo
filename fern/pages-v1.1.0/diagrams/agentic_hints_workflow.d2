@@ -1,0 +1,76 @@
+# Render with reduced gap: d2 --layout=elk --elk-nodeNodeBetweenLayers=25 ...
+direction: down
+
+# Main box 1: Agentic client (title bold; subtitle plain)
+agentic_client_box: "Agentic client" {
+  style.font-size: 28
+  shape: rectangle
+  direction: down
+  agentic_subtitle: "like NeMo Agent Toolkit" {
+    shape: text
+    style.font-size: 20
+  }
+}
+
+# Main box 2: Dynamo (big encapsulating box)
+dynamo_box: "Dynamo" {
+  style.font-size: 28
+  direction: down
+
+  frontend_row: "" {
+    direction: right
+    frontend: "Dynamo Frontend" {
+      shape: rectangle
+      style.font-size: 24
+    }
+    frontend_parse: "Parses nvext → agentic_hints, cache_control" {
+      shape: text
+      style.font-size: 20
+    }
+  }
+
+  # One box per component (no wrapper around KV Router and KV Block Manager)
+  router_col: "" {
+    direction: down
+    kv_router: "KV Router" {
+      shape: rectangle
+      style.font-size: 24
+    }
+    kv_router_text: "- Latency sensitive first\n- Priority scheduling\n- Worker selection" {
+      shape: text
+      style.font-size: 20
+    }
+  }
+  blockmgr_col: "" {
+    direction: down
+    kv_block_mgr: "KV Block Manager" {
+      shape: rectangle
+      style.font-size: 24
+    }
+    kv_block_mgr_text: "- Cache Pinning\n- Prefetching\n- Eviction" {
+      shape: text
+      style.font-size: 20
+    }
+  }
+}
+
+# Footer: below Dynamo box, outside it
+footer: "Every request can also include predictive metadata for 'expected future load', through estimates of number of requests, OSL and ITL." {
+  shape: text
+  style.font-size: 18
+  near: bottom-center
+}
+
+# Request label in top half of arrow (intermediate node to avoid overlap with Dynamo box)
+request_label: "POST /v1/chat/completions\nbody: { ... \"nvext\": { \"agent_hints\": {...}, \"cache_control\": {...} } }" {
+  shape: text
+  style.font-size: 20
+}
+
+# Client -> label (top half) -> Frontend
+agentic_client_box -> request_label
+request_label -> dynamo_box.frontend_row.frontend
+
+# Frontend -> KV Router and KV Block Manager
+dynamo_box.frontend_row.frontend -> dynamo_box.router_col.kv_router
+dynamo_box.frontend_row.frontend -> dynamo_box.blockmgr_col.kv_block_mgr

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="650" height="440" viewBox="0 0 650 440">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0A0F25" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <style type="text/css"><![CDATA[
+    .fill-N1 { fill: #0A0F25; }
+    .fill-N7 { fill: transparent; }
+    .fill-B1 { fill: #0D32B2; }
+    .fill-B5 { fill: #EDF0FD; }
+    .stroke-B1 { stroke: #0D32B2; }
+
+    .box-text {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+    .benefit {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .benefit-center {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+    .summary {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .fill-N1 { fill: #F2F2F2; }
+      .fill-N7 { fill: transparent; }
+      .fill-B1 { fill: #6B9FFF; }
+      .fill-B5 { fill: #252535; }
+      .stroke-B1 { stroke: #6B9FFF; }
+    }
+  ]]></style>
+
+  <rect width="100%" height="100%" class="fill-N7"/>
+
+  <ellipse cx="325" cy="230" rx="200" ry="135" fill="none" class="stroke-B1" style="stroke-width:1" />
+
+  <rect x="220" y="30" width="210" height="80" rx="6" class="fill-B5 stroke-B1" style="stroke-width:1" filter="url(#shadow)"/>
+  <text x="325" y="65" class="box-text fill-N1">Disaggregated</text>
+  <text x="325" y="87" class="box-text fill-N1">Serving</text>
+
+  <rect x="35" y="230" width="210" height="80" rx="6" class="fill-B5 stroke-B1" style="stroke-width:1" filter="url(#shadow)"/>
+  <text x="140" y="265" class="box-text fill-N1">KV Cache</text>
+  <text x="140" y="287" class="box-text fill-N1">Aware Routing</text>
+
+  <rect x="405" y="230" width="210" height="80" rx="6" class="fill-B5 stroke-B1" style="stroke-width:1" filter="url(#shadow)"/>
+  <text x="510" y="265" class="box-text fill-N1">KV Cache</text>
+  <text x="510" y="287" class="box-text fill-N1">Offloading</text>
+
+  <text x="30" y="145" class="benefit fill-N1">Improved latency</text>
+  <text x="30" y="163" class="benefit fill-N1">and throughput</text>
+
+  <text x="510" y="145" class="benefit fill-N1">Better TCO</text>
+  <text x="510" y="163" class="benefit fill-N1">Faster TTFT</text>
+
+  <text x="325" y="345" class="benefit-center fill-N1">Higher KV cache hit rate</text>
+
+  <text x="325" y="420" class="summary fill-N1">All Three Composed: Max Throughput | Lowest Latency | Best TCO</text>
+</svg>
