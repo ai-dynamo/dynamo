@@ -56,6 +56,8 @@ struct RequestContext {
     response_size: usize,
     response_complete: bool,
     model_server_streaming: bool,
+    is_disaggregated: bool,
+    prefill_complete_signaled: bool,
 
     request_headers: Vec<(String, String)>,
     request_metadata: HashMap<String, prost_types::Struct>,
@@ -83,6 +85,8 @@ impl RequestContext {
             response_size: 0,
             response_complete: false,
             model_server_streaming: false,
+            is_disaggregated: false,
+            prefill_complete_signaled: false,
             request_headers: Vec::new(),
             request_metadata: HashMap::new(),
             response_headers: HashMap::new(),
@@ -293,6 +297,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
+        ctx.is_disaggregated = result
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-dynamo-routing-mode" && v == "disaggregated");
 
         tracing::info!(
             request_id = %ctx.request_id,
@@ -478,6 +486,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
+
+                            if ctx.is_disaggregated && !ctx.prefill_complete_signaled {
+                                ctx.prefill_complete_signaled = true;
+                                picker.on_prefill_complete(&ctx.request_id).await;
+                            }
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
                             if ctx.model_server_streaming {
@@ -681,4 +694,160 @@ pub async fn run_ext_proc_server<P: EndpointPicker>(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::picker::{PickError, PickResult};
+    use crate::proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
+    use crate::proto::envoy::service::ext_proc::v3::{
+        HttpBody, HttpHeaders, ProcessingRequest,
+        external_processor_client::ExternalProcessorClient, processing_request::Request as ProcReq,
+    };
+
+    struct Tracker {
+        add: AtomicU32,
+        prefill_complete: AtomicU32,
+        free: AtomicU32,
+        disagg: bool,
+    }
+
+    // Tracker is a mock EndpointPicker with 3 atomic counters, one per bookkeeping call. Each trait method just increments its counter.
+    impl Tracker {
+        fn agg() -> Self {
+            Self {
+                add: 0.into(),
+                prefill_complete: 0.into(),
+                free: 0.into(),
+                disagg: false,
+            }
+        }
+        fn disagg() -> Self {
+            Self {
+                add: 0.into(),
+                prefill_complete: 0.into(),
+                free: 0.into(),
+                disagg: true,
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl EndpointPicker for Tracker {
+        async fn pick(&self, _: &RequestInfo, _: &[Endpoint]) -> Result<PickResult, PickError> {
+            self.add.fetch_add(1, Ordering::SeqCst);
+            let mode = if self.disagg {
+                "disaggregated"
+            } else {
+                "aggregated"
+            };
+            Ok(PickResult {
+                endpoint: "1.2.3.4:80".into(),
+                headers: vec![("x-dynamo-routing-mode".into(), mode.into())],
+                ..Default::default()
+            })
+        }
+        async fn on_prefill_complete(&self, _: &str) {
+            self.prefill_complete.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn on_request_complete(&self, _: &str) {
+            self.free.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // Spin up a GRPC server and create a gRPC bi-directional stream
+    async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let svc = ExtProcServer::new(t).into_service();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(l)),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        ExternalProcessorClient::new(
+            tonic::transport::Channel::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap(),
+        )
+    }
+
+    fn stream() -> Vec<ProcessingRequest> {
+        vec![
+            ProcessingRequest {
+                request: Some(ProcReq::RequestHeaders(HttpHeaders {
+                    headers: Some(HeaderMap {
+                        headers: vec![HeaderValue {
+                            key: "x-request-id".into(),
+                            value: "r1".into(),
+                            raw_value: vec![],
+                        }],
+                    }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::RequestBody(HttpBody {
+                    body: br#"{"model":"m","messages":[]}"#.to_vec(),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseHeaders(HttpHeaders {
+                    headers: Some(HeaderMap { headers: vec![] }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseBody(HttpBody {
+                    body: b"{}".to_vec(),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+        ]
+    }
+
+    async fn run(c: &mut ExternalProcessorClient<tonic::transport::Channel>) {
+        let mut r = c
+            .process(tokio_stream::iter(stream()))
+            .await
+            .unwrap()
+            .into_inner();
+        while r.message().await.unwrap().is_some() {}
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    /// add_request: pick() is invoked → registers request with the slot tracker.
+    #[tokio::test]
+    async fn test_add_request_called() {
+        let t = Arc::new(Tracker::agg());
+        run(&mut connect(t.clone()).await).await;
+        assert_eq!(t.add.load(Ordering::SeqCst), 1);
+    }
+
+    /// mark_prefill_complete: on_prefill_complete() fires on ResponseHeaders in disagg mode.
+    #[tokio::test]
+    async fn test_mark_prefill_complete_called() {
+        let t = Arc::new(Tracker::disagg());
+        run(&mut connect(t.clone()).await).await;
+        assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 1);
+    }
+
+    /// free_request: on_request_complete() fires when the stream ends.
+    #[tokio::test]
+    async fn test_free_request_called() {
+        let t = Arc::new(Tracker::agg());
+        run(&mut connect(t.clone()).await).await;
+        assert_eq!(t.free.load(Ordering::SeqCst), 1);
+    }
 }

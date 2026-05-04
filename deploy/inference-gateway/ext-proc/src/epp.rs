@@ -809,6 +809,19 @@ impl EndpointPicker for Router {
         })
     }
 
+    async fn on_prefill_complete(&self, request_id: &str) {
+        if request_id.is_empty() {
+            return;
+        }
+        if let Err(e) = self.mark_prefill_complete(request_id).await {
+            tracing::debug!(
+                request_id,
+                error = %e,
+                "Failed to mark prefill complete in router bookkeeping"
+            );
+        }
+    }
+
     async fn on_request_complete(&self, request_id: &str) {
         if request_id.is_empty() {
             return;
