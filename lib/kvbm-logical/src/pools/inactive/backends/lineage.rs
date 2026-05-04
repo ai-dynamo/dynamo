@@ -176,29 +176,12 @@ impl LineageBackend {
         allocated
     }
 
-    /// Non-mutating lookup: returns the `BlockId` currently stored under
-    /// `lineage_hash` if (and only if) the node is `Real` AND its full
-    /// `SequenceHash` matches. Does not touch `current_tick`, `last_used`, or
-    /// `leaf_queue`. The `(position, current_hash_fragment)` key alone is not
-    /// sufficient — different `PositionalLineageHash`es can share that pair —
-    /// so we compare the full hash before claiming a hit.
-    fn peek_by_hash(&self, lineage_hash: &PositionalLineageHash) -> Option<BlockId> {
-        let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
-        self.nodes
-            .get(&position)
-            .and_then(|level| level.get(&fragment))
-            .and_then(|node| match &node.data {
-                LineageNodeData::Real {
-                    block_id, seq_hash, ..
-                } if seq_hash == lineage_hash => Some(*block_id),
-                _ => None,
-            })
-    }
-
     /// Remove a specific block by its lineage hash (cache-hit path).
-    /// Verifies the stored full `SequenceHash` matches before removing — see
-    /// `peek_by_hash` for why the `(position, fragment)` key is not unique.
+    /// Verifies the stored full `SequenceHash` matches before removing: the
+    /// `(position, current_hash_fragment)` key is not unique — distinct
+    /// `PositionalLineageHash`es can share that pair (e.g. same current hash
+    /// and position but different parent), so a key-only match would let a
+    /// lookup for one PLH delete the block belonging to another.
     fn remove_by_hash(
         &mut self,
         lineage_hash: &PositionalLineageHash,
@@ -385,10 +368,25 @@ impl InactiveIndex for LineageBackend {
     }
 
     fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
-        // Non-mutating lookup first; only remove on an exact id match so
-        // a miss leaves `current_tick`, `last_used`, and `leaf_queue`
-        // untouched.
-        match self.peek_by_hash(&seq_hash) {
+        // Non-mutating lookup first; only remove on an exact id match so a
+        // miss leaves `current_tick`, `last_used`, and `leaf_queue` untouched.
+        // Match on the full `SequenceHash` AND the block id — `(position,
+        // current_hash_fragment)` alone can collide across distinct PLHs.
+        let position = seq_hash.position();
+        let fragment = seq_hash.current_hash_fragment();
+        let stored_id = self
+            .nodes
+            .get(&position)
+            .and_then(|level| level.get(&fragment))
+            .and_then(|node| match &node.data {
+                LineageNodeData::Real {
+                    block_id: id,
+                    seq_hash: stored,
+                    ..
+                } if *stored == seq_hash => Some(*id),
+                _ => None,
+            });
+        match stored_id {
             Some(id) if id == block_id => self.remove_by_hash(&seq_hash).is_some(),
             _ => false,
         }
@@ -658,16 +656,11 @@ mod tests {
 
         // Sanity: the stored hash hits.
         assert!(backend.has(stored));
-        assert_eq!(backend.peek_by_hash(&stored), Some(42));
 
-        // The impostor must NOT hit any of the read paths.
+        // The impostor must NOT hit the read path.
         assert!(
             !backend.has(impostor),
             "has() returned a false-positive for impostor PLH"
-        );
-        assert!(
-            backend.peek_by_hash(&impostor).is_none(),
-            "peek_by_hash returned a false-positive for impostor PLH"
         );
 
         // The impostor must NOT remove the stored block via any mutating path.
