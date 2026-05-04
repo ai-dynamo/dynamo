@@ -58,6 +58,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         *args: object,
         **kwargs: object,
     ) -> None:
+        # scheduler_stats can be None right after a weight reload / cache reset.
         if scheduler_stats is None:
             return
 

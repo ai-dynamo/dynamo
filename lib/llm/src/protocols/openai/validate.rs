@@ -97,16 +97,24 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
+/// Fields that Prime-RL / verifiers may send as extra_body hints which Dynamo
+/// does not implement but should not reject with a 400.  They are silently
+/// accepted and ignored so the RL client stack is forward-compatible.
+const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
+    "cache_salt", // KV prefix-cache isolation hint from prime-rl orchestrator
+];
+
 /// Validates that no unsupported fields are present in the request
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
-        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    let unknown: Vec<_> = unsupported_fields
+        .keys()
+        .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
+        .map(|s| format!("`{}`", s))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     Ok(())
 }

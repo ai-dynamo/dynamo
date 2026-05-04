@@ -10,7 +10,7 @@ use crate::{
         common::{self, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            nvext::{NvExtProvider, NvExtResponseFieldSelection},
+            nvext::{NvExtProvider, NvExtResponse, NvExtResponseFieldSelection},
             token_to_utf8_bytes,
         },
     },
@@ -51,6 +51,7 @@ impl NvCreateChatCompletionRequest {
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
+        // `completion_token_ids` is parsed by from_nvext into response_fields.
         let response_fields = NvExtResponseFieldSelection::from_nvext(self.nvext());
 
         let options = DeltaGeneratorOptions {
@@ -86,6 +87,7 @@ pub struct DeltaGeneratorOptions {
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
     /// Determines which nvext response fields may be emitted for this request.
+    /// (Includes `completion_token_ids` for the RL inference path.)
     pub response_fields: NvExtResponseFieldSelection,
 
     pub runtime_config: ModelRuntimeConfig,
@@ -112,6 +114,10 @@ pub struct DeltaGenerator {
     options: DeltaGeneratorOptions,
     /// Optional request tracker for per-request metrics (shared with PreprocessedRequest).
     tracker: Option<Arc<RequestTracker>>,
+    /// Accumulated output token IDs across chunks. Only used when
+    /// `options.response_fields.completion_token_ids` is true. Emitted in `nvext.completion_token_ids`
+    /// on the final (finish_reason-bearing) chunk.
+    accumulated_completion_token_ids: Vec<TokenIdType>,
 }
 
 impl DeltaGenerator {
@@ -160,6 +166,7 @@ impl DeltaGenerator {
             msg_counter: 0,
             options,
             tracker,
+            accumulated_completion_token_ids: Vec::new(),
         }
     }
 
@@ -353,6 +360,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         self.usage.completion_tokens += token_length;
 
+        // Accumulate output token IDs for completion_token_ids if requested.
+        if self.options.response_fields.completion_token_ids && !delta.token_ids.is_empty() {
+            self.accumulated_completion_token_ids
+                .extend_from_slice(&delta.token_ids);
+        }
+
         // If backend provides completion_usage, use it to update usage stats
         // This is critical for prompt embeddings where prompt_tokens comes from
         // the embedding sequence length computed by the worker
@@ -413,27 +426,61 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // Build the nvext response payload via the shared gating helper on
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
-        // rules stay in one place.
-        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
+        // rules stay in one place. The RL `completion_token_ids` accumulator —
+        // which is per-chunk-accumulated and emitted only on the finish chunk —
+        // is layered on top of the helper output afterwards.
+        if let Some(mut nvext_response) = self.options.response_fields.build_response_nvext(
             self.tracker.as_ref(),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
-        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
-        {
-            stream_response.nvext = Some(nvext_json);
-            if let Some(ref info) = nvext_response.worker_id {
-                tracing::debug!(
-                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                    info.prefill_worker_id,
-                    info.decode_worker_id
-                );
+        )
+        .or_else(|| {
+            // The helper returns None when no fields would be emitted. RL's
+            // accumulator path needs a base NvExtResponse to attach to when the
+            // finish chunk is the only thing carrying completion_token_ids.
+            if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
+                Some(NvExtResponse {
+                    worker_id: None,
+                    timing: None,
+                    token_ids: None,
+                    routed_experts: None,
+                    engine_data: None,
+                    completion_token_ids: None,
+                })
+            } else {
+                None
             }
-            if let Some(ref tokens) = nvext_response.token_ids {
-                tracing::debug!(
-                    "Injected token_ids into chat completion nvext: {} tokens",
-                    tokens.len()
-                );
+        }) {
+            // RL accumulator: emit the full accumulated token_ids list on the finish
+            // chunk only. The helper's per-chunk read from `disaggregated_params`
+            // is wrong for this field (we want the cumulative, not per-chunk).
+            if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
+                nvext_response.completion_token_ids =
+                    Some(self.accumulated_completion_token_ids.clone());
+            }
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                stream_response.nvext = Some(nvext_json);
+                if let Some(ref info) = nvext_response.worker_id {
+                    tracing::debug!(
+                        "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                        info.prefill_worker_id,
+                        info.decode_worker_id
+                    );
+                }
+                if let Some(ref tokens) = nvext_response.token_ids {
+                    tracing::debug!(
+                        "Injected token_ids into chat completion nvext: {} tokens",
+                        tokens.len()
+                    );
+                }
+                if let Some(ref tokens) = nvext_response.completion_token_ids {
+                    tracing::debug!(
+                        "Injected completion_token_ids into chat completion nvext: {} tokens",
+                        tokens.len()
+                    );
+                }
             }
         }
 

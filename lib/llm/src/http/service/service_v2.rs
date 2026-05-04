@@ -246,6 +246,12 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_anthropic_endpoints: bool,
 
+    /// When true, expose the RL admin routes at `/v1/rl/*` (pause, resume,
+    /// update_weights, weight_version, ready). Worker system URLs are read
+    /// from `DYN_RL_WORKER_SYSTEM_URLS` (comma-separated, default `http://localhost:8081`).
+    #[builder(default = "false")]
+    enable_rl: bool,
+
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
@@ -518,7 +524,7 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let system_routes = vec![
+        let mut system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
@@ -532,10 +538,16 @@ impl HttpServiceConfigBuilder {
             } else {
                 super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok())
             },
+            super::openai::tokenization_router(state.clone()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
+        // RL admin routes: enabled when builder flag is set OR when DYN_ENABLE_RL env var is truthy.
+        if config.enable_rl || env_is_truthy("DYN_ENABLE_RL") {
+            tracing::info!("RL admin routes enabled at /v1/rl/*");
+            system_routes.push(super::openai::rl_router());
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);
@@ -600,6 +612,15 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_CHAT_PATH_ENV).ok(),
         );
+        // RL TITO (Token-In / Token-Out) endpoint -- mounted alongside chat completions.
+        // Accepts Prime-RL's `tokens` field, translates to nvext.token_data, and delegates
+        // to the standard chat completions pipeline. Eliminates the Python rl-admin proxy.
+        let (tito_docs, tito_route) = super::openai::chat_completions_tokens_router(
+            state.clone(),
+            request_template.clone(),
+            None,
+        );
+
         let (cmpl_docs, cmpl_route) =
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
@@ -612,8 +633,13 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
+        // Merge TITO route and docs into the chat route (shares enable/disable flag)
+        let chat_route = chat_route.merge(tito_route);
+        let mut combined_chat_docs = chat_docs;
+        combined_chat_docs.extend(tito_docs);
+
         let mut endpoint_routes = HashMap::new();
-        endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
+        endpoint_routes.insert(EndpointType::Chat, (combined_chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));

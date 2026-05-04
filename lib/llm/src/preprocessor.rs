@@ -596,15 +596,24 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
+                            // Use token_data when provided (TITO / EPP / RL),
+                            // regardless of backend_instance_id.
+                            //
+                            // skip_token_annotation = has_backend_instance_id: GAIE EPP-style
+                            // callers (which set backend_instance_id) pre-tokenize and don't
+                            // want the annotation echoed back; RL / TITO callers (no
+                            // backend_instance_id) DO want the token_ids annotation in the
+                            // response so the trainer can validate.
                             let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
                                 token_data
                             {
                                 tracing::info!(
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                    backend_instance_id = has_backend_instance_id,
                                     "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
                                 );
-                                (tokens.clone(), true)
+                                (tokens.clone(), has_backend_instance_id)
                             } else if has_backend_instance_id {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"

@@ -101,6 +101,7 @@ where
                         service_tier: None,
                     },
                     nvext: None,
+                    prompt_token_ids: None,
                 }
             })
         }),
@@ -138,6 +139,7 @@ where
                         service_tier: None,
                     },
                     nvext: None,
+                    prompt_token_ids: None,
                 };
                 let _ = tx.send(fallback.clone());
                 final_response_to_one_chunk_stream(fallback)
@@ -160,6 +162,7 @@ where
                     service_tier: None,
                 },
                 nvext: None,
+                prompt_token_ids: None,
             }
         })
     });

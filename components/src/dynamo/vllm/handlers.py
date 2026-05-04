@@ -825,6 +825,280 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(f"Failed to stop profiling: {e}")
             return {"status": "error", "message": str(e)}
 
+    # ── RL weight lifecycle engine routes ──────────────────────────────
+    # Signatures kept compatible with SGLang's merged #6094 routes so
+    # a single admin coordinator can talk to either backend.
+
+    async def pause_generation(self, body: dict) -> dict:
+        """Pause the engine: drain in-flight requests, keep model loaded.
+
+        Called by RL admin coordinator before weight updates.
+        Uses engine_client.pause_generation() directly -- does NOT sleep
+        (no GPU memory release) and does NOT unregister from discovery.
+        """
+        body = body or {}
+        try:
+            await self.engine_client.pause_generation()
+            logger.info("[RL] Engine paused (generation quiesced)")
+            return {"status": "ok", "message": "Engine paused"}
+        except Exception as e:
+            logger.error(f"[RL] Failed to pause: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_generation(self, body: dict) -> dict:
+        """Resume the engine after a weight update."""
+        body = body or {}
+        try:
+            await self.engine_client.resume_generation()
+            logger.info("[RL] Engine resumed")
+            return {"status": "ok", "message": "Engine resumed"}
+        except Exception as e:
+            logger.error(f"[RL] Failed to resume: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def flush_cache(self, body: dict) -> dict:
+        """Invalidate prefix/KV cache. Called after weight updates."""
+        body = body or {}
+        try:
+            await self.engine_client.reset_prefix_cache()
+            logger.info("[RL] Prefix cache flushed")
+            return {"status": "ok", "message": "Cache flushed"}
+        except Exception as e:
+            logger.error(f"[RL] Failed to flush cache: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def update_weights_from_path(self, body: dict) -> dict:
+        """Load weights from a filesystem path (safetensors/torch checkpoint).
+
+        Expects body: {"path": "/path/to/weights", "version": "step_N"}
+        The caller is responsible for pausing/resuming around this call.
+        """
+        body = body or {}
+        path = body.get("path")
+        version = body.get("version", "unknown")
+        if not path:
+            return {"status": "error", "message": "Missing 'path' in body"}
+        try:
+            # Use vLLM's built-in reload_weights via collective RPC.
+            # This calls Worker.reload_weights() -> GPUModelRunner.reload_weights()
+            # which handles loading safetensors from a directory using vLLM's
+            # model loader with proper layerwise reload.
+            await self.engine_client.collective_rpc(
+                "reload_weights",
+                kwargs={"weights_path": path},
+            )
+            self._weight_version = version
+            logger.info(f"[RL] Weights loaded from {path} (version={version})")
+            return {
+                "status": "ok",
+                "message": f"Weights loaded from {path}",
+                "version": version,
+            }
+        except Exception as e:
+            logger.error(f"[RL] Failed to load weights from {path}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def get_weight_version(self, body: dict) -> dict:
+        """Return the current weight version tag."""
+        return {"version": getattr(self, "_weight_version", "initial")}
+
+    async def load_lora_adapter(self, body: dict) -> dict:
+        """Load (or hot-swap) a LoRA adapter from a filesystem path.
+
+        Expects body: {"lora_name": str, "lora_path": "/path/to/adapter_dir"}
+
+        The adapter directory must contain ``adapter_model.safetensors`` and
+        ``adapter_config.json`` -- the standard PEFT output layout that Prime-RL
+        writes each training step.
+
+        Unlike :meth:`load_lora` (which downloads from a URI via ``LoRAManager``
+        streaming a gRPC response), this method is the RL admin equivalent used
+        for training-loop weight updates:
+
+        * Reads the adapter directly from the given filesystem path (no URI /
+          no network fetch, no LoRAManager needed).
+        * Hot-swaps if ``lora_name`` is already loaded (remove old id then
+          re-add) so every training step replaces the same logical adapter.
+        * Resets the prefix cache after a hot-swap so stale KV entries keyed
+          to the previous adapter weights do not poison subsequent rollouts.
+        * Publishes a ModelDeploymentCard the first time a new ``lora_name`` is
+          loaded. Prime-RL switches its request ``model`` field to the LoRA
+          name after load (``scheduler.py``: ``self.model_name = self.lora_name``)
+          so the frontend needs an MDC entry to route ``r16-a32`` → this worker.
+          On subsequent hot-swaps the MDC is already published and we skip
+          re-registration.
+        """
+        body = body or {}
+        lora_name = body.get("lora_name")
+        lora_path = body.get("lora_path")
+        if not lora_name:
+            return {"status": "error", "message": "Missing 'lora_name' in body"}
+        if not lora_path:
+            return {"status": "error", "message": "Missing 'lora_path' in body"}
+        try:
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                lora_id = lora_name_to_id(lora_name)
+                is_hot_swap = lora_name in self.loaded_loras
+
+                # Hot-swap: vLLM's add_lora is a no-op when the lora_int_id is
+                # already registered, so we must remove the previous adapter
+                # first. remove_lora is best-effort on a fresh add.
+                if is_hot_swap:
+                    old_id = self.loaded_loras[lora_name].id
+                    try:
+                        await self.engine_client.remove_lora(old_id)
+                        # Invalidate the cache entry immediately after remove succeeds.
+                        # If add_lora below fails, this prevents a stale entry pointing
+                        # at an adapter the engine no longer holds from poisoning future
+                        # rollouts with wrong importance ratios (Tier-1 RL correctness risk).
+                        self.loaded_loras.pop(lora_name, None)
+                    except Exception as e:
+                        logger.warning(
+                            f"[RL] remove_lora({lora_name}, id={old_id}) failed during hot-swap: {e}"
+                        )
+
+                await self.engine_client.add_lora(
+                    LoRARequest(
+                        lora_name=lora_name,
+                        lora_int_id=lora_id,
+                        lora_path=lora_path,
+                    )
+                )
+                self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
+
+                # Invalidate KV cache on hot-swap so stale prefix entries keyed
+                # to the previous LoRA weights can't contaminate new rollouts.
+                if is_hot_swap:
+                    try:
+                        await self.engine_client.reset_prefix_cache()
+                    except Exception as e:
+                        # ERROR not WARNING: a failed cache reset means subsequent requests
+                        # sharing a prefix with an old rollout can reuse KV state computed
+                        # under the previous adapter — causing silent logprobs mismatch.
+                        logger.error(
+                            f"[RL] reset_prefix_cache after LoRA swap failed — KV cache may "
+                            f"be contaminated with stale entries from the old adapter. "
+                            f"Rollouts on this worker are unreliable until the next successful "
+                            f"swap: {e}"
+                        )
+
+                # Publish an MDC for the LoRA on first load so Dynamo's frontend
+                # can route requests with model=<lora_name> to this worker.
+                # Mirror the logic in load_lora() (URI variant). Skip on hot-swap
+                # since the MDC was already published on the first load.
+                if not is_hot_swap and self.generate_endpoint is not None:
+                    try:
+                        runtime_config = ModelRuntimeConfig()
+                        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
+                        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+                        await register_model(
+                            model_input=ModelInput.Tokens,
+                            model_type=ModelType.Chat | ModelType.Completions,
+                            endpoint=self.generate_endpoint,
+                            model_path=self.config.model,
+                            kv_cache_block_size=self.config.engine_args.block_size,
+                            runtime_config=runtime_config,
+                            user_data={"lora_adapter": True, "lora_id": lora_id},
+                            lora_name=lora_name,
+                            base_model_path=self.config.model,
+                        )
+                        logger.info(
+                            f"[RL] Published LoRA '{lora_name}' ModelDeploymentCard"
+                        )
+                    except Exception as e:
+                        # Rollback: remove the LoRA from the engine to keep state consistent.
+                        logger.exception(
+                            f"[RL] Failed to publish LoRA '{lora_name}' MDC: {e}; rolling back add_lora"
+                        )
+                        try:
+                            await self.engine_client.remove_lora(lora_id)
+                        except Exception as rollback_err:
+                            # The adapter is now leaked in the engine: it is registered but
+                            # unreachable via loaded_loras (we pop it below). Log at ERROR
+                            # so this doesn't go unnoticed in production.
+                            logger.error(
+                                f"[RL] Rollback remove_lora({lora_name}, id={lora_id}) failed "
+                                f"— adapter is leaked in the engine: {rollback_err}"
+                            )
+                        self.loaded_loras.pop(lora_name, None)
+                        return {
+                            "status": "error",
+                            "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {e}",
+                            "lora_name": lora_name,
+                        }
+
+                logger.info(
+                    f"[RL] LoRA adapter {'hot-swapped' if is_hot_swap else 'loaded'}: "
+                    f"name={lora_name} id={lora_id} path={lora_path}"
+                )
+                return {
+                    "status": "ok",
+                    "message": f"LoRA adapter '{lora_name}' loaded from {lora_path}",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                    "hot_swap": is_hot_swap,
+                }
+        except Exception as e:
+            logger.exception(
+                f"[RL] Failed to load LoRA adapter '{lora_name}' from {lora_path}: {e}"
+            )
+            return {"status": "error", "message": str(e)}
+
+    async def unload_lora_adapter(self, body: dict) -> dict:
+        """Unload a LoRA adapter previously loaded via :meth:`load_lora_adapter`.
+
+        Expects body: {"lora_name": str}
+
+        Idempotent: unloading an already-absent LoRA returns status=ok so
+        callers can safely retry without special-casing the not-found path.
+        """
+        body = body or {}
+        lora_name = body.get("lora_name")
+        if not lora_name:
+            return {"status": "error", "message": "Missing 'lora_name' in body"}
+        try:
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                lora = self.loaded_loras.get(lora_name)
+                if lora is None:
+                    return {
+                        "status": "ok",
+                        "message": f"LoRA adapter '{lora_name}' not loaded (no-op)",
+                        "lora_name": lora_name,
+                    }
+                lora_id = lora.id
+                await self.engine_client.remove_lora(lora_id)
+                del self.loaded_loras[lora_name]
+
+                # Unregister the MDC published on load so the frontend stops
+                # routing `model=<lora_name>` requests to this worker.
+                if self.generate_endpoint is not None:
+                    try:
+                        await unregister_model(
+                            endpoint=self.generate_endpoint,
+                            lora_name=lora_name,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[RL] Failed to unregister LoRA '{lora_name}' MDC (adapter already removed from engine): {e}"
+                        )
+
+                logger.info(
+                    f"[RL] LoRA adapter unloaded: name={lora_name} id={lora_id}"
+                )
+                return {
+                    "status": "ok",
+                    "message": f"LoRA adapter '{lora_name}' unloaded",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                }
+        except Exception as e:
+            logger.exception(
+                f"[RL] Failed to unload LoRA adapter '{lora_name}': {e}"
+            )
+            return {"status": "error", "message": str(e)}
+
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError

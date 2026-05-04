@@ -366,7 +366,7 @@ class WorkerFactory:
                 component_name=config.component,
             )
 
-        # Register engine routes
+        # Register engine routes (sleep/wake_up + RL weight-lifecycle + RL LoRA)
         self.register_engine_routes(runtime, handler)
 
         # Parse endpoint types from --endpoint-types flag
@@ -576,7 +576,7 @@ class WorkerFactory:
                 component_name=config.component,
             )
 
-        # Register engine routes
+        # Register engine routes (sleep/wake_up + RL weight-lifecycle + RL LoRA)
         self.register_engine_routes(runtime, handler)
 
         await self._maybe_wait_for_failover_lock(handler, runtime, config)
@@ -676,6 +676,26 @@ class WorkerFactory:
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
 
+        # RL weight-lifecycle routes (parity with SGLang #6094) — driven by the
+        # /v1/rl/{pause,resume,update_weights} bracket in the Rust frontend.
+        runtime.register_engine_route("pause_generation", handler.pause_generation)
+        runtime.register_engine_route("resume_generation", handler.resume_generation)
+        runtime.register_engine_route("flush_cache", handler.flush_cache)
+        runtime.register_engine_route(
+            "update_weights_from_path", handler.update_weights_from_path
+        )
+        runtime.register_engine_route("get_weight_version", handler.get_weight_version)
+
+        # RL LoRA adapter routes: filesystem-native hot-swap used by Prime-RL
+        # every training step to broadcast new adapter weights into the engine.
+        runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
+        runtime.register_engine_route(
+            "unload_lora_adapter", handler.unload_lora_adapter
+        )
+
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
+            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
+            "start_profile, stop_profile, pause_generation, resume_generation, "
+            "flush_cache, update_weights_from_path, get_weight_version, "
+            "load_lora_adapter, unload_lora_adapter"
         )

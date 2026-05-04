@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.20.0"
+VLLM_VER="0.19.1"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 
@@ -300,4 +300,35 @@ if [ "$DEVICE" = "cuda" ]; then
     # TODO we will be able to specify which pplx and deepep commit we want in future
     TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
 fi
+
+# ---------------------------------------------------------------------------
+# prime-rl inference-side vLLM plugin (pinned tag).
+#
+# Registers the ``vllm.general_plugins`` entry-point that applies prime-rl's
+# monkey patches (LoRA adapter load, DP engine pause/resume deadlock, Qwen 3.5
+# LoRA, etc.) automatically in every vLLM worker process -- including spawned
+# subprocesses. Required for prime-rl / Dynamo RL training integration.
+#
+# Override at build time:  --build-arg PRIME_RL_REF=v0.5.1.dev101
+# --no-deps: prime-rl's full dep tree includes trainer + wandb; Dynamo only
+#            needs the inference-side plugin and worker-extension classes.
+# Python version: prime-rl pins requires-python = "~=3.12.0"; Dynamo containers
+#            are Python 3.12, so no version override is needed. For 3.11 local
+#            dev venvs use the regular pip (not uv) with --ignore-requires-python.
+# ---------------------------------------------------------------------------
+PRIME_RL_REF="${PRIME_RL_REF:-v0.5.1.dev101}"
+echo "\n=== Installing prime-rl vLLM plugin (ref=${PRIME_RL_REF}) ==="
+uv pip install --no-deps \
+    "prime-rl @ git+https://github.com/PrimeIntellect-ai/prime-rl@${PRIME_RL_REF}"
+
+# Sanity-check: confirm vllm.general_plugins entry-point is registered.
+python3 - <<'PY_SANITY'
+from importlib.metadata import entry_points
+names = [ep.name for ep in entry_points(group="vllm.general_plugins")]
+assert "prime_rl" in names, (
+    f"prime-rl plugin NOT registered; vllm.general_plugins={names}"
+)
+print(f"✓ prime-rl plugin registered (vllm.general_plugins={names})")
+PY_SANITY
+
 echo "\n✅ All installations completed successfully!"

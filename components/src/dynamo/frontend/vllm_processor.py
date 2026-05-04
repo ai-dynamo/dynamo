@@ -633,6 +633,40 @@ class VllmProcessor:
                         break
                     choice = post.process_output(output)
                     if choice:
+                        # ── RL logprobs injection ──────────────────────
+                        # The vLLM worker sends log_probs/top_logprobs in
+                        # the engine_response dict.  Since we can't easily
+                        # construct LogprobsLists for EngineCoreOutput, we
+                        # inject them directly into the choice here.
+                        worker_log_probs = engine_response.get("log_probs")
+                        worker_top_logprobs = engine_response.get("top_logprobs")
+                        if worker_log_probs is not None and choice.get("logprobs") is None:
+                            oai_logprobs_content = []
+                            new_tids = engine_response.get("token_ids", [])
+                            for i, lp in enumerate(worker_log_probs):
+                                # Always populate token/bytes so consumers never see a
+                                # missing key.  If top_logprobs is absent or the token
+                                # string cannot be resolved we fall back to the numeric
+                                # ID as a string — better than a KeyError / silent None.
+                                tid_str = str(new_tids[i]) if i < len(new_tids) else ""
+                                entry: dict = {
+                                    "logprob": lp,
+                                    "token": tid_str,
+                                    "bytes": None,
+                                }
+                                # Resolve the human-readable token string and top_logprobs
+                                # from the engine's top_logprobs table when available.
+                                if worker_top_logprobs and i < len(worker_top_logprobs):
+                                    tops = worker_top_logprobs[i]
+                                    entry["top_logprobs"] = tops
+                                    if i < len(new_tids):
+                                        for tp in tops:
+                                            if tp.get("token_id") == new_tids[i]:
+                                                entry["token"] = tp.get("token", tid_str)
+                                                break
+                                oai_logprobs_content.append(entry)
+                            choice["logprobs"] = {"content": oai_logprobs_content}
+
                         choices.append(choice)
 
                 if choices:
@@ -645,6 +679,11 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+
+                    # ── RL: pass output token IDs for nvext.completion_token_ids ──
+                    new_token_ids = engine_response.get("token_ids", [])
+                    if new_token_ids:
+                        dynamo_out["_completion_token_ids"] = new_token_ids
 
                     yield dynamo_out
             _nvtx.end_range(rng_stream)
