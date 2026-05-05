@@ -176,7 +176,7 @@ const (
 )
 
 // GPUSKUType is the AIC hardware system identifier for a supported GPU.
-// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 type GPUSKUType string
 
 const (
@@ -190,6 +190,7 @@ const (
 	// --- Ampere ---
 	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
 	GPUSKUTypeA100PCIe GPUSKUType = "a100_pcie"
+	GPUSKUTypeA30      GPUSKUType = "a30"
 	// --- Ada ---
 	GPUSKUTypeL40S GPUSKUType = "l40s"
 	GPUSKUTypeL40  GPUSKUType = "l40"
@@ -361,7 +362,7 @@ type HardwareSpec struct {
 	// choose which GPU type to use. Discovery and totalGpus are then
 	// restricted to nodes matching this SKU.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
