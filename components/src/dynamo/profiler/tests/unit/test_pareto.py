@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from dynamo.profiler.utils.pareto import compute_pareto
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+]
 
 
 def test_compute_pareto_skips_nan_points():
