@@ -92,7 +92,7 @@ COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/fl
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install flashinfer-python==${FLASHINFER_PYTHON_VER}
 
@@ -109,7 +109,7 @@ COPY --from=trtllm_wheel / /trtllm_wheel/
 COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 # Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install "cuda-python==13.0.2"
 
@@ -122,7 +122,7 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     rm -f /usr/share/keyrings/cuda-archive-keyring.gpg && \
     rm -f /etc/apt/trusted.gpg.d/cuda*.gpg
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
@@ -133,7 +133,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            uv pip install "$WHEEL_FILE" triton==3.5.1; \
+            uv pip install "$WHEEL_FILE"; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
@@ -141,19 +141,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     elif [ -n "$(find /trtllm_wheel_image -name "*.whl" | head -n 1)" ]; then \
         # Install from wheel embedded in the TRTLLM release image
         WHEEL_FILE="$(find /trtllm_wheel_image -name "*.whl" | head -n 1)"; \
-        uv pip install "$WHEEL_FILE" triton==3.5.1; \
+        uv pip install "$WHEEL_FILE"; \
     else \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
-        # explicitly installing triton 3.5.1 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
             PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
             ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64"); \
             DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
-            uv pip install --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.1; \
+            uv pip install --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}"; \
         else \
-            uv pip install --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.1; \
+            uv pip install --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
         fi; \
     fi && \
     # Run TensorRT installer that ships with the TRTLLM wheel

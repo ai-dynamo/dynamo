@@ -48,19 +48,6 @@ func podFromInformerObj(obj interface{}) (*corev1.Pod, bool) {
 	return pod, ok
 }
 
-func resolveMainContainerName(pod *corev1.Pod) string {
-	containerName := ""
-	for _, c := range pod.Spec.Containers {
-		if c.Name == "main" {
-			return c.Name
-		}
-		if containerName == "" {
-			containerName = c.Name
-		}
-	}
-	return containerName
-}
-
 func isPodReady(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning {
 		return false
@@ -251,43 +238,6 @@ func annotateJob(ctx context.Context, clientset kubernetes.Interface, log logr.L
 		)
 	}
 	return err
-}
-
-func waitForPodReady(ctx context.Context, clientset kubernetes.Interface, namespace, podName, containerName string) error {
-	lastPhase := ""
-
-	for {
-		pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get pod %s/%s: %w", namespace, podName, err)
-		}
-
-		lastPhase = string(pod.Status.Phase)
-		for _, condition := range pod.Status.Conditions {
-			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-				return nil
-			}
-		}
-
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Name != containerName {
-				continue
-			}
-			if cs.State.Terminated != nil {
-				return fmt.Errorf(
-					"pod %s/%s container %s terminated: reason=%s exitCode=%d",
-					namespace, podName, containerName,
-					cs.State.Terminated.Reason, cs.State.Terminated.ExitCode,
-				)
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("pod %s/%s did not become Ready (last phase: %s): %w", namespace, podName, lastPhase, ctx.Err())
-		case <-time.After(1 * time.Second):
-		}
-	}
 }
 
 func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, component, eventType, reason, message string) {

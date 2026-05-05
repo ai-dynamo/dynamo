@@ -19,6 +19,52 @@ Use this when you want to:
 - compare timing and cache behavior across mocker configurations
 - validate replay logic in CI without bringing up a distributed stack
 
+## Harness Overview
+
+The replay harness wires a load driver (trace file or synthetic workload generator) into one or more mocker engine simulations and tees request/token timing into a trace collector.
+
+```mermaid
+flowchart LR
+    LD[Load Driver] --> H[Replay Harness]
+
+    H --> SES[Single Engine Simulation]
+    H --> MES[Multi Engine Simulation]
+
+    SES --> H
+    MES --> H
+
+    H --> TC[Trace Collector]
+```
+
+The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with the vLLM engine; multi-engine simulation (`MES`) covers aggregated multi-worker replay, disaggregated prefill/decode replay, and KV-router replay. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
+
+Each simulation composes a different set of components. SES drives the engine core directly (scheduler + forward-pass modeling). MES composes multiple engine cores with KV transfer/offloading, KV routing, and planner simulation layered on top:
+
+```mermaid
+flowchart TD
+    subgraph SEC[Single Engine Core]
+        subgraph SCH[Scheduler Modeling]
+            F[Fwd Pass Modeling]
+        end
+    end
+
+    KV[KV Transfer + Offloading Simulation]
+    KR[KV Router Simulation]
+    P[Planner Simulation]
+
+    SES[Single Engine Simulation]
+    MES[Multi Engine Simulation]
+
+    SES --> SEC
+
+    MES --> SEC
+    MES --> KV
+    MES --> KR
+    MES --> P
+```
+
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
+
 ## Quick Start
 
 Run offline replay through the dedicated replay CLI:

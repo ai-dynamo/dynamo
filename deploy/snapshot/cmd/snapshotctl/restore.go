@@ -5,14 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -23,7 +20,7 @@ type restoreOptions struct {
 	Namespace    string
 	KubeContext  string
 	CheckpointID string
-	Timeout      time.Duration
+	Containers   string
 }
 
 func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
@@ -34,9 +31,6 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 	if strings.TrimSpace(opts.CheckpointID) == "" {
 		return nil, fmt.Errorf("missing required flags: --checkpoint-id")
-	}
-	if opts.Timeout <= 0 {
-		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
 
 	checkpointID := strings.TrimSpace(opts.CheckpointID)
@@ -79,12 +73,25 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 
 	if createPodFromManifest {
-		restorePod := snapshotprotocol.NewRestorePod(&corev1.Pod{
+		// Stamp (or validate) the required snapshot-target-containers
+		// annotation on the manifest before handing it to the protocol.
+		targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 1, 0)
+		if err != nil {
+			return nil, err
+		}
+		annotations := map[string]string{}
+		for k, v := range pod.Annotations {
+			annotations[k] = v
+		}
+		annotations[snapshotprotocol.TargetContainersAnnotation] = targetValue
+
+		restorePod, err := snapshotprotocol.NewRestorePod(&corev1.Pod{
 			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:        pod.Name,
-				Labels:      pod.Labels,
-				Annotations: pod.Annotations,
+				Name:         pod.Name,
+				GenerateName: pod.GenerateName,
+				Labels:       pod.Labels,
+				Annotations:  annotations,
 			},
 			Spec: *pod.Spec.DeepCopy(),
 		}, snapshotprotocol.PodOptions{
@@ -94,13 +101,17 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			Storage:         resolvedStorage,
 			SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
 		})
-		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
+		if err != nil {
+			return nil, err
+		}
+		restorePod, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)
 		}
 		if err != nil {
 			return nil, err
 		}
+		podName = restorePod.Name
 	} else {
 		pod, err = clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
@@ -109,10 +120,10 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		if len(pod.Spec.Containers) == 0 {
 			return nil, fmt.Errorf("restore target pod %s/%s has no containers", namespace, podName)
 		}
-		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
-			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
+		targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 1, 0)
+		if err != nil {
+			return nil, err
 		}
-
 		labels := map[string]string{}
 		for key, value := range pod.Labels {
 			labels[key] = value
@@ -122,6 +133,10 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			annotations[key] = value
 		}
 		snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotprotocol.DefaultCheckpointArtifactVersion)
+		annotations[snapshotprotocol.TargetContainersAnnotation] = targetValue
+		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, resolvedStorage, snapshotprotocol.DefaultSeccompLocalhostProfile); err != nil {
+			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
+		}
 		patch, err := json.Marshal(map[string]any{
 			"metadata": map[string]any{
 				"labels":      labels,
@@ -136,47 +151,12 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		}
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
-	status, err := waitForRestore(waitCtx, clientset, namespace, podName)
-	if err != nil {
-		return nil, err
-	}
-
 	return &result{
 		Name:               podName,
 		Namespace:          namespace,
 		CheckpointID:       checkpointID,
 		CheckpointLocation: resolvedStorage.Location,
 		RestorePod:         podName,
-		Status:             status,
+		Status:             "requested",
 	}, nil
-}
-
-func waitForRestore(ctx context.Context, clientset kubernetes.Interface, namespace string, podName string) (string, error) {
-	var status string
-	if err := wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-		pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			return false, fmt.Errorf("get restore pod %s/%s: %w", namespace, podName, err)
-		}
-
-		status = strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreStatusAnnotation])
-		if status == snapshotprotocol.RestoreStatusCompleted {
-			return true, nil
-		}
-		if status == snapshotprotocol.RestoreStatusFailed {
-			return false, fmt.Errorf("restore pod %s/%s failed", namespace, podName)
-		}
-		if pod.Status.Phase == corev1.PodFailed {
-			return false, fmt.Errorf("restore pod %s/%s entered phase Failed (%s)", namespace, podName, pod.Status.Reason)
-		}
-		return false, nil
-	}); err != nil {
-		if !wait.Interrupted(err) {
-			return "", err
-		}
-		return "", fmt.Errorf("restore pod %s/%s timed out: status=%q", namespace, podName, status)
-	}
-	return status, nil
 }

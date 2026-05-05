@@ -235,9 +235,9 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
     return response_json
 
 
-# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
 # TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+# TODO: re-enable GPU-parallel scheduling with profiled_vram_gib(20.4)
+# once this has a bounded --kv-bytes profile.
 @pytest.mark.timeout(300)  # 3x observed ~70s wall time, rounded up
 @pytest.mark.post_merge
 def test_reasoning_effort(
@@ -304,9 +304,9 @@ def test_reasoning_effort(
         )
 
 
-# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
 # TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+# TODO: re-enable GPU-parallel scheduling with profiled_vram_gib(20.4)
+# once this has a bounded --kv-bytes profile.
 @pytest.mark.timeout(113)  # 3x observed 37.4s wall time
 @pytest.mark.post_merge
 def test_tool_calling(
@@ -349,9 +349,9 @@ def test_tool_calling(
     ), "Expected get_current_weather tool to be called"
 
 
-# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling_second_round
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
 # TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+# TODO: re-enable GPU-parallel scheduling with profiled_vram_gib(20.4)
+# once this has a bounded --kv-bytes profile.
 @pytest.mark.timeout(115)  # 3x observed 38.1s wall time
 @pytest.mark.nightly
 def test_tool_calling_second_round(
@@ -416,9 +416,9 @@ def test_tool_calling_second_round(
     ), "Expected response to include temperature information from tool call result (20°C)"
 
 
-# Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning
-@pytest.mark.profiled_vram_gib(20.4)  # actual profiled peak
 # TODO: profile with --kv-bytes once pre-existing 500 panic is fixed (JoinError::Panic "Cannot drop a runtime in a context where blocking is not allowed")
+# TODO: re-enable GPU-parallel scheduling with profiled_vram_gib(20.4)
+# once this has a bounded --kv-bytes profile.
 @pytest.mark.timeout(131)  # 3x observed 43.4s wall time
 @pytest.mark.nightly
 def test_reasoning(request, start_services: ServicePorts, predownload_models) -> None:

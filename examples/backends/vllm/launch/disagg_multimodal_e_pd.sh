@@ -5,6 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
@@ -77,16 +78,16 @@ echo "Starting frontend..."
 python -m dynamo.frontend &
 
 EXTRA_ARGS=""
+PD_GPU_MEM_ARGS=""
 
 # GPU assignments (override via environment variables)
-# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
-    EXTRA_ARGS="--enforce-eager"
+    EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
@@ -94,8 +95,14 @@ else
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
 fi
 
-# Start encode worker
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -z "$PD_GPU_MEM_ARGS" ]]; then
+    PD_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PD_GPU_MEM"
+fi
+
+# Start encode worker. Encode has no KV cache, so the byte-cap override is N/A
+# and we keep the fraction-based knob here.
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
@@ -105,15 +112,14 @@ python -m dynamo.vllm \
   $EXTRA_ARGS &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
-echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)..."
+echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
-  --max-model-len "$PD_MAX_MODEL_LEN" \
-  --gpu-memory-utilization "$DYN_PD_GPU_MEM" \
+  $PD_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   "${EXTRA_PD_ARGS[@]}" &
 

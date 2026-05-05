@@ -148,6 +148,25 @@ func TestHandleFinalizer(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "deleted object without finalizer - should return true to prevent reconciliation",
+			args: args{
+				ctx: context.Background(),
+				obj: &ObjectMock{
+					GetDeletionTimestampFunc: func() *metav1.Time {
+						return &metav1.Time{Time: time.Now()}
+					},
+					GetFinalizersFunc: func() []string {
+						return []string{}
+					},
+					GetResourceVersionFunc: func() string {
+						return "1"
+					},
+				},
+			},
+			want:    true,
+			wantErr: false,
+		},
+		{
 			name: "non deleted object without finalizer - nominal case",
 			args: args{
 				ctx: context.Background(),

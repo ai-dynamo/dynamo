@@ -30,6 +30,16 @@ The migration limit is configured at the **frontend** level and applies globally
 - Set via `--migration-limit` flag on the frontend
 - Applies to all models served by the frontend
 
+### Max Sequence Length Configuration
+
+The max sequence length setting controls how long the migration system will cache token state for a request. Once the total sequence length (prompt + generated tokens) exceeds this limit, migration is disabled for that request and token tracking stops:
+
+- Default behavior: no limit (`--migration-max-seq-len` unset)
+- Set via `--migration-max-seq-len` flag or `DYN_MIGRATION_MAX_SEQ_LEN` environment variable on the frontend
+- Prevents unbounded memory growth from caching long sequences
+- Boundary: exactly at the limit is still migratable; only strictly exceeding it disables migration
+- The check runs both at request initialization (prompt length) and during generation (prompt + output tokens)
+
 ## Token State Tracking and Request Migration
 
 The core of the migration system is the ability to preserve and continue partial generations through token state management. This ensures that when a worker fails mid-generation, the new worker can seamlessly continue from the exact point of failure.
@@ -118,21 +128,34 @@ The migration system exposes Prometheus metrics to monitor migration activity. T
   - Labels:
     - `model`: The model name being served
     - `migration_type`: Either `new_request` (initial connection failure) or `ongoing_request` (mid-stream disconnection)
+- `dynamo_frontend_model_migration_max_seq_len_exceeded_total`: Counter tracking the number of times migration was disabled because the sequence length exceeded the configured `--migration-max-seq-len`
+  - Labels:
+    - `model`: The model name being served
 
 **Example metrics output:**
-```
+```text
 dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
+dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2
 ```
 
 These metrics can be used to:
 - Monitor worker reliability and failure patterns
 - Alert on excessive migration rates indicating infrastructure issues
 - Track the effectiveness of fault tolerance mechanisms
+- Monitor how often `--migration-max-seq-len` is being reached, which may indicate the limit needs adjustment
 
 For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
 
 ## Known Limitations
+
+### Multiple Choices (`n > 1`)
+
+Request migration is **not supported** for OpenAI-compatible requests that ask for multiple generated choices with `n > 1`. Dynamo disables migration for those requests, even when `--migration-limit` is greater than 0.
+
+**Why:** Multi-choice generation maintains separate per-choice output state. Migrating a partially completed request would need to transfer the generated token state, remaining token budget, finish state, and decoder state for each choice independently. The current migration path preserves a single continuation state, so retrying an interleaved `n > 1` request could duplicate or drop choice-specific output.
+
+This limitation does not affect normal single-choice requests where `n` is omitted or set to 1.
 
 ### Guided Decoding (Structured Output)
 

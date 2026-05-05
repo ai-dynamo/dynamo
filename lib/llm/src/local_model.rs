@@ -33,6 +33,19 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
+/// Default for `LocalModelBuilder::self_host_metadata`. Truthy values opt in.
+pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
+
+fn env_self_host_metadata_default() -> bool {
+    match std::env::var(ENV_SELF_HOST_METADATA) {
+        Ok(v) => matches!(
+            v.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
@@ -48,9 +61,11 @@ pub struct LocalModelBuilder {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
+    self_host_metadata: bool,
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
@@ -76,9 +91,11 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            migration_max_seq_len: Default::default(),
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
+            self_host_metadata: env_self_host_metadata_default(),
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
@@ -140,6 +157,13 @@ impl LocalModelBuilder {
         self
     }
 
+    /// Opt in or out of self-hosting MDC artifacts. Default `false`.
+    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
+    pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
+        self.self_host_metadata = enabled;
+        self
+    }
+
     pub fn tls_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
         self.tls_cert_path = p;
         self
@@ -177,6 +201,11 @@ impl LocalModelBuilder {
 
     pub fn migration_limit(&mut self, migration_limit: Option<u32>) -> &mut Self {
         self.migration_limit = migration_limit.unwrap_or(0);
+        self
+    }
+
+    pub fn migration_max_seq_len(&mut self, max_seq_len: Option<u32>) -> &mut Self {
+        self.migration_max_seq_len = max_seq_len;
         self
     }
 
@@ -244,6 +273,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.router_config = self.router_config.clone();
 
             return Ok(LocalModel {
                 card,
@@ -260,6 +290,9 @@ impl LocalModelBuilder {
                 namespace: self.namespace.clone(),
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
+                migration_max_seq_len: self.migration_max_seq_len,
+                self_host_metadata: self.self_host_metadata,
+                attached_self_host_suffix: None,
             });
         }
 
@@ -297,6 +330,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.router_config = self.router_config.clone();
 
         Ok(LocalModel {
             card,
@@ -313,6 +347,9 @@ impl LocalModelBuilder {
             namespace: self.namespace.clone(),
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
+            migration_max_seq_len: self.migration_max_seq_len,
+            self_host_metadata: self.self_host_metadata,
+            attached_self_host_suffix: None,
         })
     }
 }
@@ -333,6 +370,11 @@ pub struct LocalModel {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
+    self_host_metadata: bool,
+    /// Set by `move_to_self_host` so `clear_self_hosted_artifacts`
+    /// scopes its unregister to this model's `(slug, suffix)` only.
+    attached_self_host_suffix: Option<String>,
 }
 
 impl LocalModel {
@@ -400,6 +442,10 @@ impl LocalModel {
         self.migration_limit
     }
 
+    pub fn migration_max_seq_len(&self) -> Option<u32> {
+        self.migration_max_seq_len
+    }
+
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
     }
@@ -453,6 +499,11 @@ impl LocalModel {
             suffix_for_log
         );
 
+        if self.self_host_metadata {
+            self.move_to_self_host(endpoint.drt(), model_suffix.as_deref())
+                .context("move_to_self_host")?;
+        }
+
         let source_path = PathBuf::from(self.card.source_path());
         if !source_path.exists() {
             // The consumers of MDC (frontend) might not have the same local path as us, so
@@ -483,6 +534,85 @@ impl LocalModel {
         let _instance = discovery.register(spec).await?;
 
         Ok(())
+    }
+
+    /// Local-path slots register in the registry and get rewritten to
+    /// `http://<worker>/v1/metadata/<slug>/<suffix>/<filename>`. URL slots
+    /// (`hf://`, etc.) are left alone so existing transports keep working.
+    /// `model_suffix` is the LoRA slug, or `None` for the base model
+    /// (recorded as `BASE_SUFFIX` in the registry).
+    fn move_to_self_host(
+        &mut self,
+        drt: &dynamo_runtime::DistributedRuntime,
+        model_suffix: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(base_url) = self_host_base_url(drt)? else {
+            tracing::warn!(
+                model_slug = %self.card.slug(),
+                "self_host_metadata enabled but system_status_server is not \
+                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
+                 set DYN_SYSTEM_PORT to enable",
+            );
+            return Ok(());
+        };
+        let model_slug = self.card.slug().to_string();
+        let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
+        let registry = drt.metadata_artifacts();
+
+        let mut rewritten = 0usize;
+        for cf in self.card.iter_metadata_files_mut() {
+            let Some(local_path) = cf.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            // Filename from the original path — HF cache symlinks would
+            // otherwise canonicalize to the LFS SHA1 and break downstream
+            // lookups by literal name (e.g. `parent.join("generation_config.json")`).
+            let Some(filename) = local_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            // Canonicalize so the handler serves the resolved HF blob, not the symlink.
+            let absolute = match fs::canonicalize(&local_path) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %local_path.display(),
+                        %err,
+                        "failed to canonicalize self-host metadata path; skipping",
+                    );
+                    continue;
+                }
+            };
+
+            let url = url::Url::parse(&format!(
+                "{base_url}/v1/metadata/{model_slug}/{suffix}/{filename}"
+            ))?;
+            registry.register(&model_slug, suffix, &filename, absolute);
+            cf.move_to_url(url);
+            rewritten += 1;
+        }
+
+        self.attached_self_host_suffix = Some(suffix.to_string());
+        tracing::debug!(
+            model_slug,
+            suffix,
+            rewritten,
+            base_url,
+            "self-hosting model metadata artifacts"
+        );
+        Ok(())
+    }
+
+    /// Idempotent. Call before detach/hot-reload; otherwise the
+    /// runtime drops the registry entries with the worker process.
+    pub fn clear_self_hosted_artifacts(&self, drt: &dynamo_runtime::DistributedRuntime) {
+        if let Some(suffix) = self.attached_self_host_suffix.as_deref() {
+            drt.metadata_artifacts()
+                .unregister(self.card.slug().as_ref(), suffix);
+        }
     }
 
     /// Helper associated function to detach a model from an endpoint
@@ -532,5 +662,52 @@ fn internal_endpoint(engine: &str) -> EndpointId {
         namespace: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
         component: engine.to_string(),
         name: "generate".to_string(),
+    }
+}
+
+/// `None` when `system_status_server` isn't running (no `DYN_SYSTEM_PORT`)
+/// — lets default-on behavior degrade gracefully without erroring.
+pub(crate) fn self_host_base_url(
+    drt: &dynamo_runtime::DistributedRuntime,
+) -> anyhow::Result<Option<String>> {
+    let Some(info) = drt.system_status_server_info() else {
+        return Ok(None);
+    };
+
+    let configured = dynamo_runtime::RuntimeConfig::from_settings()
+        .unwrap_or_default()
+        .system_host;
+    let host = match configured.as_str() {
+        "0.0.0.0" | "::" | "[::]" => {
+            dynamo_runtime::utils::ip_resolver::get_local_ip_for_advertise()
+        }
+        _ => configured,
+    };
+
+    Ok(Some(format!("http://{host}:{}", info.port())))
+}
+
+#[cfg(test)]
+mod env_self_host_metadata_tests {
+    use super::*;
+
+    #[serial_test::serial]
+    #[test]
+    fn env_default_parsing() {
+        // SAFETY: all env mutations are serialized via serial_test.
+        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
+        assert!(!env_self_host_metadata_default(), "unset → default OFF");
+
+        for v in [
+            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
+        ] {
+            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
+            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
+        }
+        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
+            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
+            assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
+        }
+        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 }

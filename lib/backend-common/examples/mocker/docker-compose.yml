@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# One-command demo for the mocker Rust backend — wraps the dynamo-mocker
+# scheduler in the `LLMEngine` contract from `dynamo-backend-common`.
+#
+#   docker compose up --build
+#   curl http://localhost:8000/v1/chat/completions \
+#       -H 'Content-Type: application/json' \
+#       -d '{"model": "mocker-model",
+#            "messages": [{"role":"user","content":"hello"}],
+#            "max_tokens": 32}'
+#
+# First `up` is slow (Rust build + HF tokenizer download). Subsequent
+# runs reuse the layer cache and the huggingface-cache volume.
+#
+# DYN_LOG=debug is set on the frontend and backend services to surface
+# the debug-level lifecycle / cancellation / stream-complete traces
+# added in dynamo-backend-common. This is intentional for the demo —
+# DO NOT ship a production deployment with DYN_LOG=debug; the
+# per-request debug traces become noisy and expensive at scale. In
+# production, let DYN_LOG default to `info` (or scope via filters, e.g.
+# `DYN_LOG=info,dynamo_backend_common=debug` if you want targeted
+# backend-common visibility).
+
+networks:
+  dynamo:
+    driver: bridge
+
+services:
+  nats-server:
+    # No healthcheck: the nats:2.11.4 image is scratch-based (no shell,
+    # no curl/wget/nc), and the dynamo-runtime NATS client already
+    # retries on connect, so backends tolerate the brief startup window.
+    image: nats:2.11.4
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    volumes:
+      - ../../../../deploy/nats-server.conf:/etc/nats/nats-server.conf:ro
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    networks:
+      - dynamo
+
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+    ports:
+      - "2379:2379"
+    # Backends racing etcd's leader election on cold start was the
+    # primary cause of first-run flakes; gate dependents on this
+    # healthcheck via `condition: service_healthy`.
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    networks:
+      - dynamo
+
+  frontend:
+    build:
+      context: ../../../..
+      dockerfile: lib/backend-common/examples/mocker/Dockerfile.frontend
+    command: ["--http-port", "8000"]
+    environment:
+      - NATS_SERVER=nats://nats-server:4222
+      - ETCD_ENDPOINTS=http://etcd-server:2379
+      # Demo-only: verbose tracing. DO NOT use DYN_LOG=debug in production.
+      - DYN_LOG=debug
+    ports:
+      - "8000:8000"
+    depends_on:
+      nats-server:
+        condition: service_started
+      etcd-server:
+        condition: service_healthy
+    networks:
+      - dynamo
+
+  mocker-backend:
+    # Explicit tag keeps `docker images` readable (otherwise compose
+    # auto-names to `<project>-mocker-backend`).
+    image: dynamo-mocker-backend:latest
+    build:
+      # Build context is the workspace root so cargo can see all crates.
+      context: ../../../..
+      dockerfile: lib/backend-common/examples/mocker/Dockerfile
+    # --model-path points at a real HF repo so the frontend can load a
+    # tokenizer + chat template. The engine still emits mocked token
+    # IDs (no weights needed); Qwen3-0.6B is just a small, openly
+    # licensed tokenizer that ships everywhere.
+    command:
+      - "--model-name"
+      - "mocker-model"
+      - "--model-path"
+      - "Qwen/Qwen3-0.6B"
+      - "--max-num-seqs"
+      - "64"
+      - "--num-gpu-blocks"
+      - "4096"
+    environment:
+      - NATS_SERVER=nats://nats-server:4222
+      - ETCD_ENDPOINTS=http://etcd-server:2379
+      - HF_HOME=/cache/huggingface
+      # Set HF_TOKEN in your shell if you hit HuggingFace rate limits.
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Demo-only: verbose tracing. DO NOT use DYN_LOG=debug in production.
+      - DYN_LOG=debug
+    volumes:
+      - huggingface-cache:/cache/huggingface
+    depends_on:
+      nats-server:
+        condition: service_started
+      etcd-server:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    networks:
+      - dynamo
+
+volumes:
+  huggingface-cache:

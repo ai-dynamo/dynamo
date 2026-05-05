@@ -142,7 +142,7 @@ fn main() {
     println!("=======================");
     println!("GPUs:            {gpus:?}");
     println!("Alloc size:      {size_mib} MiB ({alloc_size} bytes)");
-    println!("NUMA disabled:   {}", dynamo_memory::is_numa_disabled());
+    println!("NUMA enabled:    {}", dynamo_memory::is_numa_enabled());
     println!();
 
     // Phase 1: Show GPU-to-NUMA mapping

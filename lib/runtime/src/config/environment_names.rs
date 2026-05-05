@@ -14,6 +14,7 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
+//! - **TCP Response Stream**: TCP response stream server (CallHome) port and host
 //! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
@@ -292,6 +293,16 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// Backend stream inactivity timeout in seconds.
+    ///
+    /// When set to a positive integer, the frontend will kill the engine context
+    /// and drop the inflight guard if no SSE event is received from the backend
+    /// within this many seconds. Acts as a circuit breaker for zombie workers
+    /// that hold a live TCP connection but never produce output.
+    ///
+    /// Set to `0` or leave unset to disable the timeout (default: disabled).
+    pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -300,6 +311,42 @@ pub mod llm {
         /// Histogram bucket configuration (pattern: <PREFIX>_MIN, <PREFIX>_MAX, <PREFIX>_COUNT)
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+    }
+
+    /// Agent trace configuration
+    pub mod agent_trace {
+        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
+
+        /// Local output path for normalized agent trace records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
+        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
+
+        /// In-process trace bus capacity.
+        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
+
+        /// JSONL sink buffer size in bytes.
+        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
+
+        /// JSONL sink periodic flush interval in milliseconds.
+        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL sink roll threshold in record lines.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
+
+        /// Local ZMQ endpoint for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+
+        /// Optional ZMQ topic filter for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
 }
 
@@ -341,9 +388,26 @@ pub mod router {
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
 }
 
+/// TCP response stream server (CallHome listener) environment variables
+pub mod tcp_response_stream {
+    /// Port for the TCP response stream server.
+    /// If unset or 0, the OS assigns a free ephemeral port.
+    pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
+
+    /// Host/interface for the TCP response stream server.
+    /// If unset, the server auto-detects a routable local IP.
+    pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
+}
+
 /// Event Plane transport environment variables
 pub mod event_plane {
-    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    /// Event transport selection: "zmq" or "nats".
+    ///
+    /// When unset the default depends on the discovery backend:
+    /// - `file` / `mem` backends: defaults to `zmq` (no external services required).
+    /// - `etcd` / `kubernetes` backends: defaults to `nats`.
+    ///
+    /// Set this explicitly to override the context-aware default.
     pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
 
     /// Event plane codec selection: "json" or "msgpack".
@@ -368,6 +432,15 @@ pub mod zmq_broker {
 
     /// Namespace for broker discovery registration
     pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
+}
+
+/// Discovery environment variables
+pub mod discovery {
+    /// Discovery backend: "kubernetes" or "etcd" (default)
+    pub const DYN_DISCOVERY_BACKEND: &str = "DYN_DISCOVERY_BACKEND";
+
+    /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
+    pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 }
 
 /// CUDA and GPU environment variables
@@ -477,6 +550,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
@@ -484,6 +558,15 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
+            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
+            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -494,6 +577,9 @@ mod tests {
             // Router
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
+            // TCP Response Stream
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
@@ -503,6 +589,9 @@ mod tests {
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
+            // Discovery
+            discovery::DYN_DISCOVERY_BACKEND,
+            discovery::DYN_KUBE_DISCOVERY_MODE,
             // CUDA
             cuda::DYN_FATBIN_PATH,
             // Build

@@ -127,7 +127,7 @@ impl PinnedStorage {
         // Try NUMA-aware allocation unless explicitly disabled
         #[cfg(target_os = "linux")]
         let numa_ptr = if let Some(gpu_id) = device_id {
-            if !super::numa::is_numa_disabled() {
+            if super::numa::is_numa_enabled() {
                 match super::numa::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(len, gpu_id)
                 {

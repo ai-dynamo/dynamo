@@ -67,6 +67,31 @@ spec:
             spec:
               description: DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
               properties:
+                gpuMemoryService:
+                  description: |-
+                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
+                    It is intentionally outside spec.identity, so it does not affect the
+                    checkpoint identity hash or deduplication.
+                  properties:
+                    deviceClassName:
+                      default: gpu.nvidia.com
+                      description: DeviceClassName is the DRA DeviceClass to request GPUs from.
+                      type: string
+                    enabled:
+                      description: |-
+                        Enabled activates the GMS sidecar. GPU resources on the main container
+                        are replaced with a DRA ResourceClaim for shared GPU access.
+                      type: boolean
+                    mode:
+                      default: intraPod
+                      description: Mode selects the GMS deployment topology.
+                      enum:
+                        - intraPod
+                        - interPod
+                      type: string
+                  required:
+                    - enabled
+                  type: object
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:
@@ -8161,6 +8186,11 @@ spec:
                         When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
                       properties:
                         disabled:
+                          description: |-
+                            Disabled, when true, opts out of mounting a shared-memory medium for the
+                            component. When false (or unset), shared memory is enabled and Size is
+                            required (enforced by the validating webhook). Size is ignored when
+                            Disabled is true.
                           type: boolean
                         size:
                           anyOf:
@@ -8170,8 +8200,8 @@ spec:
                           x-kubernetes-int-or-string: true
                       type: object
                       x-kubernetes-validations:
-                        - message: sharedMemory.size must not be set when sharedMemory.disabled is true
-                          rule: '!(has(self.disabled) && self.disabled && has(self.size))'
+                        - message: size is required when disabled is false
+                          rule: (has(self.disabled) && self.disabled) || (has(self.size) && quantity(self.size).isGreaterThan(quantity('0')))
                     ttlSecondsAfterFinished:
                       description: |-
                         Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
@@ -8186,6 +8216,9 @@ spec:
                 - identity
                 - job
               type: object
+              x-kubernetes-validations:
+                - message: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues
+                  rule: '!has(self.gpuMemoryService) || !self.gpuMemoryService.enabled'
             status:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:

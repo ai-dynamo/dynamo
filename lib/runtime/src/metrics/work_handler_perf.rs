@@ -36,7 +36,7 @@ pub static WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS: Lazy<Histogram> = Lazy::
             "Backend processing time from handle_payload entry to prologue sent (seconds)",
         )
         .buckets(vec![
-            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
         ]),
     )
     .expect("work_handler_time_to_first_response_seconds histogram")

@@ -1,0 +1,11 @@
+{
+  "architectures": ["Qwen3_5MoeForCausalLM"],
+  "model_type": "qwen3_5_moe",
+  "text_config": {
+    "eos_token_id": 248044,
+    "max_position_embeddings": 262144,
+    "num_hidden_layers": 36,
+    "num_attention_heads": 16,
+    "vocab_size": 248064
+  }
+}

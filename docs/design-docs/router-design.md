@@ -131,9 +131,9 @@ The KVIndexer has a method `find_matches_for_request`, which takes in tokens and
 
 The KVIndexer supports two backend implementations, selected via `--router-event-threads`:
 
-- **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Supports TTL-based expiration and size-based pruning (for `--no-kv-events` approximate mode).
+- **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Supports TTL-based expiration for `--no-kv-events` approximate mode.
 
-- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing (default: 4). Uses sticky worker routing (events for the same worker always go to the same thread) to ensure per-worker event serialization. Read operations (`find_matches`) execute concurrently with writes. Does not support TTL/pruning.
+- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing (default: 4). Uses sticky worker routing (events for the same worker always go to the same thread) to ensure per-worker event serialization. Read operations (`find_matches`) execute concurrently with writes.
 
 ### Inter-Router Communication
 
@@ -314,6 +314,6 @@ This dual-layer approach—persistent global KV cache state via JetStream and ep
 ## See Also
 
 - **[Router README](../components/router/README.md)**: Quick start guide for the KV Router
-- **[Router Guide](../components/router/router-guide.md)**: Configuration, tuning, and production setup
+- **[Configuration and Tuning](../components/router/router-configuration.md)**: Router flags, tuning, and production setup
 - **[Router Examples](../components/router/router-examples.md)**: Python API usage and custom routing patterns
 - **[KV Event Publishing for Custom Engines](../integrations/kv-events-custom-engines.md)**: Integrate custom inference engines with KV-aware routing

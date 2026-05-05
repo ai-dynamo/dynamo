@@ -118,6 +118,16 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
+    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    serviceMesh:
+      provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
+      {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
+      istio:
+        {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
+        tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify | default true }}
+      {{- end }}
+    {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
     rbac:
       plannerClusterRoleName: {{ include "dynamo-operator.fullname" . }}-planner
@@ -132,8 +142,13 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
-      {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
-      readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
+      {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
+      seccomp:
+        {{- if .Values.checkpoint.seccomp.disabled }}
+        disabled: true
+        {{- else if .Values.checkpoint.seccomp.profile }}
+        profile: {{ .Values.checkpoint.seccomp.profile | quote }}
+        {{- end }}
       {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}

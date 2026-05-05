@@ -55,7 +55,7 @@ pub enum FinishReason {
     #[serde(rename = "error")]
     Error(String),
 
-    #[serde(rename = "cancelled")]
+    #[serde(rename = "cancelled", alias = "abort")]
     Cancelled,
 
     #[serde(rename = "content_filter")]
@@ -83,7 +83,7 @@ impl std::str::FromStr for FinishReason {
             "eos" => Ok(FinishReason::EoS),
             "length" => Ok(FinishReason::Length),
             "stop" => Ok(FinishReason::Stop),
-            "cancelled" => Ok(FinishReason::Cancelled),
+            "cancelled" | "abort" => Ok(FinishReason::Cancelled),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }

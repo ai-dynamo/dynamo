@@ -43,7 +43,7 @@ pub use device::DeviceStorage;
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 #[cfg(target_os = "linux")]
-pub use numa::{NumaNode, is_numa_disabled};
+pub use numa::{NumaNode, is_numa_disabled, is_numa_enabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
