@@ -491,48 +491,24 @@ class TestParseOmniRequest:
         with pytest.raises(ValueError, match="without a vLLM renderer"):
             await parse_omni_request(request, ["text", "audio"])
 
-    @pytest.mark.asyncio
-    async def test_multimodal_chat_without_chat_protocol_import_fails_fast(self):
-        import builtins
+    def test_load_omni_stage_configs_uses_resolved_deploy_loader(self):
+        resolved_stage_configs = [SimpleNamespace(stage_id=0)]
+        with patch.object(
+            omni_utils,
+            "load_and_resolve_stage_configs",
+            return_value=(None, resolved_stage_configs),
+        ) as loader:
+            result = omni_utils.load_omni_stage_configs(
+                "test-model", "/tmp/stages.yaml"
+            )
 
-        real_import = builtins.__import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "vllm.entrypoints.openai.chat_completion.protocol":
-                raise ImportError("missing protocol")
-            return real_import(name, *args, **kwargs)
-
-        request = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "describe"},
-                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav"}},
-                    ],
-                }
-            ],
-        }
-
-        with patch.object(builtins, "__import__", side_effect=fake_import):
-            with pytest.raises(ValueError, match="ChatCompletionRequest support"):
-                await parse_omni_request(
-                    request,
-                    ["text", "audio"],
-                    renderer=MagicMock(),
-                    model_config=SimpleNamespace(max_model_len=1024),
-                )
-
-    def test_load_omni_stage_configs_reraises_deploy_loader_errors(self):
-        with patch(
-            "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
-            side_effect=RuntimeError("bad deploy yaml"),
-        ):
-            with patch.object(omni_utils, "load_stage_configs_from_yaml") as legacy:
-                with pytest.raises(RuntimeError, match="bad deploy yaml"):
-                    omni_utils.load_omni_stage_configs("qwen3-omni", "/tmp/stages.yaml")
-
-        legacy.assert_not_called()
+        assert result == resolved_stage_configs
+        loader.assert_called_once_with(
+            "test-model",
+            "/tmp/stages.yaml",
+            {},
+            default_stage_cfg_factory=None,
+        )
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):

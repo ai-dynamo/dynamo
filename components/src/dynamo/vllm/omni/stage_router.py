@@ -9,6 +9,10 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
+from vllm_omni.distributed.omni_connectors.adapter import (
+    compute_talker_prompt_ids_length,
+)
+
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.output_modalities import (
@@ -33,13 +37,6 @@ from dynamo.vllm.omni.utils import (
     shm_deserialize,
     stage_configs_use_async_chunk,
 )
-
-try:
-    from vllm_omni.distributed.omni_connectors.adapter import (
-        compute_talker_prompt_ids_length,
-    )
-except Exception:  # pragma: no cover - depends on vLLM-Omni version
-    compute_talker_prompt_ids_length = None
 
 logger = logging.getLogger(__name__)
 
@@ -398,12 +395,9 @@ def _model_stage_name(stage_cfg: Any, stage_idx: int) -> str:
 
 
 def _compute_async_prewarm_prompt_len(prompt_token_ids: list[int]) -> int:
-    if compute_talker_prompt_ids_length is not None and prompt_token_ids:
-        try:
-            return max(1, int(compute_talker_prompt_ids_length(prompt_token_ids)))
-        except Exception:
-            logger.debug("Failed to compute Qwen3 talker prompt length", exc_info=True)
-    return max(1, len(prompt_token_ids), 1)
+    if prompt_token_ids:
+        return max(1, int(compute_talker_prompt_ids_length(prompt_token_ids)))
+    return 1
 
 
 async def _cancel_downstream_tasks(tasks: dict[int, asyncio.Task[StageOutput]]) -> None:

@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from huggingface_hub import scan_cache_dir
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
+from vllm_omni.engine.async_omni_engine import load_and_resolve_stage_configs
 from vllm_omni.entrypoints.stage_utils import _to_dict, shm_read_bytes
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
@@ -42,18 +44,9 @@ _JSON_UNSAFE_SAMPLING_FIELDS = {
 
 
 def load_omni_stage_configs(model: str, stage_configs_path: str | None) -> list:
-    """Load vLLM-Omni stage configs from legacy or deploy-format YAML."""
+    """Load resolved vLLM-Omni stage configs from deploy-format YAML."""
     if not stage_configs_path:
         return []
-
-    try:
-        from vllm_omni.engine.async_omni_engine import load_and_resolve_stage_configs
-    except (AttributeError, ImportError, ModuleNotFoundError):
-        logging.getLogger(__name__).debug(
-            "Falling back to legacy vLLM-Omni stage config loader",
-            exc_info=True,
-        )
-        return load_stage_configs_from_yaml(stage_configs_path)
 
     _, stage_configs = load_and_resolve_stage_configs(
         model,
@@ -112,20 +105,14 @@ def _json_safe_prompt(prompt: Any) -> dict:
 
 
 def _chat_sampling_overrides(
-    request: Any,
+    chat_request: ChatCompletionRequest,
     default_sampling_params: Any = None,
     *,
     prompt_len: int = 0,
     max_model_len: int | None = None,
 ) -> dict | None:
     """Return vLLM OpenAI sampling overrides for the comprehension stage."""
-    chat_request = _coerce_chat_request(request)
-    explicit_fields = getattr(request, "model_fields_set", None)
-    if explicit_fields is None and chat_request is not request:
-        explicit_fields = getattr(chat_request, "model_fields_set", None)
-    if explicit_fields is None and isinstance(request, dict):
-        explicit_fields = set(request)
-    explicit_fields = set(explicit_fields or ())
+    explicit_fields = set(chat_request.model_fields_set or ())
     if not explicit_fields:
         return None
 
@@ -136,45 +123,16 @@ def _chat_sampling_overrides(
         prompt_len=prompt_len,
         max_model_len=max_model_len,
     )
-
-    try:
-        sampling_params = chat_request.to_sampling_params(max_tokens, defaults)
-    except AttributeError:
-        sampling_params = None
-
-    overrides = (
-        _sampling_overrides_from_vllm(sampling_params, explicit_fields)
-        if sampling_params is not None
-        else _legacy_sampling_overrides(chat_request, explicit_fields)
-    )
+    sampling_params = chat_request.to_sampling_params(max_tokens, defaults)
+    overrides = _sampling_overrides_from_vllm(sampling_params, explicit_fields)
 
     if not overrides:
         return None
     return {_STAGE_OVERRIDES_KEY: {"0": overrides}}
 
 
-def _coerce_chat_request(request: Any) -> Any:
-    if hasattr(request, "to_sampling_params"):
-        return request
-    try:
-        from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionRequest,
-        )
-    except ImportError:
-        return request
-    if not isinstance(request, dict):
-        return request
-    try:
-        return ChatCompletionRequest.model_validate(_normalize_chat_request(request))
-    except Exception:
-        logging.getLogger(__name__).debug(
-            "Falling back to legacy chat sampling extraction", exc_info=True
-        )
-        return request
-
-
 def _chat_max_tokens(
-    request: Any,
+    request: ChatCompletionRequest,
     defaults: dict,
     *,
     prompt_len: int,
@@ -185,21 +143,14 @@ def _chat_max_tokens(
         requested = getattr(request, "max_tokens", None)
 
     if max_model_len is not None:
-        try:
-            from vllm.entrypoints.utils import get_max_tokens
-
-            return int(
-                get_max_tokens(
-                    max_model_len,
-                    requested,
-                    prompt_len,
-                    defaults,
-                )
+        return int(
+            get_max_tokens(
+                max_model_len,
+                requested,
+                prompt_len,
+                defaults,
             )
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Falling back to simple chat max_tokens resolution", exc_info=True
-            )
+        )
 
     fallback = requested if requested is not None else defaults.get("max_tokens")
     return int(fallback if fallback is not None else 16)
@@ -229,23 +180,6 @@ def _sampling_overrides_from_vllm(
     return overrides
 
 
-def _legacy_sampling_overrides(
-    request: Any, explicit_fields: set[str]
-) -> dict[str, Any]:
-    sampling_fields = set(getattr(SamplingParams, "__struct_fields__", ()))
-    overrides: dict[str, Any] = {}
-    for field in sampling_fields.intersection(explicit_fields):
-        value = getattr(request, field, None)
-        if value is None or (isinstance(value, list) and not value):
-            continue
-        overrides[field] = value
-    if "max_completion_tokens" in explicit_fields:
-        max_completion_tokens = getattr(request, "max_completion_tokens", None)
-        if max_completion_tokens is not None:
-            overrides["max_tokens"] = max_completion_tokens
-    return overrides
-
-
 async def _render_chat_request(
     request: dict,
     renderer: Any,
@@ -257,15 +191,6 @@ async def _render_chat_request(
         return None
     if renderer is None or model_config is None:
         raise ValueError("Cannot process chat without a vLLM renderer")
-
-    try:
-        from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionRequest,
-        )
-    except ImportError as e:
-        raise ValueError(
-            "Cannot process chat without ChatCompletionRequest support"
-        ) from e
 
     try:
         chat_request = ChatCompletionRequest.model_validate(
@@ -353,18 +278,43 @@ async def parse_omni_request(
     request: dict,
     output_modalities: list,
     default_video_fps: int = 16,
-    tokenizer_getter=None,
     renderer=None,
     model_config=None,
     default_sampling_params: Any = None,
 ) -> dict:
-    """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
+    """Convert a Dynamo frontend request into the inputs expected by AsyncOmni.
+
+    Dynamo receives several OpenAI-style request shapes at the same router
+    endpoint, but the stage-0 vLLM-Omni engine does not consume those raw
+    payloads directly.  This function normalizes each public request shape into
+    the three values the disaggregated stage worker needs:
+
+    * ``engine_inputs``: the object passed to ``AsyncOmni.generate``.  For chat,
+      this must be the vLLM-rendered prompt containing token ids and multimodal
+      processor data, not raw ``messages``.
+    * ``original_prompt``: a JSON-safe prompt copy that can cross Dynamo's
+      router/stage boundary and still provide metadata needed by vLLM-Omni stage
+      processor functions.
+    * ``sampling_params_list``: request-level overrides to merge with the
+      per-stage YAML defaults.  Chat overrides are scoped to stage 0 so user
+      OpenAI sampling options do not overwrite talker/code2wav defaults.
+
+    The branch structure mirrors the request families:
+
+    * Audio generation uses ``input`` rather than ``messages``.  When a renderer
+      is available we wrap it as a single-user chat request so vLLM applies the
+      model's normal chat/audio template.
+    * Image/video generation are diffusion-style requests.  They do not go
+      through chat rendering, and their geometry/nvext fields become generation
+      sampling params.
+    * Chat/text requests are rendered through vLLM's OpenAI renderer.  Passing
+      raw chat JSON to vLLM's ``InputProcessor`` skips chat-template and
+      multimodal preprocessing and can produce errors such as "Token prompt
+      should be a list of integers".
 
     Args:
-      tokenizer_getter: async callable returning a tokenizer (e.g. engine.get_tokenizer).
-          Retained for compatibility with older call sites.
-      renderer/model_config: vLLM renderer inputs.  When available, chat
-          requests are rendered like native ``vllm serve --omni`` so stage 0
+      renderer/model_config: vLLM renderer inputs.  Chat requests are rendered
+          like native ``vllm serve --omni`` so stage 0
           receives tokenized multimodal/chat-template inputs.
 
     Returns:
@@ -383,27 +333,17 @@ async def parse_omni_request(
             "messages": [{"role": "user", "content": text}],
             "modalities": request.get("modalities") or ["audio"],
         }
-        rendered = None
-        if renderer is not None and model_config is not None:
-            rendered = await _render_chat_request(chat_request, renderer, model_config)
-        if rendered is not None:
-            engine_prompt, chat_request_model = rendered
-            return {
-                "engine_inputs": engine_prompt,
-                "original_prompt": _json_safe_prompt(engine_prompt),
-                "sampling_params_list": _chat_sampling_overrides(
-                    chat_request_model,
-                    default_sampling_params,
-                    prompt_len=_prompt_len(engine_prompt),
-                    max_model_len=getattr(model_config, "max_model_len", None),
-                ),
-            }
+        engine_prompt, chat_request_model = await _render_chat_request(
+            chat_request, renderer, model_config
+        )
         return {
-            "engine_inputs": OmniTextPrompt(prompt=text),
-            "original_prompt": {"prompt": text},
+            "engine_inputs": engine_prompt,
+            "original_prompt": _json_safe_prompt(engine_prompt),
             "sampling_params_list": _chat_sampling_overrides(
-                chat_request,
+                chat_request_model,
                 default_sampling_params,
+                prompt_len=_prompt_len(engine_prompt),
+                max_model_len=getattr(model_config, "max_model_len", None),
             ),
         }
 
@@ -446,10 +386,7 @@ async def parse_omni_request(
     return {
         "engine_inputs": text,
         "original_prompt": {"prompt": text},
-        "sampling_params_list": _chat_sampling_overrides(
-            request,
-            default_sampling_params,
-        ),
+        "sampling_params_list": None,
     }
 
 

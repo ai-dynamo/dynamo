@@ -389,7 +389,7 @@ async def test_prepare_request_uses_prepare_only_media_uuids():
 
 
 @pytest.mark.asyncio
-async def test_async_chunk_prewarm_uses_placeholder_tokens_and_skips_connector_put():
+async def test_async_chunk_intermediate_stage_skips_connector_put_and_shm():
     engine = _MockEngine()
     engine.engine = MagicMock()
     out_connector = MagicMock()
@@ -406,7 +406,6 @@ async def test_async_chunk_prewarm_uses_placeholder_tokens_and_skips_connector_p
 
     with patch(
         "dynamo.vllm.omni.stage_worker.shm_write_bytes",
-        return_value={"name": "req-prewarm-stage-1"},
     ) as shm_write:
         chunks = [
             chunk
@@ -423,9 +422,44 @@ async def test_async_chunk_prewarm_uses_placeholder_tokens_and_skips_connector_p
     assert engine.received_prompt.prompt_token_ids == [0, 0, 0]
     engine.engine.output_processors[0].add_request.assert_called_once()
     out_connector.put.assert_not_called()
-    shm_write.assert_called_once()
-    assert shm_write.call_args.kwargs["name"] == "req-prewarm-stage-1"
+    shm_write.assert_not_called()
     assert len(chunks) == 2
+    assert chunks[0] == {_ASYNC_PREWARM_READY_KEY: True}
+    assert chunks[1] == {"finished": True}
+
+
+@pytest.mark.asyncio
+async def test_async_chunk_router_consumed_stage_uses_stage_specific_shm_name():
+    engine = _MockEngine()
+    engine.engine = MagicMock()
+    worker = _make_worker(
+        engine=engine,
+        connectors={},
+        stage_id=2,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True),
+            default_sampling_params={"temperature": 0.9, "max_tokens": 100},
+        ),
+    )
+
+    with patch(
+        "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+        return_value={"name": "req-final-stage-2"},
+    ) as shm_write:
+        chunks = [
+            chunk
+            async for chunk in worker.generate(
+                {
+                    "request_id": "req-final",
+                    "prompt_token_ids": [0, 0, 0],
+                    _ASYNC_PREWARM_KEY: True,
+                },
+                _MockContext(),
+            )
+        ]
+
+    shm_write.assert_called_once()
+    assert shm_write.call_args.kwargs["name"] == "req-final-stage-2"
     assert chunks[0] == {_ASYNC_PREWARM_READY_KEY: True}
     assert chunks[1]["shm_meta"]
 

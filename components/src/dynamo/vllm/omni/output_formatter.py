@@ -52,28 +52,21 @@ class TextFormatter:
         output = request_output.outputs[0]
         delta_text = output.text[len(previous_text) :]
 
-        chunk: Dict[str, Any] = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self._model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
-                    "finish_reason": (
-                        normalize_finish_reason(output.finish_reason)
-                        if output.finish_reason
-                        else None
-                    ),
-                }
-            ],
-        }
+        finish_reason = (
+            normalize_finish_reason(output.finish_reason)
+            if output.finish_reason
+            else None
+        )
 
-        if output.finish_reason:
-            chunk["usage"] = _build_completion_usage(request_output)
-
-        return chunk
+        return _make_chat_completion_chunk(
+            request_id,
+            self._model_name,
+            delta_text,
+            finish_reason=finish_reason,
+            usage=_build_completion_usage(request_output)
+            if output.finish_reason
+            else None,
+        )
 
 
 class DiffusionFormatter:
@@ -197,25 +190,12 @@ class DiffusionFormatter:
         data_urls = await self._prepare_images(images, request_id, response_format)
 
         if request_type == RequestType.CHAT_COMPLETION:
-            return {
-                "id": request_id,
-                "created": int(time.time()),
-                "object": "chat.completion.chunk",
-                "model": self._model_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": u}}
-                                for u in data_urls
-                            ],
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
+            return _make_chat_completion_chunk(
+                request_id,
+                self._model_name,
+                [{"type": "image_url", "image_url": {"url": u}} for u in data_urls],
+                finish_reason="stop",
+            )
 
         if request_type == RequestType.IMAGE_GENERATION:
             image_data_list = []
@@ -326,7 +306,7 @@ class AudioFormatter:
                 )
 
             if as_chat_completion:
-                return self._chat_completion_chunk(
+                return self._chat_audio_completion_chunk(
                     stage_output,
                     request_id,
                     audio_data_obj,
@@ -351,7 +331,7 @@ class AudioFormatter:
                 return _error_chunk(request_id, self._model_name, str(e))
             return self._error_response(request_id, str(e))
 
-    def _chat_completion_chunk(
+    def _chat_audio_completion_chunk(
         self,
         stage_output: Any,
         request_id: str,
@@ -373,22 +353,12 @@ class AudioFormatter:
                 "audio_url": {"url": f"data:{media_type};base64,{b64_json or ''}"},
             }
         )
-        return {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self._model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": content_parts,
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-        }
+        return _make_chat_completion_chunk(
+            request_id,
+            self._model_name,
+            content_parts,
+            finish_reason="stop",
+        )
 
     def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
@@ -463,7 +433,23 @@ def _error_chunk(
     request_id: str, model_name: str, error_message: str
 ) -> Dict[str, Any]:
     """Error response in OpenAI chat.completion.chunk format."""
-    return {
+    return _make_chat_completion_chunk(
+        request_id,
+        model_name,
+        f"Error: {error_message}",
+        finish_reason="error",
+    )
+
+
+def _make_chat_completion_chunk(
+    request_id: str,
+    model_name: str,
+    content: Any,
+    *,
+    finish_reason: str | None,
+    usage: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    chunk: Dict[str, Any] = {
         "id": request_id,
         "created": int(time.time()),
         "object": "chat.completion.chunk",
@@ -471,11 +457,14 @@ def _error_chunk(
         "choices": [
             {
                 "index": 0,
-                "delta": {"role": "assistant", "content": f"Error: {error_message}"},
-                "finish_reason": "error",
+                "delta": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
             }
         ],
     }
+    if usage is not None:
+        chunk["usage"] = usage
+    return chunk
 
 
 def _build_completion_usage(request_output: Any) -> Dict[str, Any]:

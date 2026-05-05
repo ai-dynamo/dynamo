@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 import yaml
+from vllm.entrypoints.chat_utils import MM_PARSER_MAP
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
@@ -42,22 +43,7 @@ _ASYNC_PREWARM_READY_KEY = "__dynamo_omni_async_prewarm_ready"
 _TEXT_CONTENT_TYPES = frozenset(
     ("text", "input_text", "output_text", "refusal", "thinking")
 )
-try:
-    from vllm.entrypoints.chat_utils import MM_PARSER_MAP
-
-    _MEDIA_CONTENT_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_TYPES
-except Exception:  # pragma: no cover - version compatibility fallback
-    _MEDIA_CONTENT_KEYS = frozenset(
-        (
-            "image_url",
-            "image_pil",
-            "image_embeds",
-            "audio_url",
-            "input_audio",
-            "audio_embeds",
-            "video_url",
-        )
-    )
+_MEDIA_CONTENT_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_TYPES
 
 
 @dataclass
@@ -207,7 +193,6 @@ class OmniStageWorker:
                     request,
                     self._output_modalities,
                     self._default_video_fps,
-                    tokenizer_getter=self.engine.get_tokenizer,
                     renderer=getattr(self.engine, "renderer", None),
                     model_config=getattr(self.engine, "model_config", None),
                     default_sampling_params=getattr(
@@ -299,6 +284,10 @@ class OmniStageWorker:
             yield out
             return
 
+        if self._async_chunk and self.stage_id > 0 and connector is not None:
+            yield {"finished": True}
+            return
+
         # Final stage → router: write output to shared memory and return the SHM handle.
         # The router reads it back via shm_deserialize() to format the response.
         #
@@ -321,7 +310,6 @@ class OmniStageWorker:
             frontend_request,
             self._output_modalities,
             self._default_video_fps,
-            tokenizer_getter=self.engine.get_tokenizer,
             renderer=getattr(self.engine, "renderer", None),
             model_config=getattr(self.engine, "model_config", None),
             default_sampling_params=getattr(
