@@ -379,6 +379,34 @@ class TestParseOmniRequest:
         }
 
     @pytest.mark.asyncio
+    async def test_chat_sampling_params_use_vllm_openai_conversion(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(self, *args, **kwargs):
+                return (["conversation"],), ({"prompt": "rendered"},)
+
+        request = {
+            "messages": [{"role": "user", "content": "say more"}],
+            "logprobs": True,
+            "top_logprobs": 3,
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["sampling_params_list"] == {
+            "__stage_overrides__": {"0": {"logprobs": 3}}
+        }
+
+    @pytest.mark.asyncio
     async def test_chat_strips_frontend_null_optional_multimodal_fields(self):
         class FakeRenderer:
             tokenizer = None

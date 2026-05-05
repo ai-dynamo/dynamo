@@ -355,8 +355,8 @@ class TestAudioFormatterFormat:
         result = await f.format(mm, "req-1", request_type=RequestType.CHAT_COMPLETION)
         assert result["object"] == "chat.completion.chunk"
         content = result["choices"][0]["delta"]["content"]
-        assert content[0]["type"] == "audio_url"
-        assert content[0]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+        audio = content[0]["audio_url"]
+        assert audio["url"].startswith("data:audio/wav;base64,")
 
     @pytest.mark.asyncio
     async def test_chat_completion_includes_text_when_available(self):
@@ -378,7 +378,7 @@ class TestAudioFormatterFormat:
 
         content = result["choices"][0]["delta"]["content"]
         assert content[0] == {"type": "text", "text": "hello"}
-        assert content[1]["type"] == "audio_url"
+        assert content[1]["audio_url"]["url"].startswith("data:audio/wav;base64,")
 
     @pytest.mark.asyncio
     async def test_chat_completion_uses_text_context(self):
@@ -398,7 +398,7 @@ class TestAudioFormatterFormat:
 
         content = result["choices"][0]["delta"]["content"]
         assert content[0] == {"type": "text", "text": "hello from thinker"}
-        assert content[1]["type"] == "audio_url"
+        assert content[1]["audio_url"]["url"].startswith("data:audio/wav;base64,")
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────

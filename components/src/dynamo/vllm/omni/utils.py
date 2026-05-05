@@ -12,7 +12,7 @@ from typing import Any, cast
 from huggingface_hub import scan_cache_dir
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
-from vllm_omni.entrypoints.stage_utils import shm_read_bytes
+from vllm_omni.entrypoints.stage_utils import _to_dict, shm_read_bytes
 from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
@@ -22,6 +22,23 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
 _STAGE_OVERRIDES_KEY = "__stage_overrides__"
+_CHAT_TO_SAMPLING_FIELDS = {
+    "max_completion_tokens": {"max_tokens"},
+    "top_logprobs": {"logprobs"},
+    "response_format": {"structured_outputs"},
+    "stream": {"output_kind"},
+    "vllm_xargs": {"extra_args"},
+    "kv_transfer_params": {"extra_args"},
+}
+_JSON_UNSAFE_SAMPLING_FIELDS = {
+    "output_kind",
+    "structured_outputs",
+    "output_text_buffer_length",
+    "skip_clone",
+    "_eos_token_id",
+    "_all_stop_token_ids",
+    "_bad_words_token_ids",
+}
 
 
 def load_omni_stage_configs(model: str, stage_configs_path: str | None) -> list:
@@ -94,57 +111,139 @@ def _json_safe_prompt(prompt: Any) -> dict:
     return result or {"prompt": prompt.get("prompt", "")}
 
 
-def _chat_sampling_overrides(request: Any) -> dict | None:
-    """Return OpenAI sampling overrides for the comprehension stage."""
-    sampling_fields = _openai_sampling_fields(request)
+def _chat_sampling_overrides(
+    request: Any,
+    default_sampling_params: Any = None,
+    *,
+    prompt_len: int = 0,
+    max_model_len: int | None = None,
+) -> dict | None:
+    """Return vLLM OpenAI sampling overrides for the comprehension stage."""
+    chat_request = _coerce_chat_request(request)
     explicit_fields = getattr(request, "model_fields_set", None)
-    overrides: dict[str, Any] = {}
+    if explicit_fields is None and chat_request is not request:
+        explicit_fields = getattr(chat_request, "model_fields_set", None)
+    if explicit_fields is None and isinstance(request, dict):
+        explicit_fields = set(request)
+    explicit_fields = set(explicit_fields or ())
+    if not explicit_fields:
+        return None
 
-    for field in sampling_fields:
-        if explicit_fields is not None:
-            if field not in explicit_fields:
-                continue
-            value = getattr(request, field, None)
-        elif isinstance(request, dict):
-            if field not in request:
-                continue
-            value = request.get(field)
-        else:
-            continue
-        if value is None:
-            continue
-        if isinstance(value, list) and not value:
-            continue
-        overrides[field] = value
+    defaults = _to_dict(default_sampling_params or {})
+    max_tokens = _chat_max_tokens(
+        chat_request,
+        defaults,
+        prompt_len=prompt_len,
+        max_model_len=max_model_len,
+    )
 
-    if explicit_fields is not None and "max_completion_tokens" in explicit_fields:
-        max_completion_tokens = getattr(request, "max_completion_tokens", None)
-        if max_completion_tokens is not None:
-            overrides["max_tokens"] = max_completion_tokens
-    elif isinstance(request, dict) and request.get("max_completion_tokens") is not None:
-        overrides["max_tokens"] = request["max_completion_tokens"]
+    try:
+        sampling_params = chat_request.to_sampling_params(max_tokens, defaults)
+    except AttributeError:
+        sampling_params = None
+
+    overrides = (
+        _sampling_overrides_from_vllm(sampling_params, explicit_fields)
+        if sampling_params is not None
+        else _legacy_sampling_overrides(chat_request, explicit_fields)
+    )
 
     if not overrides:
         return None
     return {_STAGE_OVERRIDES_KEY: {"0": overrides}}
 
 
-def _openai_sampling_fields(request: Any) -> set[str]:
-    model_fields = getattr(request.__class__, "model_fields", None)
-    if model_fields is not None:
-        return set(getattr(SamplingParams, "__struct_fields__", ())).intersection(
-            model_fields
-        )
+def _coerce_chat_request(request: Any) -> Any:
+    if hasattr(request, "to_sampling_params"):
+        return request
     try:
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionRequest,
         )
     except ImportError:
-        return set()
+        return request
+    if not isinstance(request, dict):
+        return request
+    try:
+        return ChatCompletionRequest.model_validate(_normalize_chat_request(request))
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Falling back to legacy chat sampling extraction", exc_info=True
+        )
+        return request
 
-    return set(getattr(SamplingParams, "__struct_fields__", ())).intersection(
-        ChatCompletionRequest.model_fields
-    )
+
+def _chat_max_tokens(
+    request: Any,
+    defaults: dict,
+    *,
+    prompt_len: int,
+    max_model_len: int | None,
+) -> int:
+    requested = getattr(request, "max_completion_tokens", None)
+    if requested is None:
+        requested = getattr(request, "max_tokens", None)
+
+    if max_model_len is not None:
+        try:
+            from vllm.entrypoints.utils import get_max_tokens
+
+            return int(
+                get_max_tokens(
+                    max_model_len,
+                    requested,
+                    prompt_len,
+                    defaults,
+                )
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Falling back to simple chat max_tokens resolution", exc_info=True
+            )
+
+    fallback = requested if requested is not None else defaults.get("max_tokens")
+    return int(fallback if fallback is not None else 16)
+
+
+def _sampling_overrides_from_vllm(
+    sampling_params: SamplingParams,
+    explicit_fields: set[str],
+) -> dict[str, Any]:
+    sampling_fields = set(getattr(SamplingParams, "__struct_fields__", ()))
+    fields = sampling_fields.intersection(explicit_fields)
+    for request_field in explicit_fields:
+        fields.update(_CHAT_TO_SAMPLING_FIELDS.get(request_field, ()))
+
+    overrides: dict[str, Any] = {}
+    for field in fields:
+        if field in _JSON_UNSAFE_SAMPLING_FIELDS:
+            continue
+        value = getattr(sampling_params, field, None)
+        if value is None or (isinstance(value, list) and not value):
+            continue
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            continue
+        overrides[field] = value
+    return overrides
+
+
+def _legacy_sampling_overrides(
+    request: Any, explicit_fields: set[str]
+) -> dict[str, Any]:
+    sampling_fields = set(getattr(SamplingParams, "__struct_fields__", ()))
+    overrides: dict[str, Any] = {}
+    for field in sampling_fields.intersection(explicit_fields):
+        value = getattr(request, field, None)
+        if value is None or (isinstance(value, list) and not value):
+            continue
+        overrides[field] = value
+    if "max_completion_tokens" in explicit_fields:
+        max_completion_tokens = getattr(request, "max_completion_tokens", None)
+        if max_completion_tokens is not None:
+            overrides["max_tokens"] = max_completion_tokens
+    return overrides
 
 
 async def _render_chat_request(
@@ -257,6 +356,7 @@ async def parse_omni_request(
     tokenizer_getter=None,
     renderer=None,
     model_config=None,
+    default_sampling_params: Any = None,
 ) -> dict:
     """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
 
@@ -291,12 +391,20 @@ async def parse_omni_request(
             return {
                 "engine_inputs": engine_prompt,
                 "original_prompt": _json_safe_prompt(engine_prompt),
-                "sampling_params_list": _chat_sampling_overrides(chat_request_model),
+                "sampling_params_list": _chat_sampling_overrides(
+                    chat_request_model,
+                    default_sampling_params,
+                    prompt_len=_prompt_len(engine_prompt),
+                    max_model_len=getattr(model_config, "max_model_len", None),
+                ),
             }
         return {
             "engine_inputs": OmniTextPrompt(prompt=text),
             "original_prompt": {"prompt": text},
-            "sampling_params_list": _chat_sampling_overrides(chat_request),
+            "sampling_params_list": _chat_sampling_overrides(
+                chat_request,
+                default_sampling_params,
+            ),
         }
 
     if request_type in (RequestType.VIDEO_GENERATION, RequestType.IMAGE_GENERATION):
@@ -325,7 +433,12 @@ async def parse_omni_request(
         return {
             "engine_inputs": engine_prompt,
             "original_prompt": _json_safe_prompt(engine_prompt),
-            "sampling_params_list": _chat_sampling_overrides(chat_request),
+            "sampling_params_list": _chat_sampling_overrides(
+                chat_request,
+                default_sampling_params,
+                prompt_len=_prompt_len(engine_prompt),
+                max_model_len=getattr(model_config, "max_model_len", None),
+            ),
         }
 
     text = request.get("prompt", "")
@@ -333,23 +446,20 @@ async def parse_omni_request(
     return {
         "engine_inputs": text,
         "original_prompt": {"prompt": text},
-        "sampling_params_list": _chat_sampling_overrides(request),
+        "sampling_params_list": _chat_sampling_overrides(
+            request,
+            default_sampling_params,
+        ),
     }
 
 
 def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | None:
     """Construct typed sampling params from YAML default_sampling_params."""
-    from omegaconf import OmegaConf  # type: ignore[import-not-found]
-
     defaults = getattr(stage_config, "default_sampling_params", None)
     if not defaults:
         return None
 
-    if OmegaConf.is_config(defaults):
-        params = OmegaConf.to_container(defaults, resolve=True)
-    else:
-        params = dict(defaults)
-    params_dict = cast(dict[str, Any], params)
+    params_dict = cast(dict[str, Any], _to_dict(defaults))
     stage_overrides = None
     if overrides and _STAGE_OVERRIDES_KEY in overrides:
         stage_map = overrides.get(_STAGE_OVERRIDES_KEY) or {}
@@ -373,6 +483,14 @@ def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | 
             if hasattr(llm_params, arg):
                 setattr(llm_params, arg, value)
     return [llm_params]
+
+
+def _prompt_len(prompt: Any) -> int:
+    if isinstance(prompt, dict):
+        token_ids = prompt.get("prompt_token_ids")
+    else:
+        token_ids = getattr(prompt, "prompt_token_ids", None)
+    return len(token_ids or [])
 
 
 def ensure_dummy_tokenizer_for_tts(model: str) -> list[Path]:

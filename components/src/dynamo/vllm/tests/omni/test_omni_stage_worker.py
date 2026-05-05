@@ -248,6 +248,48 @@ async def test_stage_connector_refs_with_processor():
 
 
 @pytest.mark.asyncio
+async def test_stage_connector_refs_processor_token_prompt_builds_engine_core_request():
+    """Stage N>0 token processor outputs follow vLLM-Omni orchestrator routing."""
+    engine = _MockEngine()
+    engine.engine = MagicMock()
+    fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[7])])
+    processed_prompt = {
+        "prompt_token_ids": [11, 22, 33],
+        "additional_information": {"speaker": ["ethan"]},
+    }
+
+    in_connector = MagicMock()
+    in_connector.get.return_value = fetched_output
+
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+
+    cfg = _make_stage_config(
+        default_sampling_params={"temperature": 0.9, "max_tokens": 100},
+        engine_input_source=[0],
+    )
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=cfg,
+        connectors={("0", "1"): in_connector, ("1", "2"): out_connector},
+        stage_id=1,
+    )
+    worker._processor = MagicMock(return_value=[processed_prompt])
+
+    request = {
+        "request_id": "req-token-proc",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+    }
+
+    _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert hasattr(engine.received_prompt, "prompt_token_ids")
+    assert engine.received_prompt.prompt_token_ids == [11, 22, 33]
+    engine.engine.output_processors[0].add_request.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_engine_error_yields_error_chunk():
     """Engine raises → yields {error: ..., finished: True}, no crash."""
     worker = _make_worker(engine=_ErrorEngine())
@@ -569,6 +611,35 @@ def test_stage_config_to_dict_preserves_async_chunk_stage_id_and_connectors():
     assert result["custom_process_input_func"] == "pkg.func"
     assert result["input_connectors"] == {"from_stage_0": "connector"}
     assert result["engine_args"]["async_chunk"] is True
+
+
+def test_stage_config_to_dict_handles_omegaconf_lists():
+    from omegaconf import OmegaConf
+
+    cfg = _make_stage_config(
+        stage_id=1,
+        engine_input_source=OmegaConf.create([0]),
+        engine_args=OmegaConf.create({"async_chunk": True, "model_stage": "talker"}),
+    )
+
+    result = _stage_config_to_dict(cfg, "llm", preserve_stage_id=True)
+
+    assert result["engine_input_source"] == [0]
+    assert result["engine_args"]["model_stage"] == "talker"
+
+
+def test_stage_config_to_dict_handles_empty_omegaconf_lists():
+    from omegaconf import OmegaConf
+
+    cfg = _make_stage_config(
+        stage_id=0,
+        engine_input_source=OmegaConf.create([]),
+        engine_args=OmegaConf.create({"async_chunk": True, "model_stage": "thinker"}),
+    )
+
+    result = _stage_config_to_dict(cfg, "llm", preserve_stage_id=True)
+
+    assert result["engine_input_source"] == []
 
 
 @pytest.mark.asyncio

@@ -289,6 +289,7 @@ class AudioFormatter:
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
+        as_chat_completion = ctx.get("request_type") == RequestType.CHAT_COMPLETION
 
         try:
             start_time = time.time()
@@ -309,7 +310,7 @@ class AudioFormatter:
                 encode_fmt,
             )
 
-            if response_format == "url":
+            if response_format == "url" and not as_chat_completion:
                 ext = encode_fmt if encode_fmt != "opus" else "ogg"
                 url = await upload_to_fs(
                     self._media_fs,
@@ -324,12 +325,12 @@ class AudioFormatter:
                     b64_json=base64.b64encode(audio_bytes).decode(),
                 )
 
-            if ctx.get("request_type") == RequestType.CHAT_COMPLETION:
+            if as_chat_completion:
                 return self._chat_completion_chunk(
                     stage_output,
                     request_id,
                     audio_data_obj,
-                    media_type,
+                    media_type=media_type,
                     text=ctx.get("text", ""),
                 )
 
@@ -358,21 +359,20 @@ class AudioFormatter:
         media_type: str,
         text: str = "",
     ) -> Dict[str, Any]:
-        parts = []
         text = text or _extract_text(stage_output)
+        b64_json = getattr(audio_data_obj, "b64_json", None)
+        if b64_json is None and isinstance(audio_data_obj, dict):
+            b64_json = audio_data_obj.get("b64_json")
+
+        content_parts = []
         if text:
-            parts.append({"type": "text", "text": text})
-
-        audio_url = getattr(audio_data_obj, "url", None)
-        if audio_url is None and isinstance(audio_data_obj, dict):
-            audio_url = audio_data_obj.get("url")
-        if not audio_url:
-            b64_json = getattr(audio_data_obj, "b64_json", None)
-            if b64_json is None and isinstance(audio_data_obj, dict):
-                b64_json = audio_data_obj.get("b64_json")
-            audio_url = f"data:{media_type};base64,{b64_json or ''}"
-
-        parts.append({"type": "audio_url", "audio_url": {"url": audio_url}})
+            content_parts.append({"type": "text", "text": text})
+        content_parts.append(
+            {
+                "type": "audio_url",
+                "audio_url": {"url": f"data:{media_type};base64,{b64_json or ''}"},
+            }
+        )
         return {
             "id": request_id,
             "created": int(time.time()),
@@ -381,7 +381,10 @@ class AudioFormatter:
             "choices": [
                 {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": parts},
+                    "delta": {
+                        "role": "assistant",
+                        "content": content_parts,
+                    },
                     "finish_reason": "stop",
                 }
             ],

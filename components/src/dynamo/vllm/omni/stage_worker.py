@@ -17,7 +17,7 @@ import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
+from vllm_omni.entrypoints.stage_utils import _to_dict, serialize_obj, shm_write_bytes
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -39,17 +39,25 @@ logger = logging.getLogger(__name__)
 _ASYNC_PREPARE_KEY = "__dynamo_omni_prepare"
 _ASYNC_PREWARM_KEY = "__dynamo_omni_async_prewarm"
 _ASYNC_PREWARM_READY_KEY = "__dynamo_omni_async_prewarm_ready"
-_MEDIA_CONTENT_KEYS = frozenset(
-    (
-        "image_url",
-        "image_pil",
-        "image_embeds",
-        "audio_url",
-        "input_audio",
-        "audio_embeds",
-        "video_url",
-    )
+_TEXT_CONTENT_TYPES = frozenset(
+    ("text", "input_text", "output_text", "refusal", "thinking")
 )
+try:
+    from vllm.entrypoints.chat_utils import MM_PARSER_MAP
+
+    _MEDIA_CONTENT_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_TYPES
+except Exception:  # pragma: no cover - version compatibility fallback
+    _MEDIA_CONTENT_KEYS = frozenset(
+        (
+            "image_url",
+            "image_pil",
+            "image_embeds",
+            "audio_url",
+            "input_audio",
+            "audio_embeds",
+            "video_url",
+        )
+    )
 
 
 @dataclass
@@ -168,6 +176,14 @@ class OmniStageWorker:
                 )
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
+                if _get_prompt_token_ids(prompt) is not None:
+                    try:
+                        prompt = self._build_engine_core_request(
+                            prompt, request_id, sampling_params_list_override
+                        )
+                    except RuntimeError as e:
+                        yield {"error": str(e), "finished": True}
+                        return
             else:
                 # No processor: check if the upstream output has the
                 # structure needed to build an OmniEngineCoreRequest
@@ -194,6 +210,9 @@ class OmniStageWorker:
                     tokenizer_getter=self.engine.get_tokenizer,
                     renderer=getattr(self.engine, "renderer", None),
                     model_config=getattr(self.engine, "model_config", None),
+                    default_sampling_params=getattr(
+                        self.stage_config, "default_sampling_params", None
+                    ),
                 )
             except Exception as e:
                 logger.error(
@@ -305,6 +324,9 @@ class OmniStageWorker:
             tokenizer_getter=self.engine.get_tokenizer,
             renderer=getattr(self.engine, "renderer", None),
             model_config=getattr(self.engine, "model_config", None),
+            default_sampling_params=getattr(
+                self.stage_config, "default_sampling_params", None
+            ),
         )
         prompt_token_ids = await _extract_prompt_token_ids(
             parsed["engine_inputs"],
@@ -359,6 +381,18 @@ class OmniStageWorker:
         sampling_params_list_override: dict | None,
     ):
         tokens_prompt = OmniTokensPrompt(prompt_token_ids=token_ids)
+        return self._build_engine_core_request(
+            tokens_prompt,
+            request_id,
+            sampling_params_list_override,
+        )
+
+    def _build_engine_core_request(
+        self,
+        prompt: Any,
+        request_id: str,
+        sampling_params_list_override: dict | None,
+    ):
         sp_list = _build_sampling_params(
             self.stage_config, sampling_params_list_override
         )
@@ -371,7 +405,7 @@ class OmniStageWorker:
         model_config = _engine_model_config(self.engine)
         prompt = build_engine_core_request_from_tokens(
             request_id=request_id,
-            prompt=tokens_prompt,
+            prompt=prompt,
             params=params,
             model_config=model_config,
         )
@@ -703,15 +737,6 @@ def _stage_config_to_dict(
     stage_config: Any, stage_type: str, preserve_stage_id: bool = False
 ) -> dict:
     """Convert a parsed stage config to a single-stage YAML dict."""
-    from omegaconf import OmegaConf  # type: ignore[import-not-found]
-
-    def _to_plain(obj: Any) -> Any:
-        if OmegaConf.is_config(obj):
-            return OmegaConf.to_container(obj, resolve=True)
-        if hasattr(obj, "__dict__"):
-            return dict(vars(obj))
-        return obj
-
     stage_id = int(getattr(stage_config, "stage_id", 0) or 0)
     result: dict = {
         "stage_id": stage_id if preserve_stage_id else 0,
@@ -748,6 +773,32 @@ def _stage_config_to_dict(
         result["runtime"] = rt
 
     return result
+
+
+def _to_plain(obj: Any) -> Any:
+    if _is_omegaconf_config(obj):
+        return _to_plain(_to_dict(obj))
+    if isinstance(obj, (list, tuple)):
+        return [_to_plain(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _to_plain(value) for key, value in obj.items()}
+    if not isinstance(obj, dict):
+        plain = _to_dict(obj)
+        if plain:
+            if isinstance(plain, dict):
+                return {key: _to_plain(value) for key, value in plain.items()}
+            return _to_plain(plain)
+    if hasattr(obj, "__dict__"):
+        return {key: _to_plain(value) for key, value in vars(obj).items()}
+    return copy.deepcopy(obj)
+
+
+def _is_omegaconf_config(obj: Any) -> bool:
+    try:
+        from omegaconf import OmegaConf  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    return bool(OmegaConf.is_config(obj))
 
 
 def _stage_config_uses_async_chunk(stage_config: Any) -> bool:
