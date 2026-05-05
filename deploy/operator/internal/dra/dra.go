@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -74,8 +75,8 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 
 // ResourceClaimTemplateName returns the deterministic name for the
 // ResourceClaimTemplate associated with a component.
-func ResourceClaimTemplateName(parentName, serviceName string) string {
-	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(serviceName))
+func ResourceClaimTemplateName(parentName, componentName string) string {
+	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(componentName))
 }
 
 // ExtractGPUParams extracts the GPU count and device class name from API types
@@ -97,6 +98,20 @@ func ExtractGPUParams(gmsSpec *v1alpha1.GPUMemoryServiceSpec, resources *v1alpha
 		gpuCount, _ = strconv.Atoi(gpuStr)
 	}
 	return gpuCount, deviceClassName
+}
+
+func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements) (gpuCount int, deviceClassName string) {
+	if gmsSpec == nil {
+		return 0, ""
+	}
+	deviceClassName = gmsSpec.DeviceClassName
+	if q, ok := resources.Limits[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
+		return int(q.Value()), deviceClassName
+	}
+	if q, ok := resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
+		return int(q.Value()), deviceClassName
+	}
+	return 0, deviceClassName
 }
 
 // GenerateResourceClaimTemplate builds the ResourceClaimTemplate that provides

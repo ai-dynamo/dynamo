@@ -177,7 +177,9 @@ const (
 	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
 	// Rolling update annotations
-	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+	AnnotationCurrentWorkerHash        = "nvidia.com/current-worker-hash"
+	AnnotationCurrentWorkerHashVersion = "nvidia.com/current-worker-hash-version"
+	CurrentWorkerHashVersionV2         = "v2"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged

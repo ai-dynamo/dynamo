@@ -192,7 +192,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			}
 
 			// Call UpdateContainer
-			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -290,7 +290,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 				}
 			}
 
-			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(tt.initialContainer.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", tt.initialContainer.Args, tt.expectedArgs)
@@ -380,7 +380,7 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			}
 
 			// Call UpdateContainer
-			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
 
 			if tt.expectCacheEnvVar {
 				// Check that the VLLM_CACHE_ROOT environment variable is set
@@ -654,7 +654,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			}
 
 			// Call updateVLLMMultinodeArgs with annotations
-			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, resources, 2, tt.annotations)
+			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, betaResourceRequirements(t, resources), 2, tt.annotations)
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -846,7 +846,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
 			initialVolCount := len(tt.initialPodSpec.Volumes)
-			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			if tt.expectInitContainer {
 				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))
@@ -989,7 +989,7 @@ func TestShouldUseMpBackend(t *testing.T) {
 // backend-agnostic GMS helpers (see gmsEngineEnvVars).
 func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 	backend := &VLLMBackend{}
-	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeInterPod,
@@ -998,7 +998,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeInterPod,
 		},
-	}
+	})
 	container := &corev1.Container{
 		Command: []string{"python3"},
 		Args:    []string{"-m", "dynamo.vllm"},
@@ -1036,7 +1036,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 // inter-pod layout).
 func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 	backend := &VLLMBackend{}
-	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
 	container := &corev1.Container{
 		Command: []string{"python3"},
 		Args:    []string{"-m", "dynamo.vllm"},

@@ -8,7 +8,7 @@ package epp
 import (
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -32,14 +32,18 @@ var InferencePoolGVK = schema.GroupVersionKind{
 // This solves the chicken-and-egg problem: EPP needs the pool name, pool needs EPP service
 // Using the stable inference.networking.k8s.io/v1 API (per PR #5592)
 func GenerateInferencePool(
-	dgd *v1alpha1.DynamoGraphDeployment,
+	dgd *v1beta1.DynamoGraphDeployment,
 	componentName string,
 	eppServiceName string,
-	eppConfig *v1alpha1.EPPConfig,
+	eppConfig *v1beta1.EPPConfig,
 ) (*gaiev1.InferencePool, error) {
 	poolName := GetPoolName(dgd.Name, eppConfig)
 	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
-	dynamoNamespace := dgd.GetDynamoNamespaceForService(dgd.Spec.Services[componentName])
+	component := dgd.GetComponentByName(componentName)
+	if component == nil {
+		return nil, fmt.Errorf("service %q not found", componentName)
+	}
+	dynamoNamespace := dgd.GetDynamoNamespaceForComponent(component)
 
 	// Build InferencePool using typed API
 	pool := &gaiev1.InferencePool{
@@ -76,11 +80,11 @@ func GenerateInferencePool(
 }
 
 // GetPoolName returns the InferencePool name for a given DGD
-func GetPoolName(dgdName string, eppConfig *v1alpha1.EPPConfig) string {
+func GetPoolName(dgdName string, eppConfig *v1beta1.EPPConfig) string {
 	return fmt.Sprintf("%s-pool", dgdName)
 }
 
 // GetPoolNamespace returns the InferencePool namespace for a given DGD
-func GetPoolNamespace(dgdNamespace string, eppConfig *v1alpha1.EPPConfig) string {
+func GetPoolNamespace(dgdNamespace string, eppConfig *v1beta1.EPPConfig) string {
 	return dgdNamespace
 }
