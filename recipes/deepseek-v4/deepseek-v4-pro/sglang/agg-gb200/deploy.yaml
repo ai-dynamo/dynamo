@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4-Pro SGLang Aggregated Serving on GB200
+#
+# Topology: 2 nodes x 4 GPUs = TP8 (NCCL over Socket)
+#
+# EAGLE disabled: crashes on long context (>18k) and tool calling on TP8
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-dsv4-pro-agg
+  namespace: <your-namespace>
+spec:
+  envs:
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+      value: "0"
+    - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+  pvcs:
+    - name: shared-model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - deepseek-ai/DeepSeek-V4-Pro
+            - --served-model-name
+            - deepseek-ai/DeepSeek-V4-Pro
+            - --trust-remote-code
+            - --tp
+            - "8"
+            - --moe-runner-backend
+            - flashinfer_mxfp4
+            - --chunked-prefill-size
+            - "4096"
+            - --disable-flashinfer-autotune
+            - --dyn-tool-call-parser
+            - deepseek_v4
+            - --dyn-reasoning-parser
+            - deepseek_v4
+            - --watchdog-timeout
+            - "3600"
+          env:
+            # TODO: Remove LD_PRELOAD + NCCL Socket overrides once the image
+            # bundles a working NCCL for multi-node. Current image ships
+            # pynccl 2.27.7 which lacks Socket transport; LD_PRELOAD forces
+            # system NCCL 2.28.9. The NCCL_NET=Socket block is required for
+            # multi-node TP over TCP (no RDMA/NVLink between nodes).
+            - name: LD_PRELOAD
+              value: /usr/lib/aarch64-linux-gnu/libnccl.so.2
+            - name: NCCL_NET
+              value: Socket
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_P2P_DISABLE
+              value: "1"
+            - name: NCCL_SHM_DISABLE
+              value: "1"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_DEBUG
+              value: WARN
+          resources: {}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 540

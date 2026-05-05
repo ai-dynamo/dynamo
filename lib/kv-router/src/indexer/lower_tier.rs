@@ -20,7 +20,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::{KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
@@ -263,13 +263,7 @@ impl LowerTierIndexer {
                     return Err(KvCacheEventError::BlockNotFound);
                 };
 
-                let remove_edge = match self.edges.get_mut(&key) {
-                    Some(mut edge) => edge.remove(worker),
-                    None => false,
-                };
-                if remove_edge {
-                    self.edges.remove(&key);
-                }
+                self.remove_worker_from_edge(key, worker);
             }
 
             worker_map.is_empty()
@@ -304,13 +298,15 @@ impl LowerTierIndexer {
         };
 
         for (_, key) in worker_map {
-            let remove_edge = match self.edges.get_mut(&key) {
-                Some(mut edge) => edge.remove(worker),
-                None => false,
-            };
-            if remove_edge {
-                self.edges.remove(&key);
-            }
+            self.remove_worker_from_edge(key, worker);
+        }
+    }
+
+    fn remove_worker_from_edge(&self, key: TransitionKey, worker: WorkerWithDpRank) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut edge) = self.edges.entry(key)
+            && edge.get_mut().remove(worker)
+        {
+            edge.remove();
         }
     }
 
@@ -522,6 +518,11 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_worker(&mut worker_blocks, worker_id);
                 }
@@ -530,6 +531,14 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
+                }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        worker_blocks
+                            .iter()
+                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                    );
+                    let _ = sender.send(stats);
                 }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());

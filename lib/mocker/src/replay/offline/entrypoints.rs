@@ -86,6 +86,7 @@ pub(crate) fn generate_trace_worker_artifacts(
         artifacts
             .kv_events
             .extend(pass.kv_events.into_iter().map(|event| ReplayTimedKvEvent {
+                storage_tier: event.storage_tier,
                 event: event.event,
                 timestamp_us: kv_event_timestamp_us,
             }));

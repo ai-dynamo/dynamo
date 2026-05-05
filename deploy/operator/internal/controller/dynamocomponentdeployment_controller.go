@@ -943,6 +943,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
+		if dynamo.IsIntraPodFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+		}
 		checkpointInfo = info
 	}
 
@@ -958,6 +961,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			opt.dynamoComponentDeployment.Namespace,
 			podSpec,
 			checkpointInfo,
+			r.Config.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, errors.Wrap(err, "failed to inject checkpoint config")
 		}

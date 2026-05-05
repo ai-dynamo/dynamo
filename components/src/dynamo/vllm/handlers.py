@@ -66,7 +66,11 @@ from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.model import (
+    ModelFamily,
+    construct_qwen_decode_mm_data,
+    resolve_model_family,
+)
 from .multimodal_utils.models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
@@ -115,19 +119,40 @@ class _DeferredAbort:
             self._first_token_event.set()
 
     async def abort(self) -> None:
-        """Abort immediately if first token received, otherwise defer."""
-        if self._first_token_received:
+        """Abort the request. Creates a Task to hold a strong reference so the
+        engine abort cannot be dropped if this coroutine is concurrently
+        cancelled."""
+        if self._abort_task is None:
+            if self._first_token_received:
+                logger.debug(
+                    f"Deferred abort: first token already received, "
+                    f"aborting request {self._request_id} now"
+                )
+                self._abort_task = asyncio.create_task(self._run_abort())
+            else:
+                logger.debug(
+                    f"Deferred abort: first token not received for request "
+                    f"{self._request_id}, spawning background task"
+                )
+                self._abort_task = asyncio.create_task(self._wait_and_abort())
+        try:
+            await self._abort_task
+        except asyncio.CancelledError:
+            logger.debug(
+                f"Deferred abort: shielded from cancellation for request "
+                f"{self._request_id}, abort continues in background"
+            )
+
+    async def _run_abort(self) -> None:
+        """Execute engine.abort() and emit the canonical completion log."""
+        try:
             await self._engine_client.abort(self._request_id)
-            logger.debug(
-                f"Deferred abort: first token already received, "
-                f"aborting request {self._request_id} now"
+            logger.debug(f"Aborted Request ID: {self._request_id}")
+        except Exception as e:
+            logger.warning(
+                f"Deferred abort: engine abort raised for request "
+                f"{self._request_id}: {e}"
             )
-        elif self._abort_task is None:
-            logger.debug(
-                f"Deferred abort: first token not received for request "
-                f"{self._request_id}, spawning background task"
-            )
-            self._abort_task = asyncio.create_task(self._wait_and_abort())
 
     async def _wait_and_abort(self) -> None:
         """Background task: wait for first token, then abort."""
@@ -135,17 +160,7 @@ class _DeferredAbort:
             await self._first_token_event.wait()
         except Exception:
             pass
-        try:
-            await self._engine_client.abort(self._request_id)
-            logger.debug(
-                f"Deferred abort: background task fired abort for request "
-                f"{self._request_id}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Deferred abort: background abort failed for request "
-                f"{self._request_id}: {e}"
-            )
+        await self._run_abort()
 
     async def close(self) -> None:
         """Clean up the deferred-abort waiter when generation exits.
@@ -858,14 +873,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
 
-            # Abort the request (via guard if provided, otherwise direct)
+            # Log intent before the abort — synchronous, no await, so it is
+            # guaranteed to appear even if this task is concurrently cancelled
+            # by _abort_monitor's cleanup.
+            logger.debug(
+                f"Aborting {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
+
+            # Abort the request (via guard if provided, otherwise direct).
             if abort_guard is not None:
+                # Guard owns completion logging: "Aborted Request ID:" is
+                # emitted from _run_abort() once engine.abort() returns,
+                # even if this task is concurrently cancelled.
                 await abort_guard.abort()
             else:
-                await self.engine_client.abort(request_id)
-            logger.debug(
-                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
-            )
+                # No guard: shield the abort so a concurrent CancelledError
+                # from _abort_monitor cleanup cannot interrupt it mid-flight.
+                try:
+                    await asyncio.shield(self.engine_client.abort(request_id))
+                except asyncio.CancelledError:
+                    logger.debug(
+                        f"Abort shielded from cancellation for request "
+                        f"{request_id}, continuing in background"
+                    )
+                logger.debug(
+                    f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                )
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
@@ -2106,7 +2139,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         pre_rendered: Dict[str, Any] | None = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
-            if is_qwen_vl_model(self.config.model):
+            if resolve_model_family(self.config.model) is ModelFamily.QWEN_VL:
                 # Qwen VL needs embedding_params for mRoPE initialization.
                 if embedding_params is not None:
                     multi_modal_data = construct_qwen_decode_mm_data(
@@ -2402,7 +2435,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Cache Qwen VL grid parameters for computing image_grid_thw from
         # PIL images in the P/D path (no separate encode worker).
-        if is_qwen_vl_model(config.model):
+        if resolve_model_family(config.model) is ModelFamily.QWEN_VL:
             self._qwen_grid_params = load_qwen_grid_params(config.model)
             if self._qwen_grid_params is None and self.embedding_loader is None:
                 logger.error(
@@ -2569,7 +2602,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     ) -> Dict[str, Any] | None:
         # [gluo NOTE] there could be different model architectures that
         # need different embedding params, will add more logic if needed
-        if not is_qwen_vl_model(self.config.model):
+        if resolve_model_family(self.config.model) is not ModelFamily.QWEN_VL:
             # For non-qwen models, vLLM doesn't trigger mm preprocess so
             # decode worker only needs expanded prompt to properly fetch KV blocks
             # from prefill.

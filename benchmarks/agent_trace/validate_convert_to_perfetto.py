@@ -237,7 +237,7 @@ def check_convert_records_emits_tool_duration_slices():
                 "event": {
                     "schema": "dynamo.agent.trace.v1",
                     "event_type": "tool_end",
-                    "event_time_unix_ms": 1250,
+                    "event_time_unix_ms": 1300,
                     "event_source": "harness",
                     "agent_context": {
                         "workflow_type_id": "ms_agent",
@@ -248,6 +248,8 @@ def check_convert_records_emits_tool_duration_slices():
                         "tool_call_id": "call-1",
                         "tool_class": "web_search",
                         "status": "succeeded",
+                        "started_at_unix_ms": 1000,
+                        "ended_at_unix_ms": 1250,
                         "duration_ms": 250,
                         "output_bytes": 2048,
                     },
@@ -270,6 +272,8 @@ def check_convert_records_emits_tool_duration_slices():
     assert tool_event["ts"] == 1_000_000
     assert tool_event["dur"] == 250_000
     assert tool_event["args"]["tool_call_id"] == "call-1"
+    assert tool_event["args"]["started_at_unix_ms"] == 1000
+    assert tool_event["args"]["ended_at_unix_ms"] == 1250
     assert tool_event["args"]["output_bytes"] == 2048
 
     thread_names = [

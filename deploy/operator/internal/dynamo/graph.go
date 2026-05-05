@@ -1124,6 +1124,11 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
 // with images that may expect to run as root.
 // User-provided security context values (via extraPodSpec) will override these defaults.
+//
+// Note: OpenShift's restricted-v2 SCC rejects pods with fsGroup outside the
+// namespace's allocated UID range. To run on OpenShift, bind a permissive SCC
+// (anyuid / anyuid-v2) to the workload service account, or have the user
+// supply an extraPodSpec.securityContext with an in-range value.
 func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 	// Initialize SecurityContext if not present
 	if podSpec.SecurityContext == nil {
@@ -1361,7 +1366,7 @@ func GenerateBasePodSpec(
 
 	// Clone main container into two engine containers (active + standby) for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
-	if isFailoverEnabled(component) {
+	if IsIntraPodFailoverEnabled(component) {
 		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
@@ -1565,9 +1570,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	if p.operatorConfig.Checkpoint.Enabled {
+	// GMS weight servers load weights fresh from disk and are not CRIU targets.
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
 		}
@@ -1644,7 +1651,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	if p.r.Role != RoleGMS {
+		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 
