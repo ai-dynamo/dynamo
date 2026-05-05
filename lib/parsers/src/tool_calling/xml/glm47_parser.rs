@@ -650,4 +650,63 @@ mod tests {
             "Should fall back to string when coercion fails"
         );
     }
+
+    /// Parser-level invariant: the glm47 parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output regardless of the
+    /// upstream stream-end reason. Real CASE.12 coverage (stop / tool_calls
+    /// / length mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs`
+    /// and belongs in the cross-parser finish_reason mapping work-item
+    /// (tracked separately).
+    #[test]
+    fn test_glm47_parser_output_independent_of_upstream_finish() {
+        let config = get_test_config();
+        let input = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// and whitespace-only inputs must yield no tool calls; normal_text
+    /// collapses to the empty string.
+    #[test] // CASE.14
+    fn test_parse_glm47_empty_and_whitespace_inputs() {
+        let config = get_test_config();
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) = try_tool_call_parse_glm47(input, &config, None).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text (input={:?})",
+                input
+            );
+        }
+    }
+
+    /// CASE.15 — duplicate calls (same function name twice in one section).
+    /// Universal gap noted in the test taxonomy; pin parser-level behavior —
+    /// both calls returned with distinct ids.
+    #[test] // CASE.15
+    fn test_parse_glm47_duplicate_calls_same_name() {
+        let config = get_test_config();
+        let input = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>LA</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2, "Both duplicate-name calls must be returned");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let args0: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: HashMap<String, Value> =
+            serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0.get("location").unwrap().as_str().unwrap(), "NYC");
+        assert_eq!(args1.get("location").unwrap().as_str().unwrap(), "LA");
+    }
 }

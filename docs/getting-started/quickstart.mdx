@@ -16,7 +16,7 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
   <Card title="Local Installation" icon="regular laptop-code" href="/dynamo/dev/getting-started/local-installation">
     Full walkthrough — PyPI, configuration.
   </Card>
-  <Card title="Kubernetes" icon="regular cubes" href="/dynamo/dev/kubernetes">
+  <Card title="Kubernetes" icon="regular cubes" href="/dynamo/dev/getting-started/kubernetes-deployment">
     Production multi-node clusters.
   </Card>
   <Card title="Build from Source" icon="regular code-branch" href="/dynamo/dev/getting-started/building-from-source">
@@ -144,16 +144,16 @@ Connection refused? The frontend takes a few seconds to start — retry. For pro
 Pick a full install path from the [four options above](#choose-your-path), or explore how Dynamo works under the hood:
 
 <CardGroup cols={2}>
-  <Card title="Architecture" icon="regular sitemap" href="/dynamo/dev/design-docs/architecture">
+  <Card title="Architecture" icon="regular sitemap" href="/dynamo/dev/design-docs/overall-architecture">
     How the frontend, router, and workers fit together.
   </Card>
   <Card title="Frontend Guide" icon="regular bolt" href="/dynamo/dev/components/frontend">
     Worker discovery, multi-model routing, OpenAI compat.
   </Card>
-  <Card title="KV Cache Aware Routing" icon="regular route" href="/dynamo/dev/components/router/router-concepts#kv-cache-routing">
+  <Card title="KV Cache Aware Routing" icon="regular route" href="/dynamo/dev/components/router/routing-concepts#kv-cache-routing">
     How the router places requests for prefix reuse.
   </Card>
-  <Card title="Health Checks" icon="regular heart-pulse" href="/dynamo/dev/observability/health-checks">
+  <Card title="Health Checks" icon="regular heart-pulse" href="/dynamo/dev/user-guides/observability-local/health-checks">
     Liveness and readiness probes for production deployments.
   </Card>
 </CardGroup>
