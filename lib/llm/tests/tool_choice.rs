@@ -871,3 +871,371 @@ async fn test_deepseek_v4_tool_choice_named_wrong_tool_filtered() {
         );
     }
 }
+
+// --- glm47 × tool_choice variants ---
+
+const GLM47_GET_WEATHER: &str =
+    "<tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call>";
+const GLM47_SEARCH: &str =
+    "<tool_call>search<arg_key>query</arg_key><arg_value>Paris weather</arg_value></tool_call>";
+
+/// `CASE.11` — glm47 + tool_choice=auto. Parser path detects the call and
+/// emits it.
+#[tokio::test]
+async fn test_glm47_tool_choice_auto() {
+    let responses = apply_jail_with_parser_and_choice(GLM47_GET_WEATHER, "glm47", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "auto + parser path must emit the parsed call; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+    assert_eq!(args["location"], "Paris");
+}
+
+/// `CASE.11` — glm47 + tool_choice=required. Same parser-vs-immediate
+/// conflict as the kimi_k2 / deepseek_v4 counterparts. Pin current behavior.
+///
+/// TODO(CASE.11) — required + parser path is ill-defined; reconciled by
+/// the cross-parser tool_choice parametrisation work-item. Flip when fixed.
+#[tokio::test]
+async fn test_glm47_tool_choice_required_pins_current_behavior() {
+    let responses = apply_jail_with_parser_and_choice(
+        GLM47_GET_WEATHER,
+        "glm47",
+        Some(ChatCompletionToolChoiceOption::Required),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert!(
+        calls.len() <= 1,
+        "required + parser path should produce at most one call until the \
+         immediate-vs-parser conflict is resolved; got {:?}",
+        calls
+    );
+}
+
+/// `CASE.11` — glm47 + tool_choice=named with the **correct** tool name.
+#[tokio::test]
+async fn test_glm47_tool_choice_named_correct_tool_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(GLM47_GET_WEATHER, "glm47", named_choice("get_weather"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "correct named tool must pass; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+}
+
+/// `CASE.11` — glm47 + tool_choice=named with the **wrong** tool name.
+#[tokio::test]
+async fn test_glm47_tool_choice_named_wrong_tool_filtered() {
+    let responses =
+        apply_jail_with_parser_and_choice(GLM47_SEARCH, "glm47", named_choice("get_weather")).await;
+    let calls = collect_tool_calls(&responses);
+    for (name, _) in &calls {
+        assert_ne!(
+            name, "search",
+            "wrong tool must be filtered by named_tool_filter; got {:?}",
+            calls
+        );
+    }
+}
+
+// --- minimax_m2 × tool_choice variants ---
+
+const MINIMAX_M2_GET_WEATHER: &str = "<minimax:tool_call><invoke name=\"get_weather\"><parameter name=\"location\">Paris</parameter></invoke></minimax:tool_call>";
+const MINIMAX_M2_SEARCH: &str = "<minimax:tool_call><invoke name=\"search\"><parameter name=\"query\">Paris weather</parameter></invoke></minimax:tool_call>";
+
+#[tokio::test]
+async fn test_minimax_m2_tool_choice_auto() {
+    let responses =
+        apply_jail_with_parser_and_choice(MINIMAX_M2_GET_WEATHER, "minimax_m2", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "auto + parser path must emit the parsed call; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+    assert_eq!(args["location"], "Paris");
+}
+
+/// TODO(CASE.11) — see kimi_k2 counterpart. Flip when cross-parser
+/// tool_choice parametrisation work-item reconciles paths.
+#[tokio::test]
+async fn test_minimax_m2_tool_choice_required_pins_current_behavior() {
+    let responses = apply_jail_with_parser_and_choice(
+        MINIMAX_M2_GET_WEATHER,
+        "minimax_m2",
+        Some(ChatCompletionToolChoiceOption::Required),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert!(
+        calls.len() <= 1,
+        "required + parser path should produce at most one call; got {:?}",
+        calls
+    );
+}
+
+#[tokio::test]
+async fn test_minimax_m2_tool_choice_named_correct_tool_passes() {
+    let responses = apply_jail_with_parser_and_choice(
+        MINIMAX_M2_GET_WEATHER,
+        "minimax_m2",
+        named_choice("get_weather"),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "correct named tool must pass; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+}
+
+#[tokio::test]
+async fn test_minimax_m2_tool_choice_named_wrong_tool_filtered() {
+    let responses = apply_jail_with_parser_and_choice(
+        MINIMAX_M2_SEARCH,
+        "minimax_m2",
+        named_choice("get_weather"),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    for (name, _) in &calls {
+        assert_ne!(
+            name, "search",
+            "wrong tool must be filtered; got {:?}",
+            calls
+        );
+    }
+}
+
+// --- qwen3_coder × tool_choice variants ---
+
+const QWEN3_GET_WEATHER: &str = "<tool_call>\n<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
+const QWEN3_SEARCH: &str = "<tool_call>\n<function=search>\n<parameter=query>\nParis weather\n</parameter>\n</function>\n</tool_call>";
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_auto() {
+    let responses = apply_jail_with_parser_and_choice(QWEN3_GET_WEATHER, "qwen3_coder", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "auto + parser path must emit the parsed call; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+    assert_eq!(args["location"], "Paris");
+}
+
+/// TODO(CASE.11) — see kimi_k2 counterpart.
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_required_pins_current_behavior() {
+    let responses = apply_jail_with_parser_and_choice(
+        QWEN3_GET_WEATHER,
+        "qwen3_coder",
+        Some(ChatCompletionToolChoiceOption::Required),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert!(
+        calls.len() <= 1,
+        "required + parser path should produce at most one call; got {:?}",
+        calls
+    );
+}
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_named_correct_tool_passes() {
+    let responses = apply_jail_with_parser_and_choice(
+        QWEN3_GET_WEATHER,
+        "qwen3_coder",
+        named_choice("get_weather"),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "correct named tool must pass; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+}
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_named_wrong_tool_filtered() {
+    let responses =
+        apply_jail_with_parser_and_choice(QWEN3_SEARCH, "qwen3_coder", named_choice("get_weather"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    for (name, _) in &calls {
+        assert_ne!(
+            name, "search",
+            "wrong tool must be filtered; got {:?}",
+            calls
+        );
+    }
+}
+
+// --- nemotron_deci × tool_choice variants ---
+
+const NEMOTRON_DECI_GET_WEATHER: &str =
+    "<TOOLCALL>[{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Paris\"}}]</TOOLCALL>";
+const NEMOTRON_DECI_SEARCH: &str =
+    "<TOOLCALL>[{\"name\":\"search\",\"arguments\":{\"query\":\"Paris weather\"}}]</TOOLCALL>";
+
+#[tokio::test]
+async fn test_nemotron_deci_tool_choice_auto() {
+    let responses =
+        apply_jail_with_parser_and_choice(NEMOTRON_DECI_GET_WEATHER, "nemotron_deci", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "auto + parser path must emit the parsed call; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+    assert_eq!(args["location"], "Paris");
+}
+
+/// TODO(CASE.11) — see kimi_k2 counterpart.
+#[tokio::test]
+async fn test_nemotron_deci_tool_choice_required_pins_current_behavior() {
+    let responses = apply_jail_with_parser_and_choice(
+        NEMOTRON_DECI_GET_WEATHER,
+        "nemotron_deci",
+        Some(ChatCompletionToolChoiceOption::Required),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert!(
+        calls.len() <= 1,
+        "required + parser path should produce at most one call; got {:?}",
+        calls
+    );
+}
+
+#[tokio::test]
+async fn test_nemotron_deci_tool_choice_named_correct_tool_passes() {
+    let responses = apply_jail_with_parser_and_choice(
+        NEMOTRON_DECI_GET_WEATHER,
+        "nemotron_deci",
+        named_choice("get_weather"),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "correct named tool must pass; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+}
+
+#[tokio::test]
+async fn test_nemotron_deci_tool_choice_named_wrong_tool_filtered() {
+    let responses = apply_jail_with_parser_and_choice(
+        NEMOTRON_DECI_SEARCH,
+        "nemotron_deci",
+        named_choice("get_weather"),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    for (name, _) in &calls {
+        assert_ne!(
+            name, "search",
+            "wrong tool must be filtered; got {:?}",
+            calls
+        );
+    }
+}
+
+// --- harmony (gpt-oss) × tool_choice variants ---
+
+const HARMONY_GET_WEATHER: &str = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
+const HARMONY_SEARCH: &str = "<|channel|>commentary to=functions.search <|constrain|>json<|message|>{\"query\":\"Paris weather\"}<|call|>";
+
+#[tokio::test]
+async fn test_harmony_tool_choice_auto() {
+    let responses = apply_jail_with_parser_and_choice(HARMONY_GET_WEATHER, "harmony", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "auto + parser path must emit the parsed call; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+    assert_eq!(args["location"], "Paris");
+}
+
+/// TODO(CASE.11) — see kimi_k2 counterpart.
+#[tokio::test]
+async fn test_harmony_tool_choice_required_pins_current_behavior() {
+    let responses = apply_jail_with_parser_and_choice(
+        HARMONY_GET_WEATHER,
+        "harmony",
+        Some(ChatCompletionToolChoiceOption::Required),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert!(
+        calls.len() <= 1,
+        "required + parser path should produce at most one call; got {:?}",
+        calls
+    );
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_named_correct_tool_passes() {
+    let responses = apply_jail_with_parser_and_choice(
+        HARMONY_GET_WEATHER,
+        "harmony",
+        named_choice("get_weather"),
+    )
+    .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(
+        calls.len(),
+        1,
+        "correct named tool must pass; got {:?}",
+        calls
+    );
+    assert_eq!(calls[0].0, "get_weather");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_named_wrong_tool_filtered() {
+    let responses =
+        apply_jail_with_parser_and_choice(HARMONY_SEARCH, "harmony", named_choice("get_weather"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    for (name, _) in &calls {
+        assert_ne!(
+            name, "search",
+            "wrong tool must be filtered; got {:?}",
+            calls
+        );
+    }
+}
