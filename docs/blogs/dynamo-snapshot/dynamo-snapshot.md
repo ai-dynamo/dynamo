@@ -142,17 +142,6 @@ Where the storage backend supports it, both anonymous and shared memory reads us
 
 Even more importantly, Linux native AIO is only truly asynchronous on files opened with `O_DIRECT`. On filesystems where `O_DIRECT` is unavailable or unreliable, such as some NFS deployments, restore falls back to buffered I/O with sequential readahead so the kernel still sees a predictable streaming access pattern, but the gains from AIO are significantly reduced.
 
-### I/O Configuration for CRIU Restore Performance
-Restore performance is sensitive to several I/O configuration choices:
-
-| Feature | What to configure | Impact |
-| --- | --- | --- |
-| Storage throughput cap | MiB/s per share/volume | Hard ceiling on read speed; also depends on share/volume size |
-| Protocol | NFS version, SMB/CIFS | NFSv4.1+ preferred on Linux; SMB/CIFS can work but may need tuning for large sequential reads |
-| O_DIRECT | Mount option or per-fd flag | Bypasses the host page cache; supported on NFS, not always on SMB. Falls back to buffered I/O with sequential read-ahead where unsupported |
-| rsize | NFS mount option | Maximum read size per NFS operation; larger values increase throughput up to a limit |
-| nconnect | NFS mount option | Number of parallel TCP connections to the NFS server; helps saturate available storage bandwidth |
-
 ### Results
 On the same setup, we saw a massive improvement in CRIU restore time, and it is now significantly faster to restore from checkpoint than to cold start an inference worker:
 
