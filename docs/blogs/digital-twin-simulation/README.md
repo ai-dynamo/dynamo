@@ -267,34 +267,29 @@ changing load.
 
 ### 2.5 KV Block Manager Simulation
 
-Current KVBM simulation work is focused on local G1-to-G2 behavior in the
-mocker/replay path. G1 is the scheduler-visible GPU KV capacity. When KVBM
-offload is enabled, evicted G1 blocks can be handed to an in-process KVBM
-offload engine, registered in a real `BlockManager<G2>`, and later swapped back
-into G1 with simulated transfer delay when a request finds a G2 prefix hit.
-Live mode drives this path with wall-clock time; offline replay drives the same
-hot path with virtual time from the DES loop.
+KVBM manages KV blocks across the serving memory hierarchy: local HBM, host
+memory, SSD, and distributed or remote cache. In the digital twin, the goal is
+to model those block movements as events that affect the same timeline as engine
+scheduling, routing, and planning: offload completion, swap-in completion,
+remote-cache availability, and eviction.
 
-There are two different claims to keep separate.
+There are two complementary parts to that plan.
 
-Today, the simulation can represent KV-related effects where they are hooked into
-the replay path, such as handoff delay between stages and local cache/offload
-effects that influence engine progress.
+The first is simulation inside replay. The twin can model the timing and resource
+effects of local and lower-tier KV behavior: G1 pressure, G2 swap-in and
+offload, transfer bandwidth, tier capacity, and eventually G3 or remote tiers.
+This lets us test cache policies under a fixed workload without requiring every
+idea to start as a full cluster experiment.
 
-Near-future work is to treat KVBM as a first-class DES component in the same
-style as the router and planner. In that model, cache movement, placement, and
-memory hierarchy behavior would schedule their own events and feed back into
-engine, router, and planner decisions.
-
-For distributed cache and CMX, the public wording should stay in roadmap
-territory. The current modeled path is local G2 with mock data movement and
-bandwidth-sensitive timing; extending that to shared lower tiers requires
-explicit models for cross-worker placement, topology, and shared-resource
-contention.
-
-The longer-term direction is distributed cache simulation: CMX-style
-cross-machine movement, topology-aware routing, bandwidth-sensitive placement,
-and policies for when to reuse, move, offload, or recompute KV.
+The second is a measurement loop for the real data plane. Replay can use the
+same synthetic or trace-derived request shapes to drive NIXL reads and writes
+against a distributed cache or CMX target. Those runs would give us concrete
+measurements for transfer cost, placement behavior, and contention, which can
+then calibrate the simulator instead of relying only on hand-tuned assumptions.
+Over time, those calibrated models become the basis for distributed cache
+simulation itself: CMX-style cross-machine movement, topology-aware routing,
+bandwidth-sensitive placement, and joint policies for when to reuse, move,
+offload, or recompute KV.
 
 ## 3. Optimization And Discovery With The Twin
 
