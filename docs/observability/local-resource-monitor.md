@@ -72,7 +72,7 @@ The exporter automatically identifies Dynamo inference processes and labels them
 
 ### Why a Dedicated Prometheus Instance?
 
-The GPU exporter is scraped at **100ms intervals** (10 samples/sec) to capture short-lived GPU memory spikes and PCIe bursts. Mixing these into the main Prometheus instance (which scrapes at 1-10s intervals) would:
+The GPU exporter is scraped at **200ms intervals** (5 samples/sec) to capture short-lived GPU memory spikes and PCIe bursts. (PCIe is sampled internally at 10/s; Prometheus visibility is bounded by the 5/s scrape rate.) Mixing these into the main Prometheus instance (which scrapes at 1-10s intervals) would:
 
 1. **Inflate TSDB storage** for all metrics — retention is global, not per-job
 2. **Increase resource pressure** on main Prometheus, risking query latency for Grafana dashboards and alerting
@@ -146,6 +146,6 @@ This exporter is designed for **high-frequency, per-process resource profiling**
 |---|---|---|
 | Per-process GPU memory | Yes | No (per-GPU totals only) |
 | PCIe bandwidth | Yes (10/s, dedicated subprocesses) | Yes |
-| Sample rate | 100ms (PCIe), 200ms (GPU/CPU), 1s (disk) | 5s |
+| Sample rate | 200ms (GPU/CPU/PCIe via Prometheus; PCIe internally 10/s), 1s (disk) | 5s |
 | CPU/disk/network | Yes | No |
 | Process identification | Yes (vLLM, SGLang, TRT-LLM aware) | No |

@@ -16,7 +16,7 @@
     ]
   },
   "_copyright": "SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0",
-  "description": "High-frequency per-process resource metrics (VRAM, GPU util, PCIe, CPU, disk, network) from dynamo_local_resource_monitor.py at 100ms resolution",
+  "description": "High-frequency per-process resource metrics (VRAM, GPU util, PCIe, CPU, disk, network) from dynamo_local_resource_monitor.py at 200ms resolution",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -44,7 +44,7 @@
         "uid": "dynamo-resource-monitor"
       },
       "type": "timeseries",
-      "interval": "100ms",
+      "interval": "200ms",
       "maxDataPoints": 5000,
       "gridPos": {
         "h": 12,

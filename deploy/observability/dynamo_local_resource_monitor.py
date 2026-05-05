@@ -212,18 +212,16 @@ def _extract_arg(cmdline: list[str], flag: str) -> str:
 
 def _pcie_worker(conn, gpu_idx):
     """Subprocess: sample PCIe TX/RX for one GPU at ~10/s."""
-    import pynvml as _nvml
-
-    _nvml.nvmlInit()
-    handle = _nvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-    TX = _nvml.NVML_PCIE_UTIL_TX_BYTES
-    RX = _nvml.NVML_PCIE_UTIL_RX_BYTES
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+    TX = pynvml.NVML_PCIE_UTIL_TX_BYTES
+    RX = pynvml.NVML_PCIE_UTIL_RX_BYTES
     while True:
         now = time.time()
         try:
-            tx = _nvml.nvmlDeviceGetPcieThroughput(handle, TX) / (1024.0 * 1024.0)
-            rx = _nvml.nvmlDeviceGetPcieThroughput(handle, RX) / (1024.0 * 1024.0)
-        except _nvml.NVMLError:
+            tx = pynvml.nvmlDeviceGetPcieThroughput(handle, TX) / (1024.0 * 1024.0)
+            rx = pynvml.nvmlDeviceGetPcieThroughput(handle, RX) / (1024.0 * 1024.0)
+        except pynvml.NVMLError:
             tx, rx = 0.0, 0.0
         conn.send(("pcie", now, gpu_idx, tx, rx))
         time.sleep(0.1)
@@ -231,26 +229,22 @@ def _pcie_worker(conn, gpu_idx):
 
 def _main_worker(conn, gpu_count, interval_sec):
     """Subprocess: CPU (overall + per-name groups) + GPU mem/util + network at 5/s; temperature at 1/s."""
-    import psutil as _ps
-
     handles = []
     if gpu_count > 0:
         try:
-            import pynvml as _nvml
-
-            _nvml.nvmlInit()
-            handles = [_nvml.nvmlDeviceGetHandleByIndex(i) for i in range(gpu_count)]
-        except Exception as exc:
+            pynvml.nvmlInit()
+            handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(gpu_count)]
+        except pynvml.NVMLError as exc:
             print(
                 f"[main_worker] NVML init failed ({exc}), GPU metrics disabled",
                 flush=True,
             )
             gpu_count = 0
-    _ps.cpu_percent(interval=None)
+    psutil.cpu_percent(interval=None)
     # Prime per-process cpu_percent so subsequent calls return real deltas
-    list(_ps.process_iter(["name", "cpu_percent"]))
-    ncpus = _ps.cpu_count() or 1
-    prev_net = _ps.net_io_counters()
+    list(psutil.process_iter(["name", "cpu_percent"]))
+    ncpus = psutil.cpu_count() or 1
+    prev_net = psutil.net_io_counters()
     last_mono = time.monotonic()
     # Temperature changes slowly; sample at ~1/s by collecting every temp_every-th cycle.
     temp_every = max(1, round(1.0 / (1.0 * interval_sec)))
@@ -262,16 +256,16 @@ def _main_worker(conn, gpu_count, interval_sec):
         dt = mono - last_mono
         if dt <= 0:
             dt = interval_sec
-        cpu = _ps.cpu_percent(interval=None)
+        cpu = psutil.cpu_percent(interval=None)
         # Per-process CPU grouped by name, normalised to total CPU capacity (0-100%)
         cpu_by_name: dict[str, float] = {}
-        for p in _ps.process_iter(["name", "cpu_percent"]):
+        for p in psutil.process_iter(["name", "cpu_percent"]):
             try:
                 name = p.info["name"] or "?"
                 pct = p.info["cpu_percent"] or 0.0
                 if pct > 0:
                     cpu_by_name[name] = cpu_by_name.get(name, 0.0) + pct
-            except (_ps.NoSuchProcess, _ps.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         for k in cpu_by_name:
             cpu_by_name[k] /= ncpus
@@ -280,28 +274,28 @@ def _main_worker(conn, gpu_count, interval_sec):
         for gi, h in enumerate(handles):
             proc_mem: dict[int, float] = {}
             for getter in (
-                _nvml.nvmlDeviceGetComputeRunningProcesses,
-                _nvml.nvmlDeviceGetGraphicsRunningProcesses,
+                pynvml.nvmlDeviceGetComputeRunningProcesses,
+                pynvml.nvmlDeviceGetGraphicsRunningProcesses,
             ):
                 try:
                     for p in getter(h):
                         mem_gib = (p.usedGpuMemory or 0) / (1024**3)
                         proc_mem[p.pid] = proc_mem.get(p.pid, 0.0) + mem_gib
-                except _nvml.NVMLError:
+                except pynvml.NVMLError:
                     pass
             try:
-                util = _nvml.nvmlDeviceGetUtilizationRates(h).gpu
-            except _nvml.NVMLError:
+                util = pynvml.nvmlDeviceGetUtilizationRates(h).gpu
+            except pynvml.NVMLError:
                 util = 0.0
             if collect_temp:
                 try:
                     prev_temps[gi] = float(
-                        _nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU)
+                        pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
                     )
-                except _nvml.NVMLError:
+                except pynvml.NVMLError:
                     pass
             gpu_data.append((proc_mem, util, prev_temps[gi]))
-        net = _ps.net_io_counters()
+        net = psutil.net_io_counters()
         sent_rate = (net.bytes_sent - prev_net.bytes_sent) / (1024 * 1024) / dt
         recv_rate = (net.bytes_recv - prev_net.bytes_recv) / (1024 * 1024) / dt
         prev_net = net
@@ -313,9 +307,7 @@ def _main_worker(conn, gpu_count, interval_sec):
 
 def _disk_worker(conn, interval_sec):
     """Subprocess: aggregate disk I/O (1/s)."""
-    import psutil as _ps
-
-    prev = _ps.disk_io_counters()
+    prev = psutil.disk_io_counters()
     last_mono = time.monotonic()
     while True:
         now = time.time()
@@ -323,7 +315,7 @@ def _disk_worker(conn, interval_sec):
         dt = mono - last_mono
         if dt <= 0:
             dt = interval_sec
-        cur = _ps.disk_io_counters()
+        cur = psutil.disk_io_counters()
         read_mbps = (cur.read_bytes - prev.read_bytes) / (1024 * 1024) / dt
         write_mbps = (cur.write_bytes - prev.write_bytes) / (1024 * 1024) / dt
         prev = cur
@@ -410,7 +402,6 @@ class PrometheusUpdater:
 
     def __init__(self, gpu_count: int):
         self.gpu_count = gpu_count
-        self.lock = threading.Lock()
         # Track known GPU process PIDs so we can clear stale ones
         self._gpu_proc_pids: list[set[int]] = [set() for _ in range(gpu_count)]
         self._gpu_proc_names: dict[int, str] = {}
@@ -435,7 +426,7 @@ class PrometheusUpdater:
         # Per-process-name CPU usage
         if cpu_by_name:
             # Clear old labels and set current values
-            CPU_PROC_PCT._metrics.clear()
+            CPU_PROC_PCT.clear()
             for name, pct in cpu_by_name.items():
                 if pct > 0.1:
                     CPU_PROC_PCT.labels(process_name=name).set(pct)
@@ -456,6 +447,7 @@ class PrometheusUpdater:
             for pid in stale:
                 name = self._gpu_proc_names.get(pid, f"pid:{pid}")
                 GPU_MEM_USED_GIB.remove(gi_str, str(pid), name)
+                self._gpu_proc_names.pop(pid, None)
             self._gpu_proc_pids[gi] = set(proc_mem.keys())
 
             for pid, mem_gib in proc_mem.items():
