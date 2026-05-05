@@ -177,18 +177,24 @@ navigation:
         path: features/lora/README.md
       - section: Agents
         slug: agents
-        path: features/agentic_workloads.md
+        path: agents/README.md
         contents:
-          - page: Agent Context and Tracing
+          - page: Agent Context
             path: agents/agent-context.md
+          - page: Agent Tracing
+            path: agents/agent-tracing.md
+          - page: ATIF Alignment
+            path: agents/atif-alignment.md
+          - page: Agent Hints
+            path: agents/agent-hints.md
+          - page: Chat Processors
+            path: agents/chat-processor-options.md
+          - page: Tool Calling
+            path: agents/tool-calling.md
+          - page: Reasoning
+            path: agents/reasoning.md
           - page: SGLang for Agentic Workloads
             path: backends/sglang/agents.md
-      - page: Chat Processors
-        path: agents/chat-processor-options.md
-      - page: Tool Calling
-        path: agents/tool-calling.md
-      - page: Reasoning
-        path: agents/reasoning.md
       - section: Observability (Local)
         path: observability/README.md
         contents:

@@ -486,10 +486,10 @@ mod tests {
             event_time_unix_ms: 1000,
             event_source: TraceEventSource::Dynamo,
             agent_context: AgentContext {
-                workflow_type_id: "ms_agent".to_string(),
-                workflow_id: "run-1".to_string(),
-                program_id: "run-1:agent".to_string(),
-                parent_program_id: None,
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-1".to_string(),
+                trajectory_id: "run-1:agent".to_string(),
+                parent_trajectory_id: None,
             },
             request: Some(AgentRequestMetrics {
                 request_id: "req-123".to_string(),
@@ -541,7 +541,7 @@ mod tests {
         }
         assert!(content.contains("\"event_type\":\"request_end\""));
         assert!(content.contains("\"request_id\":\"req-123\""));
-        assert!(content.contains("\"workflow_id\":\"run-1\""));
+        assert!(content.contains("\"session_id\":\"run-1\""));
     }
 
     #[tokio::test]
@@ -591,7 +591,7 @@ mod tests {
         }
 
         assert_eq!(content.matches("\"event_type\":\"request_end\"").count(), 2);
-        assert!(content.contains("\"workflow_id\":\"run-1\""));
+        assert!(content.contains("\"session_id\":\"run-1\""));
     }
 
     #[tokio::test]
