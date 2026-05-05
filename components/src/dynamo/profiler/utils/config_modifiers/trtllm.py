@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import re
 from typing import Tuple
@@ -15,6 +16,7 @@ from dynamo.profiler.utils.config import (
     break_arguments,
     get_service_name_by_type,
     get_worker_service_from_config,
+    parse_override_engine_args,
     remove_valued_arguments,
     setup_worker_service_resources,
     update_image,
@@ -57,6 +59,54 @@ def _trtllm_flags(overrides: dict) -> list[str]:
         else:
             flags.append(str(value))
     return flags
+
+
+def _dotted_to_nested(overrides: dict) -> dict:
+    """Convert flat dotted-key overrides to a nested dict.
+
+    Example::
+
+        {"kv_cache_config.enable_block_reuse": False}
+        ->  {"kv_cache_config": {"enable_block_reuse": False}}
+    """
+    result: dict = {}
+    for dotted_key, value in overrides.items():
+        keys = dotted_key.split(".")
+        current = result
+        for key in keys[:-1]:
+            current = current.setdefault(key, {})
+        current[keys[-1]] = value
+    return result
+
+
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Deep-merge *overrides* into *base*, with overrides taking precedence."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_overrides_into_args(args: list[str], overrides: dict) -> list[str]:
+    """Apply TRT-LLM overrides without creating mutually-exclusive flags.
+
+    If ``--override-engine-args`` already exists in *args*, the overrides are
+    merged into its JSON blob.  Otherwise ``--trtllm.*`` dynamic flags are
+    appended (the previous default behaviour).
+    """
+    override_dict, args = parse_override_engine_args(args)
+
+    if override_dict:
+        nested = _dotted_to_nested(overrides)
+        merged = _deep_merge(override_dict, nested)
+        args = append_argument(args, ["--override-engine-args", json.dumps(merged)])
+    else:
+        args = append_argument(args, _trtllm_flags(overrides))
+
+    return args
 
 
 class TrtllmConfigModifier(BaseConfigModifier):
@@ -129,15 +179,13 @@ class TrtllmConfigModifier(BaseConfigModifier):
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-strategy")
 
-            args = append_argument(
+            args = _merge_overrides_into_args(
                 args,
-                _trtllm_flags(
-                    {
-                        "kv_cache_config.enable_block_reuse": False,
-                        "disable_overlap_scheduler": False,
-                        "cache_transceiver_config": None,
-                    }
-                ),
+                {
+                    "kv_cache_config.enable_block_reuse": False,
+                    "disable_overlap_scheduler": False,
+                    "cache_transceiver_config": None,
+                },
             )
 
             worker_service.extraPodSpec.mainContainer.args = args
@@ -171,14 +219,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-strategy")
 
-            args = append_argument(
+            args = _merge_overrides_into_args(
                 args,
-                _trtllm_flags(
-                    {
-                        "kv_cache_config.enable_block_reuse": True,
-                        "cache_transceiver_config": None,
-                    }
-                ),
+                {
+                    "kv_cache_config.enable_block_reuse": True,
+                    "cache_transceiver_config": None,
+                },
             )
 
             worker_service.extraPodSpec.mainContainer.args = args
@@ -217,7 +263,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # Break arguments to handle both joined strings and lists
         args = break_arguments(args)
 
-        args = append_argument(args, _trtllm_flags({"tensor_parallel_size": tp_size}))
+        args = _merge_overrides_into_args(args, {"tensor_parallel_size": tp_size})
 
         worker_service.extraPodSpec.mainContainer.args = args
 
@@ -340,14 +386,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
         args = break_arguments(args)
 
-        args = append_argument(
+        args = _merge_overrides_into_args(
             args,
-            _trtllm_flags(
-                {
-                    "max_batch_size": int(max_batch_size),
-                    "max_num_tokens": int(max_num_tokens),
-                }
-            ),
+            {
+                "max_batch_size": int(max_batch_size),
+                "max_num_tokens": int(max_num_tokens),
+            },
         )
 
         worker_service.extraPodSpec.mainContainer.args = args
