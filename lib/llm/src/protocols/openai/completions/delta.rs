@@ -560,9 +560,14 @@ mod tests {
         let top_logprobs = logprobs.top_logprobs[0]
             .as_array()
             .expect("top_logprobs array");
+        let other = top_logprobs
+            .iter()
+            .find(|item| item["token"] == "token_id:999")
+            .expect("top token_id formatting");
+        assert_eq!(other["bytes"], serde_json::json!(b"token_id:999"));
         let selected = top_logprobs
             .iter()
-            .find(|item| item["token_id"] == 123)
+            .find(|item| item["token"] == "token_id:123")
             .expect("selected token fallback");
         assert_eq!(selected["token"], "token_id:123");
         assert_eq!(selected["bytes"], serde_json::json!(b"token_id:123"));

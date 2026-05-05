@@ -242,9 +242,17 @@ pub(crate) fn convert_backend_top_logprobs(
     let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
         .iter()
         .map(|top_lp| {
-            let tok = top_lp.token.clone().unwrap_or_default();
+            let tok = if return_tokens_as_token_ids {
+                format!("token_id:{}", top_lp.token_id)
+            } else {
+                top_lp.token.clone().unwrap_or_default()
+            };
             found_selected = found_selected || top_lp.token_id == selected_token_id;
-            let bytes = top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok));
+            let bytes = if return_tokens_as_token_ids {
+                token_to_utf8_bytes(&tok)
+            } else {
+                top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok))
+            };
             dynamo_protocols::types::TopLogprobs {
                 token: tok,
                 logprob: top_lp.logprob as f32,
