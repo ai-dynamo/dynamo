@@ -23,7 +23,7 @@ struct SessionRuntime {
     turns: Vec<TurnRuntime>,
     next_turn_index: usize,
     next_ready_at_ms: Option<f64>,
-    in_flight: Vec<Uuid>,
+    in_flight: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -119,21 +119,22 @@ impl WorkloadDriver {
                     turns,
                     next_turn_index: 0,
                     next_ready_at_ms,
-                    in_flight: Vec::new(),
+                    in_flight: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut ready_sessions = BinaryHeap::new();
-        for (session_index, session) in sessions.iter().enumerate() {
-            if let Some(ready_at_ms) = session.next_ready_at_ms {
-                ready_sessions.push(ReadySession {
-                    ready_at_ms,
+        let ready_sessions = sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(session_index, session)| {
+                Some(ReadySession {
+                    ready_at_ms: session.next_ready_at_ms?,
                     session_index,
                     turn_index: session.next_turn_index,
-                });
-            }
-        }
+                })
+            })
+            .collect();
 
         Ok(Self {
             mode,
@@ -159,8 +160,8 @@ impl WorkloadDriver {
     /// or panics before reaching `on_complete`.
     ///
     /// Terminating the session (marking it exhausted) prevents `run_workload` from
-    /// deadlocking: a leaked in-flight turn would leave `is_drained` stuck at
-    /// `false` forever.
+    /// deadlocking: `pop_ready` skips sessions with `in_flight.is_some()`, so a
+    /// leaked session would leave `is_drained` stuck at `false` forever.
     pub fn release_cap_slot(&mut self, request_uuid: Uuid) {
         let Some(in_flight) = self.in_flight.remove(&request_uuid) else {
             return;
@@ -168,12 +169,8 @@ impl WorkloadDriver {
         let Some(session) = self.sessions.get_mut(in_flight.session_index) else {
             return;
         };
-        if let Some(position) = session
-            .in_flight
-            .iter()
-            .position(|in_flight| *in_flight == request_uuid)
-        {
-            session.in_flight.swap_remove(position);
+        if session.in_flight == Some(request_uuid) {
+            session.in_flight = None;
             session.next_turn_index = session.turns.len();
             session.next_ready_at_ms = None;
         }
@@ -200,19 +197,18 @@ impl WorkloadDriver {
 
             let session_index = ready_session.session_index;
             let session = &mut self.sessions[session_index];
-            if ready_session.turn_index >= session.turns.len() {
-                continue;
-            }
-            let stale = !session.in_flight.is_empty()
+            if session.in_flight.is_some()
                 || session.next_turn_index != ready_session.turn_index
-                || session.next_ready_at_ms != Some(ready_session.ready_at_ms);
-            if stale {
+                || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
+            {
                 continue;
             }
-            let turn_index = ready_session.turn_index;
-            let scheduled_ready_at_ms = ready_session.ready_at_ms;
+            let turn_index = session.next_turn_index;
+            let scheduled_ready_at_ms = session
+                .next_ready_at_ms
+                .expect("ready session must have a timestamp");
             let request_uuid = Uuid::new_v4();
-            let turn = &mut session.turns[turn_index];
+            let turn = &session.turns[turn_index];
             let arrival_timestamp_ms = match self.mode {
                 DriverMode::Trace => Some(scheduled_ready_at_ms),
                 DriverMode::Concurrency => None,
@@ -224,7 +220,7 @@ impl WorkloadDriver {
                 dp_rank: 0,
                 arrival_timestamp_ms,
             };
-            session.in_flight.push(request_uuid);
+            session.in_flight = Some(request_uuid);
             session.next_ready_at_ms = None;
             self.in_flight.insert(
                 request_uuid,
@@ -254,20 +250,16 @@ impl WorkloadDriver {
             .sessions
             .get_mut(in_flight.session_index)
             .ok_or_else(|| anyhow!("unknown workload session {}", in_flight.session_index))?;
-        let Some(position) = session
-            .in_flight
-            .iter()
-            .position(|in_flight| *in_flight == request_uuid)
-        else {
+        if session.in_flight != Some(request_uuid) {
             bail!(
-                "session {} completion for {} does not match in-flight requests {:?}",
+                "session {} completion for {} does not match in-flight request {:?}",
                 session.session_id,
                 request_uuid,
                 session.in_flight
             );
-        };
+        }
 
-        session.in_flight.swap_remove(position);
+        session.in_flight = None;
         session.next_turn_index = in_flight.turn_index + 1;
         if session.next_turn_index < session.turns.len() {
             let ready_at_ms =
@@ -293,14 +285,10 @@ impl WorkloadDriver {
         loop {
             let ready_session = *self.ready_sessions.peek()?;
             let session = &self.sessions[ready_session.session_index];
-            if ready_session.turn_index >= session.turns.len() {
-                self.ready_sessions.pop();
-                continue;
-            }
-            let stale = !session.in_flight.is_empty()
+            if session.in_flight.is_some()
                 || session.next_turn_index != ready_session.turn_index
-                || session.next_ready_at_ms != Some(ready_session.ready_at_ms);
-            if stale {
+                || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
+            {
                 self.ready_sessions.pop();
                 continue;
             }
