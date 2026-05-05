@@ -8,6 +8,7 @@ use futures::SinkExt;
 use tmq::{
     Context, Multipart, SocketBuilder,
     publish::{Publish, publish},
+    pull::{Pull, pull},
     router::{Router, router},
     subscribe::{Subscribe, subscribe},
 };
@@ -16,6 +17,7 @@ use tokio::sync::Mutex;
 pub(crate) type MultipartMessage = Vec<Vec<u8>>;
 pub(crate) type SharedPubSocket = Arc<Mutex<Publish>>;
 pub(crate) type SubSocket = Subscribe;
+pub(crate) type PullSocket = Pull;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
@@ -70,9 +72,22 @@ pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
     Ok(Arc::new(Mutex::new(socket)))
 }
 
+pub(crate) async fn bind_pull_socket(endpoint: &str) -> Result<PullSocket> {
+    let ctx = Context::new();
+    let socket = configure_receive_builder(pull(&ctx)).bind(endpoint)?;
+    Ok(socket)
+}
+
 pub(crate) async fn bind_router_socket(endpoint: &str) -> Result<Router> {
     let ctx = Context::new();
     let socket = configure_bidirectional_builder(router(&ctx)).bind(endpoint)?;
+    Ok(socket)
+}
+
+#[cfg(test)]
+pub(crate) async fn connect_push_socket(endpoint: &str) -> Result<tmq::push::Push> {
+    let ctx = Context::new();
+    let socket = configure_send_builder(tmq::push::push(&ctx)).connect(endpoint)?;
     Ok(socket)
 }
 
