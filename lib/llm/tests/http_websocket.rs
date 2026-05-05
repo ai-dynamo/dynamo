@@ -20,19 +20,23 @@ mod ports;
 use ports::get_random_port;
 
 /// Engine slot is process-global; ensure we install it at most once across all
-/// tests in this binary. Also pins `DYN_TOKEN_ECHO_DELAY_MS` to zero before the
-/// engine's `LazyLock` captures it on first use — only the first call has any
-/// effect, so doing it here is sufficient for every test.
+/// tests in this binary, with `DYN_TOKEN_ECHO_DELAY_MS` pinned before the
+/// engine's `LazyLock` captures it. Wrapped in `Once::call_once` so concurrent
+/// `#[tokio::test]`s synchronize on the single env mutation rather than racing
+/// against `set_var`'s safety preconditions.
 ///
-/// [gluo TODO] DIS-1859 (2/N) will replace `OnceLock`-based engine registration
-/// with proper `ModelManager`-keyed lookups; this helper goes away then.
+/// #9174 (2/N) will replace `OnceLock`-based engine registration with proper
+/// `ModelManager`-keyed lookups; this helper goes away then.
 fn ensure_echo_engine_installed() {
-    // SAFETY: integration tests set this before any worker thread reads it,
-    // and the engine's `LazyLock` reads it at most once per process.
-    unsafe {
-        std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
-    }
-    let _ = asr::install_echo_engine();
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // SAFETY: runs at most once, before any worker thread reads the env;
+        // the engine's `LazyLock` reads it at most once per process.
+        unsafe {
+            std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
+        }
+        let _ = asr::install_echo_engine();
+    });
 }
 
 async fn wait_for_health(port: u16) {

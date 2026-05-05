@@ -549,7 +549,7 @@ impl HttpServiceConfigBuilder {
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
         }
-        // Experimental WebSocket endpoint (`/v1/asr`) — DIS-1858 / "Streaming Request Support".
+        // Experimental WebSocket endpoint (`/v1/asr`) — see #9173 ("Streaming Request Support").
         // Registered unconditionally; the underlying engine is opt-in via
         // `crate::http::service::asr::install_engine`. If no engine is installed when
         // a connection arrives, the handler closes with an error frame.

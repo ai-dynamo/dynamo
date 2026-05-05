@@ -507,9 +507,14 @@ mod tests {
     /// gets its own terminal `FinishReason::Stop`.
     #[tokio::test]
     async fn echo_bidirectional_emits_per_char_then_finish() {
-        unsafe {
-            std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
-        }
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            // SAFETY: runs at most once, before any worker thread reads the env;
+            // `TOKEN_ECHO_DELAY` captures it via `LazyLock` on first use.
+            unsafe {
+                std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
+            }
+        });
 
         let engine = EchoBidirectionalEngine {};
         let input = make_input(vec![make_user_request("hi"), make_user_request("ok")]);

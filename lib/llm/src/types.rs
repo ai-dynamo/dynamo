@@ -138,8 +138,8 @@ pub mod generic {
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         };
 
-        /// [gluo TODO] DIS-1928: reuses chat-completion request/response for now,
-        /// as the request can carry audio data and the response can carry text
+        /// TODO (#9175): reuses chat-completion request/response for now, as
+        /// the request can carry audio data and the response can carry text
         /// data, which is what ASR needs. Will move to a dedicated realtime-API
         /// protocol type.
         ///
@@ -150,7 +150,7 @@ pub mod generic {
         /// chunks for the same logical session and receives a stream of
         /// `NvCreateChatCompletionStreamResponse` chunks back. Used by the experimental
         /// `/v1/asr` WebSocket endpoint. The canonical concrete implementor of
-        /// the input side is [`crate::types::RequestStream`].
+        /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
         pub type ASRBidirectionalEngine = BidirectionalStreamingEngine<
             NvCreateChatCompletionRequest,
             Annotated<NvCreateChatCompletionStreamResponse>,

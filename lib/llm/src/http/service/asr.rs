@@ -13,13 +13,13 @@
 //! which has no bidirectional accessor yet. A future revision will replace the
 //! static with a `ModelManager` lookup keyed on `model_name`.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::{
     Router,
     extract::{
         State,
-        ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade, close_code},
+        ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade, close_code},
     },
     http::Method,
     response::Response,
@@ -28,8 +28,13 @@ use axum::{
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, RequestStream};
 use dynamo_runtime::pipeline::Context;
 use futures::{SinkExt, StreamExt};
-use tokio::sync::mpsc::unbounded_channel;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// Bound on the per-connection request queue. Picks backpressure over
+/// unbounded growth so a fast client cannot drive memory exhaustion against
+/// a slow engine.
+const REQUEST_CHANNEL_CAPACITY: usize = 64;
 
 use super::{RouteDoc, service_v2};
 use crate::engines::EchoBidirectionalEngine;
@@ -41,7 +46,7 @@ use crate::protocols::openai::chat_completions::{
 /// (in production) by whatever wires up the experimental endpoint. If unset when
 /// a connection arrives, the handler closes with `INTERNAL_ERROR`.
 ///
-/// **Placeholder.** [gluo TODO] DIS-1859 (2/N). The proper registration path is
+/// **Placeholder.** Tracked in #9174 (2/N). The proper registration path is
 /// through `ModelManager` keyed on `model_name`, parallel to chat / completions
 /// / embeddings engines, but no bidirectional accessor exists on `ModelManager`
 /// yet. When that lands, replace this static and the `install_*` helpers below
@@ -80,7 +85,7 @@ async fn asr_ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
-    // [gluo TODO] DIS-1928: read a session-init frame first so we can route /
+    // TODO (#9175): read a session-init frame first so we can route /
     // look up the model before forwarding inference frames to the engine.
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
         tracing::error!("/v1/asr connection rejected: bidirectional engine not installed");
@@ -94,10 +99,15 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     };
 
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (req_tx, req_rx) = unbounded_channel::<NvCreateChatCompletionRequest>();
+    let (req_tx, req_rx) = mpsc::channel::<NvCreateChatCompletionRequest>(REQUEST_CHANNEL_CAPACITY);
 
-    let request_stream = Box::pin(UnboundedReceiverStream::new(req_rx));
+    let request_stream = Box::pin(ReceiverStream::new(req_rx));
     let input = RequestStream::new(request_stream, Context::new(()).context());
+
+    // Inbound writes a non-NORMAL `CloseFrame` here on protocol errors before
+    // cancelling the engine; outbound takes it after the response stream ends.
+    // Empty slot ⇒ NORMAL completion.
+    let close_reason: Arc<Mutex<Option<CloseFrame>>> = Arc::new(Mutex::new(None));
 
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,
@@ -117,6 +127,7 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     let resp_ctx = response_stream.context();
 
     // Outbound task: drain the engine response stream onto the WebSocket.
+    let outbound_close_reason = close_reason.clone();
     let outbound = tokio::spawn(async move {
         while let Some(annotated) = response_stream.next().await {
             let frame_payload = match serde_json::to_string(&annotated) {
@@ -135,14 +146,14 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                 break;
             }
         }
-        // Send a normal close once the engine finishes — either natural
-        // completion or because a client disconnect cancelled the response stream.
-        let _ = ws_tx
-            .send(Message::Close(Some(close_frame(
-                close_code::NORMAL,
-                "stream complete",
-            ))))
-            .await;
+        // Pick the close frame inbound left behind on protocol errors; otherwise
+        // the engine ended naturally (or via client cancellation) → NORMAL.
+        let frame = outbound_close_reason
+            .lock()
+            .expect("close_reason mutex poisoned")
+            .take()
+            .unwrap_or_else(|| close_frame(close_code::NORMAL, "stream complete"));
+        let _ = ws_tx.send(Message::Close(Some(frame))).await;
         // Drive the sink to completion so the Close frame drains before the
         // transport is dropped — otherwise axum can tear down the TCP socket
         // mid-frame and the client sees EOF instead of an in-band Close. Bound
@@ -156,6 +167,7 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
             Ok(m) => m,
             Err(err) => {
                 tracing::debug!(%err, "/v1/asr inbound frame error; treating as disconnect");
+                resp_ctx.stop_generating();
                 break;
             }
         };
@@ -163,14 +175,15 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
             Message::Text(text) => {
                 match serde_json::from_str::<NvCreateChatCompletionRequest>(text.as_str()) {
                     Ok(req) => {
-                        if req_tx.send(req).is_err() {
+                        if req_tx.send(req).await.is_err() {
                             tracing::debug!("/v1/asr engine receiver dropped; ending inbound");
                             break;
                         }
                     }
                     Err(err) => {
                         tracing::warn!(%err, "/v1/asr malformed JSON frame; closing");
-                        close_request_side(&req_tx);
+                        *close_reason.lock().expect("close_reason mutex poisoned") =
+                            Some(close_frame(close_code::INVALID, "malformed JSON frame"));
                         resp_ctx.stop_generating();
                         break;
                     }
@@ -178,11 +191,17 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
             }
             Message::Binary(_) => {
                 tracing::warn!("/v1/asr received binary frame; not supported in this slice");
-                close_request_side(&req_tx);
+                *close_reason.lock().expect("close_reason mutex poisoned") = Some(close_frame(
+                    close_code::UNSUPPORTED,
+                    "binary frames not supported",
+                ));
                 resp_ctx.stop_generating();
                 break;
             }
-            Message::Close(_) => break,
+            Message::Close(_) => {
+                resp_ctx.stop_generating();
+                break;
+            }
             Message::Ping(_) | Message::Pong(_) => {} // axum handles ping replies
         }
     }
@@ -195,16 +214,8 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     let _ = outbound.await;
 }
 
-#[allow(unused)]
-type FailableSink = futures::stream::SplitSink<WebSocket, Message>;
-
-fn close_request_side(_tx: &tokio::sync::mpsc::UnboundedSender<NvCreateChatCompletionRequest>) {
-    // sender is dropped by the caller via `drop(req_tx)` after this returns;
-    // helper exists so call sites express intent ("stop accepting input").
-}
-
-fn close_frame(code: u16, reason: &str) -> axum::extract::ws::CloseFrame {
-    axum::extract::ws::CloseFrame {
+fn close_frame(code: u16, reason: &str) -> CloseFrame {
+    CloseFrame {
         code,
         reason: Utf8Bytes::from(reason.to_string()),
     }
