@@ -745,9 +745,19 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
+	dcdV1Beta1Handler := webhookvalidation.NewDynamoComponentDeploymentV1Beta1Handler()
+	if err := dcdV1Beta1Handler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoComponentDeployment v1beta1 webhook: %w", err)
+	}
+
 	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
+	}
+
+	dgdV1Beta1Handler := webhookvalidation.NewDynamoGraphDeploymentV1Beta1Handler()
+	if err := dgdV1Beta1Handler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeployment v1beta1 webhook: %w", err)
 	}
 
 	dmHandler := webhookvalidation.NewDynamoModelHandler()

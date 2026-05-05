@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -36,6 +37,10 @@ const (
 	// DynamoGraphDeploymentWebhookName is the name of the validating webhook handler for DynamoGraphDeployment.
 	DynamoGraphDeploymentWebhookName = "dynamographdeployment-validating-webhook"
 	dynamoGraphDeploymentWebhookPath = "/validate-nvidia-com-v1alpha1-dynamographdeployment"
+
+	// DynamoGraphDeploymentV1Beta1WebhookName is the name of the v1beta1-only validating webhook handler.
+	DynamoGraphDeploymentV1Beta1WebhookName = "dynamographdeployment-v1beta1-validating-webhook"
+	dynamoGraphDeploymentV1Beta1WebhookPath = "/validate-nvidia-com-v1beta1-dynamographdeployment"
 )
 
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
@@ -166,6 +171,81 @@ func castToDynamoGraphDeployment(obj runtime.Object) (*nvidiacomv1alpha1.DynamoG
 	deployment, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
+	}
+	return deployment, nil
+}
+
+// DynamoGraphDeploymentV1Beta1Handler validates v1beta1-only DynamoGraphDeployment invariants.
+type DynamoGraphDeploymentV1Beta1Handler struct{}
+
+// NewDynamoGraphDeploymentV1Beta1Handler creates a handler for v1beta1 DGD validation.
+func NewDynamoGraphDeploymentV1Beta1Handler() *DynamoGraphDeploymentV1Beta1Handler {
+	return &DynamoGraphDeploymentV1Beta1Handler{}
+}
+
+// ValidateCreate validates a v1beta1 DynamoGraphDeployment create request.
+func (h *DynamoGraphDeploymentV1Beta1Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentV1Beta1WebhookName)
+
+	deployment, err := castToDynamoGraphDeploymentV1Beta1(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
+
+	validator := NewDynamoGraphDeploymentV1Beta1Validator(deployment)
+	return validator.Validate(ctx)
+}
+
+// ValidateUpdate validates a v1beta1 DynamoGraphDeployment update request.
+func (h *DynamoGraphDeploymentV1Beta1Handler) ValidateUpdate(ctx context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
+	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentV1Beta1WebhookName)
+
+	deployment, err := castToDynamoGraphDeploymentV1Beta1(newObj)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("validate update", "name", deployment.Name, "namespace", deployment.Namespace)
+	if !deployment.DeletionTimestamp.IsZero() {
+		logger.Info("skipping validation for resource being deleted", "name", deployment.Name)
+		return nil, nil
+	}
+
+	validator := NewDynamoGraphDeploymentV1Beta1Validator(deployment)
+	return validator.Validate(ctx)
+}
+
+// ValidateDelete validates a v1beta1 DynamoGraphDeployment delete request.
+func (h *DynamoGraphDeploymentV1Beta1Handler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentV1Beta1WebhookName)
+
+	deployment, err := castToDynamoGraphDeploymentV1Beta1(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("validate delete", "name", deployment.Name, "namespace", deployment.Namespace)
+	return nil, nil
+}
+
+// RegisterWithManager registers the v1beta1-only validating webhook.
+func (h *DynamoGraphDeploymentV1Beta1Handler) RegisterWithManager(mgr manager.Manager) error {
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeployment)
+
+	webhook := admission.
+		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, observedValidator).
+		WithRecoverPanic(true)
+	mgr.GetWebhookServer().Register(dynamoGraphDeploymentV1Beta1WebhookPath, webhook)
+	return nil
+}
+
+func castToDynamoGraphDeploymentV1Beta1(obj runtime.Object) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	deployment, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected v1beta1 DynamoGraphDeployment but got %T", obj)
 	}
 	return deployment, nil
 }
