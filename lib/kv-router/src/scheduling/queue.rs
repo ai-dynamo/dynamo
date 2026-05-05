@@ -234,15 +234,11 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                request.token_seq.as_deref(),
-                request.isl_tokens,
-                request.effective_cached_tokens.clone(),
-                request.track_prefill_tokens,
-                decay_now,
-            );
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            request.token_seq.as_deref(),
+            &request.prefill_token_deltas(),
+            decay_now,
+        );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
@@ -483,11 +479,7 @@ mod tests {
                 })
                 .min_by_key(|worker| {
                     (
-                        request
-                            .prefill_tokens
-                            .get(worker)
-                            .copied()
-                            .unwrap_or(request.isl_tokens),
+                        request.prefill_tokens_for(*worker),
                         request.decode_blocks.get(worker).copied().unwrap_or(0),
                         worker.worker_id,
                         worker.dp_rank,
@@ -499,17 +491,9 @@ mod tests {
 
             Ok(WorkerSelectionResult {
                 worker,
-                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
-                effective_overlap_blocks: request
-                    .effective_overlap_blocks
-                    .get(&worker)
-                    .copied()
-                    .unwrap_or(0.0),
-                cached_tokens: request
-                    .effective_cached_tokens
-                    .get(&worker)
-                    .copied()
-                    .unwrap_or(0),
+                required_blocks: request.request_blocks(block_size),
+                effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+                cached_tokens: request.effective_cached_tokens_for(worker),
             })
         }
     }
