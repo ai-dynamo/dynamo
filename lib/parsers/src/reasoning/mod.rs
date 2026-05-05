@@ -21,16 +21,76 @@ pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 /// `KimiK2ParserConfig::default().section_start` in `crate::tool_calling::config`.
 pub(crate) const KIMI_K2_TOOL_SECTION_BEGIN: &str = "<|tool_calls_section_begin|>";
 
-static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
+static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ParserConfig>> = OnceLock::new();
+
+/// A condition under which reasoning parsing is disabled for a given model.
+///
+/// Each variant describes a (key, value) pair in chat_template_args:
+/// when the arg matches, reasoning is considered disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisableCondition {
+    /// Reasoning is disabled when `args[key] == Bool(value)`.
+    Bool(&'static str, bool),
+    /// Reasoning is disabled when `args[key] == String(value)`.
+    Str(&'static str, &'static str),
+}
+
+#[derive(Debug, Clone)]
+struct ParserConfig {
+    parser_type: ReasoningParserType,
+    disable_conditions: Vec<DisableCondition>,
+}
+
+impl ParserConfig {
+    fn new(parser_type: ReasoningParserType) -> Self {
+        Self {
+            parser_type,
+            disable_conditions: vec![DisableCondition::Bool("enable_thinking", false)],
+        }
+    }
+
+    fn with_key(parser_type: ReasoningParserType, key: &'static str) -> Self {
+        Self {
+            parser_type,
+            disable_conditions: vec![DisableCondition::Bool(key, false)],
+        }
+    }
+
+    fn with_conditions(
+        parser_type: ReasoningParserType,
+        conditions: Vec<DisableCondition>,
+    ) -> Self {
+        Self {
+            parser_type,
+            disable_conditions: conditions,
+        }
+    }
+}
 
 /// Initialize the global reasoning parser map
-fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserType> {
+fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ParserConfig> {
     REASONING_PARSER_MAP.get_or_init(|| {
+        use DisableCondition::*;
+        use ReasoningParserType::*;
+
+        let deepseek_conditions = vec![
+            Bool("thinking", false),
+            Bool("enable_thinking", false),
+            Str("thinking_mode", "chat"),
+        ];
+        let nemotron_conditions = vec![
+            Bool("enable_thinking", false),
+            Bool("force_nonempty_content", true),
+        ];
+
         let mut map = HashMap::new();
-        map.insert("deepseek_r1", ReasoningParserType::DeepseekR1);
-        map.insert("basic", ReasoningParserType::Basic);
-        map.insert("gpt_oss", ReasoningParserType::GptOss);
-        map.insert("qwen3", ReasoningParserType::Qwen);
+        map.insert(
+            "deepseek_r1",
+            ParserConfig::with_conditions(DeepseekR1, deepseek_conditions.clone()),
+        );
+        map.insert("basic", ParserConfig::new(Basic));
+        map.insert("gpt_oss", ParserConfig::new(GptOss));
+        map.insert("qwen3", ParserConfig::new(Qwen));
         // DeepSeek-V4 uses the same `<think>` / `</think>` delimiters as Qwen
         // (confirmed against deepseek-ai/DeepSeek-V4-Pro's encoding_dsv4.py)
         // so it delegates to the same `BasicReasoningParser` config today. We
@@ -44,27 +104,43 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         // the HF model / vLLM recipe / chat-template author picked. We accept
         // all three separator conventions (snake / kebab / concat) rather than
         // force a single canonical form on users.
-        map.insert("deepseek_v4", ReasoningParserType::DeepSeekV4);
-        map.insert("deepseek-v4", ReasoningParserType::DeepSeekV4);
-        map.insert("deepseekv4", ReasoningParserType::DeepSeekV4);
-        map.insert("nemotron_deci", ReasoningParserType::NemotronDeci);
-        map.insert("kimi", ReasoningParserType::Kimi);
-        map.insert("kimi_k25", ReasoningParserType::KimiK25);
-        map.insert("step3", ReasoningParserType::Step3);
-        map.insert("mistral", ReasoningParserType::Mistral);
-        map.insert("granite", ReasoningParserType::Granite);
-        map.insert("nemotron_nano", ReasoningParserType::DeepseekR1); // nemotron nano is ...</think>
-        map.insert("nemotron3", ReasoningParserType::DeepseekR1);
-        map.insert("glm45", ReasoningParserType::NemotronDeci); // GLM-4.5/5 is <think>...</think>, no force_reasoning
+        map.insert(
+            "deepseek_v4",
+            ParserConfig::with_conditions(DeepSeekV4, deepseek_conditions.clone()),
+        );
+        map.insert(
+            "deepseek-v4",
+            ParserConfig::with_conditions(DeepSeekV4, deepseek_conditions.clone()),
+        );
+        map.insert(
+            "deepseekv4",
+            ParserConfig::with_conditions(DeepSeekV4, deepseek_conditions),
+        );
+        map.insert("nemotron_deci", ParserConfig::new(NemotronDeci));
+        map.insert("kimi", ParserConfig::new(Kimi));
+        map.insert("kimi_k25", ParserConfig::with_key(KimiK25, "thinking"));
+        map.insert("step3", ParserConfig::new(Step3));
+        map.insert("mistral", ParserConfig::new(Mistral));
+        map.insert("granite", ParserConfig::new(Granite));
+
+        map.insert(
+            "nemotron_nano",
+            ParserConfig::with_conditions(DeepseekR1, nemotron_conditions.clone()),
+        );
+        map.insert(
+            "nemotron3",
+            ParserConfig::with_conditions(DeepseekR1, nemotron_conditions),
+        );
+        map.insert("glm45", ParserConfig::new(NemotronDeci)); // GLM-4.5/5 is <think>...</think>, no force_reasoning
         map.insert(
             "minimax_append_think",
-            ReasoningParserType::MiniMaxAppendThink,
+            ParserConfig::new(MiniMaxAppendThink),
         );
         // Gemma 4 thinking models: reasoning is wrapped in `<|channel>...<channel|>`
         // with a `thought\n` role label that this parser strips. Pair with
         // `--dyn-tool-call-parser gemma4` for end-to-end Gemma 4 support.
-        map.insert("gemma4", ReasoningParserType::Gemma4);
-        map.insert("gemma-4", ReasoningParserType::Gemma4);
+        map.insert("gemma4", ParserConfig::new(Gemma4));
+        map.insert("gemma-4", ParserConfig::new(Gemma4));
         map
     })
 }
@@ -72,6 +148,34 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
 /// Get all available reasoning parser names
 pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
     get_reasoning_parser_map().keys().copied().collect()
+}
+
+/// Returns the disable conditions for the given reasoning parser.
+///
+/// Falls back to `[DisableCondition::Bool("enable_thinking", false)]` for unknown parsers.
+pub fn get_disable_conditions(name: &str) -> Vec<DisableCondition> {
+    let normalized = name.to_lowercase();
+    get_reasoning_parser_map()
+        .get(normalized.as_str())
+        .map(|c| c.disable_conditions.clone())
+        .unwrap_or_else(|| vec![DisableCondition::Bool("enable_thinking", false)])
+}
+
+/// Returns the chat template arg key that controls reasoning for the given parser.
+///
+/// This is the first `Bool(key, false)` entry from the parser's disable conditions,
+/// used when writing overrides (e.g. mapping `reasoning_effort` to template args).
+pub fn get_reasoning_template_key(name: &str) -> &'static str {
+    let normalized = name.to_lowercase();
+    get_reasoning_parser_map()
+        .get(normalized.as_str())
+        .and_then(|c| {
+            c.disable_conditions.iter().find_map(|cond| match cond {
+                DisableCondition::Bool(key, false) => Some(*key),
+                _ => None,
+            })
+        })
+        .unwrap_or("enable_thinking")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -263,7 +367,7 @@ impl ReasoningParserType {
         let normalized_name = name.to_lowercase();
 
         match parser_map.get(normalized_name.as_str()) {
-            Some(parser_type) => parser_type.get_reasoning_parser(),
+            Some(config) => config.parser_type.get_reasoning_parser(),
             None => {
                 tracing::warn!(
                     parser_name = name,
@@ -572,5 +676,20 @@ mod tests {
         }
         assert_eq!(all_reasoning, "Weighing options.");
         assert_eq!(all_content, "Beijing is sunny.");
+    }
+
+    #[test]
+    fn test_get_reasoning_template_key() {
+        // Parsers that default to "enable_thinking"
+        assert_eq!(get_reasoning_template_key("basic"), "enable_thinking");
+        assert_eq!(
+            get_reasoning_template_key("nemotron_nano"),
+            "enable_thinking"
+        );
+        // Parsers that use "thinking" key
+        assert_eq!(get_reasoning_template_key("deepseek_r1"), "thinking");
+        assert_eq!(get_reasoning_template_key("kimi_k25"), "thinking");
+        // Unknown parser falls back to "enable_thinking"
+        assert_eq!(get_reasoning_template_key("nonexistent"), "enable_thinking");
     }
 }
