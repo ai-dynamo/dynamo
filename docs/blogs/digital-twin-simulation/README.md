@@ -45,27 +45,15 @@ the simulator is implemented in Rust, it can also run at a scale that is useful
 for systems exploration; it is practical to simulate thousands of workers on a
 developer laptop.
 
-If we benchmark only one model pass, we miss serving behavior. If we benchmark
-only one worker, we miss routing and imbalance. If we benchmark only one static
-layout, we miss planner decisions and changing traffic. Dynamo needs a way to
-study the whole system while still preserving the boundaries between components.
-
-A digital twin gives us that loop:
-
-- Run replayable workloads instead of one-off experiments.
-- Compose engine, router, planner, and KV/cache components.
-- Compare algorithms under the same simulated traffic.
-- Use hardware-informed timing where available.
-- Validate the best candidates on real hardware instead of starting there.
-
-This is especially useful when the question is algorithmic: should the router
-prefer prefix reuse or load balance? When should the planner scale decode
-capacity? How sensitive is a layout to KV handoff cost? Those questions are slow
-to answer if every idea starts as a full hardware experiment.
+The useful middle ground is to preserve component boundaries while still studying
+their interactions. We can compare router policies, planner policies, and
+KV/cache policies under the same replayed traffic, then validate the strongest
+candidates on hardware instead of starting every idea as a full cluster
+experiment.
 
 Every result from this kind of optimizer is workload-relative. That is a feature,
-not a caveat. The point is to replay the traffic shape we care about, compare
-system designs under the same workload, and reduce a large search space to a few
+not a caveat: the point is to replay the traffic shape we care about, compare
+system designs under that same workload, and reduce a large search space to a few
 strong candidates for real cluster validation.
 
 ## 1. Architecture And DES: Composing Dynamo As Events
