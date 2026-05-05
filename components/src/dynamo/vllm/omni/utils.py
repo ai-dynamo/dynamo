@@ -230,10 +230,24 @@ def _attach_omni_chat_metadata(prompt: Any, request: Any) -> None:
 
 
 def _normalize_chat_request(request: dict) -> dict:
-    chat_request = dict(request)
+    chat_request = _strip_none_values(request)
     if "voice" in chat_request and "speaker" not in chat_request:
         chat_request["speaker"] = chat_request["voice"]
     return chat_request
+
+
+def _strip_none_values(value: Any) -> Any:
+    """Drop JSON nulls before vLLM validates OpenAI chat payloads.
+
+    The Dynamo frontend materializes absent optional fields as ``None`` in some
+    multimodal content parts (for example ``image_url.detail``). vLLM's OpenAI
+    protocol expects those optional fields to be omitted, not set to null.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_none_values(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_strip_none_values(item) for item in value]
+    return value
 
 
 async def parse_omni_request(

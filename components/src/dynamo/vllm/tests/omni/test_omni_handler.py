@@ -379,6 +379,48 @@ class TestParseOmniRequest:
         }
 
     @pytest.mark.asyncio
+    async def test_chat_strips_frontend_null_optional_multimodal_fields(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(
+                self, conversations, chat_params, tok_params, *, prompt_extras=None
+            ):
+                image_url = conversations[0][0]["content"][0]["image_url"]
+                assert image_url == {"url": "https://example.com/image.jpg"}
+                return (["conversation"],), ({"prompt": "rendered"},)
+
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/image.jpg",
+                                "detail": None,
+                            },
+                        },
+                        {"type": "text", "text": "describe"},
+                    ],
+                }
+            ],
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["engine_inputs"]["prompt"] == "rendered"
+
+    @pytest.mark.asyncio
     async def test_multimodal_chat_renderer_failure_is_returned_as_error(self):
         class BrokenRenderer:
             async def render_chat_async(self, *args, **kwargs):

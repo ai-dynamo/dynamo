@@ -299,6 +299,54 @@ async def test_prepare_request_returns_router_prewarm_fields():
 
 
 @pytest.mark.asyncio
+async def test_prepare_request_uses_prepare_only_media_uuids():
+    engine = _TokenizerEngine()
+    worker = _make_worker(engine=engine)
+    request = {
+        "request_id": "req-prepare",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.jpg"},
+                    },
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "https://example.com/audio.ogg"},
+                        "uuid": "user-audio-uuid",
+                    },
+                    {"type": "text", "text": "describe"},
+                ],
+            }
+        ],
+        _ASYNC_PREPARE_KEY: True,
+    }
+
+    parse_mock = AsyncMock(
+        return_value={
+            "engine_inputs": "rendered prompt",
+            "original_prompt": {"prompt": "rendered prompt"},
+            "sampling_params_list": None,
+        }
+    )
+    with patch("dynamo.vllm.omni.stage_worker.parse_omni_request", parse_mock):
+        chunks = [
+            chunk async for chunk in worker.generate(dict(request), _MockContext())
+        ]
+
+    parsed_request = parse_mock.call_args.args[0]
+    parts = parsed_request["messages"][0]["content"]
+    assert parts[0]["uuid"] == "__dynamo_prepare_req-prepare_0_0"
+    assert parts[1]["uuid"] == "user-audio-uuid"
+    assert "uuid" not in parts[2]
+    assert _ASYNC_PREPARE_KEY not in parsed_request
+    assert "uuid" not in request["messages"][0]["content"][0]
+    assert chunks[-1]["finished"] is True
+
+
+@pytest.mark.asyncio
 async def test_async_chunk_prewarm_uses_placeholder_tokens_and_skips_connector_put():
     engine = _MockEngine()
     engine.engine = MagicMock()

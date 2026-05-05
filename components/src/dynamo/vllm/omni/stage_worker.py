@@ -39,6 +39,17 @@ logger = logging.getLogger(__name__)
 _ASYNC_PREPARE_KEY = "__dynamo_omni_prepare"
 _ASYNC_PREWARM_KEY = "__dynamo_omni_async_prewarm"
 _ASYNC_PREWARM_READY_KEY = "__dynamo_omni_async_prewarm_ready"
+_MEDIA_CONTENT_KEYS = frozenset(
+    (
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+    )
+)
 
 
 @dataclass
@@ -283,7 +294,10 @@ class OmniStageWorker:
         yield {"shm_meta": shm_meta, "finished": True}
 
     async def _prepare_router_request(self, request: dict) -> dict:
-        frontend_request = _strip_internal_fields(request)
+        frontend_request = _with_prepare_multimodal_uuids(
+            _strip_internal_fields(request),
+            request.get("request_id") or "",
+        )
         parsed = await parse_omni_request(
             frontend_request,
             self._output_modalities,
@@ -535,6 +549,35 @@ def _ensure_cumulative_token_ids(result: Any) -> None:
 
 def _strip_internal_fields(request: dict) -> dict:
     return {k: v for k, v in request.items() if not k.startswith("__dynamo_omni_")}
+
+
+def _with_prepare_multimodal_uuids(request: dict, request_id: str) -> dict:
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return request
+
+    prepared = copy.deepcopy(request)
+    for message_index, message in enumerate(prepared.get("messages") or []):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        parts = content if isinstance(content, list) else [content]
+        for part_index, part in enumerate(parts):
+            if _is_media_content_part(part) and part.get("uuid") is None:
+                prepare_uuid = (
+                    f"__dynamo_prepare_{request_id}_{message_index}_{part_index}"
+                )
+                part["uuid"] = prepare_uuid
+    return prepared
+
+
+def _is_media_content_part(part: Any) -> bool:
+    if not isinstance(part, dict):
+        return False
+    part_type = part.get("type")
+    return part_type in _MEDIA_CONTENT_KEYS or any(
+        key in part for key in _MEDIA_CONTENT_KEYS
+    )
 
 
 async def _extract_prompt_token_ids(prompt: Any, engine: StageEngine) -> list[int]:
