@@ -133,6 +133,13 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     )
 
 
+def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
+    """Sync MDC-visible config fields from final TensorRT-LLM engine args."""
+    for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
+        if field_name in engine_args:
+            setattr(config, field_name, engine_args[field_name])
+
+
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
         "release_memory_occupation",
@@ -298,6 +305,8 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    _sync_config_from_engine_args(config, arg_map)
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
@@ -310,9 +319,9 @@ async def init_llm_worker(
             arg_map["kv_cache_config"] = kv_config_dict
         elif isinstance(current_kv_config, dict):
             # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
-            current_kv_config[
-                "event_buffer_max_size"
-            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            current_kv_config["event_buffer_max_size"] = (
+                DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            )
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
