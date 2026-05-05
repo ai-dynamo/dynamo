@@ -742,6 +742,10 @@ impl Trace {
         Ok(requests)
     }
 
+    pub fn is_single_turn(&self) -> bool {
+        self.sessions.iter().all(|session| session.turns.len() == 1)
+    }
+
     pub fn to_router_sequences(
         &self,
         worker_id: WorkerId,

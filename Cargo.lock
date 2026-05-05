@@ -2327,6 +2327,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-mocker",
  "dynamo-tokens",
+ "flate2",
  "futures-util",
  "hf-hub",
  "indicatif 0.18.4",
