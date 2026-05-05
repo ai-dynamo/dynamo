@@ -1,4 +1,5 @@
 <svg width="100%" viewBox="0 0 680 1620" role="img" xmlns="http://www.w3.org/2000/svg" style="">
+<rect width="100%" height="100%" fill="#ffffff"/>
   <title style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">State of the system at each step of checkpoint and restore</title>
   <desc style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">Five panels show how the contents of GPU, CPU, and Disk change as cuda-checkpoint and CRIU run, then run in reverse on the restore side. Color is preserved as contents move: GPU-origin contents stay blue, CPU-origin contents stay teal, so you can track where each piece of state lives at every step.</desc>
   <defs>
