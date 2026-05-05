@@ -23,7 +23,6 @@ lru = "0.16"
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rmp-serde = { workspace = true }
-rustc-hash = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

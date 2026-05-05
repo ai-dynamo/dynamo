@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use dynamo_tokens::PositionalLineageHash;
-use rustc_hash::FxHashMap;
 
 use super::super::{Block, BlockMetadata, InactivePoolBackend, Registered};
 
@@ -57,7 +56,7 @@ impl<T: BlockMetadata> LineageNode<T> {
 /// A backend that manages blocks using a lineage graph and evicts from the leaves.
 pub struct LineageBackend<T: BlockMetadata> {
     /// Map from (position, fragment) to Node.
-    nodes: FxHashMap<u64, FxHashMap<u64, LineageNode<T>>>,
+    nodes: HashMap<u64, HashMap<u64, LineageNode<T>>>,
 
     /// Sorted queue of leaf nodes, keyed by (last_used, position, fragment).
     /// Smallest key (oldest tick) is popped first.
@@ -80,7 +79,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     /// Creates a new LineageBackend.
     pub fn new() -> Self {
         Self {
-            nodes: FxHashMap::default(),
+            nodes: HashMap::new(),
             leaf_queue: BTreeMap::new(),
             count: 0,
             current_tick: 0,
