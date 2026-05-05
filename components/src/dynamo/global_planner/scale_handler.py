@@ -83,7 +83,7 @@ class ScaleRequestHandler:
         no_operation: bool = False,
         max_total_gpus: int = -1,
         min_total_gpus: int = -1,
-        intent_cache_ttl_seconds: float = 120.0,
+        intent_cache_ttl_seconds: float = 360.0,
     ):
         """Initialize the scale request handler.
 

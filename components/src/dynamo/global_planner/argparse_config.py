@@ -72,9 +72,9 @@ Examples:
     parser.add_argument(
         "--intent-cache-ttl-seconds",
         type=float,
-        default=120.0,
+        default=360.0,
         dest="intent_cache_ttl_seconds",
-        help="Cached scale-intent from a pool is considered fresh for this many seconds (default: 120). This should be at least 2x the local planner tick interval so opposite-direction intents from different pools overlap.",
+        help="Cached scale-intent from a pool is considered fresh for this many seconds (default: 360). This should be at least 2x the local planner's slowest tick interval so opposite-direction intents can overlap. Default throughput-based scaling ticks every 180s, so 360 covers two ticks.",
     )
 
     return parser
