@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek REAP SGLang
 
-This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
+This runbook validates `BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1` on the Dynamo production Kubernetes profile with the SGLang backend from `ai-blaise/optimization-playground`.
 
 The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200 GPUs: four GPUs for prefill and four GPUs for decode. The production profile uses the combined HiSparse, IndexCache, and dense TurboQuant path from `ai-blaise/optimization-playground`:
 
@@ -16,6 +16,7 @@ The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200
 - dense TurboQuant via `--enable-turboquant-dense-kv-cache --turboquant-dense-kv-preset latent_2p5bit_nc`
 - DSA sparse attention backends via `--nsa-prefill-backend flashmla_sparse` and `--nsa-decode-backend flashmla_sparse`
 - no SGLang HiCache in this profile because HiSparse requires the decode no-radix path
+- no LayerSplit flags in this 4+4 DP=4 profile because the prefill worker does not have effective attention CP size greater than 1
 - Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
 - prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
 - decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled, radix cache disabled as required by HiSparse
@@ -71,7 +72,7 @@ The GitOps manifests read from `https://github.com/ai-blaise/dynamo-prod-k8s.git
 Run the download on every node that can schedule the worker pod. The default manifest mounts the model from:
 
 ```text
-/models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+/models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
 ```
 
 and the SMC draft from:
@@ -95,8 +96,8 @@ python -m pip install --upgrade pip
 python -m pip install "huggingface_hub[hf_xet]>=0.36"
 
 hf download \
-  BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
-  --local-dir /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+  BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1 \
+  --local-dir /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
 
 hf download \
   BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP \
@@ -136,8 +137,8 @@ The worker launches SGLang through Dynamo with the core stack enabled:
 
 ```bash
 python3 -m dynamo.sglang \
-  --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
-  --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 \
+  --model-path /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1 \
+  --served-model-name BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1 \
   --quantization compressed-tensors \
   --kv-cache-dtype bfloat16 \
   --tp 4 \
@@ -187,7 +188,7 @@ kubectl port-forward -n dynamo-system svc/deepseek-v32-reap-sglang-frontend 8000
 curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
-    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1",
+    "model": "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1",
     "messages": [{"role": "user", "content": "Say: dynamo-ready"}],
     "temperature": 0,
     "max_tokens": 64

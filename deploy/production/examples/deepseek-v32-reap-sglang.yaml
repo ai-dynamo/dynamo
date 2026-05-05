@@ -9,7 +9,8 @@
 # TurboQuant, and decode-side HiSparse. HiCache is intentionally omitted because
 # HiSparse requires the no-radix decode path. The checkpoint remains W4A4KV4
 # NVFP4; target KV uses BF16 source dtype with dense TurboQuant 2.5-bit storage.
-# Speculation is decode-only through SMC-SD.
+# Speculation is decode-only through SMC-SD. LayerSplit is not enabled in this
+# 4+4 DP=4 profile because the prefill worker does not have effective CP>1.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -112,7 +113,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
               type: Directory
         mainContainer:
           image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4
@@ -124,9 +125,9 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
             - --served-model-name
-            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
             - --host
             - 0.0.0.0
             - --trust-remote-code
@@ -203,7 +204,7 @@ spec:
             failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
               readOnly: true
     decode:
       componentType: worker
@@ -225,7 +226,7 @@ spec:
         volumes:
           - name: deepseek-v32-reap-model
             hostPath:
-              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
               type: Directory
           - name: smcsd-draft-model
             hostPath:
@@ -241,9 +242,9 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
             - --served-model-name
-            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
             - --host
             - 0.0.0.0
             - --trust-remote-code
@@ -346,7 +347,7 @@ spec:
             failureThreshold: 360
           volumeMounts:
             - name: deepseek-v32-reap-model
-              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
               readOnly: true
             - name: smcsd-draft-model
               mountPath: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP

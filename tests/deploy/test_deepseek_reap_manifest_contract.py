@@ -12,6 +12,10 @@ MANIFEST = (
     / "examples"
     / "deepseek-v32-reap-sglang.yaml"
 )
+TARGET_MODEL = (
+    "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-"
+    "IndexerK8-FP8-GatedNorm-G1"
+)
 
 
 def _args_for(service_name: str) -> list[str]:
@@ -39,6 +43,8 @@ def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_c
 
         assert _arg_value(args, "--disaggregation-mode") == mode
         assert _arg_value(args, "--disaggregation-transfer-backend") == "nixl"
+        assert _arg_value(args, "--served-model-name") == TARGET_MODEL
+        assert _arg_value(args, "--model-path") == f"/models/{TARGET_MODEL}"
         assert _arg_value(args, "--tp") == "4"
         assert _arg_value(args, "--dp") == "4"
         assert "--enable-dp-attention" in args
@@ -49,6 +55,8 @@ def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_c
         assert _arg_value(args, "--nsa-decode-backend") == "flashmla_sparse"
 
         assert "--enable-hierarchical-cache" not in args
+        assert "--nsa-prefill-cp-kv-storage-mode" not in args
+        assert "--nsa-prefill-cp-layersplit-layout" not in args
         assert _arg_value(args, "--nsa-indexer-mode") == "indexcache"
         assert _arg_value(args, "--nsa-indexcache-pattern") == (
             "FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF"
