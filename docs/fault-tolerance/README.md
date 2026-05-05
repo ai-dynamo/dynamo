@@ -15,6 +15,7 @@ Fault tolerance in Dynamo operates at multiple levels:
 |-------|-----------|---------|
 | **Request** | Migration, Cancellation | Handle in-flight request failures |
 | **Worker** | Health Checks, Graceful Shutdown | Detect and recover from worker failures |
+| **Engine Process** | [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) | Active/passive recovery for same-node engine-process failures in Kubernetes |
 | **System** | Load Shedding, Request Rejection | Prevent system overload |
 | **Infrastructure** | etcd HA, NATS resilience | Handle infrastructure component failures |
 
@@ -69,6 +70,10 @@ Dynamo provides multiple health check mechanisms:
 - **Engine Monitoring**: Automatic shutdown on engine failure detection
 
 See [Health Checks](../observability/health-checks.md) for details.
+
+### Shadow Engine Failover
+
+For Kubernetes deployments, [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) can help with same-node recovery from unknown backend engine or software-process failures. It uses GPU Memory Service to keep model weights resident while a standby or replacement engine attaches. It does not preserve in-flight requests or KV cache state, and it does not cover GPU or node loss.
 
 ## Configuration Quick Reference
 
@@ -127,6 +132,7 @@ See [Fault Tolerance Testing](testing.md) for details.
 ## Related Documentation
 
 - [Observability](../observability/README.md) - Metrics and monitoring
+- [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) - Same-node active/passive engine failover for Kubernetes deployments
 - [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
 - [Event Plane](../design-docs/event-plane.md) - Pub/sub for KV cache events and worker metrics
 - [Discovery Plane](../design-docs/discovery-plane.md) - Service discovery and coordination
