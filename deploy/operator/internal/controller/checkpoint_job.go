@@ -100,7 +100,7 @@ func buildCheckpointJob(
 	dynamo.AddStandardEnvVars(mainContainer, config)
 
 	checkpoint.EnsurePodInfoMount(mainContainer)
-	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.
 

@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -284,24 +284,25 @@ func removeEnvVar(c *corev1.Container, name string) {
 	c.Env = filtered
 }
 
-// getGPUCount extracts the GPU count from the component's resource limits.
-func getGPUCount(resources *v1alpha1.Resources) int32 {
-	if resources == nil || resources.Limits == nil || resources.Limits.GPU == "" {
-		return 0
+// getGPUCount extracts the GPU count from the component's Kubernetes resource requirements.
+func getGPUCount(resources corev1.ResourceRequirements) int32 {
+	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
+	if q, ok := resources.Limits[gpuResource]; ok {
+		return int32(q.Value())
 	}
-	if n, err := strconv.ParseInt(resources.Limits.GPU, 10, 32); err == nil {
-		return int32(n)
+	if q, ok := resources.Requests[gpuResource]; ok {
+		return int32(q.Value())
 	}
 	return 0
 }
 
-// getDeviceClassName returns the DRA device class name from gpuType,
+// getDeviceClassName returns the DRA device class name from the GMS config,
 // falling back to the default device class shipped with the NVIDIA DRA
 // driver. The literal "gpu.nvidia.com" is intentionally not duplicated
 // here — it is the single source of truth in the dra package.
-func getDeviceClassName(resources *v1alpha1.Resources) string {
-	if resources != nil && resources.Limits != nil && resources.Limits.GPUType != "" {
-		return resources.Limits.GPUType
+func getDeviceClassName(gmsSpec *v1beta1.GPUMemoryServiceSpec) string {
+	if gmsSpec != nil && gmsSpec.DeviceClassName != "" {
+		return gmsSpec.DeviceClassName
 	}
 	return dra.DefaultDeviceClassName
 }
@@ -314,7 +315,7 @@ func gmsRCTName(serviceName string, rank int32) string {
 // gmsResourceClaimTemplateConfigs builds one PCS-level ResourceClaimTemplateConfig
 // per rank. Each RCT has the same GPU spec but a distinct per-rank name so that
 // each rank's GMS + engine pods get their own ResourceClaim.
-func gmsResourceClaimTemplateConfigs(serviceName string, resources *v1alpha1.Resources, roles []ServiceRole) []grovev1alpha1.ResourceClaimTemplateConfig {
+func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements, roles []ServiceRole) []grovev1alpha1.ResourceClaimTemplateConfig {
 	seen := map[int32]bool{}
 	configs := make([]grovev1alpha1.ResourceClaimTemplateConfig, 0, len(roles))
 	for _, r := range roles {
@@ -331,7 +332,7 @@ func gmsResourceClaimTemplateConfigs(serviceName string, resources *v1alpha1.Res
 							{
 								Name: "gpu",
 								Exactly: &resourcev1.ExactDeviceRequest{
-									DeviceClassName: getDeviceClassName(resources),
+									DeviceClassName: getDeviceClassName(gmsSpec),
 									AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
 									Count:           int64(getGPUCount(resources)),
 								},
@@ -400,9 +401,12 @@ const (
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
 // engine pod.
-func IsIntraPodFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
-	return component != nil && component.Failover != nil && component.Failover.Enabled &&
-		component.Failover.Mode == v1alpha1.GMSModeIntraPod
+func IsIntraPodFailoverEnabled(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil || component.Experimental == nil || component.Experimental.Failover == nil {
+		return false
+	}
+	mode := component.Experimental.Failover.Mode
+	return mode == "" || mode == v1beta1.GMSModeIntraPod
 }
 
 func IntraPodFailoverEngineContainerNames() []string {

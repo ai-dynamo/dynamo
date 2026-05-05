@@ -34,7 +34,7 @@ import (
 
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -94,7 +94,6 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;create;delete
 
 // +kubebuilder:rbac:groups=scheduling.volcano.sh,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
@@ -113,7 +112,7 @@ type DynamoComponentDeploymentReconciler struct {
 func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logs := log.FromContext(ctx)
 
-	dynamoComponentDeployment := &v1alpha1.DynamoComponentDeployment{}
+	dynamoComponentDeployment := &nvidiacomv1beta1.DynamoComponentDeployment{}
 	err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
@@ -141,7 +140,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Type:    nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", reconcileErr),
@@ -166,13 +165,13 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		r.Recorder.Event(dynamoComponentDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile DynamoComponentDeployment")
 		dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Type:    nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile DynamoComponentDeployment",
 			},
 			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+				Type:    nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile DynamoComponentDeployment",
@@ -185,20 +184,21 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// Sync GMS ResourceClaimTemplate before creating workload resources
 	if r.RuntimeConfig.DRAEnabled {
-		serviceName := dynamoComponentDeployment.Spec.ServiceName
-		if serviceName == "" {
-			serviceName = dynamoComponentDeployment.Name
-		}
+		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
 		spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
-		gpuCount, deviceClassName := dra.ExtractGPUParams(spec.GPUMemoryService, spec.Resources)
-		claimTemplateName := dra.ResourceClaimTemplateName(dynamoComponentDeployment.GetParentGraphDeploymentName(), serviceName)
+		gpuCount, deviceClassName := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(spec), dynamo.GetMainContainerResources(spec))
+		parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
+		if parentName == "" {
+			parentName = dynamoComponentDeployment.Name
+		}
+		claimTemplateName := dra.ResourceClaimTemplateName(parentName, componentName)
 		_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
 			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
 		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
 		}
-	} else if dynamoComponentDeployment.Spec.GPUMemoryService != nil && dynamoComponentDeployment.Spec.GPUMemoryService.Enabled {
+	} else if dynamo.GetGPUMemoryService(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) != nil {
 		return ctrl.Result{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
 	}
 
@@ -223,8 +223,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	// create or update headless service for model endpoint discovery
-	componentMap := map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		dynamoComponentDeployment.Name: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+	componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
+	componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
 	}
 	if err := dynamo.ReconcileModelServicesForComponents(
 		ctx,
@@ -269,10 +270,10 @@ type ComponentReconcileResult struct {
 	status               metav1.ConditionStatus
 	reason               string
 	message              string
-	serviceReplicaStatus *v1alpha1.ServiceReplicaStatus
+	serviceReplicaStatus *nvidiacomv1beta1.ComponentReplicaStatus
 }
 
-func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
+func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	logger := log.FromContext(ctx)
 	deploymentModified, deployment, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
 		dynamoComponentDeployment: dynamoComponentDeployment,
@@ -291,9 +292,8 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		"deploymentAvailableReplicas", deployment.Status.AvailableReplicas,
 		"deploymentReadyReplicas", deployment.Status.ReadyReplicas)
 
-	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
-		ComponentKind:     v1alpha1.ComponentKindDeployment,
-		ComponentName:     deployment.Name,
+	serviceReplicaStatus := &nvidiacomv1beta1.ComponentReplicaStatus{
+		ComponentKind:     nvidiacomv1beta1.ComponentKindDeployment,
 		ComponentNames:    []string{deployment.Name},
 		Replicas:          deployment.Status.Replicas,
 		UpdatedReplicas:   deployment.Status.UpdatedReplicas,
@@ -319,7 +319,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
+func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	logger := log.FromContext(ctx)
 	anyModified := false
 
@@ -402,9 +402,9 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
+func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
 	availableCondition := metav1.Condition{
-		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+		Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReconcileResult.reason,
 		Message: componentReconcileResult.message,
@@ -420,7 +420,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	}
 
 	componentReadyCondition := metav1.Condition{
-		Type:    v1alpha1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+		Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeDynamoComponentReady,
 		Status:  componentReconcileResult.status,
 		Reason:  componentReadyReason,
 		Message: componentReadyMessage,
@@ -428,7 +428,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
-	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
+	dynamoComponentDeployment.Status.Component = componentReconcileResult.serviceReplicaStatus
 	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 
 	err := r.Status().Update(ctx, dynamoComponentDeployment)
@@ -438,10 +438,9 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	return nil
 }
 
-func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) v1alpha1.ServiceReplicaStatus {
-	return v1alpha1.ServiceReplicaStatus{
-		ComponentKind:   v1alpha1.ComponentKindLeaderWorkerSet,
-		ComponentName:   leaderWorkerSet.Name,
+func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) nvidiacomv1beta1.ComponentReplicaStatus {
+	return nvidiacomv1beta1.ComponentReplicaStatus{
+		ComponentKind:   nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
 		ComponentNames:  []string{leaderWorkerSet.Name},
 		Replicas:        leaderWorkerSet.Status.Replicas,
 		UpdatedReplicas: leaderWorkerSet.Status.UpdatedReplicas,
@@ -547,7 +546,8 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
 	}
 
-	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
+	resources := dynamo.GetMainContainerResources(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
+	if gpu, ok := resources.Limits[corev1.ResourceName("nvidia.com/gpu")]; !ok || gpu.IsZero() {
 		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for LWS worker pod")
 	}
 
@@ -613,7 +613,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	return leaderWorkerSet, false, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) error {
+func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Finalizing the DynamoComponentDeployment", "dynamoComponentDeployment", dynamoComponentDeployment)
 
@@ -663,8 +663,8 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	return false
 }
 
-func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, err error) {
-	dynamoComponentDeployment = &v1alpha1.DynamoComponentDeployment{}
+func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, err error) {
+	dynamoComponentDeployment = &nvidiacomv1beta1.DynamoComponentDeployment{}
 	maxRetries := 3
 	for range maxRetries - 1 {
 		if err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment); err != nil {
@@ -705,10 +705,11 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(
 	return modified, depl, nil
 }
 
-func getResourceAnnotations(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
-	resourceAnnotations := dynamoComponentDeployment.Spec.Annotations
-	if resourceAnnotations == nil {
-		resourceAnnotations = map[string]string{}
+func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {
+	resourceAnnotations := map[string]string{}
+	if dynamoComponentDeployment != nil {
+		maps.Copy(resourceAnnotations, dynamo.GetPodTemplateAnnotations(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
+		maps.Copy(resourceAnnotations, dynamo.GetDCDPreservedAlphaAnnotations(dynamoComponentDeployment))
 	}
 
 	return resourceAnnotations
@@ -747,6 +748,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 	log := log.FromContext(ctx)
 	log.Info("Starting generateIngress")
 
+	ingressSpec, hasIngressSpec := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
 	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opt.dynamoComponentDeployment.Name,
@@ -754,17 +756,18 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		},
 	}
 
-	if opt.dynamoComponentDeployment.Spec.Ingress == nil || !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
+	if !hasIngressSpec || !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}
-	return dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
+	return dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context.Context, opt generateResourceOption) (*networkingv1beta1.VirtualService, bool, error) {
 	log := log.FromContext(ctx)
 	log.Info("Starting generateVirtualService")
 
+	ingressSpec, hasIngressSpec := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opt.dynamoComponentDeployment.Name,
@@ -772,36 +775,53 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.Spec.Ingress.IsVirtualServiceEnabled() {
+	if !hasIngressSpec || !ingressSpec.IsVirtualServiceEnabled() {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}
-	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
+	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec), false, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
+func preservedAlphaIngressSpec(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (dynamo.IngressSpec, bool) {
+	return dynamo.GetDCDPreservedAlphaIngressSpec(dcd)
+}
+
+func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {
 	labels := map[string]string{}
 	if dynamoComponentDeployment != nil {
-		if dynamoComponentDeployment.Spec.Labels != nil {
-			maps.Copy(labels, dynamoComponentDeployment.Spec.Labels)
-		}
-		if dynamoComponentDeployment.Labels != nil {
-			maps.Copy(labels, dynamoComponentDeployment.Labels)
-		}
+		objectLabels := dynamoComponentDeployment.GetLabels()
+		maps.Copy(labels, objectLabels)
+		maps.Copy(labels, dynamo.GetDCDPreservedAlphaLabels(dynamoComponentDeployment))
+		maps.Copy(labels, dynamo.GetPodTemplateLabels(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
 		dynamo.AddBaseModelLabel(labels, dynamoComponentDeployment.Spec.ModelRef)
+		if subComponentType := dynamo.GetDCDSubComponentType(dynamoComponentDeployment); subComponentType != "" {
+			labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
+		}
+		if componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment); componentName != "" {
+			labels[commonconsts.KubeLabelDynamoComponent] = componentName
+		}
+		if dynamoNamespace := dynamo.GetDCDDynamoNamespace(dynamoComponentDeployment); dynamoNamespace != "" {
+			labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+		}
+		for _, key := range []string{
+			commonconsts.KubeLabelDynamoComponent,
+			commonconsts.KubeLabelDynamoNamespace,
+			commonconsts.KubeLabelDynamoGraphDeploymentName,
+			commonconsts.KubeLabelDynamoWorkerHash,
+		} {
+			if value := objectLabels[key]; value != "" {
+				labels[key] = value
+			}
+		}
 	}
 	return labels
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
+func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {
 	annotations := map[string]string{}
 	if dynamoComponentDeployment != nil {
-		if dynamoComponentDeployment.Spec.Annotations != nil {
-			maps.Copy(annotations, dynamoComponentDeployment.Spec.Annotations)
-		}
-		if dynamoComponentDeployment.Spec.ExtraPodMetadata != nil && dynamoComponentDeployment.Spec.ExtraPodMetadata.Annotations != nil {
-			maps.Copy(annotations, dynamoComponentDeployment.Spec.ExtraPodMetadata.Annotations)
-		}
+		maps.Copy(annotations, dynamo.GetDCDPreservedAlphaAnnotations(dynamoComponentDeployment))
+		maps.Copy(annotations, dynamo.GetPodTemplateAnnotations(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
 		dynamo.AddBaseModelAnnotation(annotations, dynamoComponentDeployment.Spec.ModelRef)
 	}
 	return annotations
@@ -891,55 +911,47 @@ func getDeploymentRollingUpdateMaxSurgeAndMaxUnavailable(annotations map[string]
 }
 
 type generateResourceOption struct {
-	dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment
+	dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment
 }
 
-//nolint:gocyclo,nakedret
-func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment)
+func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (*corev1.PodTemplateSpec, error) {
+	dcd := opt.dynamoComponentDeployment
+	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
+	podLabels := r.getKubeLabels(dcd)
+	podAnnotations := r.getKubeAnnotations(dcd)
+	kubeName := dcd.Name
 
 	// Convert user-provided metrics annotation into controller-managed label
 	// By default (no annotation), metrics are enabled
-	metricsAnnotationValue := ""
-	if opt.dynamoComponentDeployment.Spec.Annotations != nil {
-		metricsAnnotationValue = opt.dynamoComponentDeployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics]
-	}
-	switch metricsAnnotationValue {
-	case commonconsts.KubeLabelValueFalse:
+	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] == commonconsts.KubeLabelValueFalse {
 		// Explicitly disabled, don't add the label
-	default:
+	} else {
 		// Any other value (including empty) enables metrics
 		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
-	// Add label for the dynamo graph deployment on the pods themselves
-	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
-
-	// Add component type label if specified
-	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
-		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
+	if parentName := dcd.GetLabels()[commonconsts.KubeLabelDynamoGraphDeploymentName]; parentName != "" {
+		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
+	} else if parentName := dcd.GetParentGraphDeploymentName(); parentName != "" {
+		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
 	}
-
-	if opt.dynamoComponentDeployment.Spec.SubComponentType != "" {
-		podLabels[commonconsts.KubeLabelDynamoSubComponentType] = opt.dynamoComponentDeployment.Spec.SubComponentType
+	if component.ComponentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
 	}
-
-	podAnnotations := make(map[string]string)
-
-	kubeName := opt.dynamoComponentDeployment.Name
-
-	resourceAnnotations := opt.dynamoComponentDeployment.Spec.Annotations
-
-	if resourceAnnotations == nil {
-		resourceAnnotations = make(map[string]string)
+	if componentName := dynamo.GetDCDComponentName(dcd); componentName != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
+	}
+	if dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd); dynamoNamespace != "" {
+		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+	}
+	if workerHash := dcd.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 
 	// Resolve checkpoint for this component
 	var checkpointInfo *checkpoint.CheckpointInfo
-	if r.Config.Checkpoint.Enabled &&
-		opt.dynamoComponentDeployment.Spec.Checkpoint != nil &&
-		opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
-		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
+	if checkpointConfig := dynamo.GetCheckpoint(component); r.Config.Checkpoint.Enabled && checkpointConfig != nil {
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dcd.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig))
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
@@ -949,16 +961,15 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		checkpointInfo = info
 	}
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(dcd, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
 	if err != nil {
-		err = errors.Wrap(err, "failed to generate base pod spec")
-		return nil, err
+		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
 	if r.Config.Checkpoint.Enabled {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			ctx,
 			r.Client,
-			opt.dynamoComponentDeployment.Namespace,
+			dcd.Namespace,
 			podSpec,
 			checkpointInfo,
 			r.Config.Checkpoint.EffectiveSeccompProfile(),
@@ -975,45 +986,22 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
 	// Add discovery labels to pod template for Pod-based daemon filtering
-	if commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, opt.dynamoComponentDeployment.Spec.Annotations) {
+	if commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, podAnnotations) {
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
-	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
-
-	if extraPodMetadata != nil {
-		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
-		maps.Copy(podLabels, extraPodMetadata.Labels)
-	}
-	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
-	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
-		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
-	}
-	if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-		podLabels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
-	}
-	if workerHash := opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
-		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
-	}
 	// Restore labels are operator-controlled state. Clear stale values after
 	// metadata merge and only reapply them when checkpoint material is ready.
 	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
 
-	// Propagate restart annotation to pod template to trigger rolling restart
-	// This is the same mechanism used by kubectl rollout restart
-	if restartAt, exists := resourceAnnotations[commonconsts.RestartAnnotation]; exists {
-		podAnnotations[commonconsts.RestartAnnotation] = restartAt
-	}
-
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
-		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoComponentDeployment.Namespace), client.MatchingLabels{
+		err = r.List(ctx, serviceAccounts, client.InNamespace(dcd.Namespace), client.MatchingLabels{
 			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
-			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoComponentDeployment.Namespace)
-			return
+			return nil, errors.Wrapf(err, "failed to list service accounts in namespace %s", dcd.Namespace)
 		}
 		if len(serviceAccounts.Items) > 0 {
 			podSpec.ServiceAccountName = serviceAccounts.Items[0].Name
@@ -1022,15 +1010,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
-	podTemplateSpec = &corev1.PodTemplateSpec{
+	return &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
 		Spec: *podSpec,
-	}
-
-	return
+	}, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {
@@ -1043,24 +1029,26 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dcd.Spec.Annotations)
+	annotations := r.getKubeAnnotations(dcd)
+	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, annotations)
 
 	if !(isK8sDiscovery || dcd.IsFrontendComponent()) {
 		return deleteStub, true, nil
 	}
 
-	if dcd.Spec.DynamoNamespace == nil {
+	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)
+	if dynamoNamespace == "" {
 		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
 	}
 
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
-		ComponentType:   dcd.Spec.ComponentType,
-		DynamoNamespace: *dcd.Spec.DynamoNamespace,
-		ComponentName:   dcd.Spec.ServiceName,
+		ComponentType:   string(dcd.Spec.ComponentType),
+		DynamoNamespace: dynamoNamespace,
+		ComponentName:   dynamo.GetDCDComponentName(dcd),
 		Labels:          r.getKubeLabels(dcd),
-		Annotations:     r.getKubeAnnotations(dcd),
+		Annotations:     annotations,
 		IsK8sDiscovery:  isK8sDiscovery,
 	})
 	if err != nil {
@@ -1075,7 +1063,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
@@ -1086,7 +1074,6 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		})).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
 
 	if r.RuntimeConfig.LWSEnabled {

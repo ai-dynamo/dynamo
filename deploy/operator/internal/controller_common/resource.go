@@ -27,6 +27,7 @@ import (
 	"strconv"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -652,10 +653,10 @@ func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectRefer
 }
 
 type Resource struct {
-	object          client.Object
-	isReady         bool
-	readyReason     string
-	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
+	object            client.Object
+	isReady           bool
+	readyReason       string
+	componentStatuses map[string]v1beta1.ComponentReplicaStatus
 }
 
 func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
@@ -672,18 +673,18 @@ func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*R
 	}, nil
 }
 
-func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+func NewResourceWithComponentStatuses[T client.Object](resource T, isReadyAndComponentStatuses func() (bool, string, map[string]v1beta1.ComponentReplicaStatus)) (*Resource, error) {
 	v := reflect.ValueOf(resource)
 	// handles untype nil and typed nil
 	if !v.IsValid() || v.IsNil() {
 		return nil, fmt.Errorf("resource is nil")
 	}
-	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
+	ready, reason, componentStatuses := isReadyAndComponentStatuses()
 	return &Resource{
-		object:          resource,
-		isReady:         ready,
-		readyReason:     reason,
-		serviceStatuses: serviceStatuses,
+		object:            resource,
+		isReady:           ready,
+		readyReason:       reason,
+		componentStatuses: componentStatuses,
 	}, nil
 }
 
@@ -695,6 +696,6 @@ func (r *Resource) GetName() string {
 	return r.object.GetName()
 }
 
-func (r *Resource) GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus {
-	return r.serviceStatuses
+func (r *Resource) GetComponentStatuses() map[string]v1beta1.ComponentReplicaStatus {
+	return r.componentStatuses
 }
