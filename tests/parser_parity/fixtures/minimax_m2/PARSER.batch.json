@@ -1,0 +1,286 @@
+{
+  "family": "minimax_m2",
+  "mode": "batch",
+  "cases": {
+    "1": {
+      "description": "Single tool call (happy path)",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "2": {
+      "description": "Multiple tool calls",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>\n<invoke name=\"get_time\">\n<parameter name=\"timezone\">EST</parameter>\n</invoke>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "name": "get_time",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timezone": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          },
+          {
+            "name": "get_time",
+            "arguments": {
+              "timezone": "EST"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "3": {
+      "description": "No tool call (plain text)",
+      "model_text": "Hello, how can I help you today?",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [],
+        "normal_text": "Hello, how can I help you today?"
+      }
+    },
+    "4": {
+      "description": "Malformed (missing closing invoke tag)",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "5": {
+      "description": "Missing </minimax:tool_call> end marker",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [],
+        "normal_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>"
+      }
+    },
+    "6": {
+      "description": "Empty args (no-arg call)",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_time\">\n</invoke>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_time",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_time",
+            "arguments": {}
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "7": {
+      "description": "Complex args (multi-parameter)",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n<parameter name=\"unit\">fahrenheit</parameter>\n</invoke>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              },
+              "unit": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "unit": "fahrenheit",
+              "location": "NYC"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "8": {
+      "description": "Interleaved normal text",
+      "model_text": "I'll help you check the weather. <minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">Tokyo</parameter>\n</invoke>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "Tokyo"
+            }
+          }
+        ],
+        "normal_text": "I'll help you check the weather."
+      }
+    },
+    "9": {
+      "description": "Empty input",
+      "model_text": "",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [],
+        "normal_text": ""
+      }
+    },
+    "10": {
+      "description": "Duplicate calls (same name twice)",
+      "model_text": "<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">LA</parameter>\n</invoke>\n</minimax:tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          },
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "LA"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    }
+  }
+}
