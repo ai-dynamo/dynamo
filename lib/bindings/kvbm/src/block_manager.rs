@@ -183,7 +183,7 @@ impl BlockManager {
 
         let rt = get_current_tokio_handle();
 
-        config = config.device_type(String::from("cuda"));
+        config = config.device_type(String::from("xpu"));
 
         let config = config.build().map_err(to_pyerr)?;
         Ok(BlockManager {
@@ -372,7 +372,7 @@ impl BlockManagerBuilder {
                 config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
-        config_builder = config_builder.device_type(String::from("cuda"));
+        config_builder = config_builder.device_type(String::from("xpu"));
 
         let config = config_builder.build()?;
 

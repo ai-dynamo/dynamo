@@ -87,7 +87,7 @@ impl ZeContext {
         level_zero::init().map_err(ZeError::from)?;
 
         let drivers = level_zero::drivers().map_err(ZeError::from)?;
-        let Some(driver) = drivers.first().copied() else {
+        let Some(driver) = drivers.first().cloned() else {
             return Err(ZeError::NoDriver);
         };
 
@@ -95,12 +95,12 @@ impl ZeContext {
         if devices.is_empty() {
             return Err(ZeError::NoDevice);
         }
-        let Some(device) = devices.get(device_index).copied() else {
+        let Some(device) = devices.get(device_index).cloned() else {
             return Err(ZeError::InvalidDeviceIndex(device_index));
         };
 
         let context = Arc::new(Context::create(&driver).map_err(ZeError::from)?);
-        let queue = ZeCommandQueue::new(context.clone(), device)?;
+        let queue = ZeCommandQueue::new(context.clone(), device.clone())?;
         Ok(Arc::new(Self {
             device_id: device_index,
             driver,
@@ -117,7 +117,7 @@ impl ZeContext {
 
     /// Create a new command queue (analogous to CudaContext::new_stream).
     pub fn new_stream(&self) -> Result<Arc<ZeCommandQueue>, ZeError> {
-        ZeCommandQueue::new(self.context.clone(), self.device)
+        ZeCommandQueue::new(self.context.clone(), self.device.clone())
     }
 }
 
@@ -146,7 +146,7 @@ impl ZeCommandQueue {
             .create_command_queue(&device)
             .map_err(ZeError::from)?;
         let event_pool = context
-            .create_event_pool(&[device], 1, 0)
+            .create_event_pool(&[device.clone()], 1, 0)
             .map_err(ZeError::from)?;
         Ok(Arc::new(Self {
             handle,
@@ -175,7 +175,7 @@ impl ZeCommandQueue {
 
     /// Get the Level Zero device.
     pub fn device(&self) -> Device {
-        self.device
+        self.device.clone()
     }
 
     /// Get the event pool.
