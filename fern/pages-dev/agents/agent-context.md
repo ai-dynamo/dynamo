@@ -52,8 +52,8 @@ This writes files like:
 /tmp/dynamo-agent-trace.000001.jsonl.gz
 ```
 
-To ingest harness tool events, also configure the local ZMQ endpoint that the
-harness will publish on:
+To ingest harness tool events, also configure the local ZMQ endpoint that Dynamo
+will bind. Harness processes connect to this endpoint as producers:
 
 ```bash
 export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
@@ -73,8 +73,8 @@ Then start any Dynamo OpenAI-compatible backend.
 | `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS`  |                  No                  | `1000`      | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member.                                                         |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |                  No                  | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes.                                                                                          |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |                  No                  | unset       | Optional `jsonl_gz` segment roll threshold in records.                                                                                            |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |                  No                  | unset       | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion.                                                            |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |                  No                  | unset       | Optional ZMQ topic filter for harness tool events.                                                                                                |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |                  No                  | unset       | Local ZMQ PULL endpoint that Dynamo binds for harness tool events. Setting this enables tool event ingestion.                                      |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |                  No                  | unset       | Optional topic filter applied to the first ZMQ message frame.                                                                                     |
 
 </details>
 
@@ -138,10 +138,10 @@ def instrument_llm_request(kwargs, agent_context):
 
 ## Step 3: Send Tool Events to Dynamo
 
-Harnesses bind a long-lived local ZMQ PUB socket and publish tool lifecycle
-records on the configured endpoint. Dynamo accepts `tool_start`, `tool_end`, and
-`tool_error` records from the harness and writes them to the same trace stream
-as LLM request records.
+Harnesses connect a long-lived local ZMQ PUSH socket and publish tool lifecycle
+records to the endpoint Dynamo binds. Dynamo accepts `tool_start`, `tool_end`,
+and `tool_error` records from the harness and writes them to the same trace
+stream as LLM request records.
 
 The ZMQ wire format is:
 
@@ -149,31 +149,34 @@ The ZMQ wire format is:
 [topic, seq_be_u64, msgpack(AgentTraceRecord)]
 ```
 
-Use the same producer pattern as our KV event publisher pattern in [vllm](https://github.com/vllm-project/vllm/blob/399005a986a2b99f435919777427b6d73d36a277/vllm/distributed/kv_events.py#L103) and [SGLang](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/kv_events.py): a bounded queue, a background
-publisher thread, monotonically increasing sequence numbers, and a PUB socket
-with a high-water mark. Plain ZMQ PUB/SUB is best-effort for early frames, so a
-terminal tool record should be self-contained with `started_at_unix_ms`,
-`ended_at_unix_ms`, and `duration_ms`. Keep `tool_start` for live/in-flight
+Use a bounded queue, a background publisher thread, monotonically increasing
+sequence numbers, and a PUSH socket with a high-water mark. Terminal tool
+records should be self-contained with `started_at_unix_ms`, `ended_at_unix_ms`,
+and `duration_ms` because queue pressure, process exits, or network failures can
+still drop earlier `tool_start` records. Keep `tool_start` for live/in-flight
 status, but do not require it to reconstruct completed spans.
 
-### Publisher Ownership
+### Endpoint Ownership
 
-Most framework integrations should create one exporter per harness or runtime
-instance. In-process systems, such as callback or middleware integrations, can
-emit records directly into the root queued publisher.
+Dynamo owns the shared ZMQ bind. Harnesses are producers and only connect.
 
-If a harness runs tools or subagents in child processes, do not let each child
-bind the same ZMQ endpoint. Keep the root process as the only network publisher
-and forward child records to it over the framework event bus, a multiprocessing
-queue, or a local collector. The child should forward the same normalized
-`AgentTraceRecord`; the parent handles ZMQ framing and sequence numbers.
+This direction matters for production process trees. Agent frameworks often run
+tools, subagents, plugins, or model wrappers in child processes. If every process
+that loads a tracing integration tries to bind the same local endpoint, only one
+process succeeds and the others fail during startup. With Dynamo as the single
+collector bind and all harness processes connecting as PUSH producers, parent and
+child processes can emit their own tool records independently while preserving
+their own `agent_context.program_id` and `parent_program_id`.
 
 ```text
-in-process callbacks / tool wrappers
-  -> root queued publisher -> ZMQ PUB -> Dynamo relay
+Dynamo frontend
+  -> ZMQ PULL bind -> trace bus -> sinks
 
-child process tools / subagents
-  -> process queue or event bus -> root queued publisher -> ZMQ PUB -> Dynamo relay
+parent harness process
+  -> queued ZMQ PUSH connect -> Dynamo
+
+child tool / subagent process
+  -> queued ZMQ PUSH connect -> Dynamo
 ```
 
 A compact publisher implementation is included below for harness authors that
@@ -197,9 +200,9 @@ class ZmqToolEventPublisher:
         self.topic = topic.encode("utf-8")
         self.seq = 0
         self.queue = queue.Queue(maxsize=100_000)
-        self.socket = zmq.Context.instance().socket(zmq.PUB)
+        self.socket = zmq.Context.instance().socket(zmq.PUSH)
         self.socket.set_hwm(100_000)
-        self.socket.bind(endpoint)
+        self.socket.connect(endpoint)
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
         atexit.register(self.shutdown)
@@ -212,6 +215,7 @@ class ZmqToolEventPublisher:
         while True:
             payload = self.queue.get()
             if payload is None:
+                self.queue.task_done()
                 break
             seq = self.seq
             self.seq += 1
@@ -219,7 +223,16 @@ class ZmqToolEventPublisher:
             self.queue.task_done()
 
     def shutdown(self):
-        self.queue.put_nowait(None)
+        while True:
+            try:
+                self.queue.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                except queue.Empty:
+                    time.sleep(0.01)
         self.thread.join(timeout=1.0)
         self.socket.close(linger=0)
 ```
@@ -306,17 +319,17 @@ Dynamo runtime APIs. Framework integrations should use this shape:
 - Call one helper before each OpenAI-compatible LLM request to merge
   `extra_body.nvext.agent_context` and set `x-request-id`.
 - For LangGraph/LangChain-style in-process runtimes, implement callbacks or
-  middleware that emit directly to the root publisher.
+  middleware that emit directly to the process-local queued publisher.
 - Emit `tool_start` and a terminal `tool_end` or `tool_error` wherever the
   harness executes model-requested tools. Include `started_at_unix_ms`,
   `ended_at_unix_ms`, and `duration_ms` on terminal records so completed spans
-  survive best-effort PUB/SUB startup loss.
+  survive dropped or missing start records.
 - Propagate context through thread pools, subprocesses, and subagent launches
   when those paths can make LLM calls or emit tool records.
 - Register a queued ZMQ publisher at process startup when tool tracing is
   enabled.
-- If tools or subagents run in subprocesses, forward normalized tool records
-  back to the root publisher instead of binding another ZMQ endpoint.
+- If tools or subagents run in subprocesses, each subprocess may create its own
+  queued PUSH publisher as long as it propagates the correct `agent_context`.
 
 You do not need custom code in every tool implementation when existing tool
 calls already pass through shared harness code. Add explicit hooks only for paths
@@ -389,13 +402,13 @@ Use `DYN_AGENT_TRACE_*` variables for the Dynamo runtime and
 
 The fork automatically attaches `nvext.agent_context` and `x-request-id` to
 ms-agent OpenAI-compatible LLM calls while an agent context is active. When
-`DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` is set, the ms-agent CLI also binds a
-ZMQ PUB socket and publishes tool lifecycle records to Dynamo's tool-event
-relay. Shared tool execution paths publish directly to that root publisher;
-`agent_tools` subprocesses forward normalized tool records back to the root
-process, so subprocess isolation remains enabled without each child binding the
-endpoint. Python entrypoints that do not use the CLI lazily initialize the same
-publisher on the first tool event.
+`DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` is set, the ms-agent CLI connects a ZMQ
+PUSH socket and publishes tool lifecycle records to Dynamo's tool-event relay.
+Shared tool execution paths publish directly to the process-local queued
+publisher. Subprocess tools can connect their own PUSH publishers to the same
+Dynamo endpoint as long as they propagate the active agent context. Python
+entrypoints that do not use the CLI lazily initialize the same publisher on the
+first tool event.
 
 For DeepResearch v2, keep the normal ms-agent setup: configure
 `OPENAI_BASE_URL`, `OPENAI_API_KEY`, search keys such as `EXA_API_KEY`, and the
