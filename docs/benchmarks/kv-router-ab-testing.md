@@ -117,7 +117,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-no-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -130,7 +129,6 @@ spec:
                   fieldPath: metadata.uid
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-no-router
       componentType: worker
       replicas: 8
       resources:
@@ -208,7 +206,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -224,7 +221,6 @@ spec:
           value: kv  # KEY DIFFERENCE: Enable KV Smart Router
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router
       componentType: worker
       replicas: 8
       resources:

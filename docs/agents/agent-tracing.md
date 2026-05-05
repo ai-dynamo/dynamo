@@ -46,8 +46,8 @@ This writes files like:
 /tmp/dynamo-agent-trace.000001.jsonl.gz
 ```
 
-To ingest harness tool events, configure the local ZMQ endpoint that the harness
-will publish on:
+To ingest harness tool events, configure the local ZMQ endpoint that Dynamo
+will bind. Harness processes connect to this endpoint as producers:
 
 ```bash
 export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
@@ -67,8 +67,9 @@ Then start any Dynamo OpenAI-compatible backend.
 | `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS`  |                  No                  | `1000`      | JSONL periodic flush interval. For `jsonl_gz`, each flush appends a complete gzip member.                                                         |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |                  No                  | `268435456` | `jsonl_gz` segment roll threshold in uncompressed bytes.                                                                                          |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |                  No                  | unset       | Optional `jsonl_gz` segment roll threshold in records.                                                                                            |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |                  No                  | unset       | Local ZMQ endpoint for harness tool events. Setting this enables tool event ingestion.                                                            |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |                  No                  | unset       | Optional ZMQ topic filter for harness tool events.                                                                                                |
+| `DYN_AGENT_TRACE_REPLAY_HASHES`            |                  No                  | enabled     | Replay-oriented prompt block hashes are emitted by default in request records. Set to a falsey value such as `0`, `false`, `off`, or `no` to disable them. Hashes use the model deployment card's KV cache block size. |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |                  No                  | unset       | Local ZMQ PULL endpoint that Dynamo binds for harness tool events. Setting this enables tool event ingestion.                                     |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |                  No                  | unset       | Optional topic filter applied to the first ZMQ message frame.                                                                                     |
 
 </details>
 
@@ -79,10 +80,10 @@ also configured.
 
 ## Tool Events
 
-Harnesses bind a long-lived local ZMQ PUB socket and publish tool lifecycle
-records on the configured endpoint. Dynamo accepts `tool_start`, `tool_end`, and
-`tool_error` records from the harness and writes them to the same trace stream
-as LLM request records.
+Harnesses connect a long-lived local ZMQ PUSH socket and publish tool lifecycle
+records to the endpoint Dynamo binds. Dynamo accepts `tool_start`, `tool_end`,
+and `tool_error` records from the harness and writes them to the same trace
+stream as LLM request records.
 
 The ZMQ wire format is:
 
@@ -90,23 +91,34 @@ The ZMQ wire format is:
 [topic, seq_be_u64, msgpack(AgentTraceRecord)]
 ```
 
-Use the same producer pattern as KV event publishers: a bounded queue, a
-background publisher thread, monotonically increasing sequence numbers, and a
-PUB socket with a high-water mark. Plain ZMQ PUB/SUB is best-effort for early
-frames, so a terminal tool record should be self-contained with
-`started_at_unix_ms`, `ended_at_unix_ms`, and `duration_ms`. Keep `tool_start`
-for live/in-flight status, but do not require it to reconstruct completed spans.
+Use a bounded queue, a background publisher thread, monotonically increasing
+sequence numbers, and a PUSH socket with a high-water mark. Terminal tool
+records should be self-contained with `started_at_unix_ms`, `ended_at_unix_ms`,
+and `duration_ms` because queue pressure, process exits, or network failures can
+still drop earlier `tool_start` records. Keep `tool_start` for live/in-flight
+status, but do not require it to reconstruct completed spans.
 
-If a harness runs tools or subagents in child processes, keep the root process as
-the only network publisher and forward child records to it over the framework
-event bus, a multiprocessing queue, or a local collector.
+### Endpoint Ownership
+
+Dynamo owns the shared ZMQ bind. Harnesses are producers and only connect.
+
+This direction matters for production process trees. Agent frameworks often run
+tools, subagents, plugins, or model wrappers in child processes. If every process
+that loads a tracing integration tries to bind the same local endpoint, only one
+process succeeds and the others fail during startup. With Dynamo as the single
+collector bind and all harness processes connecting as PUSH producers, parent and
+child processes can emit their own tool records independently while preserving
+their own `agent_context.trajectory_id` and `parent_trajectory_id`.
 
 ```text
-in-process callbacks / tool wrappers
-  -> root queued publisher -> ZMQ PUB -> Dynamo relay
+Dynamo frontend
+  -> ZMQ PULL bind -> trace bus -> sinks
 
-child process tools / subagents
-  -> process queue or event bus -> root queued publisher -> ZMQ PUB -> Dynamo relay
+parent harness process
+  -> queued ZMQ PUSH connect -> Dynamo
+
+child tool / subagent process
+  -> queued ZMQ PUSH connect -> Dynamo
 ```
 
 The record must include `agent_context`. Tool events should use the same
@@ -174,6 +186,62 @@ Useful converter flags:
 | `--no-stages`             | Show request slices without prefill/decode stage slices.                       |
 | `--separate-stage-tracks` | Place prefill/decode stages on adjacent tracks for debugging timeline nesting. |
 
+## Replay the Trace with Mocker
+
+Request trace rows include text-free replay hashes by default. Convert a trace
+shard to Mooncake JSONL, then replay it through mocker:
+
+```bash
+cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
+  --input-path "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
+  --output-file /tmp/dynamo-agent-trace.mooncake.jsonl
+```
+
+Use the `trace_block_size` printed by the converter when launching replay. For a
+multi-worker KV-router replay:
+
+```bash
+TRACE_BLOCK_SIZE=128
+uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl \
+  --trace-format mooncake \
+  --trace-block-size "${TRACE_BLOCK_SIZE}" \
+  --replay-mode offline \
+  --router-mode kv_router \
+  --num-workers 4 \
+  --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
+  --report-json /tmp/dynamo-agent-trace.replay-report.json
+```
+
+`kv_router` requires more than one mock worker. For a single aggregated-worker
+smoke test, use `--router-mode round_robin --num-workers 1`.
+
+### Replay Scope and Follow-ups
+
+What works today:
+
+- Per-`request_end` cumulative input-block hashes are emitted on agent traces by
+  default.
+- Single-turn agent traces convert to Mooncake JSONL with absolute timestamps
+  and compacted `hash_ids`.
+- Mocker replay reads these rows as wall-clock arrivals and simulates a cache
+  pattern from the configured engine, router, and capacity model.
+- Concurrent LLM fan-out from the same `trajectory_id` is preserved as parallel
+  arrivals because converted rows do not share a `session_id`.
+
+On the roadmap:
+
+- Live KV cache movement is simulated by the mocker, not replayed byte-for-byte
+  from the original run. Higher-fidelity replay would need an explicit replay
+  event stream or sidecar rather than inferring writes in the converter.
+- Output token text/ids are not reconstructed. Replay only drives
+  `max_output_tokens`; the original response text is not regenerated.
+- Causal tool and turn dependencies are not modeled in single-row Mooncake
+  output. A request that depended on an earlier tool result is replayed by its
+  absolute arrival time, not as "wait for the tool to finish".
+- End-to-end re-run of an agent run is on the roadmap. Replay today is
+  request-level; reconstructing tool decisions, agent control flow, or external
+  tool effects is follow-up work.
+
 ## Record Semantics
 
 Dynamo emits `request_end` after the response stream completes or is dropped.
@@ -195,9 +263,9 @@ Nullable fields are omitted when the serving path did not record them.
         "request_id": "dynamo-request-id",
         "x_request_id": "llm-call-42",
         "model": "my-model",
-        "input_tokens": 4096,
-        "output_tokens": 512,
-        "cached_tokens": 3584,
+        "input_tokens": 128,
+        "output_tokens": 16,
+        "cached_tokens": 112,
         "request_received_ms": 1777312800000,
         "prefill_wait_time_ms": 12.1,
         "prefill_time_ms": 70.3,
@@ -212,6 +280,11 @@ Nullable fields are omitted when the serving path did not record them.
             "prefill_dp_rank": 0,
             "decode_worker_id": 1,
             "decode_dp_rank": 0
+        },
+        "replay": {
+            "trace_block_size": 64,
+            "input_length": 128,
+            "input_sequence_hashes": [14879255164371896291, 274632075616497421]
         }
     }
 }
@@ -237,10 +310,41 @@ Request records capture Dynamo-owned serving metrics:
 | `kv_transfer_estimated_latency_ms` | Upper-bound estimated disaggregated KV transfer latency. |
 | `queue_depth`                      | Router queue depth observed when routing the request.    |
 | `worker`                           | Prefill/decode worker IDs and DP ranks when recorded.    |
+| `replay`                           | Text-free replay metadata for Mooncake/mocker conversion. Emitted by default when agent tracing is enabled unless `DYN_AGENT_TRACE_REPLAY_HASHES` is falsey. Strict trace consumers must accept this optional object before enabling tracing. |
+| `replay.trace_block_size`          | KV cache block size from the model deployment card, used to derive replay hashes. |
+| `replay.input_length`              | Prompt/input token count represented by the replay hashes. |
+| `replay.input_sequence_hashes`     | Stable sequence-aware prompt block hashes. These are replay labels, not raw tokens and not compact Mooncake `hash_ids`. |
 
-Trace records do not include prompt/response content, sampling parameters,
-finish reason, or error status. Use the audit sink for request/response payload
-capture and OpenTelemetry export for span-based observability.
+Trace records do not include prompt/response content, raw token IDs, sampling
+parameters, finish reason, or error status. Replay hashes expose prompt prefix
+reuse structure without storing the prompt text. Use the audit sink for
+request/response payload capture and OpenTelemetry export for span-based
+observability.
+
+For local payload debugging, enable audit logging while running the backend:
+
+```bash
+export DYN_AUDIT_SINKS=stderr
+export DYN_AUDIT_FORCE_LOGGING=true
+```
+
+Audit records include the raw OpenAI-compatible request, the final aggregated
+response, and any `nvext.agent_context` supplied by the harness. Join audit
+records to agent trace records by `request_id` when correlating payload text with
+replay hashes and timing metrics.
+
+Replay hashes describe the cumulative input presented to each LLM request. They
+do not by themselves declare cache movement, observed reuse, or that a prior
+decode stored a block in KV cache. Mooncake conversion maps these sequence
+hashes to compact per-file `hash_ids` and writes an absolute request-arrival
+`timestamp` on every converted row. Replay/mocker treats rows with explicit
+per-turn timestamps as wall-clock arrivals, so LLM calls from the same
+`trajectory_id` can overlap when the original agent issued them concurrently.
+Rows that use `delay` instead keep closed-loop session behavior: the next turn
+waits for the previous turn to complete plus the delay. Replay/mocker then
+treats those rows as request reads and simulates KV writes/events from the
+configured engine, router, capacity, admission, and timing model. The simulated
+cache pattern is only as exact as those replay parameters.
 
 ## Consistency Model
 

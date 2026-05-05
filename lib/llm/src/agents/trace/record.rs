@@ -123,6 +123,7 @@ mod tests {
                 kv_transfer_estimated_latency_ms: Some(f64::NEG_INFINITY),
                 queue_depth: None,
                 worker: None,
+                replay: None,
             },
         );
 

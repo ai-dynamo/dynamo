@@ -508,6 +508,7 @@ mod tests {
                 kv_transfer_estimated_latency_ms: None,
                 queue_depth: None,
                 worker: None,
+                replay: None,
             }),
             tool: None,
         }

@@ -1300,7 +1300,7 @@ mod offload {
     use kvbm_logical::manager::BlockManager;
     use uuid::Uuid;
 
-    use crate::common::protocols::{DirectRequest, MockEngineArgs};
+    use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock};
     use crate::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
 
     use super::super::core::VllmCore;
@@ -1391,7 +1391,7 @@ mod offload {
             .sequence
             .positional_lineage_hashes();
         assert_eq!(plhs.len(), 1, "test request should have one full block");
-        seed_g2_blocks(engine.g2_manager(), &plhs);
+        seed_g2_blocks(engine.g2_manager(), plhs);
 
         core.kv_manager.attach_new_offload_engine(engine);
         let mut collector = crate::replay::TraceCollector::default();
@@ -1473,7 +1473,7 @@ mod offload {
             .sequence
             .positional_lineage_hashes();
         assert_eq!(plhs.len(), 1, "test request should have one full block");
-        seed_g2_blocks(engine.g2_manager(), &plhs);
+        seed_g2_blocks(engine.g2_manager(), plhs);
         core.kv_manager.attach_new_offload_engine(engine);
 
         let mut collector = crate::replay::TraceCollector::default();
@@ -1497,6 +1497,75 @@ mod offload {
         assert!(
             core.state.waiting.contains(&cold_uuid),
             "cold request should remain waiting for G1 capacity"
+        );
+    }
+
+    /// A partial G2 swap-in is scheduled from the first G1 miss onward. The
+    /// already-cached G1 prefix must stay pinned while the transfer is pending,
+    /// otherwise G1 eviction can remove the parent block before the suffix
+    /// publishes its Device-tier `Stored` event.
+    #[tokio::test]
+    async fn partial_g2_swap_in_pins_cached_g1_prefix() {
+        let block_size = 4;
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(3)
+            .block_size(block_size)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let config = KvbmOffloadConfig {
+            block_size_tokens: block_size,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g2_to_g1_gbps: 1.0,
+            ..Default::default()
+        };
+        let engine = MockOffloadEngine::new(config).await.expect("engine build");
+        engine.tick(0.0);
+
+        let uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..(block_size * 3) as u32).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let (prefix_signal, plhs) = {
+            let request = core.state.requests.get(&uuid).unwrap();
+            (
+                request
+                    .sequence
+                    .prepare_allocation(block_size * 2)
+                    .expect("prefix allocation signal"),
+                request.sequence.positional_lineage_hashes().to_vec(),
+            )
+        };
+        let prefix_blocks = match &prefix_signal {
+            MoveBlock::Use(blocks, ..) => blocks.clone(),
+            _ => panic!("expected prefix Use signal"),
+        };
+        assert_eq!(core.kv_manager.process(&prefix_signal), 2);
+        assert_eq!(core.kv_manager.process(&MoveBlock::Deref(prefix_blocks)), 1);
+
+        assert_eq!(plhs.len(), 3, "test request should have three full blocks");
+        seed_g2_blocks(engine.g2_manager(), &plhs[2..]);
+        core.kv_manager.attach_new_offload_engine(engine);
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(pass.admissions.len(), 0);
+        assert_eq!(core.requests_awaiting_swap_in.len(), 1);
+        assert_eq!(core.requests_awaiting_swap_in[0]._prefix_pins.len(), 2);
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            3,
+            "two cached prefix blocks plus one destination slot must be pinned"
         );
     }
 
@@ -1649,7 +1718,7 @@ mod offload {
             .positional_lineage_hashes();
         assert!(!plhs.is_empty(), "test sequence must have full blocks");
 
-        seed_g2_blocks(engine.g2_manager(), &plhs);
+        seed_g2_blocks(engine.g2_manager(), plhs);
         core.kv_manager.attach_new_offload_engine(engine);
 
         // Pass 1 (t=0.0): admission detects G2 prefix, parks the
@@ -1698,7 +1767,7 @@ mod offload {
     /// Replaying the same synthetic G2-offload trace twice with the same
     /// `now_ms` sequence must produce byte-identical scheduler behaviour.
     /// Live/offline mode is a caller concern: the engine sees only the
-    /// timestamps passed into `tick` / `try_onboard_prefix`.
+    /// timestamps passed into `tick` and swap-in start.
     #[tokio::test]
     async fn equivalence_replayed_twice_with_g2_offload() {
         use std::sync::{Arc, Mutex};
@@ -1799,7 +1868,7 @@ mod offload {
                 .unwrap()
                 .sequence
                 .positional_lineage_hashes();
-            seed_g2_blocks(engine.g2_manager(), &plhs);
+            seed_g2_blocks(engine.g2_manager(), plhs);
             core.kv_manager.attach_new_offload_engine(engine);
 
             // Drive 5 passes at well-separated `now_ms`. Pass 1 parks

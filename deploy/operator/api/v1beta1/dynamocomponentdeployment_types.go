@@ -218,7 +218,6 @@ type DynamoComponentDeploymentStatus struct {
 
 // +genclient
 // +kubebuilder:object:root=true
-// +kubebuilder:unservedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dcd
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
@@ -227,10 +226,10 @@ type DynamoComponentDeploymentStatus struct {
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 //
-// v1beta1 is currently an UNSERVED version: it is defined so that conversion
-// scaffolding and type generation can land ahead of the full multi-version
-// wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-// served in a subsequent MR.
+// v1beta1 is a served version: the API server accepts reads and writes
+// against it, and transparently converts to/from v1alpha1 (still the
+// storage version until a later MR flips it). Conversion goes through the
+// operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
