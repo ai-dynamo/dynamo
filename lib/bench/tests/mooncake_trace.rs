@@ -3,7 +3,7 @@
 
 mod support;
 
-#[path = "../kv_router/common/shared.rs"]
+#[path = "../kv_router/common/mod.rs"]
 mod common;
 
 #[path = "../kv_router/mooncake_shared.rs"]
@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use common::{WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::KvIndexerMetrics;
+use dynamo_kv_router::indexer::pruning::PruneConfig;
+use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, TokensWithHashes, WorkerWithDpRank};
 use dynamo_mocker::loadgen::{SessionTrace, Trace, TurnTrace};
 use mooncake_shared::{
@@ -179,6 +180,39 @@ async fn collect_overlap_scores_for_replay(
     Ok(scores)
 }
 
+async fn collect_overlap_scores_for_supported_modes(
+    config: &MooncakeIndexerConfig,
+    traces: &[Trace],
+    artifacts: &[WorkerReplayArtifacts],
+) -> anyhow::Result<Vec<(String, Vec<NormalizedOverlapScores>)>> {
+    let mut results = vec![(
+        format!(
+            "{} ({})",
+            config.short_name(),
+            MooncakeReplayMode::KvEvents.name()
+        ),
+        collect_overlap_scores_for_replay(config, traces, artifacts, MooncakeReplayMode::KvEvents)
+            .await?,
+    )];
+    if config.supports_approximate() {
+        results.push((
+            format!(
+                "{} ({})",
+                config.short_name(),
+                MooncakeReplayMode::Approx.name()
+            ),
+            collect_overlap_scores_for_replay(
+                config,
+                traces,
+                artifacts,
+                MooncakeReplayMode::Approx,
+            )
+            .await?,
+        ));
+    }
+    Ok(results)
+}
+
 async fn assert_overlap_score_parity(
     variants: &[MooncakeIndexerConfig],
     traces: &[Trace],
@@ -187,11 +221,10 @@ async fn assert_overlap_score_parity(
     let mut expected_name = None;
     let mut expected_scores = Vec::new();
 
-    for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
-        for config in variants {
-            let actual_scores =
-                collect_overlap_scores_for_replay(config, traces, artifacts, mode).await?;
-            let actual_name = format!("{} ({})", config.short_name(), mode.name());
+    for config in variants {
+        for (actual_name, actual_scores) in
+            collect_overlap_scores_for_supported_modes(config, traces, artifacts).await?
+        {
             if expected_name.is_none() {
                 expected_name = Some(actual_name);
                 expected_scores = actual_scores;
@@ -218,6 +251,34 @@ async fn assert_overlap_score_parity(
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+fn approx_tokens(seed: u32, num_blocks: usize) -> Vec<u32> {
+    (0..num_blocks)
+        .flat_map(|block_idx| {
+            let token = seed + block_idx as u32;
+            (0..BLOCK_SIZE as usize).map(move |_| token)
+        })
+        .collect()
+}
+
+async fn route_approx_writes(
+    indexer: &(dyn KvIndexerInterface + Send + Sync),
+) -> anyhow::Result<()> {
+    let writes = [
+        (WorkerWithDpRank::new(0, 0), approx_tokens(10, 1)),
+        (WorkerWithDpRank::new(1, 0), approx_tokens(20, 2)),
+        (WorkerWithDpRank::new(0, 1), approx_tokens(30, 3)),
+    ];
+
+    for (worker, tokens) in writes {
+        let mut tokens_with_hashes = TokensWithHashes::new(tokens, BLOCK_SIZE);
+        indexer
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .await?;
     }
 
     Ok(())
@@ -333,6 +394,55 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_approx_ttl_drain_leaves_indexer_dumps_empty() -> anyhow::Result<()> {
+    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let ttl = Duration::from_millis(250);
+    let variants = [
+        MooncakeIndexerConfig::radix_tree(),
+        MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+    ];
+
+    for config in &variants {
+        let label = config.short_name();
+        support::reset_warning_count(&warning_count);
+        let indexer = config.build_approximate_with_prune_config(
+            BLOCK_SIZE,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            PruneConfig { ttl },
+        )?;
+
+        route_approx_writes(indexer.as_ref()).await?;
+        indexer.flush().await;
+
+        assert!(
+            !indexer.dump_events().await?.is_empty(),
+            "{label} test setup should populate approximate blocks"
+        );
+
+        tokio::time::sleep(ttl + Duration::from_millis(100)).await;
+        indexer.flush().await;
+
+        assert!(
+            indexer.dump_events().await?.is_empty(),
+            "{label} should not dump any visible store events after TTL drain"
+        );
+
+        indexer.shutdown();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            warning_count.load(Ordering::Relaxed),
+            0,
+            "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> anyhow::Result<()> {
     let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
 
@@ -346,10 +456,14 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
 
     for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
         for config in &variants {
+            if matches!(mode, MooncakeReplayMode::Approx) && !config.supports_approximate() {
+                continue;
+            }
             support::reset_warning_count(&warning_count);
             let label = format!("{} ({})", config.short_name(), mode.name());
 
@@ -366,7 +480,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
             };
             let run = run_benchmark(
                 indexer,
-                input,
+                &input,
                 MooncakeBenchmarkConfig {
                     benchmark_duration_ms: BENCHMARK_DURATION_MS,
                     inference_worker_duplication_factor: 1,

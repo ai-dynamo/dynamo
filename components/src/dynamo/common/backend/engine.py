@@ -126,5 +126,12 @@ class LLMEngine(ABC):
 
     @abstractmethod
     async def cleanup(self) -> None:
-        """Release all engine resources.  Called once on shutdown."""
+        """Release all engine resources.
+
+        ``Worker`` invokes ``cleanup()`` at most once, only after ``start()``
+        has returned successfully, and never concurrently with ``start()`` or
+        another ``cleanup()``. Implementations do not need to defend against
+        pre-start, concurrent-with-start, or double-cleanup invocations —
+        ``Worker``'s lifecycle state machine serializes these transitions.
+        """
         ...

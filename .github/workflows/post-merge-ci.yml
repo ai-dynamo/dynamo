@@ -163,7 +163,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       cuda_version: '["12.9"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -206,6 +206,22 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-dev' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  sglang-efa-build:
+    name: sglang-runtime-efa
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_version: '["12.9"]'
+      make_efa: true
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
     secrets: inherit
 
   trtllm-build:
@@ -251,7 +267,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       cuda_version: '["13.1"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -313,6 +329,11 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       gpu_test_timeout_minutes: 120
+      # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
+      # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
+      # currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -341,7 +362,7 @@ jobs:
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
@@ -423,7 +444,7 @@ jobs:
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       run_gpu_tests: false
@@ -531,6 +552,20 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  vllm-dev-copy-to-acr:
+    name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-dev-build]
+    if: |
+      always() &&
+      needs.vllm-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, sglang-test]
@@ -546,6 +581,20 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  sglang-dev-copy-to-acr:
+    name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-dev-build]
+    if: |
+      always() &&
+      needs.sglang-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, trtllm-test]
@@ -556,6 +605,20 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  trtllm-dev-copy-to-acr:
+    name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-dev-build]
+    if: |
+      always() &&
+      needs.trtllm-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.trtllm-dev-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 20
@@ -732,7 +795,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

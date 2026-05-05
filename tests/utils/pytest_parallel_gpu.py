@@ -692,10 +692,23 @@ def run_parallel(
                     ts = tentative[gi]
                     will_be_multi = ts.count >= 1
                     cap = gs.budget_multi if will_be_multi else gs.total_gib
+                    # Two independent gates against the SAME cap.  Both must
+                    # leave room for the new test or we skip this GPU.
+                    #   (1) Reserved-budget gate: sum of profiled markers of
+                    #       tests already on this GPU + this candidate must
+                    #       fit under cap.
+                    #   (2) Actual-usage gate: nvidia-smi current usage + this
+                    #       candidate must also fit under cap.  This catches
+                    #       transient peaks (e.g. multi-worker tests during
+                    #       model load) where actual usage exceeds the sum of
+                    #       steady-state markers.  Without this, the scheduler
+                    #       trusts markers and over-commits the GPU during
+                    #       init-time spikes.
                     avail = cap - ts.budget
                     if avail < test.profiled_gib:
                         continue
-                    if ts.free < test.profiled_gib:
+                    actual_used = gs.total_gib - ts.free
+                    if actual_used + test.profiled_gib > cap:
                         continue
                     if avail > best_avail:
                         best_gi = gi

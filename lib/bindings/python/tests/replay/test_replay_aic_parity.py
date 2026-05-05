@@ -80,7 +80,6 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
             120,
             6,
             5,
-            marks=pytest.mark.vllm,
             id="vllm",
         ),
         pytest.param(
@@ -96,7 +95,6 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
             184,
             6,
             6,
-            marks=pytest.mark.sglang,
             id="sglang",
         ),
     ],

@@ -18,7 +18,7 @@ pytestmark = [
 ]
 
 
-class TestMakeBackendError:  # FE.8 — BackendError construction
+class TestMakeBackendError:  # FRONTEND.8 — BackendError construction
     def test_extracts_message(self):
         resp = {"status": "error", "message": "image load failed: 403"}
         err = make_backend_error(resp)
@@ -41,7 +41,7 @@ class TestMakeBackendError:  # FE.8 — BackendError construction
         assert err["error"]["message"] == "unknown backend error"
 
 
-class TestMakeInternalError:  # FE.8 — InternalError construction
+class TestMakeInternalError:  # FRONTEND.8 — InternalError construction
     def test_default_message(self):
         err = make_internal_error("req-42")
         assert err["error"]["message"] == "Invalid engine response for request req-42"
@@ -56,7 +56,7 @@ class TestMakeInternalError:  # FE.8 — InternalError construction
         assert err["error"]["message"] == "Invalid engine response for request req-42"
 
 
-class TestHandleEngineError:  # FE.8 — engine error → HTTP-friendly mapping
+class TestHandleEngineError:  # FRONTEND.8 — engine error → HTTP-friendly mapping
     def test_backend_error_dict(self):
         resp = {"status": "error", "message": "403 Forbidden"}
         err = handle_engine_error(resp, "req-1", logging.getLogger("test"))

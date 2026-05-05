@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 mod base_parser;
+mod gemma4_parser;
 mod gpt_oss_parser;
 mod granite_parser;
 mod minimax_append_think_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
+pub use gemma4_parser::Gemma4ReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
@@ -58,6 +60,11 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
             "minimax_append_think",
             ReasoningParserType::MiniMaxAppendThink,
         );
+        // Gemma 4 thinking models: reasoning is wrapped in `<|channel>...<channel|>`
+        // with a `thought\n` role label that this parser strips. Pair with
+        // `--dyn-tool-call-parser gemma4` for end-to-end Gemma 4 support.
+        map.insert("gemma4", ReasoningParserType::Gemma4);
+        map.insert("gemma-4", ReasoningParserType::Gemma4);
         map
     })
 }
@@ -140,6 +147,9 @@ pub enum ReasoningParserType {
     Mistral,
     Granite,
     MiniMaxAppendThink,
+    /// Google Gemma 4 thinking models. Custom `<|channel>...<channel|>`
+    /// delimiters with a `thought\n` role-label prefix stripped by the parser.
+    Gemma4,
 }
 
 #[derive(std::fmt::Debug)]
@@ -240,6 +250,9 @@ impl ReasoningParserType {
             ReasoningParserType::MiniMaxAppendThink => ReasoningParserWrapper {
                 parser: Box::new(MiniMaxAppendThinkParser::new()),
             },
+            ReasoningParserType::Gemma4 => ReasoningParserWrapper {
+                parser: Box::new(Gemma4ReasoningParser::new()),
+            },
         }
     }
 
@@ -266,7 +279,7 @@ impl ReasoningParserType {
 mod tests {
     use super::*;
 
-    #[test] // CASE.20 — registry helper
+    #[test] // registry helper
     fn test_get_available_reasoning_parsers() {
         let parsers = get_available_reasoning_parsers();
         assert!(!parsers.is_empty());
@@ -289,13 +302,15 @@ mod tests {
             "nemotron3",
             "glm45",
             "minimax_append_think",
+            "gemma4",
+            "gemma-4",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
         }
     }
 
-    #[test] // CASE.10
+    #[test] // REASONING.batch.1
     fn test_deepseek_v4_detect_and_parse() {
         for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             let mut parser = ReasoningParserType::get_reasoning_parser_from_name(parser_name);
@@ -305,7 +320,7 @@ mod tests {
         }
     }
 
-    #[test] // CASE.3, CASE.10
+    #[test] // REASONING.batch.3, REASONING.batch.1
     fn test_deepseek_v4_no_forced_reasoning_without_tags() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
         let result = parser.detect_and_parse_reasoning("answer only", &[]);
@@ -313,7 +328,7 @@ mod tests {
         assert_eq!(result.normal_text, "answer only");
     }
 
-    #[test] // CASE.8, CASE.10
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_deepseek_v4_streaming() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
 
@@ -331,7 +346,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // CASE.10
+    #[test] // REASONING.batch.1
     fn test_kimi_k25_detect_and_parse() {
         // (description, input, expected_reasoning, expected_normal)
         let cases = [
@@ -372,7 +387,7 @@ mod tests {
         }
     }
 
-    #[test] // CASE.8, CASE.10
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_kimi_k25_streaming_force_reasoning() {
         // Streaming: force_reasoning means tokens before <think> are treated as reasoning
         let mut parser = ReasoningParserType::KimiK25.get_reasoning_parser();
@@ -393,7 +408,7 @@ mod tests {
         assert_eq!(r3.normal_text, "Hello!");
     }
 
-    #[test] // CASE.8, CASE.10
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_kimi_k25_streaming() {
         // (description, tokens, expected_reasoning, expected_content)
         let cases: Vec<(&str, &[&str], &str, &str)> = vec![
@@ -436,7 +451,7 @@ mod tests {
         }
     }
 
-    #[test] // CASE.20 — registry lookup
+    #[test] // registry lookup
     fn test_kimi_k25_parser_lookup_by_name() {
         // Verify the parser can be looked up by name
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("kimi_k25");
@@ -445,7 +460,7 @@ mod tests {
         assert_eq!(result.normal_text, "answer");
     }
 
-    #[test] // CASE.23 — token-spelling differences across model variants
+    #[test] // PARSER.fmt.3 — token-spelling differences across model variants
     fn test_kimi_vs_kimi_k25_different_tags() {
         // Kimi (original) uses ◁think▷/◁/think▷, KimiK25 uses <think>/</think>
         let mut kimi = ReasoningParserType::Kimi.get_reasoning_parser();
@@ -466,7 +481,7 @@ mod tests {
     // Simulates the OpenAI path where the preprocessor detects prompt-injected
     // reasoning and calls set_in_reasoning(true). The parser should correctly
     // transition from reasoning to content when </think> arrives.
-    #[test] // CASE.8, CASE.10
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_nemotron_streaming_with_set_in_reasoning() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true); // OpenAI path calls this
@@ -489,7 +504,7 @@ mod tests {
     // set_in_reasoning is never called. The parser still starts in reasoning
     // mode (force_reasoning=true) but stripped_think_start=false. The </think>
     // boundary must still be detected correctly.
-    #[test] // CASE.8, CASE.10
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_nemotron_streaming_force_reasoning_without_set_in_reasoning() {
         // DeepseekR1 has force_reasoning=true but we do NOT call set_in_reasoning
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
@@ -512,7 +527,7 @@ mod tests {
     // is false, the parser's prefix-check could buffer '<' and interfere with
     // </think> detection. This test verifies the boundary is detected even when
     // </think> arrives as individual characters.
-    #[test] // CASE.8, CASE.20
+    #[test] // REASONING.stream.3, helper
     fn test_nemotron_streaming_split_end_think_tokens() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true);

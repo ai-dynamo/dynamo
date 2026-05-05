@@ -6,6 +6,9 @@ use super::config::{ParserConfig, ToolCallConfig};
 use super::dsml::{
     detect_tool_call_start_dsml, find_tool_call_end_position_dsml, try_tool_call_parse_dsml,
 };
+use super::gemma4::{
+    detect_tool_call_start_gemma4, find_tool_call_end_position_gemma4, try_tool_call_parse_gemma4,
+};
 use super::harmony::{
     detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
     parse_tool_calls_harmony_complete,
@@ -51,6 +54,8 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("minimax_m2", ToolCallConfig::minimax_m2());
         map.insert("glm47", ToolCallConfig::glm47());
         map.insert("kimi_k2", ToolCallConfig::kimi_k2());
+        map.insert("gemma4", ToolCallConfig::gemma4());
+        map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
         map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
@@ -103,7 +108,59 @@ pub async fn try_tool_call_parse(
                 try_tool_call_parse_kimi_k2(message, kimi_config, tools)?;
             Ok((results, normal_content))
         }
+        ParserConfig::Gemma4 => {
+            let (results, normal_content) = try_tool_call_parse_gemma4(message, tools)?;
+            Ok((results, normal_content))
+        }
     }
+}
+
+/// Same as [`detect_and_parse_tool_call`] but flips `allow_eof_recovery=true`
+/// on the JSON / XML / GLM-4.7 configs so finalize / non-streaming aggregate
+/// paths recover from missing-end-token / truncated-JSON instead of silently
+/// dropping the call. Streaming jails MUST keep using the non-recovery
+/// variant — otherwise `should_exit_jail_early` fires before the end-token
+/// has actually arrived (see jail.rs).
+pub async fn detect_and_parse_tool_call_with_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    let parser_map = get_tool_parser_map();
+    let parser_key = match parser_str {
+        Some(s) if !s.is_empty() => s,
+        _ => "default",
+    };
+    let base = parser_map.get(parser_key).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Parser '{}' is not implemented. Available parsers: {:?}",
+            parser_key,
+            get_available_tool_parsers()
+        )
+    })?;
+    let recovery_config = match &base.parser_config {
+        ParserConfig::Json(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Json(c)
+        }
+        ParserConfig::Xml(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Xml(c)
+        }
+        ParserConfig::Glm47(c) => {
+            let mut c = c.clone();
+            c.allow_eof_recovery = true;
+            ParserConfig::Glm47(c)
+        }
+        // Other parsers don't have an EOF-recovery flag — pass through.
+        other => other.clone(),
+    };
+    let cfg = ToolCallConfig {
+        parser_config: recovery_config,
+    };
+    try_tool_call_parse(message, &cfg, tools).await
 }
 
 // Base Detector to call for all tool parsing
@@ -159,6 +216,7 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
             ParserConfig::KimiK2(kimi_config) => {
                 Ok(detect_tool_call_start_kimi_k2(chunk, kimi_config))
             }
+            ParserConfig::Gemma4 => Ok(detect_tool_call_start_gemma4(chunk)),
         },
         None => anyhow::bail!(
             "Parser '{}' is not implemented. Available parsers: {:?}",
@@ -211,6 +269,7 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
+            ParserConfig::Gemma4 => find_tool_call_end_position_gemma4(chunk),
         },
         None => Some(chunk.len()),
     }
@@ -253,6 +312,8 @@ mod tests {
             "minimax_m2",
             "glm47",
             "kimi_k2",
+            "gemma4",
+            "gemma-4",
             "qwen25",
         ];
         for parser in available_parsers {
@@ -1729,7 +1790,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
-    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a CASE.*; covers registry plumbing.
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a PARSER.*; covers registry plumbing.
     #[tokio::test]
     async fn test_deepseek_v4_compatibility_aliases() {
         let input = r#"<｜DSML｜tool_calls>
