@@ -255,7 +255,6 @@ impl Trace {
                 input_length,
                 max_output_tokens: output_length,
                 hash_ids,
-                arrival_timestamp_ms: timestamp_ms,
                 delay_after_previous_ms,
             });
             if let Some(timestamp_ms) = timestamp_ms {
@@ -377,7 +376,6 @@ impl Trace {
                     input_length: current_input_length,
                     max_output_tokens: raw.assistant_response_length[turn_idx],
                     hash_ids: hash_ids.clone(),
-                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: next_turn_delay_ms,
                 });
 
@@ -405,7 +403,6 @@ impl Trace {
                 input_length: current_input_length,
                 max_output_tokens: raw.final_assistant_response_length,
                 hash_ids,
-                arrival_timestamp_ms: None,
                 delay_after_previous_ms: next_turn_delay_ms,
             });
 
@@ -493,7 +490,6 @@ impl Trace {
                     input_length,
                     max_output_tokens,
                     hash_ids,
-                    arrival_timestamp_ms: None,
                     delay_after_previous_ms: if turn_idx == 0 {
                         0.0
                     } else {
@@ -537,11 +533,6 @@ impl Trace {
             if let Some(timestamp_ms) = session.first_arrival_timestamp_ms.as_mut() {
                 *timestamp_ms -= min_timestamp_ms;
             }
-            for turn in &mut session.turns {
-                if let Some(timestamp_ms) = turn.arrival_timestamp_ms.as_mut() {
-                    *timestamp_ms -= min_timestamp_ms;
-                }
-            }
         }
         Ok(self)
     }
@@ -556,9 +547,6 @@ impl Trace {
                 *timestamp_ms /= ratio;
             }
             for turn in &mut session.turns {
-                if let Some(timestamp_ms) = turn.arrival_timestamp_ms.as_mut() {
-                    *timestamp_ms /= ratio;
-                }
                 turn.delay_after_previous_ms /= ratio;
             }
         }
@@ -592,15 +580,6 @@ impl Trace {
                 } else {
                     (*timestamp_ms - min_timestamp_ms) * target_span_ms / source_span_ms
                 };
-            }
-            for turn in &mut session.turns {
-                if let Some(timestamp_ms) = turn.arrival_timestamp_ms.as_mut() {
-                    *timestamp_ms = if source_span_ms == 0.0 {
-                        0.0
-                    } else {
-                        (*timestamp_ms - min_timestamp_ms) * target_span_ms / source_span_ms
-                    };
-                }
             }
         }
         Ok(self)
@@ -640,9 +619,6 @@ impl Trace {
                 *start_ms = (*start_ms - min_start_ms) * ratio;
             }
             for (turn_idx, turn) in session.turns.iter_mut().enumerate() {
-                if let Some(timestamp_ms) = turn.arrival_timestamp_ms.as_mut() {
-                    *timestamp_ms = (*timestamp_ms - min_start_ms) * ratio;
-                }
                 if turn_idx > 0 {
                     turn.delay_after_previous_ms *= ratio;
                 }
@@ -892,16 +868,6 @@ impl Trace {
                         turn_idx,
                         turn.input_length,
                         turn.hash_ids.len() * self.block_size
-                    );
-                }
-                if let Some(timestamp_ms) = turn.arrival_timestamp_ms
-                    && (!timestamp_ms.is_finite() || timestamp_ms < 0.0)
-                {
-                    bail!(
-                        "session {} turn {} has invalid arrival_timestamp_ms {}",
-                        session.session_id,
-                        turn_idx,
-                        timestamp_ms
                     );
                 }
                 if !turn.delay_after_previous_ms.is_finite() || turn.delay_after_previous_ms < 0.0 {

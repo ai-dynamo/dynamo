@@ -32,10 +32,6 @@ pub struct TurnTrace {
     pub input_length: usize,
     pub max_output_tokens: usize,
     pub hash_ids: Vec<u64>,
-    /// Absolute request arrival offset from the source row, when available.
-    /// Multi-turn workload replay remains closed-loop: later turns are gated on
-    /// prior completion plus `delay_after_previous_ms`.
-    pub arrival_timestamp_ms: Option<f64>,
     pub delay_after_previous_ms: f64,
 }
 
