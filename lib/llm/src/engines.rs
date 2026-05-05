@@ -130,7 +130,7 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
 /// Bidirectional echo engine: consumes a stream of `NvCreateChatCompletionRequest`s
 /// and, for each one, emits character-by-character `NvCreateChatCompletionStreamResponse`
 /// chunks followed by a terminal `FinishReason::Stop`. Used by the experimental
-/// `/v1/asr` WebSocket endpoint to demonstrate end-to-end bidirectional plumbing.
+/// `/v1/realtime` WebSocket endpoint to demonstrate end-to-end bidirectional plumbing.
 pub struct EchoBidirectionalEngine {}
 
 #[async_trait]

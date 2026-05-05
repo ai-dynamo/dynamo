@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Experimental WebSocket endpoint at `/v1/asr` for bidirectional streaming input.
+//! Experimental WebSocket endpoint at `/v1/realtime` for bidirectional streaming input.
 //!
 //! Wire shape: client sends a sequence of `Message::Text` frames each containing a
 //! JSON-encoded `NvCreateChatCompletionRequest`; server forwards each frame onto an
@@ -48,17 +48,17 @@ use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 /// through `ModelManager` keyed on `model_name`, parallel to chat / completions
 /// / embeddings engines, but no bidirectional accessor exists on `ModelManager`
 /// yet. When that lands, replace this static and the `install_*` helpers below
-/// with `state.manager().get_asr_engine(model_name)` lookups in `handle_socket`,
+/// with `state.manager().get_realtime_engine(model_name)` lookups in `handle_socket`,
 /// and remove the install-time API entirely.
 static BIDIRECTIONAL_ENGINE: OnceLock<EchoBidirectionalEngine> = OnceLock::new();
 
-/// Install the bidirectional engine to be used by `/v1/asr`. Returns `Err` if an
+/// Install the bidirectional engine to be used by `/v1/realtime`. Returns `Err` if an
 /// engine is already installed (the static can only be set once per process).
 /// See [`BIDIRECTIONAL_ENGINE`] for why this install-time API exists.
 pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static str> {
     BIDIRECTIONAL_ENGINE
         .set(engine)
-        .map_err(|_| "asr bidirectional engine already installed")
+        .map_err(|_| "realtime bidirectional engine already installed")
 }
 
 /// Convenience installer for tests/dev: registers the echo mock engine.
@@ -66,16 +66,19 @@ pub fn install_echo_engine() -> Result<(), &'static str> {
     install_engine(EchoBidirectionalEngine {})
 }
 
-pub fn asr_router(state: Arc<service_v2::State>, path: Option<String>) -> (Vec<RouteDoc>, Router) {
-    let asr_path = path.unwrap_or_else(|| "/v1/asr".to_string());
-    let docs = vec![RouteDoc::new(Method::GET, &asr_path)];
+pub fn realtime_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let realtime_path = path.unwrap_or_else(|| "/v1/realtime".to_string());
+    let docs = vec![RouteDoc::new(Method::GET, &realtime_path)];
     let router = Router::new()
-        .route(&asr_path, get(asr_ws_handler))
+        .route(&realtime_path, get(realtime_ws_handler))
         .with_state(state);
     (docs, router)
 }
 
-async fn asr_ws_handler(
+async fn realtime_ws_handler(
     State(state): State<Arc<service_v2::State>>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -86,7 +89,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
     // TODO (#9175): read a session-init frame first so we can route /
     // look up the model before forwarding inference frames to the engine.
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
-        tracing::error!("/v1/asr connection rejected: bidirectional engine not installed");
+        tracing::error!("/v1/realtime connection rejected: bidirectional engine not installed");
         let _ = socket
             .send(close_message(
                 close_code::ERROR,
@@ -110,7 +113,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,
         Err(err) => {
-            tracing::error!(%err, "/v1/asr engine.generate() failed");
+            tracing::error!(%err, "/v1/realtime engine.generate() failed");
             let _ = ws_tx
                 .send(close_message(
                     close_code::ERROR,
@@ -129,7 +132,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
             let frame_payload = match serde_json::to_string(&annotated) {
                 Ok(s) => s,
                 Err(err) => {
-                    tracing::warn!(%err, "/v1/asr serializing response chunk failed");
+                    tracing::warn!(%err, "/v1/realtime serializing response chunk failed");
                     continue;
                 }
             };
@@ -138,7 +141,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
                 .await
                 .is_err()
             {
-                tracing::debug!("/v1/asr client disconnected during response");
+                tracing::debug!("/v1/realtime client disconnected during response");
                 break;
             }
         }
@@ -163,7 +166,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
         let msg = match msg {
             Ok(m) => m,
             Err(err) => {
-                tracing::debug!(%err, "/v1/asr inbound frame error; treating as disconnect");
+                tracing::debug!(%err, "/v1/realtime inbound frame error; treating as disconnect");
                 break;
             }
         };
@@ -172,12 +175,12 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
                 match serde_json::from_str::<NvCreateChatCompletionRequest>(text.as_str()) {
                     Ok(req) => {
                         if req_tx.send(req).await.is_err() {
-                            tracing::debug!("/v1/asr engine receiver dropped; ending inbound");
+                            tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
                             break;
                         }
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "/v1/asr malformed JSON frame; closing");
+                        tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
                         *close_reason.lock().expect("close_reason mutex poisoned") =
                             Some(close_message(close_code::INVALID, "malformed JSON frame"));
                         break;
@@ -185,7 +188,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
                 }
             }
             Message::Binary(_) => {
-                tracing::warn!("/v1/asr received binary frame; not supported in this slice");
+                tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
                 *close_reason.lock().expect("close_reason mutex poisoned") = Some(close_message(
                     close_code::UNSUPPORTED,
                     "binary frames not supported",

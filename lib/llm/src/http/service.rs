@@ -21,13 +21,13 @@
 mod anthropic;
 mod openai;
 
-pub mod asr;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
+pub mod realtime;
 pub mod service_v2;
 
 pub use axum;

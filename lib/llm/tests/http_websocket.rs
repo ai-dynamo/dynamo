@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration test for the experimental `/v1/asr` WebSocket endpoint.
+//! Integration test for the experimental `/v1/realtime` WebSocket endpoint.
 //!
 //! Verifies the slice's acceptance criteria: a WebSocket client can connect,
 //! send chat-completion JSON frames, and receive streamed echo response frames
@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use dynamo_llm::http::service::{asr, service_v2::HttpService};
+use dynamo_llm::http::service::{realtime, service_v2::HttpService};
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -35,7 +35,7 @@ fn ensure_echo_engine_installed() {
         unsafe {
             std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
         }
-        let _ = asr::install_echo_engine();
+        let _ = realtime::install_echo_engine();
     });
 }
 
@@ -55,7 +55,7 @@ async fn wait_for_health(port: u16) {
 }
 
 #[tokio::test]
-async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
+async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -64,7 +64,7 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
     let handle = service.spawn(token.clone()).await;
     wait_for_health(port).await;
 
-    let url = format!("ws://127.0.0.1:{port}/v1/asr");
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("ws connect");
@@ -141,11 +141,11 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
 /// After a client-initiated close, the server should let the engine drain
 /// (sender side dropped → `req_rx` returns None → engine response stream ends)
 /// and emit its own Close frame as part of the cleanup. Covers the
-/// "Send a normal close once the engine finishes" path in `asr.rs`'s outbound
+/// "Send a normal close once the engine finishes" path in `realtime.rs`'s outbound
 /// task, where the trigger is client disconnect rather than natural completion
 /// (the other test) or server-side rejection (the binary-frame test).
 #[tokio::test]
-async fn asr_websocket_emits_close_after_client_close() {
+async fn realtime_websocket_emits_close_after_client_close() {
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -154,7 +154,7 @@ async fn asr_websocket_emits_close_after_client_close() {
     let handle = service.spawn(token.clone()).await;
     wait_for_health(port).await;
 
-    let url = format!("ws://127.0.0.1:{port}/v1/asr");
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("ws connect");
@@ -211,7 +211,7 @@ async fn asr_websocket_emits_close_after_client_close() {
 }
 
 #[tokio::test]
-async fn asr_websocket_rejects_binary_frame() {
+async fn realtime_websocket_rejects_binary_frame() {
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -220,7 +220,7 @@ async fn asr_websocket_rejects_binary_frame() {
     let handle = service.spawn(token.clone()).await;
     wait_for_health(port).await;
 
-    let url = format!("ws://127.0.0.1:{port}/v1/asr");
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("ws connect");
