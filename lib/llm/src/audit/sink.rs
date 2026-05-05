@@ -4,9 +4,11 @@
 use anyhow::Context as _;
 use async_nats::jetstream;
 use async_trait::async_trait;
+use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 use dynamo_runtime::transports::nats;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use super::{bus, handle::AuditRecord};
 
@@ -39,7 +41,7 @@ pub struct NatsSink {
 
 impl NatsSink {
     pub fn new(nats_client: dynamo_runtime::transports::nats::Client) -> Self {
-        let subject = std::env::var("DYN_AUDIT_NATS_SUBJECT")
+        let subject = std::env::var(env_audit::DYN_AUDIT_NATS_SUBJECT)
             .unwrap_or_else(|_| "dynamo.audit.v1".to_string());
         Self {
             js: nats_client.jetstream().clone(),
@@ -67,7 +69,7 @@ impl AuditSink for NatsSink {
 }
 
 async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
-    let cfg = std::env::var("DYN_AUDIT_SINKS").unwrap_or_else(|_| "stderr".into());
+    let cfg = std::env::var(env_audit::DYN_AUDIT_SINKS).unwrap_or_else(|_| "stderr".into());
     let mut out: Vec<Arc<dyn AuditSink>> = Vec::new();
     for name in cfg.split(',').map(|s| s.trim().to_lowercase()) {
         match name.as_str() {
@@ -76,7 +78,12 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
                 let nats_client = nats::ClientOptions::default()
                     .connect()
                     .await
-                    .context("Attempting to connect NATS sink from env var DYN_AUDIT_SINKS")?;
+                    .with_context(|| {
+                        format!(
+                            "Attempting to connect NATS sink from env var {}",
+                            env_audit::DYN_AUDIT_SINKS
+                        )
+                    })?;
                 out.push(Arc::new(NatsSink::new(nats_client)));
             }
             // "pg"   => out.push(Arc::new(PostgresSink::from_env())),
@@ -86,26 +93,51 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
     Ok(out)
 }
 
-/// spawn one worker per sink; each subscribes to the bus (off hot path)
-pub async fn spawn_workers_from_env() -> anyhow::Result<()> {
+/// Spawn one worker per sink; each subscribes to the bus (off the hot path).
+/// Workers drain remaining records and exit when `shutdown` is cancelled.
+pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
     let sinks = parse_sinks_from_env().await?;
+    let sink_count = sinks.len();
     for sink in sinks {
         let name = sink.name();
         let mut rx: broadcast::Receiver<AuditRecord> = bus::subscribe();
+        let worker_shutdown = shutdown.clone();
         tokio::spawn(async move {
             loop {
-                match rx.recv().await {
-                    Ok(rec) => sink.emit(&rec).await,
-                    Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!(
-                        sink = name,
-                        dropped = n,
-                        "audit bus lagged; dropped records"
-                    ),
-                    Err(broadcast::error::RecvError::Closed) => break,
+                tokio::select! {
+                    biased;
+                    _ = worker_shutdown.cancelled() => {
+                        loop {
+                            match rx.try_recv() {
+                                Ok(rec) => sink.emit(&rec).await,
+                                Err(broadcast::error::TryRecvError::Lagged(n)) => tracing::warn!(
+                                    sink = name,
+                                    dropped = n,
+                                    "audit bus lagged during shutdown; dropped records"
+                                ),
+                                Err(
+                                    broadcast::error::TryRecvError::Empty
+                                    | broadcast::error::TryRecvError::Closed,
+                                ) => break,
+                            }
+                        }
+                        return;
+                    }
+                    msg = rx.recv() => {
+                        match msg {
+                            Ok(rec) => sink.emit(&rec).await,
+                            Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!(
+                                sink = name,
+                                dropped = n,
+                                "audit bus lagged; dropped records"
+                            ),
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
                 }
             }
         });
     }
-    tracing::info!("Audit sinks ready.");
+    tracing::info!(sinks = sink_count, "Audit sinks ready");
     Ok(())
 }
