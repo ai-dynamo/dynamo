@@ -74,6 +74,18 @@ impl LowerTierIndexers {
         self.indexers.read().unwrap().values().cloned().collect()
     }
 
+    /// All currently allocated lower-tier indexers paired with the
+    /// [`StorageTier`] each one indexes. Used by callers that need to retag
+    /// per-tier dumps (e.g. peer-recovery).
+    pub fn entries(&self) -> Vec<(StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>)> {
+        self.indexers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tier, indexer)| (*tier, indexer.clone()))
+            .collect()
+    }
+
     /// Lookup without allocation; returns `None` if the tier is unseen.
     pub fn get(
         &self,

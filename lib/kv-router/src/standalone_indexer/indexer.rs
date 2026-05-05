@@ -184,11 +184,41 @@ impl Indexer {
         }
     }
 
+    /// Dump every event tracked by this indexer in a form replayable by a
+    /// peer's [`Self::apply_event_routed`].
+    ///
+    /// Returns the primary device-tier dump first, followed by every allocated
+    /// lower-tier indexer's dump with each event's `storage_tier` retagged to
+    /// the tier it lives in. The `LowerTierIndexer::dump_events` synthetic
+    /// events default `storage_tier` to `Device`, so without retagging a peer
+    /// would replay them into the wrong slot.
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>> {
-        match self {
-            Indexer::Single { primary, .. } => primary.dump_events().await.map_err(Into::into),
-            Indexer::Concurrent { primary, .. } => primary.dump_events().await.map_err(Into::into),
+        let (primary_events, lower_tier_entries) = match self {
+            Indexer::Single {
+                primary,
+                lower_tier,
+            } => (
+                primary.dump_events().await.map_err(anyhow::Error::from)?,
+                lower_tier.entries(),
+            ),
+            Indexer::Concurrent {
+                primary,
+                lower_tier,
+            } => (
+                primary.dump_events().await.map_err(anyhow::Error::from)?,
+                lower_tier.entries(),
+            ),
+        };
+
+        let mut out = primary_events;
+        for (tier, indexer) in lower_tier_entries {
+            let events = indexer.dump_events().await.map_err(anyhow::Error::from)?;
+            for mut event in events {
+                event.storage_tier = tier;
+                out.push(event);
+            }
         }
+        Ok(out)
     }
 }
 
@@ -317,6 +347,124 @@ mod tests {
             host_hits.hits.get(&worker).copied(),
             Some(1),
             "host-pinned should report 1 additional matched block beyond device"
+        );
+    }
+
+    /// Dump every tier's events from a populated indexer, replay through a
+    /// fresh indexer with `apply_event_routed`, and assert the tiered query
+    /// result is identical. This is the peer-recovery round trip: it would
+    /// fail if `dump_events` skipped lower-tier events or omitted their tier
+    /// tags (peer would replay HostPinned events into the device primary).
+    #[tokio::test]
+    async fn dump_events_round_trips_through_apply_event_routed() {
+        let block_size = 4;
+        let worker = WorkerWithDpRank::new(7, 0);
+        let source = create_indexer(block_size, 1);
+
+        source
+            .apply_event_routed(store_event(
+                worker.worker_id,
+                worker.dp_rank,
+                1,
+                &[],
+                &[11, 12],
+                StorageTier::Device,
+            ))
+            .await;
+        source
+            .apply_event_routed(store_event(
+                worker.worker_id,
+                worker.dp_rank,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+        source
+            .apply_event_routed(store_event(
+                worker.worker_id,
+                worker.dp_rank,
+                3,
+                &[11, 12, 13],
+                &[14],
+                StorageTier::Disk,
+            ))
+            .await;
+
+        if let Indexer::Single {
+            primary,
+            lower_tier,
+        } = &source
+        {
+            let _ = primary.flush().await;
+            for inner in lower_tier.all() {
+                let _ = inner.dump_events().await.unwrap();
+            }
+        }
+
+        let dump = source.dump_events().await.unwrap();
+
+        // Sanity: dump must surface events from every tier we fed in.
+        assert!(
+            dump.iter()
+                .any(|e| matches!(e.storage_tier, StorageTier::Device)),
+            "dump must contain Device events"
+        );
+        assert!(
+            dump.iter()
+                .any(|e| matches!(e.storage_tier, StorageTier::HostPinned)),
+            "dump must contain HostPinned events with tier retagged"
+        );
+        assert!(
+            dump.iter()
+                .any(|e| matches!(e.storage_tier, StorageTier::Disk)),
+            "dump must contain Disk events with tier retagged"
+        );
+
+        let replayed = create_indexer(block_size, 1);
+        for event in dump {
+            replayed.apply_event_routed(event).await;
+        }
+        if let Indexer::Single {
+            primary,
+            lower_tier,
+        } = &replayed
+        {
+            let _ = primary.flush().await;
+            for inner in lower_tier.all() {
+                let _ = inner.dump_events().await.unwrap();
+            }
+        }
+
+        let sequence = vec![
+            LocalBlockHash(11),
+            LocalBlockHash(12),
+            LocalBlockHash(13),
+            LocalBlockHash(14),
+        ];
+        let tiered = replayed.find_tiered_matches(sequence).await.unwrap();
+
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&worker).copied(),
+            Some(2),
+            "device should match 2 blocks after replay"
+        );
+        assert_eq!(
+            tiered
+                .lower_tier
+                .get(&StorageTier::HostPinned)
+                .and_then(|d| d.hits.get(&worker).copied()),
+            Some(1),
+            "host-pinned should report 1 additional block after replay"
+        );
+        assert_eq!(
+            tiered
+                .lower_tier
+                .get(&StorageTier::Disk)
+                .and_then(|d| d.hits.get(&worker).copied()),
+            Some(1),
+            "disk should report 1 additional block after replay"
         );
     }
 }
