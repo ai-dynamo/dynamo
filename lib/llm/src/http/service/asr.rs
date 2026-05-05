@@ -1,18 +1,17 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Experimental WebSocket endpoint at `/v1/asr` — first slice of the bidirectional
-//! streaming-input feature (DIS-1858, parent design "Streaming Request Support").
+//! Experimental WebSocket endpoint at `/v1/asr` for bidirectional streaming input.
 //!
 //! Wire shape: client sends a sequence of `Message::Text` frames each containing a
 //! JSON-encoded `NvCreateChatCompletionRequest`; server forwards each frame onto an
 //! engine-bound stream and forwards engine response chunks back as `Message::Text`
 //! frames each containing a JSON-encoded `NvCreateChatCompletionStreamResponse`.
 //!
-//! For this slice the engine is a process-scoped mock (`EchoBidirectionalEngine`)
-//! held in a `OnceLock` so tests can install one without going through the
-//! `ModelManager` (which has no bidirectional accessor yet — see plan.md). A future
-//! slice will replace the static with a `ModelManager` lookup keyed on `model_name`.
+//! For now the engine is a process-scoped mock (`EchoBidirectionalEngine`) held in
+//! a `OnceLock` so tests can install one without going through the `ModelManager`,
+//! which has no bidirectional accessor yet. A future revision will replace the
+//! static with a `ModelManager` lookup keyed on `model_name`.
 
 use std::sync::{Arc, OnceLock};
 
@@ -42,22 +41,17 @@ use crate::protocols::openai::chat_completions::{
 /// (in production) by whatever wires up the experimental endpoint. If unset when
 /// a connection arrives, the handler closes with `INTERNAL_ERROR`.
 ///
-/// **Placeholder until DIS-1859 (2/N).** The proper registration path is through
-/// `ModelManager` keyed on `model_name`, parallel to how chat / completions /
-/// embeddings engines are registered. That accessor doesn't exist yet on
-/// `ModelManager` — this `OnceLock` is a stand-in so DIS-1858 can ship the
-/// frontend slice without depending on the engine-side refactor. When DIS-1859
-/// adds the bidirectional accessor, replace this static + the `install_*`
-/// helpers below with `state.manager().get_asr_engine(model_name)` lookups in
-/// `handle_socket`, and remove the install-time API entirely.
+/// **Placeholder.** [gluo TODO] DIS-1859 (2/N). The proper registration path is
+/// through `ModelManager` keyed on `model_name`, parallel to chat / completions
+/// / embeddings engines, but no bidirectional accessor exists on `ModelManager`
+/// yet. When that lands, replace this static and the `install_*` helpers below
+/// with `state.manager().get_asr_engine(model_name)` lookups in `handle_socket`,
+/// and remove the install-time API entirely.
 static BIDIRECTIONAL_ENGINE: OnceLock<EchoBidirectionalEngine> = OnceLock::new();
 
 /// Install the bidirectional engine to be used by `/v1/asr`. Returns `Err` if an
 /// engine is already installed (the static can only be set once per process).
-///
-/// **Placeholder.** See `BIDIRECTIONAL_ENGINE` doc comment above — this
-/// install-time API exists only because there is no `ModelManager` accessor for
-/// bidirectional engines yet. DIS-1859 retires it.
+/// See [`BIDIRECTIONAL_ENGINE`] for why this install-time API exists.
 pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static str> {
     BIDIRECTIONAL_ENGINE
         .set(engine)
@@ -65,9 +59,6 @@ pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static st
 }
 
 /// Convenience installer for tests/dev: registers the echo mock engine.
-///
-/// **Placeholder.** Once DIS-1859 lands, tests should register the engine
-/// through `ModelManager` like every other engine kind.
 pub fn install_echo_engine() -> Result<(), &'static str> {
     install_engine(EchoBidirectionalEngine {})
 }
@@ -89,9 +80,8 @@ async fn asr_ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
-    // [DIS-1928] frontend MUST read first message in the socket so it knows how to
-    // route / lookup model. Basically "session.update" type of message will be
-    // consumed, model only gets inference messages?
+    // [gluo TODO] DIS-1928: read a session-init frame first so we can route /
+    // look up the model before forwarding inference frames to the engine.
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
         tracing::error!("/v1/asr connection rejected: bidirectional engine not installed");
         let _ = close_with(
@@ -145,22 +135,19 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                 break;
             }
         }
-        // Send a normal close once the engine finishes,
-        // usually result from client-side closing the socket,
-        // cancellation propagates to the engine and response
-        // stream ends. In such a case the socket should have
-        // been closed.
+        // Send a normal close once the engine finishes — either natural
+        // completion or because a client disconnect cancelled the response stream.
         let _ = ws_tx
             .send(Message::Close(Some(close_frame(
                 close_code::NORMAL,
                 "stream complete",
             ))))
             .await;
-        // Drive the sink to completion so the Close frame fully drains before
-        // the underlying transport is dropped. Without this, axum can tear
-        // down the TCP socket while the Close frame is still in-flight and
-        // the client observes EOF instead of an in-band Close.
-        let _ = ws_tx.close().await;
+        // Drive the sink to completion so the Close frame drains before the
+        // transport is dropped — otherwise axum can tear down the TCP socket
+        // mid-frame and the client sees EOF instead of an in-band Close. Bound
+        // the wait so a half-broken peer can't park this task indefinitely.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ws_tx.close()).await;
     });
 
     // Inbound loop: parse client frames into request stream items.

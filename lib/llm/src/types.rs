@@ -138,18 +138,19 @@ pub mod generic {
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         };
 
-        /// [DIS-1928] NOTE that reusing chat completions request and response for now,
-        /// as request can carry audio data and response can carry text data,
-        /// which is what needed for ASR.
+        /// [gluo TODO] DIS-1928: reuses chat-completion request/response for now,
+        /// as the request can carry audio data and the response can carry text
+        /// data, which is what ASR needs. Will move to a dedicated realtime-API
+        /// protocol type.
+        ///
         /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI Chat
         /// Completions API.
         ///
         /// Many-in / many-out: the client streams a sequence of `NvCreateChatCompletionRequest`
         /// chunks for the same logical session and receives a stream of
         /// `NvCreateChatCompletionStreamResponse` chunks back. Used by the experimental
-        /// `/v1/asr` WebSocket endpoint — see DIS-1858 / parent design
-        /// "Streaming Request Support". The canonical concrete implementor of the
-        /// input side is [`crate::types::RequestStream`].
+        /// `/v1/asr` WebSocket endpoint. The canonical concrete implementor of
+        /// the input side is [`crate::types::RequestStream`].
         pub type ASRBidirectionalEngine = BidirectionalStreamingEngine<
             NvCreateChatCompletionRequest,
             Annotated<NvCreateChatCompletionStreamResponse>,

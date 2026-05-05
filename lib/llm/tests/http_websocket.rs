@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration test for the experimental `/v1/asr` WebSocket endpoint (DIS-1858).
+//! Integration test for the experimental `/v1/asr` WebSocket endpoint.
 //!
 //! Verifies the slice's acceptance criteria: a WebSocket client can connect,
 //! send chat-completion JSON frames, and receive streamed echo response frames
@@ -20,14 +20,18 @@ mod ports;
 use ports::get_random_port;
 
 /// Engine slot is process-global; ensure we install it at most once across all
-/// tests in this binary. Subsequent calls are silent no-ops.
+/// tests in this binary. Also pins `DYN_TOKEN_ECHO_DELAY_MS` to zero before the
+/// engine's `LazyLock` captures it on first use — only the first call has any
+/// effect, so doing it here is sufficient for every test.
 ///
-/// The `install_echo_engine` helper is itself a placeholder — see DIS-1859
-/// (2/N), which will replace `OnceLock`-based engine registration with proper
-/// `ModelManager`-keyed lookups (`state.manager().get_asr_engine(model_name)`).
-/// Once that lands, this helper goes away and the test instead registers the
-/// echo engine through `ModelManager` like every other engine kind.
+/// [gluo TODO] DIS-1859 (2/N) will replace `OnceLock`-based engine registration
+/// with proper `ModelManager`-keyed lookups; this helper goes away then.
 fn ensure_echo_engine_installed() {
+    // SAFETY: integration tests set this before any worker thread reads it,
+    // and the engine's `LazyLock` reads it at most once per process.
+    unsafe {
+        std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
+    }
     let _ = asr::install_echo_engine();
 }
 
@@ -48,10 +52,6 @@ async fn wait_for_health(port: u16) {
 
 #[tokio::test]
 async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
-    // Keep echo delay short so the test is fast.
-    unsafe {
-        std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
-    }
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -142,9 +142,6 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
 /// (the other test) or server-side rejection (the binary-frame test).
 #[tokio::test]
 async fn asr_websocket_emits_close_after_client_close() {
-    unsafe {
-        std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
-    }
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -211,9 +208,6 @@ async fn asr_websocket_emits_close_after_client_close() {
 
 #[tokio::test]
 async fn asr_websocket_rejects_binary_frame() {
-    unsafe {
-        std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
-    }
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
