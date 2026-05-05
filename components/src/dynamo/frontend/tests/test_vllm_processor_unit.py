@@ -51,7 +51,7 @@ def tokenizer():
 # ---------------------------------------------------------------------------
 
 
-class TestPrepareRequestToolStripping:
+class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool stripping when tool_choice=none on chat-template input
     """Test that _prepare_request strips/keeps tools based on the flag."""
 
     def test_tool_choice_none_strips_tools_from_template(self, tokenizer):

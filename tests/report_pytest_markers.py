@@ -25,7 +25,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, Optional, Set
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -95,6 +94,9 @@ STUB_MODULES = [
     "huggingface_hub",
     "huggingface_hub.model_info",
     "transformers",
+    "transformers.models",
+    "transformers.models.qwen2_vl",
+    "transformers.models.qwen2_vl.image_processing_qwen2_vl",
     "pandas",
     "matplotlib",
     "matplotlib.pyplot",
@@ -156,6 +158,105 @@ STUB_MODULES = [
     "prometheus_client.parser",
     "sklearn",
     "sklearn.linear_model",
+    "torch",
+    "PIL",
+    "PIL.Image",
+    "fsspec",
+    "fsspec.implementations",
+    "fsspec.implementations.dirfs",
+    "sglang",
+    "sglang.srt",
+    "sglang.srt.entrypoints",
+    "sglang.srt.entrypoints.openai",
+    "sglang.srt.entrypoints.openai.protocol",
+    "sglang.srt.function_call",
+    "sglang.srt.function_call.core_types",
+    "sglang.srt.function_call.function_call_parser",
+    "sglang.srt.function_call.json_array_parser",
+    "sglang.srt.function_call.utils",
+    "sglang.srt.parser",
+    "sglang.srt.parser.conversation",
+    "sglang.srt.parser.reasoning_parser",
+    "sglang.srt.utils",
+    "sglang.srt.utils.hf_transformers_utils",
+    "sglang.srt.disaggregation",
+    "sglang.srt.disaggregation.kv_events",
+    "sglang.srt.disaggregation.utils",
+    "sglang.srt.server_args",
+    "sglang.srt.server_args_config_parser",
+    "vllm",
+    "vllm.config",
+    "vllm.distributed",
+    "vllm.distributed.ec_transfer",
+    "vllm.distributed.ec_transfer.ec_connector",
+    "vllm.distributed.ec_transfer.ec_connector.base",
+    "vllm.distributed.kv_events",
+    "vllm.engine",
+    "vllm.engine.arg_utils",
+    "vllm.entrypoints",
+    "vllm.entrypoints.chat_utils",
+    "vllm.entrypoints.openai",
+    "vllm.entrypoints.openai.chat_completion",
+    "vllm.entrypoints.openai.chat_completion.protocol",
+    "vllm.entrypoints.openai.engine",
+    "vllm.entrypoints.openai.engine.protocol",
+    "vllm.inputs",
+    "vllm.logprobs",
+    "vllm.lora",
+    "vllm.lora.request",
+    "vllm.multimodal",
+    "vllm.multimodal.inputs",
+    "vllm.outputs",
+    "vllm.reasoning",
+    "vllm.reasoning.mistral_reasoning_parser",
+    "vllm.reasoning.qwen3_reasoning_parser",
+    "vllm.renderers",
+    "vllm.renderers.embed_utils",
+    "vllm.sampling_params",
+    "vllm.tokenizers",
+    "vllm.tokenizers.mistral",
+    "vllm.tool_parsers",
+    "vllm.tool_parsers.hermes_tool_parser",
+    "vllm.tool_parsers.mistral_tool_parser",
+    "vllm.utils",
+    "vllm.utils.async_utils",
+    "vllm.utils.hashing",
+    "vllm.utils.system_utils",
+    "vllm.v1",
+    "vllm.v1.core",
+    "vllm.v1.core.kv_cache_utils",
+    "vllm.v1.core.sched",
+    "vllm.v1.core.sched.async_scheduler",
+    "vllm.v1.core.sched.output",
+    "vllm.v1.engine",
+    "vllm.v1.engine.async_llm",
+    "vllm.v1.engine.exceptions",
+    "vllm.v1.engine.input_processor",
+    "vllm.v1.engine.output_processor",
+    "vllm.v1.metrics",
+    "vllm.v1.metrics.loggers",
+    "vllm.v1.metrics.stats",
+    "vllm.v1.request",
+    "msgspec",
+    "msgspec.structs",
+    "mistral_common",
+    "mistral_common.tokens",
+    "mistral_common.tokens.tokenizers",
+    "mistral_common.tokens.tokenizers.base",
+    "safetensors",
+    "nixl",
+    "nixl._api",
+    "nixl._bindings",
+    "aiohttp.web",
+    "aiconfigurator.sdk",
+    "aiconfigurator.sdk.task",
+    "plotly",
+    "plotly.graph_objects",
+    "plotly.subplots",
+    "pybase64",
+    "zmq",
+    "zmq.asyncio",
+    "blake3",
 ]
 
 # Project paths for local imports
@@ -189,19 +290,98 @@ def missing_categories(markers: Set[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _make_stub_class(name: str) -> type:
+    """Permissive class usable as a base, a pydantic field type, or a callable.
+
+    - __init__ accepts arbitrary args so `Cls(*a, **kw)` works.
+    - Metaclass __getattr__ auto-creates stub-class attributes so
+      `Cls.SOME_CONSTANT` and `Cls.NestedType` both work.
+    - __init_subclass__ tolerates arbitrary keyword args from typing tricks.
+    - __get_pydantic_core_schema__ returns any_schema for pydantic field use.
+    """
+
+    class _StubMeta(type):
+        def __getattr__(cls, attr):
+            if attr.startswith("__") and attr.endswith("__"):
+                raise AttributeError(attr)
+            sub = _make_stub_class(f"{cls.__name__}.{attr}")
+            setattr(cls, attr, sub)
+            return sub
+
+    def _init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        pass
+
+    def _init_subclass(cls, **kwargs):  # type: ignore[no-untyped-def]
+        pass
+
+    def _getattr(self, attr):  # type: ignore[no-untyped-def]
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        return _make_stub_class(attr)()
+
+    def _call(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return _make_stub_class("call_result")()
+
+    def _get_schema(cls, source, handler):  # type: ignore[no-untyped-def]
+        try:
+            from pydantic_core import core_schema
+
+            return core_schema.any_schema()
+        except ImportError:
+            return None
+
+    return _StubMeta(
+        name,
+        (),
+        {
+            "__init__": _init,
+            "__init_subclass__": classmethod(_init_subclass),
+            "__getattr__": _getattr,
+            "__call__": _call,
+            "__get_pydantic_core_schema__": classmethod(_get_schema),
+        },
+    )
+
+
+class _StubModule(ModuleType):
+    """Module whose unknown attributes resolve to real, pydantic-friendly classes.
+
+    Real classes (vs MagicMock) so that:
+      - class Foo(stub.X): works (X is a type)
+      - field: stub.X in pydantic works (X has __get_pydantic_core_schema__)
+      - stub.X.attr = classmethod(...) descriptor-binds correctly
+    Submodule attribute access prefers an entry already in sys.modules so
+    `pkg.sub` returns the submodule instance (not a class) when both are
+    present.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        sub_name = f"{self.__name__}.{name}"
+        if sub_name in sys.modules:
+            sub = sys.modules[sub_name]
+            setattr(self, name, sub)
+            return sub
+        cls = _make_stub_class(name)
+        setattr(self, name, cls)
+        return cls
+
+
 class DependencyStubber:
     """Stub unavailable modules to allow test collection without real dependencies."""
 
     def __init__(self):
         self.stubbed: Set[str] = set()
 
-    def _create_module_stub(self, name: str) -> MagicMock:
+    def _create_module_stub(self, name: str) -> ModuleType:
         """Create a stub module with proper Python module attributes."""
-        stub = MagicMock()
-        stub.__path__ = []
-        stub.__name__ = name
+        stub = _StubModule(name)
+        stub.__path__ = []  # type: ignore[attr-defined]
         stub.__loader__ = None
-        stub.__spec__ = None
+        # Real ModuleSpec so importlib.util.find_spec() doesn't raise
+        # ValueError when callers introspect the stub.
+        stub.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
@@ -225,8 +405,9 @@ class DependencyStubber:
         for i in range(1, len(parts)):
             sub = ".".join(parts[:i])
             if sub not in sys.modules:
-                pkg = ModuleType(sub)
-                pkg.__path__ = []
+                pkg = _StubModule(sub)
+                pkg.__path__ = []  # type: ignore[attr-defined]
+                pkg.__spec__ = importlib.machinery.ModuleSpec(sub, loader=None)
                 sys.modules[sub] = pkg
                 self.stubbed.add(sub)
 
@@ -273,7 +454,7 @@ class MarkerReportPlugin:
     def pytest_collection_modifyitems(self, session, config, items):
         for item in items:
             markers = {m.name for m in item.iter_markers()}
-            if "mypy" in markers:
+            if markers & {"mypy", "skip", "skipif"}:
                 self.skipped_mypy += 1
                 continue
 
@@ -394,7 +575,10 @@ def parse_args():
         help="Enable strict validation (undeclared markers, missing config, naming)",
     )
     parser.add_argument(
-        "--tests", default="tests", help="Path to test directory (default: tests)"
+        "--tests",
+        nargs="*",
+        default=["tests", "components/src"],
+        help="Paths to test directories (default: tests components/src)",
     )
     parser.add_argument(
         "--verbose",
@@ -404,9 +588,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
+def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Report]:
     """Run pytest collection and return exit code and report."""
     if use_stubbing:
+        # Force-remove native extensions that may be partially loaded but broken.
+        for mod in ("dynamo._core", "nixl._api"):
+            sys.modules.pop(mod, None)
+
         stubber = DependencyStubber()
         for module in STUB_MODULES:
             stubber.ensure_available(module)
@@ -418,6 +606,22 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
             )
         except (KeyError, AttributeError):
             pass
+
+        # Default pydantic models to arbitrary_types_allowed so stubbed
+        # classes used as field annotations don't blow up schema generation.
+        try:
+            import pydantic as _pydantic_root
+
+            _pydantic_root.BaseModel.model_config = _pydantic_root.ConfigDict(  # type: ignore[assignment]
+                arbitrary_types_allowed=True
+            )
+        except (ImportError, AttributeError):
+            pass
+
+        # Some dynamo code reads `vllm.__version__`. Stubs strip dunders;
+        # set the attribute explicitly so `from vllm import __version__` works.
+        if "vllm" in sys.modules and "vllm" in stubber.stubbed:
+            sys.modules["vllm"].__version__ = "0.0.0"  # type: ignore[attr-defined]
 
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
@@ -433,7 +637,7 @@ def run_collection(test_path: str, use_stubbing: bool) -> tuple[int, Report]:
             "addopts=",
             "-o",
             "filterwarnings=",
-            test_path,
+            *test_paths,
         ],
         plugins=[plugin],
     )

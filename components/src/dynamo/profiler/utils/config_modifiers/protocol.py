@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import logging
 from typing import Any, Protocol, Tuple
+from uuid import uuid4
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
@@ -512,7 +513,7 @@ class BaseConfigModifier:
         cfg = Config.model_validate(config)
 
         # Set metadata
-        cfg.metadata.name = f"{cls.BACKEND}-{mode}"
+        cfg.metadata.name = f"{cls.BACKEND}-{mode}-{uuid4().hex[:8]}"
         if namespace and hasattr(cfg.metadata, "namespace"):
             cfg.metadata.namespace = namespace
 
@@ -591,10 +592,11 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to a single worker service."""
         service.replicas = replicas
-        setup_worker_service_resources(service, gpus, num_gpus_per_node)
-
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
             service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
+
+        # Apply resources after args so multinode sizing can inspect final TP/PP flags.
+        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
     @classmethod
     def _apply_disagg_workers(

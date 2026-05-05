@@ -107,6 +107,10 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoNixlPort),
 		},
+		{
+			Name:  "DYN_FORWARDPASS_METRIC_PORT",
+			Value: fmt.Sprintf("%d", commonconsts.DynamoFPMBasePort),
+		},
 	}...)
 
 	if context.WorkerHashSuffix != "" {

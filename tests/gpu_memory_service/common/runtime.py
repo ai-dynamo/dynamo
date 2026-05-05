@@ -432,6 +432,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "gms",
             "--enable-memory-saver",
             "--disable-cuda-graph",
+            "--disable-piecewise-cuda-graph",
             "--mem-fraction-static",
             "0.8",
             "--port",

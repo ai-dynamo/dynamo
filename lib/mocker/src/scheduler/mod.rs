@@ -271,6 +271,68 @@ pub trait SchedulerHandle: Send + Sync {
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
 }
 
+/// Attach a [`crate::kvbm_offload::MockOffloadEngine`] driven by
+/// wall-clock `now_ms` supplied by live replay. Returns `Ok(None)` unless
+/// `num_g2_blocks` explicitly opts into G2 and `kv_bytes_per_token` supplies
+/// the simulated block size.
+#[cfg(feature = "kvbm-offload")]
+pub async fn init_kvbm_live(
+    args: &crate::common::protocols::MockEngineArgs,
+    kv_manager: &mut crate::kv_manager::KvManager,
+) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
+{
+    use crate::kvbm_offload::KvbmOffloadConfig;
+    let Some(config) = KvbmOffloadConfig::from_args(args) else {
+        return Ok(None);
+    };
+    let engine = std::thread::spawn(move || build_owned_offload_engine(config))
+        .join()
+        .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
+    Ok(Some(kv_manager.attach_new_offload_engine(engine)))
+}
+
+/// Attach a [`crate::kvbm_offload::MockOffloadEngine`] driven by
+/// virtual `now_ms` supplied by offline replay. The same engine hot path is
+/// used for live and offline; only the caller's clock source differs.
+#[cfg(feature = "kvbm-offload")]
+pub fn init_kvbm_offline(
+    args: &crate::common::protocols::MockEngineArgs,
+    kv_manager: &mut crate::kv_manager::KvManager,
+) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
+{
+    use crate::kvbm_offload::KvbmOffloadConfig;
+    let Some(config) = KvbmOffloadConfig::from_args(args) else {
+        return Ok(None);
+    };
+    tracing::debug!(
+        num_g2_blocks = config.num_g2_blocks,
+        offload_batch_size = config.offload_batch_size,
+        bw_g1_to_g2_gbps = config.bandwidth_g1_to_g2_gbps,
+        bw_g2_to_g1_gbps = config.bandwidth_g2_to_g1_gbps,
+        "kvbm-offload: init_kvbm_offline attaching engine"
+    );
+    let engine = build_owned_offload_engine(config)?;
+    Ok(Some(kv_manager.attach_new_offload_engine(engine)))
+}
+
+/// Build an offload engine with its private runtime attached.
+///
+/// kvbm-engine uses background pipeline/session tasks even though the mocker
+/// scheduler is synchronous. Keeping the runtime inside the engine lets each
+/// scheduler pass explicitly pump those tasks after transfer completions.
+#[cfg(feature = "kvbm-offload")]
+fn build_owned_offload_engine(
+    config: crate::kvbm_offload::KvbmOffloadConfig,
+) -> anyhow::Result<crate::kvbm_offload::MockOffloadEngine> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()?;
+    let mut engine = rt.block_on(crate::kvbm_offload::MockOffloadEngine::new(config))?;
+    engine.attach_runtime(rt);
+    Ok(engine)
+}
+
 /// Shared test utilities for scheduler stress tests.
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -327,5 +389,121 @@ mod tests {
             "expected {expected}, got {}",
             acc.variance()
         );
+    }
+}
+
+#[cfg(all(test, feature = "kvbm-offload"))]
+mod offload_init_tests {
+    use super::{init_kvbm_live, init_kvbm_offline};
+    use crate::common::protocols::{KvEventPublishers, MockEngineArgs};
+    use crate::kv_manager::KvManager;
+
+    fn make_kv_manager() -> KvManager {
+        KvManager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
+    }
+
+    fn args_with_g2_and_bpt(bpt: usize) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .num_gpu_blocks(8)
+            .num_g2_blocks(Some(8))
+            .block_size(4)
+            .kv_bytes_per_token(Some(bpt))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn init_kvbm_live_attaches_engine_when_g2_and_bpt_set() {
+        let args = args_with_g2_and_bpt(131_072);
+        let mut kv = make_kv_manager();
+        assert!(!kv.has_offload_engine());
+        let engine = init_kvbm_live(&args, &mut kv)
+            .await
+            .expect("init must succeed")
+            .expect("engine built with G2 and bpt present");
+        assert!(kv.has_offload_engine());
+        // Returned Arc shares the same engine as the one on kv_manager;
+        // earliest_offload_deadline reflects an idle engine.
+        assert!(engine.lock().unwrap().earliest_pending_deadline().is_none());
+        assert!(kv.earliest_offload_deadline().is_none());
+    }
+
+    #[tokio::test]
+    async fn init_kvbm_live_returns_none_without_g2_blocks() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(8)
+            .block_size(4)
+            .kv_bytes_per_token(Some(131_072))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert!(args.num_g2_blocks.is_none());
+        let mut kv = make_kv_manager();
+        let result = init_kvbm_live(&args, &mut kv)
+            .await
+            .expect("init must succeed");
+        assert!(result.is_none());
+        assert!(!kv.has_offload_engine());
+    }
+
+    #[tokio::test]
+    async fn init_kvbm_live_returns_none_without_bpt() {
+        let args = MockEngineArgs::default();
+        assert!(args.kv_bytes_per_token.is_none());
+        let mut kv = make_kv_manager();
+        let result = init_kvbm_live(&args, &mut kv)
+            .await
+            .expect("init must succeed");
+        assert!(result.is_none());
+        assert!(!kv.has_offload_engine());
+    }
+
+    #[test]
+    fn init_kvbm_offline_attaches_engine_and_keeps_runtime_alive() {
+        // Sync entry: no ambient tokio runtime. init_kvbm_offline owns
+        // its own runtime and moves it onto the engine via
+        // attach_runtime. After init returns, the engine (and its
+        // runtime) must still be usable — `tick` is a sync call that
+        // internally depends on the worker thread continuing to drain
+        // kvbm-engine's background tasks.
+        let args = args_with_g2_and_bpt(131_072);
+        let mut kv = make_kv_manager();
+        let engine = init_kvbm_offline(&args, &mut kv)
+            .expect("offline init must succeed")
+            .expect("engine built with G2 and bpt present");
+        assert!(kv.has_offload_engine());
+        // Engine is still callable post-init — no runtime-dropped hang.
+        engine.lock().unwrap().tick(100.0);
+        assert!(kv.earliest_offload_deadline().is_none());
+    }
+
+    #[test]
+    fn init_kvbm_offline_returns_none_without_g2_blocks() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(8)
+            .block_size(4)
+            .kv_bytes_per_token(Some(131_072))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert!(args.num_g2_blocks.is_none());
+        let mut kv = make_kv_manager();
+        let result = init_kvbm_offline(&args, &mut kv).expect("init must succeed");
+        assert!(result.is_none());
+        assert!(!kv.has_offload_engine());
+    }
+
+    #[test]
+    fn init_kvbm_offline_returns_none_without_bpt() {
+        let args = MockEngineArgs::default();
+        assert!(args.kv_bytes_per_token.is_none());
+        let mut kv = make_kv_manager();
+        let result = init_kvbm_offline(&args, &mut kv).expect("init must succeed");
+        assert!(result.is_none());
+        assert!(!kv.has_offload_engine());
     }
 }
