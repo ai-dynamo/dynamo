@@ -19,7 +19,6 @@ jobs:
 
       - name: Restore lychee cache
         id: restore-cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/restore@v5
         with:
           path: .lycheecache
@@ -30,7 +29,7 @@ jobs:
         uses: lycheeverse/lychee-action@v2
         with:
           args: >-
-            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '--cache' || '' }}
+            --cache
             --no-progress
             --max-retries 4
             --retry-wait-time 3
