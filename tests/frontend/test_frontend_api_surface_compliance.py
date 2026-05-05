@@ -605,8 +605,15 @@ def _write_codex_config(codex_home, frontend_port: int) -> None:
     """
     codex_home.mkdir(parents=True, exist_ok=True)
     config_path = codex_home / "config.toml"
+    # Bound the per-request output budget so the smoke test stays well within
+    # the 180s subprocess timeout. Codex omits `max_output_tokens` by default,
+    # and the Dynamo Responses handler forwards `None` to the engine — sglang
+    # then generates up to `max_model_len`, which is far more than this test
+    # needs and easily exceeds the timeout for reasoning models.
     config_path.write_text(
         f"""
+model_max_output_tokens = 4096
+
 [model_providers.local]
 name = "local-dynamo"
 base_url = "http://localhost:{frontend_port}/v1"
