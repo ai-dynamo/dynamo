@@ -200,17 +200,17 @@ then estimates the duration of that chosen pass. The combination is the point:
 AIC informs the speed of the pass, while the mocker/replay scheduler models the
 serving behavior around the pass.
 
-![Throughput (TPS per GPU) vs. Interactivity (TPS per User) for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K, concurrencies c=4 to c=64.](./images/hw_mocker_aic_pareto.png)
+![Throughput (TPS per GPU) vs. Interactivity (TPS per User) for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K, concurrencies c=8 to c=64.](./images/hw_mocker_aic_pareto.png)
 
 ![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/hw_mocker_aic_4panel.png)
 
-The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at concurrencies from 4 to 64. Here are the mean absolute percentage errors (MAPE) vs. real hardware:
+The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at concurrencies from 8 to 64. Here are the mean absolute percentage errors (MAPE) vs. real hardware:
 
 | Metric | Mocker MAPE | AIC MAPE |
 |---|---|---|
-| TPS/GPU | 6.6% | 5.8% |
-| TPS/User | 5.3% | 7.2% |
-| TPOT | 8.3% | 7.7% |
+| TPS/GPU | 5.7% | 4.7% |
+| TPS/User | 5.0% | 7.3% |
+| TPOT | 9.0% | 8.1% |
 | TTFT | 8.8% | 10.6% |
 
 Mocker achieved comparable or better accuracy across all metrics, notably with better TTFT estimation at high concurrency (64).
@@ -278,7 +278,13 @@ changing load.
 
 ### 2.5 KV Block Manager Simulation
 
-[placeholder: exact wording for current KVBM simulation status and near-future WIP]
+Current KVBM simulation work is focused on local G1-to-G2 behavior in the
+mocker/replay path. G1 is the scheduler-visible GPU KV capacity. When KVBM
+offload is enabled, evicted G1 blocks can be handed to an in-process KVBM
+offload engine, registered in a real `BlockManager<G2>`, and later swapped back
+into G1 with simulated transfer delay when a request finds a G2 prefix hit.
+Live mode drives this path with wall-clock time; offline replay drives the same
+hot path with virtual time from the DES loop.
 
 There are two different claims to keep separate.
 
@@ -291,7 +297,11 @@ style as the router and planner. In that model, cache movement, placement, and
 memory hierarchy behavior would schedule their own events and feed back into
 engine, router, and planner decisions.
 
-[placeholder: external team input on distributed cache / CMX roadmap]
+For distributed cache and CMX, the public wording should stay in roadmap
+territory. The current modeled path is local G2 with mock data movement and
+bandwidth-sensitive timing; extending that to shared lower tiers requires
+explicit models for cross-worker placement, topology, and shared-resource
+contention.
 
 The longer-term direction is distributed cache simulation: CMX-style
 cross-machine movement, topology-aware routing, bandwidth-sensitive placement,
