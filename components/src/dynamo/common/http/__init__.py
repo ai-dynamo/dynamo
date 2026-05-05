@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backend-neutral facade for Dynamo's multimodal HTTP client.
+"""Backend-neutral facade for Dynamo's HTTP fetch client.
 
 Env var ``DYN_MM_HTTP_BACKEND`` selects the implementation behind the
 process-wide singleton used by :func:`fetch_bytes`:
@@ -13,7 +13,7 @@ process-wide singleton used by :func:`fetch_bytes`:
     matches ``max_connections``).
 
 Callers use :func:`fetch_bytes` and catch the unified exception classes
-(``MmHttpTimeout``, ``MmHttpConnectionError``, ``MmHttpStatusError``).
+(``HttpTimeoutError``, ``HttpConnectionError``, ``HttpStatusError``).
 For SSRF-safe fetches (e.g. from ``ImageLoader``) pass a
 ``UrlValidationPolicy`` — :func:`fetch_bytes` then follows redirects
 manually and revalidates each hop against the policy.
@@ -29,13 +29,13 @@ import os
 from typing import Optional
 
 from .aiohttp_client import AiohttpClient
-from .args import HttpArgs, from_env
+from .args import HttpArgGroup, HttpConfigBase, from_env
 from .base import (
-    MmHttpClient,
-    MmHttpConnectionError,
-    MmHttpError,
-    MmHttpStatusError,
-    MmHttpTimeout,
+    HttpClient,
+    HttpConnectionError,
+    HttpError,
+    HttpStatusError,
+    HttpTimeoutError,
 )
 from .httpx_client import HttpxClient
 
@@ -43,10 +43,10 @@ logger = logging.getLogger(__name__)
 
 
 _VALID_BACKENDS = ("aiohttp", "httpx")
-_default: Optional[MmHttpClient] = None
+_default: Optional[HttpClient] = None
 
 
-def _create_client() -> MmHttpClient:
+def _create_client() -> HttpClient:
     """Pick a concrete client class based on ``DYN_MM_HTTP_BACKEND``."""
     name = os.environ.get("DYN_MM_HTTP_BACKEND", "aiohttp").lower()
     if name == "aiohttp":
@@ -58,17 +58,17 @@ def _create_client() -> MmHttpClient:
     )
 
 
-def get_default_client() -> MmHttpClient:
+def get_default_client() -> HttpClient:
     """Return the process-wide singleton client, instantiating on first call."""
     global _default
     if _default is None:
         _default = _create_client()
-        logger.info("Multimodal HTTP backend resolved: %s", type(_default).__name__)
+        logger.info("HTTP backend resolved: %s", type(_default).__name__)
     return _default
 
 
 async def fetch_bytes(url, timeout, *, policy=None) -> bytes:
-    """Singleton-backed convenience wrapper over :meth:`MmHttpClient.fetch_bytes`."""
+    """Singleton-backed convenience wrapper over :meth:`HttpClient.fetch_bytes`."""
     return await get_default_client().fetch_bytes(url, timeout, policy=policy)
 
 
@@ -87,14 +87,15 @@ async def close_http_client() -> None:
 
 
 __all__ = [
-    "MmHttpClient",
+    "HttpClient",
     "AiohttpClient",
     "HttpxClient",
-    "MmHttpError",
-    "MmHttpTimeout",
-    "MmHttpConnectionError",
-    "MmHttpStatusError",
-    "HttpArgs",
+    "HttpError",
+    "HttpTimeoutError",
+    "HttpConnectionError",
+    "HttpStatusError",
+    "HttpConfigBase",
+    "HttpArgGroup",
     "from_env",
     "fetch_bytes",
     "close_http_client",

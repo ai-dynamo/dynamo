@@ -18,7 +18,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from ..http import MmHttpError, MmHttpStatusError, MmHttpTimeout, fetch_bytes
+from ..http import HttpError, HttpStatusError, HttpTimeoutError, fetch_bytes
 from ..http.url_validator import UrlValidationPolicy, validate_media_url
 
 logger = logging.getLogger(__name__)
@@ -105,16 +105,16 @@ class ImageLoader:
 
             return await self._open_image(image_data)
 
-        except MmHttpStatusError as e:
+        except HttpStatusError as e:
             logger.error(f"HTTP {e.status} loading image: '{image_url}'")
             raise
-        except MmHttpTimeout as e:
+        except HttpTimeoutError as e:
             logger.error(
                 f"{type(e).__name__} loading image: '{image_url}' "
                 f"(timeout={self._http_timeout}s)"
             )
             raise ValueError(f"Timeout loading image: '{image_url}'") from e
-        except MmHttpError as e:
+        except HttpError as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
         except Exception as e:

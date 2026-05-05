@@ -28,9 +28,9 @@ def print_iteration(mean_ms: float, summaries: list[Summary]) -> None:
             f"{s.backend:<8} {s.wall_s:>7.1f} {s.avg_ms:>7.1f} {s.p50_ms:>7.1f} "
             f"{s.p90_ms:>7.1f} {s.p99_ms:>7.1f}  "
             f"{s.outcomes.get('success', 0):>7} "
-            f"{s.outcomes.get('MmHttpTimeout', 0):>7} "
-            f"{s.outcomes.get('MmHttpStatusError', 0):>6} "
-            f"{s.outcomes.get('MmHttpConnectionError', 0):>4}"
+            f"{s.outcomes.get('HttpTimeoutError', 0):>7} "
+            f"{s.outcomes.get('HttpStatusError', 0):>6} "
+            f"{s.outcomes.get('HttpConnectionError', 0):>4}"
         )
     print()
 

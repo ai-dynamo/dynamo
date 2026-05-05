@@ -60,11 +60,11 @@ async def test_invalid_backend_raises(monkeypatch) -> None:
 
 # --- Backend-neutral SSRF revalidation via fetch_bytes(policy=...) ---
 #
-# These exercise the facade path through an injected
-# ``fetch_body_or_redirect`` stub on a concrete client instance, so they
-# cover the shared redirect-loop + validate-each-hop logic independent
-# of the chosen backend. We then parametrize over both backends to
-# confirm routing.
+# These exercise the facade path through an injected stub on the
+# subclass-impl ``_fetch_body_or_redirect`` seam — the cleanest place
+# to inject test responses without standing up a real HTTP server.
+# Patching a private method is acceptable here because we're testing
+# the parent class's redirect-loop logic, not the seam itself.
 
 
 _PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
@@ -88,7 +88,7 @@ async def test_fetch_with_policy_returns_first_response(
         call_count["n"] += 1
         return b"body-bytes", None
 
-    with patch.object(client, "fetch_body_or_redirect", _fake):
+    with patch.object(client, "_fetch_body_or_redirect", _fake):
         result = await mm_http.fetch_bytes(
             "https://example.com/x.png", 30.0, policy=_PERMISSIVE
         )
@@ -111,7 +111,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
             return None, "https://example.com/final.png"
         return b"final-bytes", None
 
-    with patch.object(client, "fetch_body_or_redirect", _fake):
+    with patch.object(client, "_fetch_body_or_redirect", _fake):
         result = await mm_http.fetch_bytes(
             "https://example.com/x.png", 30.0, policy=_PERMISSIVE
         )
@@ -131,7 +131,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
     async def _fake(url, timeout):
         return None, "http://169.254.169.254/latest/meta-data/"
 
-    with patch.object(client, "fetch_body_or_redirect", _fake):
+    with patch.object(client, "_fetch_body_or_redirect", _fake):
         with pytest.raises(UrlValidationError):
             await mm_http.fetch_bytes("https://8.8.8.8/x.png", 30.0, policy=strict)
 
@@ -154,6 +154,6 @@ async def test_fetch_with_policy_enforces_redirect_limit(
     async def _fake(url, timeout):
         return None, chain[url]
 
-    with patch.object(client, "fetch_body_or_redirect", _fake):
+    with patch.object(client, "_fetch_body_or_redirect", _fake):
         with pytest.raises(UrlValidationError, match="Too many redirects"):
             await mm_http.fetch_bytes("https://example.com/a", 30.0, policy=_PERMISSIVE)

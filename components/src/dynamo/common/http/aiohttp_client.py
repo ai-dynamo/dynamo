@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""aiohttp implementation of :class:`MmHttpClient` — the default backend.
+"""aiohttp implementation of :class:`HttpClient` — the default backend.
 
 See ``README.md`` (sibling file) for why aiohttp is the default and
 the perf data behind that choice. Operator-tunable knobs live in
@@ -17,7 +17,7 @@ from typing import Optional
 import aiohttp
 from yarl import URL
 
-from .base import MmHttpClient, MmHttpConnectionError, MmHttpStatusError, MmHttpTimeout
+from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
-class AiohttpClient(MmHttpClient):
+class AiohttpClient(HttpClient):
     """aiohttp-backed concrete client."""
 
-    def __init__(self, args=None) -> None:
-        super().__init__(args)
+    def __init__(self, config=None) -> None:
+        super().__init__(config)
         self._session: Optional[aiohttp.ClientSession] = None
 
     def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
@@ -39,21 +39,21 @@ class AiohttpClient(MmHttpClient):
         # byte arrives, matching what httpx's ``Timeout.connect`` gives
         # us on the other backend.
         total = (
-            self._args.per_call_timeout_override
-            if self._args.per_call_timeout_override is not None
+            self._config.per_call_timeout_override
+            if self._config.per_call_timeout_override is not None
             else timeout
         )
         return aiohttp.ClientTimeout(
-            total=total, sock_connect=self._args.connect_timeout
+            total=total, sock_connect=self._config.connect_timeout
         )
 
     def _build_session(self) -> aiohttp.ClientSession:
         connector = aiohttp.TCPConnector(
-            limit=self._args.max_connections,
+            limit=self._config.max_connections,
             # Single-origin fan-out is the whole point; capping per-host
             # would defeat it. Hard-coded rather than env-tunable.
             limit_per_host=0,
-            keepalive_timeout=self._args.keepalive_timeout,
+            keepalive_timeout=self._config.keepalive_timeout,
             enable_cleanup_closed=True,
         )
         return aiohttp.ClientSession(connector=connector, trust_env=True)
@@ -65,10 +65,10 @@ class AiohttpClient(MmHttpClient):
                 logger.info(
                     "aiohttp backend initialized: limit=%d, limit_per_host=0, "
                     "keepalive_timeout=%.1fs%s",
-                    self._args.max_connections,
-                    self._args.keepalive_timeout,
-                    f", total timeout forced to {self._args.per_call_timeout_override:.1f}s via env"
-                    if self._args.per_call_timeout_override is not None
+                    self._config.max_connections,
+                    self._config.keepalive_timeout,
+                    f", total timeout forced to {self._config.per_call_timeout_override:.1f}s via env"
+                    if self._config.per_call_timeout_override is not None
                     else "; total timeout set per-request",
                 )
         return self._session
@@ -83,19 +83,19 @@ class AiohttpClient(MmHttpClient):
                 response.raise_for_status()
                 return await response.read()
         except aiohttp.ClientResponseError as e:
-            raise MmHttpStatusError(e.status, e.message or "", url) from e
+            raise HttpStatusError(e.status, e.message or "", url) from e
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
-            raise MmHttpTimeout(f"Timeout loading {url}") from e
+            raise HttpTimeoutError(f"Timeout loading {url}") from e
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
-            raise MmHttpConnectionError(f"Connection error loading {url}: {e}") from e
+            raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
         except aiohttp.ClientError as e:
-            raise MmHttpConnectionError(f"HTTP error loading {url}: {e}") from e
+            raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
-    async def fetch_body_or_redirect(
+    async def _fetch_body_or_redirect(
         self, url: str, timeout: float
     ) -> tuple[bytes | None, str | None]:
         session = await self._get_session()
@@ -114,18 +114,18 @@ class AiohttpClient(MmHttpClient):
                 try:
                     response.raise_for_status()
                 except aiohttp.ClientResponseError as e:
-                    raise MmHttpStatusError(e.status, e.message or "", url) from e
+                    raise HttpStatusError(e.status, e.message or "", url) from e
                 return await response.read(), None
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
-            raise MmHttpTimeout(f"Timeout loading {url}") from e
+            raise HttpTimeoutError(f"Timeout loading {url}") from e
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
-            raise MmHttpConnectionError(f"Connection error loading {url}: {e}") from e
+            raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
         except aiohttp.ClientError as e:
-            raise MmHttpConnectionError(f"HTTP error loading {url}: {e}") from e
+            raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
     async def close(self) -> None:
         async with self._lock:

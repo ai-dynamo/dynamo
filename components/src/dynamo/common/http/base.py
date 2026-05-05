@@ -15,7 +15,7 @@ import abc
 import asyncio
 from typing import Optional
 
-from .args import HttpArgs, from_env
+from .args import HttpConfigBase, from_env
 from .url_validator import (
     _MAX_REDIRECTS,
     UrlValidationError,
@@ -24,19 +24,19 @@ from .url_validator import (
 )
 
 
-class MmHttpError(Exception):
-    """Base class for all multimodal HTTP fetch failures."""
+class HttpError(Exception):
+    """Base class for all HTTP fetch failures."""
 
 
-class MmHttpTimeout(MmHttpError):
+class HttpTimeoutError(HttpError):
     """Timeout during connect / read / pool-wait."""
 
 
-class MmHttpConnectionError(MmHttpError):
+class HttpConnectionError(HttpError):
     """Network-layer failure: DNS, refused, reset, half-close."""
 
 
-class MmHttpStatusError(MmHttpError):
+class HttpStatusError(HttpError):
     """Server responded with a non-2xx status."""
 
     def __init__(self, status: int, message: str, url: str) -> None:
@@ -46,7 +46,7 @@ class MmHttpStatusError(MmHttpError):
         self.url = url
 
 
-class MmHttpClient(abc.ABC):
+class HttpClient(abc.ABC):
     """Backend-neutral HTTP client.
 
     Subclasses own a backend-specific session/client singleton on the
@@ -55,8 +55,8 @@ class MmHttpClient(abc.ABC):
     is invisible past instantiation.
     """
 
-    def __init__(self, args: Optional[HttpArgs] = None) -> None:
-        self._args: HttpArgs = args if args is not None else from_env()
+    def __init__(self, config: Optional[HttpConfigBase] = None) -> None:
+        self._config: HttpConfigBase = config if config is not None else from_env()
         self._lock = asyncio.Lock()
 
     async def fetch_bytes(
@@ -96,11 +96,14 @@ class MmHttpClient(abc.ABC):
             await validate_url(current, policy)
             visited.append(current)
 
-            body, redirect_to = await self.fetch_body_or_redirect(current, timeout)
+            body, redirect_to = await self._fetch_body_or_redirect(current, timeout)
 
             if redirect_to is None:
-                # Subclass must return bytes on terminal (2xx or 3xx-without-Location).
-                assert body is not None
+                if body is None:
+                    raise HttpError(
+                        f"Backend returned (None, None) for {current}; "
+                        "expected bytes on a terminal (2xx or 3xx-without-Location) response"
+                    )
                 return body
 
             if hops_remaining <= 0:
@@ -115,14 +118,15 @@ class MmHttpClient(abc.ABC):
         """Backend's native redirect-following GET (no SSRF policy applied)."""
 
     @abc.abstractmethod
-    async def fetch_body_or_redirect(
+    async def _fetch_body_or_redirect(
         self, url: str, timeout: float
     ) -> tuple[bytes | None, str | None]:
         """Single hop with redirects disabled.
 
+        Subclass contract used by :meth:`_fetch_with_revalidation`.
         Returns ``(body, None)`` for a terminal response (2xx, or 3xx
         without a ``Location`` header), or ``(None, absolute_next_url)``
-        for a followable redirect. Raises :class:`MmHttpStatusError`
+        for a followable redirect. Raises :class:`HttpStatusError`
         for 4xx/5xx and the usual timeout / connection classes on
         transport failure.
         """

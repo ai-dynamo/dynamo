@@ -7,6 +7,10 @@ The session singleton is held on the client instance (``client._session``)
 and replaced via ``patch.object``; the autouse
 ``_close_shared_http_client`` fixture in ``conftest.py`` resets the
 process-wide singleton between tests.
+
+Redirect parsing is exercised through the public ``fetch_bytes(...,
+policy=...)`` path so we don't reach into the
+``_fetch_body_or_redirect`` abstract-method seam from tests.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from yarl import URL
 
 from dynamo.common import http as mm_http
 from dynamo.common.http import AiohttpClient
+from dynamo.common.http.url_validator import UrlValidationPolicy
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -61,6 +66,28 @@ def _cm_returning(response):
     return _get
 
 
+def _cm_per_url(response_for_url):
+    """``session.get`` stand-in that picks the response by URL.
+
+    ``response_for_url`` maps URL → ``_FakeResponse``.
+    """
+
+    class _CM:
+        def __init__(self, response):
+            self._response = response
+
+        async def __aenter__(self):
+            return self._response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def _get(url, **kwargs):
+        return _CM(response_for_url[str(url)])
+
+    return _get
+
+
 def _cm_raising(exc_factory):
     """``session.get`` stand-in: async-CM whose ``__aenter__`` raises."""
 
@@ -83,6 +110,9 @@ def _make_client_with_session(session) -> AiohttpClient:
     return client
 
 
+_PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+
 async def test_fetch_bytes_returns_body_on_200() -> None:
     response = _FakeResponse(status=200, body=b"hello")
     session = MagicMock(spec=aiohttp.ClientSession)
@@ -98,7 +128,7 @@ async def test_fetch_bytes_maps_timeout() -> None:
     session.closed = False
     session.get = _cm_raising(lambda: asyncio.TimeoutError())
     client = _make_client_with_session(session)
-    with pytest.raises(mm_http.MmHttpTimeout):
+    with pytest.raises(mm_http.HttpTimeoutError):
         await client.fetch_bytes("https://h/x", 30.0)
 
 
@@ -112,7 +142,7 @@ async def test_fetch_bytes_maps_status() -> None:
     session.closed = False
     session.get = _cm_raising(_mk_error)
     client = _make_client_with_session(session)
-    with pytest.raises(mm_http.MmHttpStatusError) as exc:
+    with pytest.raises(mm_http.HttpStatusError) as exc:
         await client.fetch_bytes("https://h/x", 30.0)
     assert exc.value.status == 404
 
@@ -122,20 +152,26 @@ async def test_fetch_bytes_maps_connection_error() -> None:
     session.closed = False
     session.get = _cm_raising(lambda: aiohttp.ClientConnectionError("refused"))
     client = _make_client_with_session(session)
-    with pytest.raises(mm_http.MmHttpConnectionError):
+    with pytest.raises(mm_http.HttpConnectionError):
         await client.fetch_bytes("https://h/x", 30.0)
 
 
-async def test_fetch_body_or_redirect_returns_absolute_next_url_on_302() -> None:
-    response = _FakeResponse(
-        status=302,
-        headers={"Location": "/next.png"},
-        url=URL("https://h/x.png"),
-    )
+async def test_redirect_resolved_through_policy_path() -> None:
+    """302 → absolute next URL is parsed correctly when the SSRF policy
+    drives the redirect loop. Verifies relative-Location resolution
+    against the response URL through the public API."""
+    responses = {
+        "https://h/x.png": _FakeResponse(
+            status=302,
+            headers={"Location": "/next.png"},
+            url=URL("https://h/x.png"),
+        ),
+        "https://h/next.png": _FakeResponse(status=200, body=b"final"),
+    }
     session = MagicMock(spec=aiohttp.ClientSession)
     session.closed = False
-    session.get = _cm_returning(response)
+    session.get = _cm_per_url(responses)
     client = _make_client_with_session(session)
-    body, next_url = await client.fetch_body_or_redirect("https://h/x.png", 30.0)
-    assert body is None
-    assert next_url == "https://h/next.png"
+
+    body = await client.fetch_bytes("https://h/x.png", 30.0, policy=_PERMISSIVE)
+    assert body == b"final"
