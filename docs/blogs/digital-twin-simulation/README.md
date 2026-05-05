@@ -155,6 +155,7 @@ flowchart LR
     MES --> H
 
     H --> TC[Trace Collector]
+    H -. "completion / admission feedback" .-> LD
 ```
 
 The replay harness connects workload generation to the simulated components and
