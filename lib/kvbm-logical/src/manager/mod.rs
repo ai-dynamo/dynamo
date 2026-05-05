@@ -219,6 +219,25 @@ impl<T: BlockMetadata> BlockManager<T> {
         matched
     }
 
+    /// Match a single block, checking active blocks first and then inactive.
+    pub fn match_block(&self, seq_hash: SequenceHash) -> Option<ImmutableBlock<T>> {
+        self.metrics.inc_match_hashes_requested(1);
+
+        let matched = self
+            .active_pool
+            .find_match(seq_hash, true)
+            .or_else(|| self.inactive_pool.find_block(seq_hash, true))
+            .map(|block| {
+                ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
+            });
+
+        if matched.is_some() {
+            self.metrics.inc_match_blocks_returned(1);
+        }
+
+        matched
+    }
+
     /// Scatter-gather scan: finds all blocks matching any hash, without stopping on misses.
     ///
     /// Returns a map of found hashes to immutable handles.

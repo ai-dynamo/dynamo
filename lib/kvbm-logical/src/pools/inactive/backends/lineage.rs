@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use dynamo_tokens::PositionalLineageHash;
+use rustc_hash::FxHashMap;
 
 use super::super::{Block, BlockMetadata, InactivePoolBackend, Registered};
 
@@ -56,7 +57,7 @@ impl<T: BlockMetadata> LineageNode<T> {
 /// A backend that manages blocks using a lineage graph and evicts from the leaves.
 pub struct LineageBackend<T: BlockMetadata> {
     /// Map from (position, fragment) to Node.
-    nodes: HashMap<u64, HashMap<u64, LineageNode<T>>>,
+    nodes: FxHashMap<u64, FxHashMap<u64, LineageNode<T>>>,
 
     /// Sorted queue of leaf nodes, keyed by (last_used, position, fragment).
     /// Smallest key (oldest tick) is popped first.
@@ -79,7 +80,7 @@ impl<T: BlockMetadata> LineageBackend<T> {
     /// Creates a new LineageBackend.
     pub fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
+            nodes: FxHashMap::default(),
             leaf_queue: BTreeMap::new(),
             count: 0,
             current_tick: 0,
@@ -348,6 +349,14 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LineageBackend<T> {
         }
 
         matches
+    }
+
+    fn find_match(
+        &mut self,
+        hash: PositionalLineageHash,
+        _touch: bool,
+    ) -> Option<Block<T, Registered>> {
+        self.remove(&hash)
     }
 
     fn scan_matches(

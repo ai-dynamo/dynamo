@@ -60,6 +60,18 @@ impl<T: BlockMetadata> ActivePool<T> {
         matches
     }
 
+    /// Find a single active block by sequence hash.
+    #[inline]
+    pub(crate) fn find_match(
+        &self,
+        hash: SequenceHash,
+        touch: bool,
+    ) -> Option<Arc<dyn RegisteredBlock<T>>> {
+        self.block_registry
+            .match_sequence_hash(hash, touch)
+            .and_then(|handle| handle.try_get_block::<T>(self.return_fn.clone()))
+    }
+
     /// Scan for blocks in the active pool (doesn't stop on miss).
     ///
     /// Unlike `find_matches`, this continues scanning even when a hash is not found.
@@ -82,16 +94,6 @@ impl<T: BlockMetadata> ActivePool<T> {
             })
             .collect()
     }
-
-    // /// Find a single block by sequence hash.
-    // ///
-    // /// Returns the block if found and active, None otherwise.
-    // #[inline]
-    // pub(crate) fn find_match(&self, seq_hash: SequenceHash) -> Option<Arc<dyn RegisteredBlock<T>>> {
-    //     self.block_registry
-    //         .match_sequence_hash(seq_hash, true)
-    //         .and_then(|handle| handle.try_get_block::<T>(self.return_fn.clone()))
-    // }
 
     // /// Check if a block with the given sequence hash is currently active.
     // pub(crate) fn has_block(&self, seq_hash: SequenceHash) -> bool {

@@ -4622,6 +4622,7 @@ dependencies = [
  "rand_chacha 0.9.0",
  "rmp-serde",
  "rstest 0.26.1",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
