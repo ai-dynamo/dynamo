@@ -179,46 +179,16 @@ The subtle constraint, however, lies in preserving execution correctness. The re
 
 The **GPU Memory Service (GMS)** is what makes this possible.
 
-### Memory Model
-GMS is a per-GPU sidecar process that owns physical GPU memory on behalf of inference workers. It is built on top of the CUDA Virtual Memory Management API, which lets us separate a physical allocation from the virtual address it's mapped at, and share that physical allocation across processes.
+### Parallelizing Weight Restore
+GMS is a per-GPU sidecar process (deployed as a separate container/pod) that owns physical GPU memory on behalf of inference workers, built on top of the CUDA Virtual Memory Management API. At a high level, it lets the worker hand off ownership of its weight allocations to a separate process that outlives any individual worker, so that when the worker is checkpointed, the weights are not part of its checkpointed state — and when it is restored, it can reattach to the same physical memory on the new node without copying.
 
-The GMS server allocates physical GPU memory with `cuMemCreate`, requesting an allocation handle that supports POSIX file descriptor export. It then immediately calls `cuMemExportToShareableHandle` to get an FD that represents that physical allocation, and caches it. Critically, the server **never calls** `cuMemMap` on its own — it does not reserve a virtual address, does not touch the bytes, and never even establishes a CUDA context capable of dereferencing the memory. It is purely a registry/memory store of physical allocations and the FDs that name them.
-
-A client (the inference worker) connects to the GMS server over a Unix domain socket and asks for a particular allocation. The server `dup()`s its cached FD and passes it back to the client over the same socket using `SCM_RIGHTS`. The client then runs the import side of the protocol locally:
-
-1. `cuMemImportFromShareableHandle(fd)`: turn the FD back into a CUDA allocation handle in the client's context.
-2. `cuMemAddressReserve(size)`: reserve a stable virtual address range.
-3. `cuMemMap(va, handle)`: map the imported physical memory at that VA.
-
-The bytes are then accessible from the client at `va`. There is no copy at any point in this flow; the import is just a re-export of the same physical pages into a new address space. This is the same primitive that backs IPC across CUDA processes; GMS just builds a long-lived, lock-protected service around it.
-
-Because the server never holds VA mappings, it has no CUDA context to lose. It can outlive client crashes and cuda-checkpoint tear-downs that would normally clobber an ordinary CUDA process's state.
-
-### Lifecycle: Sleep, Checkpoint, Restore, Wake
-The worker treats GMS-backed weights through the same `sleep()` / `wake_up()` primitive that vLLM already uses for the KV cache trick from Optimization #1. The difference is what happens to the physical memory in between.
-
-When `sleep()` is called, the worker walks every GMS mapping, unmaps the VA (`cuMemUnmap`), and releases its imported handle (`cuMemRelease`). This drops the worker's reference to the physical memory, but the GMS server is still holding it via the original handle from `cuMemCreate`, so the pages stay alive on the GPU. **The VA reservation is kept**, i.e. the worker does not call `cuMemAddressFree`. From CUDA's point of view those addresses are still reserved by the worker, just unbacked. Any CUDA graph that captured a kernel parameter pointing into a weight tensor still sees a valid (if currently unmapped) virtual address.
-
-This is the moment cuda-checkpoint and CRIU run. Because the worker no longer holds any imported handles or live mappings to the GMS allocations, **the weight bytes are simply not part of the checkpointed state**. The cuda-checkpoint snapshot covers only what the worker still has mapped: the CUDA graph, a few miscellaneous activation/workspace buffers that get double-buffered into host memory, and the small mutable bookkeeping that the engine kept around.
-
-On restore (potentially on a different node), CRIU brings the worker's process tree back. The VA reservations come back with it — they're just kernel state inside the process. What's missing is the *backing* for those VAs. The worker calls `wake_up()`, which:
-
-1. Reconnects to the GMS server, which on the restore node has been independently brought up and populated.
-2. Remaps all VAs. This requests previously-imported allocations from the GMS server, receives fresh FDs, imports them, and calls `cuMemMap` at the *same VAs* the worker reserved before. Because the VAs are unchanged, every captured CUDA graph and every cached tensor pointer is instantly valid again.
-3. Before mapping, it verifies a layout hash published by the server at commit time. This protects against the case where someone published a completely different model architecture's weights into GMS in between.
-
-![Worker releases weight mappings while GMS retains the physical pages; on restore, the worker reconnects to a freshly populated GMS to remap weights at their original addresses.](./figures/gms_checkpoint_restore_flow.svg)
-
-### Independent Weight Restoration
-The above only works if, by the time the worker calls `wake_up()`, the GMS server on the restore node already has the weights resident on its GPU. This is what unlocks the next big optimization: the path that gets weights onto the GPU is now **completely decoupled** from CRIU and cuda-checkpoint. CRIU can stream process state from the snapshot PVC at whatever rate NFS gives us, and *in parallel*, an entirely separate `gms-loader` sidecar populates GMS with the weights for that model.
-
-However, what needs to be determined is where the loader gets the weights from. In a real cluster, weight management is its own concern: we want a single source of truth for which models are cached where, deduplicated downloads from external sources like HuggingFace, and ideally GPU-to-GPU RDMA between nodes that already have the weights resident. This is exactly what weight transfer engines like [ModelExpress](https://github.com/ai-dynamo/modelexpress) (MX) are built for, and the intended production path is to have `gms-loader` be a shim that exposes GMS's stored allocations directly to different weight transfer backends. For instance, MX figures out the fastest available source for a given model — peer GPU over NIXL/RDMA, disk over GPUDirect Storage, HuggingFace, etc. — and `gms-loader` exposes the necessary shims to plumb those bytes into GMS, where the worker imports them at its preserved VAs as described above.
+The payoff is that the path that gets weights onto the GPU is now **completely decoupled** from CRIU and cuda-checkpoint. CRIU can stream process state (which is now much smaller) from the snapshot PVC at NFS bandwidth, and *in parallel*, an entirely separate `gms-loader` sidecar populates GMS with the weights for that model. The two paths converge only at the moment the worker resumes, when it reattaches to the now-populated GMS and continues serving.
 
 ![Restored pod data flow: snapshot-agent restores the CRIU artifact into the worker while gms-loader streams weights into gms-server in parallel.](./figures/gms_combined_dataflow.svg)
 
-CRIU restore and the GMS weight load run concurrently on the restore pod, but they have to converge before the worker can resume. In particular, the worker can't `wake_up()` until the weights are actually in GMS. The snapshot agent coordinates this by waiting for both halves to finish before signaling the worker to continue, which is what turns the two parallel paths into a single join point at `wake_up()`. The same coordination runs in reverse on the checkpoint side: the snapshot agent waits for the weight dump to finish before letting the checkpoint job complete.
+Where the loader gets the weights from is its own concern. In a real cluster, we want a single source of truth for which models are cached where, deduplicated downloads from external sources like HuggingFace, and ideally GPU-to-GPU RDMA between nodes that already have the weights resident. This is exactly what weight transfer engines like [ModelExpress](https://github.com/ai-dynamo/modelexpress) (MX) are built for, and the intended production path is to have `gms-loader` be a shim that exposes GMS's stored allocations directly to different weight transfer backends — peer GPU over NIXL/RDMA, disk over GPUDirect Storage, HuggingFace, etc.
 
-However, we are still in the process of developing the integration with MX, among other transfer engine backends. For now, the fallback is to also use NFS for the weights, which eliminates the full host-side materialization of the weights but still causes some NFS bandwidth contention with the ongoing CRIU restore. Nonetheless, we still see a major reduction in startup time, even with this fallback.
+We are still in the process of developing the integration with MX, among other transfer engine backends. For now, the fallback is to also use NFS for the weights, which eliminates the full host-side materialization of the weights but still causes some NFS bandwidth contention with the ongoing CRIU restore. Nonetheless, we still see a major reduction in startup time, even with this fallback.
 
 ### Full Overlap with External Weight Restoration
 To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore with a faster channel for restoring the weights, we implemented a proof-of-concept backend for `gms-loader` where the weights for each model are sharded across 8 SSDs on a node, and ensured the restored workload was on the same node as the checkpoint.
@@ -229,7 +199,7 @@ We saw that parallelizing the container restoration in CRIU and the weights rest
 
 ![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 5 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
 
-The CRIU checkpoint now only contains the host-side state of the container's process tree, as well as the CUDA graph and a few miscellaneous buffers that are still double-buffered. The GMS weight artifact now holds the majority of process memory.
+The CRIU checkpoint now only contains the host-side state of the container's process tree and a few miscellaneous buffers that are still double-buffered. The GMS weight artifact now holds the majority of process memory.
 
 | Model | CRIU checkpoint size (baseline) | CRIU checkpoint size (with GMS) | GMS weight artifact |
 | --- | --- | --- | --- |
@@ -245,6 +215,7 @@ The CRIU checkpoint now only contains the host-side state of the container's pro
 Not everything in this blog post is generally available in Dynamo yet:
 
 - **Support for Other Frameworks:** Dynamo Snapshot currently works for vLLM and SGLang. TensorRT-LLM support is work in progress.
+- **CRIU optimizations:** We are currently in the process of upstreaming the AIO and parallel memfd optimizations to CRIU.
 - **GMS + Snapshot Integration:** This requires an unreleased CUDA driver patch to be able to work with GPU migration (checkpoint on one GPU, restore on another) that is necessary for this to be practical. The patch will be part of an upcoming CUDA driver release.
 - **GDS/P2P transfer via MX integration with GMS:** Currently we only have the PVC-source fallback for weight restoration. We are working on integrating GPUDirect Storage and peer-to-peer GPU transfer into `gms-loader`, enabling direct SSD→GPU weight loading and GPU→GPU weight transfer for autoscaling.
 - **Multi-GPU support:** Single-node multi-GPU is still experimental (currently vLLM-only, with limitations) and may fail on certain hardware/driver configurations. We are actively working on robust multi-GPU and multi-node checkpoint/restore support.
