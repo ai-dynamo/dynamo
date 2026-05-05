@@ -432,8 +432,8 @@ impl ModelWatcher {
             // PrefillRouter; leaving it in the map causes the next decode
             // rebuild's `register_prefill_router` to find a stale `DecodeWaiting`,
             // return `None`, and produce a WorkerSet with no PrefillRouter at
-            // all. See the stale-DecodeWaiting reproducer in
-            // `docs/pr-8965-stale-decodewaiting-reproducer.md`.
+            // all. The stale-DecodeWaiting cleanup tests cover this rebuild
+            // path.
             if card.model_type.supports_prefill() {
                 if removed.is_some() {
                     self.manager
