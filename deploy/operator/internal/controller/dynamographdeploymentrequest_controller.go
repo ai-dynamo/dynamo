@@ -588,34 +588,40 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateProfilingSubPhase(
 	return r.Status().Update(ctx, dgdr)
 }
 
-// checkProfilerFailureInConfigMap reads the output ConfigMap and returns an
-// error if the profiler reported failure. The sidecar writes profiler_status=failed
-// and profiler_error=<message> to the ConfigMap before exiting 0, so that the
-// Job succeeds but the controller can still detect and surface the failure.
-// Returns nil when the ConfigMap does not exist yet, has no profiler_status key,
-// or reports success.
+// checkProfilerFailureInConfigMap reads the output ConfigMap and checks whether
+// the profiler reported failure. The sidecar writes profiler_status=failed and
+// profiler_error=<message> to the ConfigMap before exiting 0, so that the Job
+// succeeds but the controller can still detect and surface the failure.
+//
+// Returns:
+//   - (true, "...", nil)  — profiler explicitly reported failure; message contains details
+//   - (false, "", nil)    — no failure detected (ConfigMap missing, key absent, or success)
+//   - (false, "", err)    — infrastructure error reading the ConfigMap (RBAC, API, etc.)
 func (r *DynamoGraphDeploymentRequestReconciler) checkProfilerFailureInConfigMap(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-) error {
+) (bool, string, error) {
 	outputCMName := getOutputConfigMapName(dgdr)
 	cm := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name: outputCMName, Namespace: dgdr.Namespace,
 	}, cm); err != nil {
-		return nil // ConfigMap not found — nothing to check
+		if apierrors.IsNotFound(err) {
+			return false, "", nil // ConfigMap not created yet — nothing to check
+		}
+		return false, "", fmt.Errorf("failed to read output ConfigMap %s: %w", outputCMName, err)
 	}
 
 	status, exists := cm.Data["profiler_status"]
 	if !exists || status != "failed" {
-		return nil
+		return false, "", nil
 	}
 
 	profilerError := cm.Data["profiler_error"]
 	if profilerError == "" {
 		profilerError = "profiler reported failure (no details available)"
 	}
-	return fmt.Errorf("profiling failed: %s", profilerError)
+	return true, profilerError, nil
 }
 
 // handleProfilingPhase monitors profiling progress and generates spec when complete
@@ -677,24 +683,30 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 	// The sidecar exits 0 even on profiler failure (to avoid wasteful Job
 	// retries), so a completed Job does not imply success. Check the output
 	// ConfigMap for an explicit failure status written by the sidecar.
-	if failErr := r.checkProfilerFailureInConfigMap(ctx, dgdr); failErr != nil {
+	profilerFailed, profilerError, cmErr := r.checkProfilerFailureInConfigMap(ctx, dgdr)
+	if cmErr != nil {
+		// Infrastructure error reading ConfigMap (RBAC, API, etc.) — retry.
+		return ctrl.Result{}, cmErr
+	}
+	if profilerFailed {
 		failureReason := profilingPhaseFailureReason(dgdr.Status.ProfilingPhase)
+		failureMessage := fmt.Sprintf("profiling failed: %s", profilerError)
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
 		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 			Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: dgdr.Generation,
 			Reason:             failureReason,
-			Message:            failErr.Error(),
+			Message:            failureMessage,
 		})
 		dgdr.AddStatusCondition(metav1.Condition{
 			Type:               nvidiacomv1beta1.ConditionTypeProfiling,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: dgdr.Generation,
 			Reason:             failureReason,
-			Message:            failErr.Error(),
+			Message:            failureMessage,
 		})
-		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, failErr.Error())
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageProfilingCheckFailed, failureMessage)
 		if err := r.Status().Update(ctx, dgdr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1557,9 +1569,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// No retries: profiling failures are generally non-transient (config errors,
-		// label mismatches, missing results) so retrying wastes GPU time. The sidecar
-		// writes failure details to the output ConfigMap before exiting 0, letting
-		// the controller transition directly to the Failed phase.
+		// label mismatches, missing results) so retrying wastes GPU time.
 		backoffLimit := int32(0)
 
 		podSpec := corev1.PodSpec{
