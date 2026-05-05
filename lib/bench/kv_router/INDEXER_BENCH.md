@@ -150,8 +150,10 @@ done
 
 | Field | Meaning |
 |-------|---------|
-| Early-exit % | Queries resolved in ~300 ns with no shard dispatch (unknown branch key) |
-| Avg routing | Routing-table lookup time (branch key → shard index) |
+| Exact dispatch | Queries routed by the deepest requested prefix key |
+| Shallow-fallback % | Queries whose exact requested prefix key missed but a shorter registered prefix routed to a shard that can return the shallow overlap score |
+| Early-exit % | Queries with no registered prefix alias, resolved without shard dispatch |
+| Avg routing | Prefix-key routing-table lookup time (deepest registered prefix → shard index) |
 | Avg shard | CRTC traversal time on the dispatched shard |
 
 ---
@@ -200,29 +202,31 @@ Trace: `conversation_trace.jsonl` (Mooncake FAST25). Config: 2 shards × 4 worke
 
 ### Steady-state — p99 at real-world request rate (~11,860 ops/s offered)
 
-| Indexer | Achieved ops/s | p99 | Early-exit / TRIE-only | Avg routing | Avg shard |
-|---------|---------------|-----|------------------------|-------------|-----------|
+| Indexer | Achieved ops/s | p99 | Routing outcome | Avg routing | Avg shard |
+|---------|---------------|-----|-----------------|-------------|-----------|
 | CRTC baseline (8w) | 11,540 | 5,768 µs | — | — | — |
-| Branch-sharded depth=2 (2×4w) | 11,706 | **1,387 µs** | 85.4% | 433 ns | 521 µs |
-| Branch-sharded depth=4 (2×4w) | 11,775 | **727 µs** | 87.0% | 299 ns | 397 µs |
+| Branch-sharded depth=2 (2×4w) | 11,846 | **769 µs** | 14.6% exact / 85.4% shallow-fallback / 0.0% miss | 498 ns | 161 µs |
+| Branch-sharded depth=4 (2×4w) | 11,818 | **855 µs** | 13.0% exact / 87.0% shallow-fallback / 0.0% miss | 601 ns | 176 µs |
 | Anchor-aware BSI depth=2 (2×4w) | 11,740 | 1,006 µs | 18.5% TRIE-only | 394 µs | 8 µs |
 
-Branch-sharded depth=2 p99 is **4.2× lower** than CRTC; depth=4 is **7.9× lower**. The deeper key resolves more unique branches (1,038 vs 831), raising the early-exit rate slightly and reducing average shard traversal time.
+Branch-sharded depth=2 p99 is **7.5× lower** than CRTC; depth=4 is **6.7× lower**. Both branch-sharded runs effectively keep up with the offered trace rate. Routing remains sub-microsecond, while CRTC traversal on the selected shard dominates request latency.
 
-Anchor-aware BSI sits between CRTC and branch-sharded in p99 on this trace. Avg routing is 394 µs — the routing TRIE traversal is much heavier than old BSI's flat FNV lookup (433 ns). Avg shard is only 8 µs because most blocks are handled by the TRIE and never reach the CRTC. 18.5% of queries resolved entirely within the TRIE (no CRTC dispatch).
+The low true-miss rate is expected for this trace: most queries share a registered shallow prefix and are dispatched through shallow-fallback so the shard can return a shallow overlap score instead of an empty result. That keeps accuracy aligned with the unsharded CRTC baseline while preserving single-shard dispatch. In these runs, shallow-fallback accounts for **85.4%** of depth=2 lookups and **87.0%** of depth=4 lookups.
 
-> **Shard imbalance warning (this trace):** `conversation_trace.jsonl` has highly similar conversation prefixes (shared system prompts). Nearly all traffic fell on one shard — shard 0: 63 blocks (0.0%), shard 1: 2,036,902 blocks (100.0%). This is a known limitation of the static divergent-shard assignment in the routing TRIE when there is a single hot branch. See Known Issues.
+Anchor-aware BSI sits between CRTC and branch-sharded in p99 on this trace. Avg routing is 394 µs because the routing TRIE does more work before dispatch; avg shard time is only 8 µs because many blocks are represented by the routing TRIE and never reach the CRTC. Anchor-aware BSI provides a stronger routing-correctness guarantee for out-of-order events, but its routing overhead is materially higher on this workload.
+
+> **Shard imbalance warning (this trace):** `conversation_trace.jsonl` has highly similar conversation prefixes (shared system prompts). With `prefix_depth` 2 and 4, branch-sharded routing put all stored blocks on one shard for the single-copy trace. This does not prevent the trace-rate latency win above, but it means these numbers do not show the ideal multi-shard scaling case. See Known Issues.
 
 Shard block distribution:
 ```text
-depth=2:  shard 0: 1,061,550 blocks (91.1%), 3,556 workers  shard 1: 104,300 blocks  (8.9%), 3,444 workers
-          branches: shard[0]=415, shard[1]=416  ← balanced branch count, 10:1 block skew
+depth=2:  shard 0: 2,128,077 blocks (100.0%), 7,000 workers  shard 1: 0 blocks (0.0%), 0 workers
+          branches: shard[0]=831, shard[1]=0
 
-depth=4:  shard 0: 1,010,142 blocks (90.7%), 3,367 workers  shard 1: 103,222 blocks  (9.3%), 3,633 workers
-          branches: shard[0]=416, shard[1]=622  ← unbalanced branch count, similar 10:1 block skew
+depth=4:  shard 0: 2,128,077 blocks (100.0%), 7,000 workers  shard 1: 0 blocks (0.0%), 0 workers
+          branches: shard[0]=959, shard[1]=0
 ```
 
-The block skew (~10:1) persists at both depths despite different branch count distributions — confirming this is a lifetime skew problem (some branches inherently accumulate far more blocks), not an artifact of the assignment criterion. See Known Issues below.
+Increasing `prefix_depth` from 2 to 4 does not distribute blocks across shards on this trace, and this steady-state sample shows slightly higher p99 at depth=4. The common prefix is still too dominant for these depths. See Known Issues below.
 
 ### Peak throughput sweep — `conversation_trace.jsonl`
 
@@ -231,9 +235,9 @@ Peak is defined as the highest achieved ops/s before the bench warns it cannot k
 | Indexer | Peak achieved ops/s | p99 at peak | vs CRTC |
 |---------|--------------------:|-------------|---------|
 | CRTC baseline (8w) | 18,046 | 13,362 µs | — |
-| Branch-sharded depth=2 (2×4w) | **122,585** | **583 µs** | **+579%, 23× lower p99** |
+| Branch-sharded depth=2 (2×4w) | **130,096** | **655 µs** | **+621%, 20× lower p99** |
 
-CRTC saturates at ~18k ops/s with p99 exceeding 10,000 µs at all higher offered rates. Branch-sharded sustains 122k+ ops/s with p99 under 600 µs — the 85% early-exit rate means most queries never touch a shard at all, so it scales far better under load.
+CRTC saturates at ~18k ops/s with p99 exceeding 10,000 µs at all higher offered rates. Branch-sharded sustains ~130k ops/s before the first bench warning, with p99 under 700 µs at that point. The gain comes from cheap prefix routing plus one-shard CRTC traversal; it does not depend on early exits.
 
 Full sweep data:
 
@@ -254,14 +258,13 @@ Full sweep data:
 
 | Benchmark window | Offered ops/s | Achieved ops/s | p99 |
 |-----------------|--------------|----------------|-----|
-| 30,000 ms | 11,861 | 11,770 | 885 µs |
-| 18,455 ms | 19,281 | 19,052 | 794 µs |
-| 11,352 ms | 31,345 | 30,561 | 799 µs |
-| 6,983 ms | 50,956 | 49,033 | 746 µs |
-| 4,296 ms | 82,827 | 76,323 | 598 µs |
-| 2,643 ms | 134,629 | 122,585 | 583 µs |
-| 1,626 ms ⚠ | 218,834 | 182,005 | 569 µs |
-| 1,000 ms ⚠ | 355,824 | 255,190 | 573 µs |
+| 18,455 ms | 19,281 | 19,231 | 529 µs |
+| 11,352 ms | 31,345 | 31,250 | 591 µs |
+| 6,983 ms | 50,956 | 50,727 | 511 µs |
+| 4,296 ms | 82,827 | 82,224 | 531 µs |
+| 2,643 ms | 134,629 | 130,096 | 655 µs |
+| 1,626 ms ⚠ | 218,834 | 183,918 | 1,338 µs |
+| 1,000 ms ⚠ | 355,824 | 217,263 | 1,453 µs |
 
 **Anchor-aware BSI depth=2:**
 
@@ -276,7 +279,7 @@ Full sweep data:
 | 1,626 ms ⚠ | 218,834 | 114,587 | 2,042 µs |
 | 1,000 ms ⚠ | 355,824 | 106,663 | 2,427 µs |
 
-Anchor-aware BSI saturates at ~77k ops/s (no warning at 4,296 ms; first warning at 2,643 ms), comparable to branch-sharded. Best p99 is 1,228 µs at moderate load, vs 583 µs for branch-sharded. The TRIE routing overhead sets a floor: avg routing is ~394 µs regardless of throughput. The caveat on this trace (single hot shard) means these numbers do not represent ideal anchor-aware performance — on a trace with more diverse prefixes the shard load would distribute.
+Anchor-aware BSI saturates at ~77k ops/s (no warning at 4,296 ms; first warning at 2,643 ms). Best p99 is 1,228 µs at moderate load, vs 511-655 µs for branch-sharded in the same offered-rate range. The TRIE routing overhead sets a floor: avg routing is ~394 µs regardless of throughput. The caveat on this trace (single hot shard) means these numbers do not represent ideal anchor-aware performance — on a trace with more diverse prefixes the shard load would distribute.
 
 ⚠ = bench warned it could not keep up with the offered rate.
 
@@ -285,32 +288,37 @@ Anchor-aware BSI saturates at ~77k ops/s (no warning at 4,296 ms; first warning 
 Tests how p99 and shard balance change as the number of inference workers grows.
 Config: 2 shards × 4 workers per shard, `--num-unique-inference-workers 1000`, `-d 7` (7 replicas × 1,000 workers = 7,000 concurrent workers), `--benchmark-duration-ms 30000`.
 
-| Duplication factor | Effective workers | Branches | Offered ops/s | Early-exit | Avg routing | Avg shard | p99 | Block split |
-|-------------------|-----------------|----------|--------------|------------|-------------|-----------|-----|-------------|
-| 1× | 7,000 | 831 | 11,860 | 85.4% | 287 ns | 347 µs | 587 µs | 90.8% / 9.2% |
-| 2× | 14,000 | 1,650 | 23,721 | 86.3% | 282 ns | 289 µs | **458 µs** | 48.7% / 51.3% |
-| 4× | 28,000 | 3,330 | 47,443 | 86.4% | 249 ns | 293 µs | **446 µs** | 49.7% / 50.3% |
-| 8× | 56,000 | 6,647 | 94,886 | 86.7% | 302 ns | 381 µs | 623 µs | 57.9% / 42.1% |
-| 16× | 112,000 | 13,296 | 189,772 | 86.8% | 278 ns | 402 µs | 709 µs | 56.2% / 43.8% |
-| 32× | 224,000 | 26,617 | 379,543 | 86.5% | 344 ns | 364 µs | 713 µs | 49.3% / 50.7% |
+| Duplication factor | Effective workers | Branches | Offered ops/s | Achieved ops/s | Early-exit | Avg routing | Avg shard | p99 | Block split |
+|-------------------|------------------:|---------:|--------------:|---------------:|------------|-------------|-----------|-----|-------------|
+| 1× | 7,000 | 831 | 11,860 | 11,846 | 0.0% | 594 ns | 192 µs | 1,301 µs | 100.0% / 0.0% |
+| 2× | 14,000 | 1,650 | 23,721 | 23,670 | 0.0% | 472 ns | 176 µs | 505 µs | 50.0% / 50.0% |
+| 4× | 28,000 | 3,329 | 47,443 | 47,370 | 0.0% | 499 ns | 157 µs | **464 µs** | 50.0% / 50.0% |
+| 8× | 56,000 | 6,646 | 94,886 | 94,749 | 0.0% | 425 ns | 174 µs | 811 µs | 50.0% / 50.0% |
+| 16× | 112,000 | 13,296 | 189,772 | 184,034 | 0.0% | 432 ns | 185 µs | 1,363 µs | 37.5% / 62.5% |
+| 32× ⚠ | 224,000 | 26,617 | 379,543 | 160,396 | 0.0% | 550 ns | 227 µs | 2,121 µs | 50.0% / 50.0% |
 
-**1× is the only problematic case.** The 90.8%/9.2% block split at 7k workers is the lifetime skew issue — a few heavy branches landed on one shard and dominated it. At 2× the shards snap to balanced (48.7%/51.3%) due to the different hashes. and p99 drops to 458 µs.
+**1× is the most skewed case.** The single-copy trace lands entirely on one shard for `prefix_depth=2`, so p99 reflects one-shard CRTC traversal rather than multi-shard load distribution.
 
-**Sweet spot around 4×.** p99 is lowest at 4× (446 µs) where shards are balanced and per-shard tree depth is still moderate. Beyond that, p99 rises as each shard holds more blocks, but plateaus at ~700–750 µs between 16× and 32× even as workers double. This is sub-linear: block count grows 8× from 4× to 32×, but p99 grows only ~60%.
+**2× to 8× show the intended balanced case.** Once duplicated hash spaces introduce more distinct branch keys, block distribution is near 50/50 and p99 stays at or below 811 µs while offered throughput scales from 23.7k to 94.9k ops/s.
 
-**No worker-count or lookup ceiling.** Throughput scales linearly (11,860 → 379,543 ops/s, doubling each factor step) with no saturation up to 224,000 effective workers. There is no cliff. Similarly, avg routing ranges from 249–344 ns across 831 to 26,617 branches — DashMap lookup is not a bottleneck in this range.
+**16× remains usable but starts to show pressure.** It keeps up with the offered rate within a few percent, but p99 rises to 1,363 µs and block distribution skews to 37.5%/62.5%.
 
-**Practical implication:** If minimizing single-query latency matters, 14k–28k workers is the sweet spot for a 2-shard config; if maximizing throughput matters, the indexer keeps scaling.
+**32× is outside the clean measurement range for this command.** The bench warns that it cannot keep up and macOS reports allocation pressure, so the 160k achieved ops/s is not a reliable indexer ceiling. Avg routing is still sub-microsecond at 26,617 branches, which suggests the routing map is not the limiting factor.
+
+**Practical implication:** For this trace and a 2-shard config, the cleanest latency/throughput region is 14k-56k effective workers. Higher worker counts need either a longer benchmark window, more memory headroom, or more shards to separate indexer limits from benchmark-driver pressure.
 
 ---
 
 ## Known Issues
 
-### Lifetime block skew
+### Shared-prefix shard collapse and lifetime block skew
 
-`assign_shard` uses live block count as the primary load metric, so initial placement is good. The skew is a post-assignment problem: branches are placed permanently, and some branches accumulate far more blocks over their lifetime than others (e.g. long multi-turn conversations vs. one-shot queries). Shards diverge over time even though branch counts stay balanced.
+`assign_shard` uses live block count as the primary load metric, so branch placement adapts to observed load. Two skew modes remain:
 
-Observed on `conversation_trace.jsonl`: 415 vs 416 branches (balanced) but 1,061,550 vs 104,300 blocks (10:1). The hot shard's larger tree drives up its p99.
+1. **Shared-prefix collapse:** if many requests share the same first `prefix_depth` blocks, they share the same routing aliases and land on one shard. Observed on the single-copy `conversation_trace.jsonl` run: 831-959 branch aliases and 2,128,077 blocks all landed on shard 0.
+2. **Lifetime skew:** even when branch counts are distributed, branches are placed permanently and some conversations accumulate far more blocks than others. Over time, a few heavy branches can dominate one shard.
+
+The hot shard's larger tree drives up p99.
 
 **Future work — rebalancing:** periodically migrate heavy branches from the overloaded shard to lighter ones. This directly addresses lifetime skew when branches can be moved whole. It does not fully solve shared-prefix collapse (see `prefix_depth` section below), where the routing key itself is too coarse and a structural fix like node-depth routing is needed instead.
 
