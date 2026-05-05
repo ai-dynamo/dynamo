@@ -127,7 +127,6 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
     Arc::new(data)
 }
 
-/// [gluo WIP] Not the behavior we want to showcase
 /// Bidirectional echo engine: consumes a stream of `NvCreateChatCompletionRequest`s
 /// and, for each one, emits character-by-character `NvCreateChatCompletionStreamResponse`
 /// chunks followed by a terminal `FinishReason::Stop`. Used by the experimental

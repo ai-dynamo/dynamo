@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration test for the experimental `/v1/asr` WebSocket endpoint (DIS-1858).
@@ -21,6 +21,12 @@ use ports::get_random_port;
 
 /// Engine slot is process-global; ensure we install it at most once across all
 /// tests in this binary. Subsequent calls are silent no-ops.
+///
+/// The `install_echo_engine` helper is itself a placeholder — see DIS-1859
+/// (2/N), which will replace `OnceLock`-based engine registration with proper
+/// `ModelManager`-keyed lookups (`state.manager().get_asr_engine(model_name)`).
+/// Once that lands, this helper goes away and the test instead registers the
+/// echo engine through `ModelManager` like every other engine kind.
 fn ensure_echo_engine_installed() {
     let _ = asr::install_echo_engine();
 }
@@ -59,13 +65,23 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
         .await
         .expect("ws connect");
 
-    let body = serde_json::json!({
+    // Send two requests back-to-back. The engine processes them sequentially
+    // (each one fully echoed and terminated with `FinishReason::Stop` before
+    // the next is dequeued), so the response stream is "hi" + Stop + "ok" + Stop.
+    let body1 = serde_json::json!({
         "model": "echo",
         "messages": [{ "role": "user", "content": "hi" }],
     });
-    ws.send(Message::Text(body.to_string()))
+    ws.send(Message::Text(body1.to_string()))
         .await
-        .expect("send");
+        .expect("send first request");
+    let body2 = serde_json::json!({
+        "model": "echo",
+        "messages": [{ "role": "user", "content": "ok" }],
+    });
+    ws.send(Message::Text(body2.to_string()))
+        .await
+        .expect("send second request");
 
     // Read until we see two finish_reason="stop" or a normal close.
     let mut text = String::new();
@@ -105,10 +121,7 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
             Message::Close(_) => break,
             _ => {}
         }
-        if stops >= 1 {
-            // For a single inbound request, the engine emits chars then one Stop;
-            // we can also wait for the server-side Close frame, but the assertion
-            // below is sufficient.
+        if stops >= 2 {
             break;
         }
     }
@@ -117,8 +130,83 @@ async fn asr_websocket_echoes_per_char_and_finishes_per_request() {
     token.cancel();
     let _ = handle.await;
 
-    assert_eq!(text, "hi", "echoed text");
-    assert_eq!(stops, 1, "expected exactly one finish_reason=stop");
+    assert_eq!(text, "hiok", "echoed text from both requests");
+    assert_eq!(stops, 2, "expected one finish_reason=stop per request");
+}
+
+/// After a client-initiated close, the server should let the engine drain
+/// (sender side dropped → `req_rx` returns None → engine response stream ends)
+/// and emit its own Close frame as part of the cleanup. Covers the
+/// "Send a normal close once the engine finishes" path in `asr.rs`'s outbound
+/// task, where the trigger is client disconnect rather than natural completion
+/// (the other test) or server-side rejection (the binary-frame test).
+#[tokio::test]
+async fn asr_websocket_emits_close_after_client_close() {
+    unsafe {
+        std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
+    }
+    ensure_echo_engine_installed();
+
+    let port = get_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    let token = CancellationToken::new();
+    let handle = service.spawn(token.clone()).await;
+    wait_for_health(port).await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/asr");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    let body = serde_json::json!({
+        "model": "echo",
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    ws.send(Message::Text(body.to_string()))
+        .await
+        .expect("send");
+
+    // Read one Text frame to confirm the engine started emitting before we
+    // close. We don't need to time the close to the middle of an emission —
+    // the cleanup path under test triggers the same way regardless of whether
+    // the engine is mid-emission or already done.
+    let first = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+    assert!(
+        matches!(first, Ok(Some(Ok(Message::Text(_))))),
+        "expected at least one delta from the engine before closing, got {first:?}"
+    );
+
+    // Client-initiated close.
+    ws.close(None).await.expect("client close");
+
+    // Server should now clean up by sending an explicit Close frame back. The
+    // outbound task drives the sink to completion (`ws_tx.close().await`)
+    // after writing the Close frame, which ensures it fully drains before the
+    // transport is dropped — so the client must observe `Message::Close`, not
+    // a bare EOF. Drain any residual delta frames already in flight along the
+    // way.
+    let mut got_close = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        let Ok(maybe) = frame else { break };
+        match maybe {
+            Some(Ok(Message::Close(_))) => {
+                got_close = true;
+                break;
+            }
+            None => break, // EOF without an in-band Close — treated as a regression below
+            _ => {}        // residual Text frame from the in-flight response — drain
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    assert!(
+        got_close,
+        "server should send an explicit Close frame after client-initiated close"
+    );
 }
 
 #[tokio::test]

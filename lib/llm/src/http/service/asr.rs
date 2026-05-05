@@ -41,10 +41,23 @@ use crate::protocols::openai::chat_completions::{
 /// Process-scoped registry for the bidirectional engine. Populated by tests and
 /// (in production) by whatever wires up the experimental endpoint. If unset when
 /// a connection arrives, the handler closes with `INTERNAL_ERROR`.
+///
+/// **Placeholder until DIS-1859 (2/N).** The proper registration path is through
+/// `ModelManager` keyed on `model_name`, parallel to how chat / completions /
+/// embeddings engines are registered. That accessor doesn't exist yet on
+/// `ModelManager` — this `OnceLock` is a stand-in so DIS-1858 can ship the
+/// frontend slice without depending on the engine-side refactor. When DIS-1859
+/// adds the bidirectional accessor, replace this static + the `install_*`
+/// helpers below with `state.manager().get_asr_engine(model_name)` lookups in
+/// `handle_socket`, and remove the install-time API entirely.
 static BIDIRECTIONAL_ENGINE: OnceLock<EchoBidirectionalEngine> = OnceLock::new();
 
 /// Install the bidirectional engine to be used by `/v1/asr`. Returns `Err` if an
 /// engine is already installed (the static can only be set once per process).
+///
+/// **Placeholder.** See `BIDIRECTIONAL_ENGINE` doc comment above — this
+/// install-time API exists only because there is no `ModelManager` accessor for
+/// bidirectional engines yet. DIS-1859 retires it.
 pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static str> {
     BIDIRECTIONAL_ENGINE
         .set(engine)
@@ -52,6 +65,9 @@ pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static st
 }
 
 /// Convenience installer for tests/dev: registers the echo mock engine.
+///
+/// **Placeholder.** Once DIS-1859 lands, tests should register the engine
+/// through `ModelManager` like every other engine kind.
 pub fn install_echo_engine() -> Result<(), &'static str> {
     install_engine(EchoBidirectionalEngine {})
 }
@@ -73,6 +89,9 @@ async fn asr_ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
+    // [DIS-1928] frontend MUST read first message in the socket so it knows how to
+    // route / lookup model. Basically "session.update" type of message will be
+    // consumed, model only gets inference messages?
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
         tracing::error!("/v1/asr connection rejected: bidirectional engine not installed");
         let _ = close_with(
@@ -126,13 +145,22 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                 break;
             }
         }
-        // Send a normal close once the engine finishes.
+        // Send a normal close once the engine finishes,
+        // usually result from client-side closing the socket,
+        // cancellation propagates to the engine and response
+        // stream ends. In such a case the socket should have
+        // been closed.
         let _ = ws_tx
             .send(Message::Close(Some(close_frame(
                 close_code::NORMAL,
                 "stream complete",
             ))))
             .await;
+        // Drive the sink to completion so the Close frame fully drains before
+        // the underlying transport is dropped. Without this, axum can tear
+        // down the TCP socket while the Close frame is still in-flight and
+        // the client observes EOF instead of an in-band Close.
+        let _ = ws_tx.close().await;
     });
 
     // Inbound loop: parse client frames into request stream items.

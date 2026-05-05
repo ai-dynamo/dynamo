@@ -138,7 +138,7 @@ pub mod generic {
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         };
 
-        /// [gluo WIP] NOTE that reusing chat completions request and response
+        /// [DIS-1928] NOTE that reusing chat completions request and response for now,
         /// as request can carry audio data and response can carry text data,
         /// which is what needed for ASR.
         /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI Chat

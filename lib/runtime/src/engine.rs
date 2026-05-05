@@ -87,8 +87,7 @@ pub type Engine<Req, Resp, E> = Arc<dyn AsyncEngine<Req, Resp, E>>;
 pub type EngineUnary<Resp> = Pin<Box<dyn AsyncEngineUnary<Resp>>>;
 /// Trait-object alias for an [`AsyncEngineStream`] — used on both sides of an
 /// engine: the input side via [`crate::pipeline::ManyIn`] and the output side via
-/// [`crate::pipeline::ManyOut`]. The two are structurally identical now that
-/// [`AsyncEngine`]'s `Req` bound is `Send + 'static`; the directional names exist
+/// [`crate::pipeline::ManyOut`]. The directional names exist
 /// at the [`crate::pipeline`] alias layer for documentary clarity at use sites.
 pub type EngineStream<T> = Pin<Box<dyn AsyncEngineStream<T>>>;
 pub type Context = Arc<dyn AsyncEngineContext>;
