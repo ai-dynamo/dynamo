@@ -12,24 +12,38 @@ SPDX-License-Identifier: Apache-2.0
 > Draft status: unpublished working draft. Keep this file out of `docs/index.yml`
 > and `docs/blogs/index.mdx` until the post is ready to publish.
 
-LLM serving systems are hard to reason about because the interesting behavior is
-not isolated inside one layer. A model backend has its own scheduler and KV
-cache behavior. A router chooses where requests land. A planner changes future
-capacity. Workloads arrive with different concurrency, prefix reuse, sequence
-lengths, and burst patterns. Hardware throughput matters, but it only becomes
-serving throughput after all of those components interact.
+Modern LLM serving is much more than loading model weights onto GPUs. At the
+bottom, kernels execute the attention and MLP work. Above them, engines such as
+vLLM, SGLang, and TensorRT-LLM schedule forward passes, batch requests, manage KV
+blocks, and decide how prefill and decode work share the device. Above that,
+Dynamo adds the system layer: a router decides which engine should receive each
+request based on prefix affinity and active load, a planner decides when to scale
+workers up or down based on dynamic service goals, and the KV Block Manager
+controls how cached blocks are offloaded and distributed.
+
+That stack is powerful, but it is also hard to optimize. A routing policy can
+change cache reuse and downstream decode pressure. A planner decision can change
+future queueing after a startup delay. A block movement policy can change whether
+a request pays recompute, transfer, or offload cost. For larger models, even
+running a single realistic experiment can require many GPUs or nodes before we
+learn whether the idea was worth testing.
 
 That is the motivation for a Dynamo digital twin.
 
 [placeholder: confirm exact public wording for "digital twin"]
 
-In this post, a digital twin means a replayable discrete-event simulation of
-Dynamo serving components: engine schedulers, KV and cache behavior, routers,
-planners, workload traces, and hardware-informed timing where available. It is
-not a bit-exact hardware emulator, and it is not meant to replace hardware
-validation. The goal is to make simulation the inner loop: cheap enough to run
-many design experiments, realistic enough to decide which ones deserve hardware
-time.
+In this post, a digital twin means a replayable discrete-event simulation of the
+Dynamo serving stack: engine schedulers, forward-pass timing, KV and cache
+behavior, routers, planners, and workload traces. The goal is not a purely
+analytical estimate and not a bit-exact hardware emulator. The goal is a faithful
+serving simulation at the atomic level of forward passes, with the Dynamo
+components above the engine included in the same event timeline.
+
+That makes simulation the inner loop: cheap enough to run many design
+experiments, realistic enough to decide which ones deserve hardware time. Because
+the simulator is implemented in Rust, it can also run at a scale that is useful
+for systems exploration; it is practical to simulate thousands of workers on a
+developer laptop.
 
 If we benchmark only one model pass, we miss serving behavior. If we benchmark
 only one worker, we miss routing and imbalance. If we benchmark only one static
