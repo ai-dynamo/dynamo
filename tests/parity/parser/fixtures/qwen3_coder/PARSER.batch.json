@@ -1,0 +1,286 @@
+{
+  "family": "qwen3_coder",
+  "mode": "batch",
+  "cases": {
+    "1": {
+      "description": "Single tool call (happy path)",
+      "model_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "2": {
+      "description": "Multiple tool calls",
+      "model_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_time>\n<parameter=timezone>\nEST\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "name": "get_time",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timezone": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          },
+          {
+            "name": "get_time",
+            "arguments": {
+              "timezone": "EST"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "3": {
+      "description": "No tool call (plain text)",
+      "model_text": "Hello, how can I help you today?",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [],
+        "normal_text": "Hello, how can I help you today?"
+      }
+    },
+    "4": {
+      "description": "Malformed (missing </parameter> closing tag)",
+      "model_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "5": {
+      "description": "Missing </tool_call> end marker",
+      "model_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [],
+        "normal_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>"
+      }
+    },
+    "6": {
+      "description": "Empty args (no-arg call)",
+      "model_text": "<tool_call>\n<function=get_time>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_time",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_time",
+            "arguments": {}
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "7": {
+      "description": "Complex args (multi-parameter)",
+      "model_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n<parameter=unit>\nfahrenheit\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              },
+              "unit": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC",
+              "unit": "fahrenheit"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    },
+    "8": {
+      "description": "Interleaved normal text",
+      "model_text": "I'll help you check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me get that information for you.",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          }
+        ],
+        "normal_text": "I'll help you check the weather.  Let me get that information for you."
+      }
+    },
+    "9": {
+      "description": "Empty input",
+      "model_text": "",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [],
+        "normal_text": ""
+      }
+    },
+    "10": {
+      "description": "Duplicate calls (same name twice)",
+      "model_text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=location>\nLA\n</parameter>\n</function>\n</tool_call>",
+      "tools": [
+        {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "calls": [
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "NYC"
+            }
+          },
+          {
+            "name": "get_weather",
+            "arguments": {
+              "location": "LA"
+            }
+          }
+        ],
+        "normal_text": ""
+      }
+    }
+  }
+}
