@@ -202,14 +202,12 @@ func injectCheckpointIntoPodSpec(
 	}
 
 	EnsurePodInfoVolume(podSpec)
-	targetContainers := make([]*corev1.Container, 0, len(targets))
 	for _, name := range targets {
 		container := findPodSpecContainer(podSpec, name)
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
 		}
 		EnsurePodInfoMount(container)
-		targetContainers = append(targetContainers, container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
 		if len(info.RestoreTargetContainers) > 0 {
@@ -223,7 +221,11 @@ func injectCheckpointIntoPodSpec(
 		if info.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
 			return nil
 		}
-		EnsureGMSRestoreSidecars(podSpec, targetContainers, gmsStorage)
+		mainContainer := findPodSpecContainer(podSpec, commonconsts.MainContainerName)
+		if mainContainer == nil {
+			return fmt.Errorf("gpuMemoryService enabled but no container named %q found in pod spec", commonconsts.MainContainerName)
+		}
+		EnsureGMSRestoreSidecars(podSpec, mainContainer, gmsStorage)
 	}
 
 	return nil
