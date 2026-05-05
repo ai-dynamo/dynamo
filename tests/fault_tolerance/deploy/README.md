@@ -176,6 +176,7 @@ test_outputs/test_network_partition_vllm/
 | --- | --- | --- |
 | `DeletePod(services=[...])` | `pod.delete(force=...)`. Worker / frontend / planner — anything with the right `nvidia.com/dynamo-component` label. | Snapshots the pod manifest + `/metrics` `before_delete` so post-mortem comparisons are possible. |
 | `TerminateProcess(services, process_name, signal)` | Exec into the pod and `kill -<signal> <pid>` of a matching process (`dynamo.vllm`, `VLLM::EngineCore`, `sglang::scheduler`, …). | The kubelet restart-in-place behaviour depends on the process being PID 1 vs. a child; subprocess kills are no-ops at the container level (documented in *Backend-Specific Validations* further below). |
+| `StallProcess(services, process_name, duration=None)` | `SIGSTOP` the matching process; sleep `duration` seconds (or until `stop()` if `duration` is None); `SIGCONT` to resume. | Models a "hung worker": the process stays alive, TCP sockets and conntrack entries are preserved, kubelet doesn't notice — but it stops servicing requests. Exercises frontend timeout / health-check behaviour rather than crash recovery. |
 | `NetworkPartition(source, target, duration=None)` | Applies a `NetworkPolicy` selecting `target` pods and denying ingress from `source` pods, then schedules a privileged hostNetwork `conntrack -D` flusher Pod on the source pod's node so already-established TCP sockets are severed (k8s `NetworkPolicy` is connection-tracked; without the flush a pooled socket trivially survives). Heals on `stop()` or after `duration` seconds. | Requires a CNI that enforces NetworkPolicy (k3s kube-router, Calico, Cilium). The flusher uses `localhost:32000/netshoot:latest` by default; override with `DYN_CONNTRACK_IMAGE`. |
 | `RollingUpgrade(services, env_var=...)` | Stamps a unique env var on each named service then publishes the change so the operator rolls the underlying Deployments. | Drives the "redeploy under load" scenario. |
 | `RunCommand(services, command)` | Exec arbitrary command in matched pods. | Escape hatch for one-off injections (e.g., `pkill -STOP`, `nvidia-smi -i 0 -r`). |
@@ -223,6 +224,26 @@ Pod IP is **preserved** (kubelet restarts the container in place), so
 the frontend's TCP socket fails fast on the existing connection rather
 than waiting for re-discovery — but the model must still reload, so
 recovery time is comparable to `DeletePod`.
+
+#### StallProcess (engine hang)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> SIGSTOPSent: kill -SIGSTOP dynamo.vllm
+    SIGSTOPSent --> Stopped: process suspended; pod alive, sockets open
+    Stopped --> RequestsBacklogged: in-flight requests stall on the worker; new requests queue at frontend
+    RequestsBacklogged --> ClientTimeouts: aiperf request_timeout fires; 5xx returned
+    ClientTimeouts --> SIGCONTSent: duration expires (event.stop)
+    SIGCONTSent --> Resumed: process scheduled again; queued work drains
+    Resumed --> Healthy
+```
+
+The pod, container, TCP sockets, and conntrack entries all persist
+unchanged through the stall — kubelet doesn't notice and there is no
+container restart. Distinct from `TerminateProcess` (crash) and
+`NetworkPartition` (network cut): only `StallProcess` exercises the
+"worker accepted my request and went silent" failure mode.
 
 #### NetworkPartition + conntrack flush
 

@@ -30,6 +30,7 @@ __all__ = [
     "RollingUpgrade",
     "WaitForLogPattern",
     "TerminateProcess",
+    "StallProcess",
     "RunCommand",
     "NetworkPartition",
     "WaitForModelReady",
@@ -437,6 +438,101 @@ class TerminateProcess(Event):
     @property
     def description(self) -> str:
         return f"Terminate '{self.process_name}' in {', '.join(self.services)}"
+
+
+@dataclass
+class StallProcess(Event):
+    """Pause a process by name in service pods (SIGSTOP), then resume (SIGCONT).
+
+    Models a "hung worker": the process stays alive — TCP sockets,
+    filesystem handles, conntrack entries are all preserved — but it
+    stops servicing requests because it doesn't get scheduled. Useful
+    for testing how the frontend handles a worker that accepts
+    connections, never replies, and eventually un-hangs (e.g. a GPU
+    deadlock that resolves itself, a long GC pause, a debugger).
+
+    Differences vs. ``TerminateProcess`` (SIGKILL):
+      * Pod IP and conntrack entries survive (no reconnect storm).
+      * No container restart — kubelet doesn't notice.
+      * The frontend sees idle TCP connections that never advance,
+        so timeout / health-check behaviour is what's exercised
+        (not crash recovery).
+
+    Behaviour:
+      * If ``duration`` is set, the event SIGSTOPs the matching
+        processes, sleeps for ``duration`` seconds, then SIGCONTs them.
+        Healing happens inside ``execute()`` so a transient stall reads
+        as a single line in the scenario.
+      * If ``duration`` is None, the stall holds until ``stop()`` runs
+        at end-of-scenario.
+
+    Example::
+
+        StallProcess(
+            services=["VllmDecodeWorker"],
+            process_name="dynamo.vllm",
+            duration=20,
+        )
+    """
+
+    services: list[str]
+    process_name: str
+    duration: float | None = None  # seconds; None = hold until scenario stop()
+    name: str = ""
+    results: dict[str, Any] | None = field(default=None, init=False)
+    _stalled_pids: list[tuple[Any, int]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        ctx.logger.info(
+            f"Stalling process '{self.process_name}' (SIGSTOP) "
+            f"in services: {self.services}"
+        )
+        service_pod_dict = ctx.deployment.get_pods(self.services)
+        for service_name, pods in service_pod_dict.items():
+            for pod in pods:
+                processes = ctx.deployment.get_processes(pod)
+                for proc in processes:
+                    if self.process_name in proc.command:
+                        ctx.logger.info(
+                            f"SIGSTOP pid={proc.pid} ({proc.command[:50]}...) "
+                            f"on pod {pod.name}"
+                        )
+                        proc.kill(signal="SIGSTOP")
+                        self._stalled_pids.append((pod, proc.pid))
+                        break
+
+        if self.duration is not None:
+            ctx.logger.info(f"StallProcess: holding for {self.duration}s, then SIGCONT")
+            try:
+                await asyncio.sleep(self.duration)
+            finally:
+                await self._resume(ctx)
+
+    async def stop(self, ctx: "ScenarioContext") -> None:
+        # When duration is set, execute() already healed the stall.
+        # Otherwise stop() resumes it at end of scenario.
+        await self._resume(ctx)
+
+    async def _resume(self, ctx: "ScenarioContext") -> None:
+        if not self._stalled_pids:
+            return
+        for pod, pid in self._stalled_pids:
+            try:
+                await asyncio.to_thread(pod.exec, ["kill", "-SIGCONT", str(pid)])
+                ctx.logger.info(f"SIGCONT pid={pid} on pod {pod.name}")
+            except Exception as e:
+                ctx.logger.warning(
+                    f"StallProcess resume failed for pid={pid} on "
+                    f"pod {pod.name}: {e}"
+                )
+        self._stalled_pids = []
+
+    @property
+    def description(self) -> str:
+        suffix = f" for {self.duration}s" if self.duration else ""
+        return f"Stall '{self.process_name}' in {', '.join(self.services)}" f"{suffix}"
 
 
 @dataclass
