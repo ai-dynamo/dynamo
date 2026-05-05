@@ -167,7 +167,6 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
             Ok(m) => m,
             Err(err) => {
                 tracing::debug!(%err, "/v1/asr inbound frame error; treating as disconnect");
-                resp_ctx.stop_generating();
                 break;
             }
         };
@@ -184,7 +183,6 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                         tracing::warn!(%err, "/v1/asr malformed JSON frame; closing");
                         *close_reason.lock().expect("close_reason mutex poisoned") =
                             Some(close_frame(close_code::INVALID, "malformed JSON frame"));
-                        resp_ctx.stop_generating();
                         break;
                     }
                 }
@@ -195,19 +193,18 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                     close_code::UNSUPPORTED,
                     "binary frames not supported",
                 ));
-                resp_ctx.stop_generating();
                 break;
             }
-            Message::Close(_) => {
-                resp_ctx.stop_generating();
-                break;
-            }
+            Message::Close(_) => break,
             Message::Ping(_) | Message::Pong(_) => {} // axum handles ping replies
         }
     }
 
-    // Inbound loop ended (client close, error, or unsupported frame).
-    // Drop the sender so the engine's input stream completes naturally.
+    // Inbound loop ended (client close, EOF, error, or unsupported frame).
+    // Cancel any in-flight engine work, then drop the sender so the engine's
+    // input stream completes; outbound picks up the close-reason left in the
+    // shared slot (or NORMAL on natural completion).
+    resp_ctx.stop_generating();
     drop(req_tx);
 
     // Wait for outbound to finish flushing.
