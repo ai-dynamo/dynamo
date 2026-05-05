@@ -263,17 +263,14 @@ class MinioService:
             f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
         )
 
-        # Temporarily unset HF_HUB_OFFLINE so the download works even when
-        # the predownload_models fixture has already enabled offline mode.
-        old_offline = os.environ.pop("HF_HUB_OFFLINE", None)
-        try:
-            snapshot_download(
-                self.config.lora_repo,
-                local_dir=self._temp_download_dir,
-            )
-        finally:
-            if old_offline is not None:
-                os.environ["HF_HUB_OFFLINE"] = old_offline
+        # The adapter is staged into the HF cache by predownload_models (via
+        # @pytest.mark.model) before HF_HUB_OFFLINE is enabled, so read from the
+        # cache here without going to the network.
+        snapshot_download(
+            self.config.lora_repo,
+            local_dir=self._temp_download_dir,
+            local_files_only=True,
+        )
 
         # Clean up cache directory
         cache_dir = os.path.join(self._temp_download_dir, ".cache")

@@ -833,6 +833,7 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.profiled_vram_gib(4.0)  # actual nvidia-smi peak with kv-bytes cap
 @pytest.mark.requested_vllm_kv_cache_bytes(
     941_712_000
@@ -892,6 +893,7 @@ def test_lora_aggregated(
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
