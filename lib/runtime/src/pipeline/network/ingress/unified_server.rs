@@ -84,6 +84,31 @@ pub trait RequestPlaneServer: Send + Sync {
     /// Errors are only returned for transport-specific failures.
     async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()>;
 
+    /// Register a bidirectional-streaming endpoint handler.
+    ///
+    /// Bidi endpoints use the velo streaming primitives (two anchors per
+    /// session). The default impl returns an error so transports that don't
+    /// support bidi (TCP / HTTP / NATS) reject registration loudly.
+    /// `RequestPlaneServer` impls that *do* support bidi (currently only the
+    /// velo backend) override this.
+    #[cfg(feature = "velo-transport")]
+    async fn register_bidi_endpoint(
+        &self,
+        _endpoint_name: String,
+        _service_handler: Arc<
+            dyn crate::pipeline::network::ingress::bidi_handler::BidiPushWorkHandler,
+        >,
+        _instance_id: u64,
+        _namespace: String,
+        _component_name: String,
+        _system_health: Arc<Mutex<SystemHealth>>,
+    ) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "transport `{}` does not support bidi streaming; use velo (`DYN_REQUEST_PLANE=velo`)",
+            self.transport_name()
+        ))
+    }
+
     /// Get server bind address or identifier
     ///
     /// Returns a transport-specific address string:

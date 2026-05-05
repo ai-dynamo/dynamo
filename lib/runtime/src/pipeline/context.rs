@@ -46,6 +46,18 @@ impl<T: Send + Sync + 'static> Context<T> {
         }
     }
 
+    /// Like [`Context::with_controller`], but accepts a pre-`Arc`d controller
+    /// so it can be shared with other tasks (e.g. a session that needs to
+    /// drive `controller.kill()` from outside the context).
+    pub fn with_controller_arc(current: T, controller: Arc<Controller>) -> Self {
+        Context {
+            current,
+            controller,
+            registry: Registry::new(),
+            stages: Vec::new(),
+        }
+    }
+
     pub fn with_id(current: T, id: String) -> Self {
         Context {
             current,

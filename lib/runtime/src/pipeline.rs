@@ -16,6 +16,13 @@ pub mod error;
 pub mod network;
 pub use network::egress::addressed_router::{AddressedPushRouter, AddressedRequest};
 pub use network::egress::push_router::{PushRouter, RouterMode, WorkerLoadMonitor};
+#[cfg(feature = "velo-transport")]
+pub use network::bidi::{
+    BIDI_INIT_HANDLER, BIDI_INIT_KEY, BIDI_UNATTACHED_TIMEOUT, BidiFrame, BidiInitRequest,
+    BidiInitResponse,
+};
+#[cfg(feature = "velo-transport")]
+pub use network::ingress::bidi_handler::{BidiIngress, BidiPushWorkHandler};
 pub mod registry;
 
 pub use crate::engine::{
@@ -32,7 +39,48 @@ pub type SingleIn<T> = Context<T>;
 
 /// Pipeline inputs carry a [`Context`] which can be used to carry metadata or additional information
 /// about the request. This information propagates through the stages, both local and distributed.
-pub type ManyIn<T> = Context<DataStream<T>>;
+pub type ManyIn<T> = Context<AsyncRequestStream<T>>;
+
+/// `Send + Sync` wrapper around a [`DataStream<T>`] so it can ride inside a
+/// `Context<...>` (and therefore inside the `AsyncEngine<Req, ..>` slot that
+/// requires `Req: Send + Sync + 'static`).
+///
+/// The underlying [`DataStream<T>`] is `Pin<Box<dyn Stream<Item = T> + Send>>` —
+/// `Send`-only, since most concrete `Stream` impls are not `Sync`. Wrapping
+/// in `Mutex<Option<...>>` gives us interior mutability that *is* `Sync`,
+/// while the `Option` lets the user `take()` ownership of the stream once
+/// (typical pattern: take the stream and iterate it inside the handler).
+pub struct AsyncRequestStream<T: Send + 'static> {
+    inner: std::sync::Mutex<Option<DataStream<T>>>,
+}
+
+impl<T: Send + 'static> std::fmt::Debug for AsyncRequestStream<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let present = self.is_present();
+        f.debug_struct("AsyncRequestStream")
+            .field("present", &present)
+            .finish()
+    }
+}
+
+impl<T: Send + 'static> AsyncRequestStream<T> {
+    pub fn new(stream: DataStream<T>) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(stream)),
+        }
+    }
+
+    /// Take the underlying stream out of the holder. Returns `None` on
+    /// subsequent calls (the holder is intended for a single take).
+    pub fn take(&self) -> Option<DataStream<T>> {
+        self.inner.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// Returns `true` if the stream has not yet been taken.
+    pub fn is_present(&self) -> bool {
+        self.inner.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+}
 
 /// Type alias for the output of pipeline that returns a single value
 pub type SingleOut<T> = EngineUnary<T>;

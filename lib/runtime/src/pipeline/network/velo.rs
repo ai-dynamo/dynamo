@@ -198,6 +198,18 @@ pub fn current_velo_instance_id() -> Result<InstanceId> {
         })
 }
 
+/// Borrow the per-process velo handle, or error if it has not been
+/// initialized yet. Used by the bidi client/server paths to call
+/// `velo.create_anchor` / `velo.attach_anchor` / `velo.unary(...)`.
+pub fn current_velo() -> Result<&'static Arc<Velo>> {
+    GLOBAL_VELO.get().map(|h| &h.velo).ok_or_else(|| {
+        anyhow!(
+            "velo request-plane node not yet initialized; \
+             ensure DistributedRuntime started the velo server before issuing bidi traffic"
+        )
+    })
+}
+
 /// Build (or fetch) the process-wide velo instance.
 ///
 /// `kv_manager` is used as the backing store for the `PeerDiscovery` adapter so

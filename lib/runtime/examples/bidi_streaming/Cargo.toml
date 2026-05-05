@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "bidi_streaming"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+# Bidi requires the velo request plane.
+dynamo-runtime = { workspace = true, features = ["velo-transport"] }
+
+# third-party
+anyhow = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-stream = { version = "0.1" }
+futures = { version = "0.3" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }

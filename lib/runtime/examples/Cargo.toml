@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "bidi_streaming",
     "hello_world",
     "service_metrics",
     "system_metrics",
