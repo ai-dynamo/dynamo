@@ -304,24 +304,28 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
-        uses: ./.github/actions/docker-remote-build
-        with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
-          framework: ${{ inputs.framework }}
-          target: ${{ inputs.target }}
-          build_target: ${{ inputs.target }}_test
-          tag_suffix: test
-          platform: ${{ inputs.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          no_cache: ${{ inputs.no_cache }}
-          push_image: ${{ inputs.push_image }}
-          no_load: ${{ inputs.no_load }}
-          extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
-            ${{ inputs.extra_build_args }}
+        shell: bash
+        run: |
+          PUSH_ARGS=""
+          if [ "${{ inputs.push_image }}" == "true" ]; then
+            PUSH_ARGS="--push"
+          elif [ "${{ inputs.no_load }}" == "false" ]; then
+            PUSH_ARGS="--load"
+          fi
+
+          NO_CACHE_ARG=""
+          if [ "${{ inputs.no_cache }}" == "true" ]; then
+            NO_CACHE_ARG="--no-cache"
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            ${PUSH_ARGS} \
+            ${NO_CACHE_ARG} \
+            --platform ${{ inputs.platform }} \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
+            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}

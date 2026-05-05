@@ -16,7 +16,8 @@ use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
 use super::{
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
+    WorkerLookupStats, WorkerTask,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -202,6 +203,38 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// itself.
     pub fn backend_arc(&self) -> Arc<T> {
         Arc::clone(&self.backend)
+    }
+
+    pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
+        let mut receivers = Vec::new();
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if channel.send(WorkerTask::Stats(resp_tx)).is_ok() {
+                receivers.push(resp_rx);
+            }
+        }
+
+        let mut worker_blocks = BTreeMap::new();
+        for receiver in receivers {
+            if let Ok(stats) = receiver.await {
+                for (worker, block_count) in stats.worker_blocks {
+                    *worker_blocks.entry(worker).or_insert(0usize) += block_count;
+                }
+            }
+        }
+
+        WorkerLookupStats::from_worker_block_counts(worker_blocks)
+    }
+
+    pub async fn get_workers(&self) -> Vec<WorkerId> {
+        self.worker_lookup_stats()
+            .await
+            .worker_blocks
+            .into_iter()
+            .map(|(worker, _)| worker.worker_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Enqueue a structural anchor on the same worker queue used by normal
@@ -683,11 +716,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         self.backend.timing_report()
     }
 
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        let stats = self.worker_lookup_stats().await;
         vec![ShardSizeSnapshot {
             shard_idx: 0,
-            worker_count: self.backend.worker_count(),
-            block_count: self.backend.block_count(),
+            worker_count: stats.worker_count(),
+            block_count: stats.block_count(),
             node_count: self.backend.node_count(),
         }]
     }

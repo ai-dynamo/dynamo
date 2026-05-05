@@ -20,8 +20,10 @@ pub use mooncake_trace::{
 pub use progress::make_progress_bar;
 pub use replay::{
     NoopSequencePublisher, WorkerReplayArtifacts, default_mock_engine_args,
-    generate_replay_artifacts, maybe_rescale_ready_span,
+    generate_replay_artifacts, generate_replay_artifacts_with_args, maybe_rescale_ready_span,
 };
+#[cfg(feature = "mocker-kvbm-offload")]
+pub use replay::{g2_mock_engine_args, generate_g2_replay_artifacts_with_capacity};
 pub use results::{
     BenchmarkResults, BenchmarkRun, PercentileStats, compute_benchmark_run,
     print_benchmark_results_percentiles,

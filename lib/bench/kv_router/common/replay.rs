@@ -36,6 +36,28 @@ pub fn default_mock_engine_args(
         .build()?)
 }
 
+#[cfg(feature = "mocker-kvbm-offload")]
+#[allow(dead_code)]
+pub fn g2_mock_engine_args(
+    num_gpu_blocks: usize,
+    block_size: usize,
+    num_g2_blocks: usize,
+) -> anyhow::Result<MockEngineArgs> {
+    Ok(MockEngineArgs::builder()
+        .num_gpu_blocks(num_gpu_blocks)
+        .block_size(block_size)
+        .speedup_ratio(10.0)
+        .enable_prefix_caching(true)
+        .max_num_batched_tokens(None)
+        .max_num_seqs(None)
+        .num_g2_blocks(Some(num_g2_blocks))
+        .kv_bytes_per_token(Some(1))
+        .offload_batch_size(Some(32))
+        .bandwidth_g1_to_g2_gbps(Some(14.0))
+        .bandwidth_g2_to_g1_gbps(Some(14.0))
+        .build()?)
+}
+
 fn replay_worker_trace(
     trace: Trace,
     sched_args: MockEngineArgs,
@@ -55,14 +77,12 @@ fn replay_worker_trace(
     Ok(artifacts)
 }
 
-pub async fn generate_replay_artifacts(
+pub async fn generate_replay_artifacts_with_args(
     traces: &[Trace],
-    num_gpu_blocks: usize,
-    block_size: u32,
+    sched_args: MockEngineArgs,
     trace_simulation_duration_ms: Option<u64>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     println!("Generating events...");
-    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
     let progress = make_progress_bar(Some(
         traces
             .iter()
@@ -129,4 +149,27 @@ pub async fn generate_replay_artifacts(
     println!("Remove events: {}", num_removed_events);
 
     Ok(artifacts)
+}
+
+pub async fn generate_replay_artifacts(
+    traces: &[Trace],
+    num_gpu_blocks: usize,
+    block_size: u32,
+    trace_simulation_duration_ms: Option<u64>,
+) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
+    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
+    generate_replay_artifacts_with_args(traces, sched_args, trace_simulation_duration_ms).await
+}
+
+#[cfg(feature = "mocker-kvbm-offload")]
+#[allow(dead_code)]
+pub async fn generate_g2_replay_artifacts_with_capacity(
+    traces: &[Trace],
+    num_gpu_blocks: usize,
+    num_g2_blocks: usize,
+    block_size: u32,
+    trace_simulation_duration_ms: Option<u64>,
+) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
+    let sched_args = g2_mock_engine_args(num_gpu_blocks, block_size as usize, num_g2_blocks)?;
+    generate_replay_artifacts_with_args(traces, sched_args, trace_simulation_duration_ms).await
 }
