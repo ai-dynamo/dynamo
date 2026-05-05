@@ -6,7 +6,7 @@
 FROM {{ target }} AS {{ target }}_test
 USER root
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
