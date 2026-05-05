@@ -35,6 +35,9 @@ class _MockEngine:
     def get_tokenizer(self):
         return None
 
+    def get_input_preprocessor(self):
+        return None
+
 
 def test_stage_engine_protocol_satisfied():
     assert isinstance(_MockEngine(), StageEngine)

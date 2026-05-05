@@ -10,7 +10,6 @@ import time
 from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
-from vllm_omni.entrypoints import AsyncOmni
 
 try:
     from vllm_omni.diffusion.data import DiffusionParallelConfig
@@ -49,6 +48,8 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         )
 
         omni_kwargs = self._build_omni_kwargs(config)
+        from vllm_omni.entrypoints import AsyncOmni
+
         self.engine_client = AsyncOmni(**omni_kwargs)
 
         # Initialize attributes needed from BaseWorkerHandler

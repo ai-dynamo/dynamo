@@ -345,6 +345,25 @@ class TestAudioFormatterFormat:
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
 
+    @pytest.mark.asyncio
+    async def test_chat_completion_audio_uses_chunk_audio_content(self):
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import AudioFormatter
+
+        f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+        mm = {"audio": np.zeros(100, dtype=np.float32), "sr": 24000}
+        with patch.object(f, "_encode_audio", return_value=("b64", "audio/wav")):
+            result = await f.format(
+                mm, "req-1", request_type=RequestType.CHAT_COMPLETION
+            )
+
+        assert result["object"] == "chat.completion.chunk"
+        audio = result["choices"][0]["delta"]["content"][0]
+        assert audio["type"] == "audio_url"
+        assert audio["audio_url"]["url"] == "data:audio/wav;base64,b64"
+
 
 # ── OutputFormatter dispatcher ─────────────────────────────
 
@@ -405,6 +424,33 @@ class TestOutputFormatter:
             stage, "req-1", request_type=RequestType.AUDIO_GENERATION, **self._FULL_CTX
         )
         assert chunk["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_routes_chat_audio(self):
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.final_output_type = "audio"
+        stage.multimodal_output = {
+            "audio": np.zeros(100, dtype=np.float32),
+            "sr": 24000,
+        }
+        with patch(
+            "dynamo.vllm.omni.output_formatter.AudioFormatter._encode_audio",
+            return_value=("b64", "audio/wav"),
+        ):
+            chunk = await f.format(
+                stage,
+                "req-1",
+                request_type=RequestType.CHAT_COMPLETION,
+                **self._FULL_CTX,
+            )
+        audio = chunk["choices"][0]["delta"]["content"][0]
+        assert audio["audio_url"]["url"] == "data:audio/wav;base64,b64"
 
     @pytest.mark.asyncio
     async def test_unknown_type_returns_none(self):

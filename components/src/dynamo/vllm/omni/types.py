@@ -26,7 +26,6 @@ class StageEngine(Protocol):
         request_id: str = "",
         *,
         sampling_params_list: Any = None,
-        output_modalities: list[str] | None = None,
     ) -> AsyncGenerator[Any, None]:
         ...
 

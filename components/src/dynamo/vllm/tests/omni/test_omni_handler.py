@@ -7,7 +7,7 @@ import pytest
 
 try:
     from PIL import Image
-    from vllm.sampling_params import SamplingParams
+    from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -201,6 +201,7 @@ class TestBuildSamplingParamsList:
         result = handler._build_sampling_params_list(sp)
         assert len(result) == 2
         assert isinstance(result[0], SamplingParams)
+        assert result[0].output_kind == RequestOutputKind.FINAL_ONLY
         assert result[1] is sp
 
     def test_fallback_when_defaults_empty(self):

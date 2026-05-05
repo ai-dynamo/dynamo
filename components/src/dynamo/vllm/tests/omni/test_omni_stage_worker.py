@@ -12,8 +12,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
+    from vllm.sampling_params import RequestOutputKind
+
     from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
-    from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
+    from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -34,7 +36,6 @@ class _MockEngine:
         self.received_prompt = None
         self.received_request_id = None
         self.received_sampling_params_list = None
-        self.received_output_modalities = None
         self._output = output or {"output": "mock", "finished": True}
         self._input_preprocessor = input_preprocessor
 
@@ -44,12 +45,10 @@ class _MockEngine:
         request_id="",
         *,
         sampling_params_list=None,
-        output_modalities=None,
     ):
         self.received_prompt = prompt
         self.received_request_id = request_id
         self.received_sampling_params_list = sampling_params_list
-        self.received_output_modalities = output_modalities
 
         async def _gen():
             yield self._output
@@ -70,7 +69,6 @@ class _ErrorEngine:
         request_id="",
         *,
         sampling_params_list=None,
-        output_modalities=None,
     ):
         async def _gen():
             raise RuntimeError("engine exploded")
@@ -333,23 +331,6 @@ async def test_audio_request_stage_final_output_still_writes_connector():
     out_connector.put.assert_called_once()
     assert chunks[0]["stage_connector_refs"]["0"] == {"name": "ref0"}
     assert chunks[0]["output_modalities"] == ["audio"]
-    assert engine.received_output_modalities is None
-
-
-@pytest.mark.asyncio
-async def test_parse_audio_request_uses_chat_template_when_available():
-    async def get_tokenizer():
-        return _FakeTokenizer()
-
-    parsed = await parse_omni_request(
-        {"input": "hello"},
-        ["text", "audio"],
-        tokenizer_getter=get_tokenizer,
-    )
-
-    assert parsed["engine_inputs"] == "templated:hello"
-    assert parsed["original_prompt"] == {"prompt": "hello"}
-    assert parsed["output_modalities"] == ["audio"]
 
 
 @pytest.mark.asyncio
@@ -371,10 +352,17 @@ async def test_chat_audio_request_renders_with_vllm_and_forwards_modalities():
         "audio": {"voice": "Ethan"},
     }
 
-    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+    with patch(
+        "dynamo.vllm.omni.stage_worker.serialize_obj", return_value=b"payload"
+    ), patch(
+        "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+        return_value={"name": "req-chat-audio-stage-0"},
+    ) as shm_write_bytes:
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
 
     assert chunks[0]["output_modalities"] == ["text", "audio"]
-    assert engine.received_output_modalities == ["text"]
+    assert chunks[0]["shm_meta"] == {"name": "req-chat-audio-stage-0"}
+    shm_write_bytes.assert_called_once_with(b"payload", name="req-chat-audio-stage-0")
     assert engine.received_prompt["prompt_token_ids"] == [
         151644,
         872,
@@ -388,7 +376,7 @@ async def test_chat_audio_request_renders_with_vllm_and_forwards_modalities():
 
 
 @pytest.mark.asyncio
-async def test_output_modalities_propagate_from_connector_request_to_engine():
+async def test_output_modalities_propagate_to_next_stage_only():
     engine = _MockEngine()
     fetched_prompt = {"prior_token_ids": [1, 2, 3]}
 
@@ -412,7 +400,6 @@ async def test_output_modalities_propagate_from_connector_request_to_engine():
 
     chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
 
-    assert engine.received_output_modalities is None
     assert chunks[0]["output_modalities"] == ["audio"]
 
 
@@ -535,6 +522,16 @@ def test_build_sampling_params_no_defaults_returns_none():
     stage_config = SimpleNamespace(stage_type="llm")
     assert _build_sampling_params(stage_config, None) is None
     assert _build_sampling_params(stage_config, {}) is None
+
+
+def test_build_sampling_params_coerces_llm_to_final_only():
+    stage_config = SimpleNamespace(
+        stage_type="llm",
+        default_sampling_params={"max_tokens": 8},
+    )
+    result = _build_sampling_params(stage_config, None)
+    assert result is not None
+    assert result[0].output_kind == RequestOutputKind.FINAL_ONLY
 
 
 @pytest.mark.asyncio

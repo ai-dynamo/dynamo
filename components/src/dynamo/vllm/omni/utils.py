@@ -12,6 +12,7 @@ from huggingface_hub import scan_cache_dir
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
+from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import (
@@ -79,7 +80,7 @@ async def parse_omni_request(
       engine_inputs:        text prompt (str or OmniTextPrompt) for the stage 0 engine
       original_prompt:      rich prompt dict with geometry/params for processor functions
       sampling_params_list: raw user overrides dict (height/width/nvext) or None for chat
-      output_modalities:    per-request modalities to pass to vLLM-Omni generation
+      output_modalities:    per-request modalities for router/stage continuation
     """
     _, request_type = parse_request_type(request, output_modalities)
     requested_modalities = _requested_output_modalities(
@@ -88,16 +89,8 @@ async def parse_omni_request(
 
     if request_type == RequestType.AUDIO_GENERATION or "input" in request:
         text = request.get("input", "")
-        engine_inputs: Any = OmniTextPrompt(prompt=text)
-        templated = await _apply_chat_template(
-            [{"role": "user", "content": text}],
-            fallback=text,
-            tokenizer_getter=tokenizer_getter,
-        )
-        if templated != text:
-            engine_inputs = templated
         return {
-            "engine_inputs": engine_inputs,
+            "engine_inputs": OmniTextPrompt(prompt=text),
             "original_prompt": {"prompt": text},
             "sampling_params_list": None,
             "output_modalities": requested_modalities,
@@ -194,38 +187,23 @@ async def _render_chat_engine_prompt(
     if renderer is None or not hasattr(renderer, "render_chat_async"):
         return None
 
-    from vllm.renderers.params import ChatParams  # type: ignore[import-not-found]
+    from vllm.entrypoints.openai.chat_completion.protocol import (  # type: ignore[import-not-found]
+        ChatCompletionRequest,
+    )
 
-    chat_template_kwargs = dict(request.get("chat_template_kwargs") or {})
-    chat_template_kwargs.setdefault("tools", request.get("tools"))
-    chat_template_kwargs.setdefault("documents", request.get("documents"))
-    chat_template_kwargs.setdefault(
-        "add_generation_prompt", request.get("add_generation_prompt", True)
+    chat_request = ChatCompletionRequest.model_validate(request)
+    chat_params = chat_request.build_chat_params(None, "auto").with_defaults(
+        {"tools": chat_request.tools, "tokenize": False},
+        default_mm_processor_kwargs=request.get("mm_processor_kwargs"),
     )
-    chat_template_kwargs.setdefault(
-        "continue_final_message", request.get("continue_final_message", False)
-    )
-    chat_template_kwargs.setdefault(
-        "add_special_tokens", request.get("add_special_tokens", False)
-    )
-    chat_template_kwargs.setdefault("tokenize", False)
 
-    chat_params = ChatParams(
-        chat_template=request.get("chat_template"),
-        chat_template_content_format=request.get(
-            "chat_template_content_format", "auto"
-        ),
-        chat_template_kwargs=chat_template_kwargs,
-        media_io_kwargs=request.get("media_io_kwargs"),
-        mm_processor_kwargs=request.get("mm_processor_kwargs"),
-    )
     prompt_extras = {
         key: value
         for key in ("mm_processor_kwargs", "cache_salt")
         if (value := request.get(key)) is not None
     }
     _, engine_prompts = await renderer.render_chat_async(
-        [messages],
+        [chat_request.messages],
         chat_params,
         prompt_extras=prompt_extras or None,
     )
@@ -285,17 +263,8 @@ def _requested_output_modalities(
     request: dict, request_type: RequestType, configured_output_modalities: list
 ) -> list[str]:
     """Return the modalities that this specific request asks the engine to emit."""
-    raw_modalities = request.get("modalities") or request.get("output_modalities")
-    if raw_modalities is not None:
-        if isinstance(raw_modalities, str):
-            tokens = [raw_modalities]
-        elif isinstance(raw_modalities, list):
-            tokens = [str(token) for token in raw_modalities]
-        else:
-            tokens = []
-        normalized = normalize_output_modalities(tokens)
-        if normalized:
-            return normalized
+    if request_modalities := _modalities_from_request(request):
+        return request_modalities
 
     if request_type == RequestType.CHAT_COMPLETION:
         return ["text"]
@@ -312,34 +281,51 @@ def stage_satisfies_request(
     stage_config: Any, request_type: RequestType, request: dict
 ) -> bool:
     """Return whether a stage's final output is the response this request needs."""
+    terminal_modality = _terminal_output_modality(request_type, request)
+    return bool(
+        terminal_modality and stage_output_requested(stage_config, [terminal_modality])
+    )
+
+
+def stage_output_requested(
+    stage_config: Any, request_output_modalities: list[str] | None
+) -> bool:
+    """Return whether this final stage output is one of the request modalities."""
     if not getattr(stage_config, "final_output", False):
         return False
-
     final_output_type = str(getattr(stage_config, "final_output_type", "")).lower()
-    if request_type == RequestType.CHAT_COMPLETION:
-        if request_includes_output_modality(request, "audio"):
-            return final_output_type == "audio"
-        return final_output_type == "text"
-
-    return final_output_type == {
-        RequestType.AUDIO_GENERATION: "audio",
-        RequestType.IMAGE_GENERATION: "image",
-        RequestType.VIDEO_GENERATION: "video",
-    }.get(request_type)
+    return bool(
+        final_output_type and final_output_type in (request_output_modalities or [])
+    )
 
 
 def request_includes_output_modality(request: dict, modality: str) -> bool:
     """Check chat-style output modality hints from OpenAI-compatible payloads."""
+    return modality.lower() in _modalities_from_request(request)
+
+
+def _modalities_from_request(request: dict) -> list[str]:
     raw_modalities = request.get("modalities") or request.get("output_modalities")
     if raw_modalities is None:
-        return False
+        return []
     if isinstance(raw_modalities, str):
         tokens = [raw_modalities]
     elif isinstance(raw_modalities, list):
         tokens = [str(token) for token in raw_modalities]
     else:
-        return False
-    return modality.lower() in normalize_output_modalities(tokens)
+        return []
+    return normalize_output_modalities(tokens)
+
+
+def _terminal_output_modality(request_type: RequestType, request: dict) -> str | None:
+    """Return the final modality where a routed request should stop."""
+    if request_type == RequestType.CHAT_COMPLETION:
+        return "audio" if request_includes_output_modality(request, "audio") else "text"
+    return {
+        RequestType.AUDIO_GENERATION: "audio",
+        RequestType.IMAGE_GENERATION: "image",
+        RequestType.VIDEO_GENERATION: "video",
+    }.get(request_type)
 
 
 def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | None:
@@ -363,14 +349,14 @@ def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | 
             for arg, value in overrides.items():
                 if hasattr(diffusion_params, arg):
                     setattr(diffusion_params, arg, value)
-        return [diffusion_params]
+        return coerce_param_message_types([diffusion_params], is_streaming=False)
 
     llm_params = SamplingParams(**params_dict)
     if overrides:
         for arg, value in overrides.items():
             if hasattr(llm_params, arg):
                 setattr(llm_params, arg, value)
-    return [llm_params]
+    return coerce_param_message_types([llm_params], is_streaming=False)
 
 
 def ensure_dummy_tokenizer_for_tts(model: str) -> list[Path]:

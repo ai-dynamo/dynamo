@@ -254,10 +254,13 @@ async def test_generate_audio_chat_continues_to_audio_stage():
     """Chat requests that ask for audio output continue past the text stage."""
     stage1_received = {}
     mock_formatter = AsyncMock()
-    mock_formatter.format.return_value = {"audio": "ok"}
+    mock_formatter.format.side_effect = [{"text": "ok"}, {"audio": "ok"}]
+    text_result = SimpleNamespace(final_output_type="text")
+    audio_result = SimpleNamespace(final_output_type="audio")
 
     async def stage0_handler(request):
         return {
+            "shm_meta": {"text": "meta"},
             "original_prompt": {"prompt": "hello"},
             "stage_connector_refs": {"0": {"name": "ref0"}},
             "finished": True,
@@ -291,13 +294,110 @@ async def test_generate_audio_chat_continues_to_audio_stage():
             "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-audio"
         ):
             with patch.object(
-                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+                stage_router,
+                "shm_deserialize",
+                side_effect=[text_result, audio_result],
             ):
                 chunks = [c async for c in router.generate(request, None)]
 
-    assert chunks == [{"audio": "ok"}]
+    assert chunks == [{"text": "ok"}, {"audio": "ok"}]
     assert stage1_received["stage_connector_refs"] == {"0": {"name": "ref0"}}
     assert stage1_received["request_id"] == "req-audio"
+    assert mock_formatter.format.await_args_list[0].args == (text_result, "req-audio")
+    assert mock_formatter.format.await_args_list[1].args == (audio_result, "req-audio")
+
+
+@pytest.mark.asyncio
+async def test_generate_combined_chat_merges_text_and_audio_chunks():
+    mock_formatter = AsyncMock()
+    mock_formatter.format.side_effect = [
+        {
+            "id": "req-audio",
+            "created": 1,
+            "object": "chat.completion.chunk",
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "hello"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 1},
+        },
+        {
+            "id": "req-audio",
+            "created": 1,
+            "object": "chat.completion.chunk",
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "audio_url",
+                                "audio_url": {"url": "data:audio/wav;base64,b64"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "stop",
+                    "stop_reason": None,
+                }
+            ],
+        },
+    ]
+    text_result = SimpleNamespace(final_output_type="text")
+    audio_result = SimpleNamespace(final_output_type="audio")
+
+    async def stage0_handler(request):
+        return {
+            "shm_meta": {"text": "meta"},
+            "original_prompt": {"prompt": "hello"},
+            "stage_connector_refs": {"0": {"name": "ref0"}},
+            "finished": True,
+        }
+
+    async def stage1_handler(request):
+        return {"shm_meta": {"audio": "meta"}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[
+            _make_stage_cfg(0, final_output=True, final_output_type="text"),
+            _make_stage_cfg(1, final_output=True, final_output_type="audio"),
+        ],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, RequestType.CHAT_COMPLETION),
+    ):
+        with patch(
+            "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-audio"
+        ):
+            with patch.object(
+                stage_router,
+                "shm_deserialize",
+                side_effect=[text_result, audio_result],
+            ):
+                chunks = [
+                    c
+                    async for c in router.generate(
+                        {"messages": [], "modalities": ["text", "audio"]}, None
+                    )
+                ]
+
+    assert len(chunks) == 1
+    content = chunks[0]["choices"][0]["delta"]["content"]
+    assert content[0] == {"type": "text", "text": "hello"}
+    assert content[1]["type"] == "audio_url"
+    assert chunks[0]["usage"] == {"completion_tokens": 1}
 
 
 # ── existing tests (formatting + error paths) ────────────

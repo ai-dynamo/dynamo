@@ -102,8 +102,10 @@ class OmniStageRouter:
             if stage_satisfies_request(stage_cfg, request_type, request):
                 break
 
-        final = stage_outputs[-1]
-        if not final.shm_meta:
+        outputs_to_format = [
+            stage_output for stage_output in stage_outputs if stage_output.shm_meta
+        ]
+        if not outputs_to_format:
             yield {"error": "No SHM output from final stage", "finished": True}
             return
 
@@ -132,9 +134,20 @@ class OmniStageRouter:
         if output_format is not None:
             fmt_ctx["output_format"] = output_format
 
-        async for chunk in self._format_output(
-            final, request_id, request_type, fmt_ctx
-        ):
+        formatted_chunks: list[dict] = []
+        for final in outputs_to_format:
+            async for chunk in self._format_output(
+                final, request_id, request_type, fmt_ctx
+            ):
+                formatted_chunks.append(chunk)
+
+        if request_type == RequestType.CHAT_COMPLETION:
+            merged = _merge_chat_completion_chunks(formatted_chunks)
+            if merged is not None:
+                yield merged
+                return
+
+        for chunk in formatted_chunks:
             yield chunk
 
     async def _format_output(
@@ -166,6 +179,59 @@ class OmniStageRouter:
                 "error": f"Formatter returned no output for type '{final_output_type}'",
                 "finished": True,
             }
+
+
+def _merge_chat_completion_chunks(chunks: list[dict]) -> dict | None:
+    """Merge non-streaming chat chunks when multiple modalities finish together."""
+    if len(chunks) < 2 or any(
+        chunk.get("object") != "chat.completion.chunk" for chunk in chunks
+    ):
+        return None
+
+    content_parts: list[Any] = []
+    finish_reason = None
+    stop_reason = None
+    usage = None
+    for chunk in chunks:
+        choices = chunk.get("choices") or []
+        if not choices:
+            return None
+        choice = choices[0]
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            return None
+        content = delta.get("content")
+        if isinstance(content, str):
+            if content:
+                content_parts.append({"type": "text", "text": content})
+        elif isinstance(content, list):
+            content_parts.extend(content)
+        elif content is not None:
+            return None
+        finish_reason = choice.get("finish_reason") or finish_reason
+        stop_reason = choice.get("stop_reason") or stop_reason
+        usage = chunk.get("usage") or usage
+
+    if not content_parts:
+        return None
+
+    merged = {
+        "id": chunks[-1]["id"],
+        "created": chunks[-1]["created"],
+        "object": "chat.completion.chunk",
+        "model": chunks[-1]["model"],
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": content_parts},
+                "finish_reason": finish_reason,
+                "stop_reason": stop_reason,
+            }
+        ],
+    }
+    if usage is not None:
+        merged["usage"] = usage
+    return merged
 
 
 async def init_omni_stage_router(

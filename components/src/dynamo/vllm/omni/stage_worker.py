@@ -13,6 +13,7 @@ from typing import Any, AsyncGenerator
 
 import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
+from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
@@ -28,6 +29,7 @@ from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
 from dynamo.vllm.omni.utils import (
     _build_sampling_params,
     parse_omni_request,
+    stage_output_requested,
     stage_satisfies_request,
 )
 
@@ -168,9 +170,14 @@ class OmniStageWorker:
         )
 
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
-        engine_output_modalities = _engine_output_modalities_for_stage(
-            self.stage_config, request_output_modalities
-        )
+        if stage_connector_refs:
+            try:
+                prompt = self._build_engine_core_request_from_stage_prompt(
+                    prompt, request_id, sp
+                )
+            except RuntimeError as e:
+                yield {"error": str(e), "finished": True}
+                return
         last_result = None
 
         try:
@@ -178,7 +185,6 @@ class OmniStageWorker:
                 prompt,
                 request_id=request_id,
                 sampling_params_list=sp,
-                output_modalities=engine_output_modalities,
             ):
                 last_result = chunk
         except Exception as e:
@@ -220,6 +226,12 @@ class OmniStageWorker:
             if not ok:
                 yield {"error": "connector.put() failed", "finished": True}
                 return
+            shm_meta = None
+            if stage_output_requested(self.stage_config, request_output_modalities):
+                shm_meta = shm_write_bytes(
+                    serialize_obj(last_result),
+                    name=f"{request_id}-stage-{self.stage_id}",
+                )
             out: dict = {
                 "original_prompt": original_prompt,
                 "stage_connector_refs": {
@@ -232,6 +244,8 @@ class OmniStageWorker:
                 out["sampling_params_list"] = sampling_params_list_override
             if request_output_modalities is not None:
                 out["output_modalities"] = request_output_modalities
+            if shm_meta is not None:
+                out["shm_meta"] = shm_meta
             yield out
             return
 
@@ -276,13 +290,31 @@ class OmniStageWorker:
             ) from e
 
         tokens_prompt = OmniTokensPrompt(prompt_token_ids=list(token_ids))
-        sp_list = _build_sampling_params(
-            self.stage_config, sampling_params_list_override
+        return self._build_engine_core_request_from_stage_prompt(
+            tokens_prompt,
+            request_id,
+            _build_sampling_params(self.stage_config, sampling_params_list_override),
         )
-        params = sp_list[0] if sp_list else None
+
+    def _build_engine_core_request_from_stage_prompt(
+        self,
+        prompt: Any,
+        request_id: str,
+        sampling_params_list: list | None,
+    ) -> Any:
+        """Wrap downstream token prompts the same way vLLM-Omni's orchestrator does."""
+        if isinstance(prompt, OmniEngineCoreRequest):
+            return prompt
+        has_token_ids = hasattr(prompt, "prompt_token_ids") or (
+            isinstance(prompt, dict) and "prompt_token_ids" in prompt
+        )
+        if not has_token_ids or not sampling_params_list:
+            return prompt
+
+        params = sampling_params_list[0]
         prompt = build_engine_core_request_from_tokens(
             request_id=request_id,
-            prompt=tokens_prompt,
+            prompt=prompt,
             params=params,
         )
         # Pre-built EngineCoreRequests skip the output processor registration
@@ -448,22 +480,6 @@ def _ensure_cumulative_token_ids(result: Any) -> None:
     for output in getattr(result, "outputs", []) or []:
         if not hasattr(output, "cumulative_token_ids") and hasattr(output, "token_ids"):
             output.cumulative_token_ids = list(output.token_ids)
-
-
-def _engine_output_modalities_for_stage(
-    stage_config: Any, request_output_modalities: list[str] | None
-) -> list[str] | None:
-    """Return only modalities valid for this worker's single-stage Omni engine."""
-    if not request_output_modalities or not getattr(
-        stage_config, "final_output", False
-    ):
-        return None
-
-    final_output_type = str(getattr(stage_config, "final_output_type", "")).lower()
-    requested = {str(modality).lower() for modality in request_output_modalities}
-    if final_output_type and final_output_type in requested:
-        return [final_output_type]
-    return None
 
 
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:

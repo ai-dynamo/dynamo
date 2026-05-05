@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm.sampling_params import SamplingParams
+from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
@@ -282,7 +283,11 @@ class OmniHandler(BaseOmniHandler):
                 result.append(
                     default.clone() if hasattr(default, "clone") else SamplingParams()
                 )
-        return result if result else [diffusion_sp]
+        return (
+            coerce_param_message_types(result, is_streaming=False)
+            if result
+            else [diffusion_sp]
+        )
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""

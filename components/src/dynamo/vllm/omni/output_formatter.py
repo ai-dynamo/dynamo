@@ -197,25 +197,11 @@ class DiffusionFormatter:
         data_urls = await self._prepare_images(images, request_id, response_format)
 
         if request_type == RequestType.CHAT_COMPLETION:
-            return {
-                "id": request_id,
-                "created": int(time.time()),
-                "object": "chat.completion.chunk",
-                "model": self._model_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": u}}
-                                for u in data_urls
-                            ],
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
+            return _chat_completion_chunk(
+                request_id,
+                self._model_name,
+                [{"type": "image_url", "image_url": {"url": u}} for u in data_urls],
+            )
 
         if request_type == RequestType.IMAGE_GENERATION:
             image_data_list = []
@@ -291,6 +277,10 @@ class AudioFormatter:
         try:
             start_time = time.time()
             audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+            if ctx.get("request_type") == RequestType.CHAT_COMPLETION:
+                return await self._chat_completion_audio(
+                    audio_np, sample_rate, request_id, speed
+                )
 
             encode_fmt = "wav" if output_format is None else output_format
             assert encode_fmt is not None
@@ -337,6 +327,24 @@ class AudioFormatter:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
+    async def _chat_completion_audio(
+        self, audio_np: Any, sample_rate: int, request_id: str, speed: float
+    ) -> Dict[str, Any]:
+        audio_b64, media_type = await asyncio.to_thread(
+            self._encode_audio,
+            audio_np,
+            sample_rate,
+            "wav",
+            speed,
+            True,
+        )
+        audio_url = f"data:{media_type};base64,{audio_b64}"
+        return _chat_completion_chunk(
+            request_id,
+            self._model_name,
+            [{"type": "audio_url", "audio_url": {"url": audio_url}}],
+        )
+
     def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
@@ -366,8 +374,19 @@ class AudioFormatter:
         return audio_np, sample_rate
 
     def _encode_audio(
-        self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
+        self,
+        audio_np: Any,
+        sample_rate: int,
+        fmt: str = "wav",
+        speed: float = 1.0,
+        base64_encode: bool = False,
     ) -> tuple:
+        upstream = self._encode_audio_with_vllm_omni(
+            audio_np, sample_rate, fmt, speed, base64_encode
+        )
+        if upstream is not None:
+            return upstream
+
         if speed != 1.0:
             try:
                 import librosa
@@ -394,7 +413,37 @@ class AudioFormatter:
 
         buf = BytesIO()
         sf.write(buf, audio_np, sample_rate, format=sf_format, **kwargs)
-        return buf.getvalue(), media_type
+        audio_data: bytes | str = buf.getvalue()
+        if base64_encode:
+            audio_data = base64.b64encode(audio_data).decode("utf-8")
+        return audio_data, media_type
+
+    def _encode_audio_with_vllm_omni(
+        self,
+        audio_np: Any,
+        sample_rate: int,
+        fmt: str,
+        speed: float,
+        base64_encode: bool,
+    ) -> tuple | None:
+        try:
+            from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
+            from vllm_omni.entrypoints.openai.protocol.audio import CreateAudio
+
+            audio_response = AudioMixin().create_audio(
+                CreateAudio(
+                    audio_tensor=np.asarray(audio_np, dtype=np.float32),
+                    sample_rate=int(sample_rate),
+                    response_format=fmt or "wav",
+                    speed=speed,
+                    stream_format="audio",
+                    base64_encode=base64_encode,
+                )
+            )
+            return audio_response.audio_data, audio_response.media_type
+        except Exception:
+            logger.debug("vLLM-Omni audio codec unavailable; using local encoder")
+            return None
 
     def _error_response(self, request_id: str, error: str) -> Dict[str, Any]:
         return NvAudioSpeechResponse(
@@ -410,6 +459,22 @@ def _error_chunk(
     request_id: str, model_name: str, error_message: str
 ) -> Dict[str, Any]:
     """Error response in OpenAI chat.completion.chunk format."""
+    return _chat_completion_chunk(
+        request_id,
+        model_name,
+        f"Error: {error_message}",
+        finish_reason="error",
+    )
+
+
+def _chat_completion_chunk(
+    request_id: str,
+    model_name: str,
+    content: Any,
+    *,
+    finish_reason: str | None = "stop",
+) -> Dict[str, Any]:
+    """Build a chat.completion.chunk accepted by Dynamo's frontend parser."""
     return {
         "id": request_id,
         "created": int(time.time()),
@@ -418,8 +483,8 @@ def _error_chunk(
         "choices": [
             {
                 "index": 0,
-                "delta": {"role": "assistant", "content": f"Error: {error_message}"},
-                "finish_reason": "error",
+                "delta": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
             }
         ],
     }
