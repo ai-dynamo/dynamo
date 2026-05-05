@@ -78,16 +78,12 @@ navigation:
             path: kubernetes/service-discovery.md
           - page: Webhooks
             path: kubernetes/webhooks.md
-          - page: Minikube Setup
-            path: kubernetes/deployment/minikube.md
           - page: Managing Models with DynamoModel
             path: kubernetes/deployment/dynamomodel-guide.md
           - page: Autoscaling
             path: kubernetes/autoscaling.md
           - page: Rolling Update
             path: kubernetes/rolling-update.md
-          - page: Developing with Tilt
-            path: kubernetes/tilt-dev-setup.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - page: Snapshot
@@ -340,6 +336,10 @@ navigation:
         path: development/runtime-guide.md
       - page: Custom Image Builds
         path: development/custom-image-build-guide.md
+      - page: Developing with Tilt
+        path: kubernetes/tilt-dev-setup.md
+      - page: Minikube Setup
+        path: kubernetes/deployment/minikube.md
       - page: JetStream (Jail Stream)
         path: development/jail-stream.md
 
