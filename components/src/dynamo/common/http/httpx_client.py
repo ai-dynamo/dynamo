@@ -53,9 +53,12 @@ class HttpxClient(MmHttpClient):
         return self._semaphore
 
     def _per_call_timeout(self, read_timeout: float) -> httpx.Timeout:
+        # Override targets ``read`` only — ``connect`` / ``pool`` stay
+        # independent so a stuck handshake or saturated pool still
+        # fast-fails on its own budget.
         effective_read = (
-            self._args.read_timeout_override
-            if self._args.read_timeout_override is not None
+            self._args.per_call_timeout_override
+            if self._args.per_call_timeout_override is not None
             else read_timeout
         )
         return httpx.Timeout(
@@ -86,8 +89,8 @@ class HttpxClient(MmHttpClient):
                     self._args.max_keepalive,
                     self._args.connect_timeout,
                     self._args.pool_timeout,
-                    f"forced to {self._args.read_timeout_override:.1f}s via env"
-                    if self._args.read_timeout_override is not None
+                    f"forced to {self._args.per_call_timeout_override:.1f}s via env"
+                    if self._args.per_call_timeout_override is not None
                     else "set per-request",
                 )
         return self._client

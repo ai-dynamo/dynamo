@@ -33,12 +33,19 @@ class AiohttpClient(MmHttpClient):
         self._session: Optional[aiohttp.ClientSession] = None
 
     def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
+        # The override caps ``total`` (whole request). ``sock_connect``
+        # bounds the TCP+TLS handshake independently — without it a
+        # stuck origin would burn the full ``total`` budget before any
+        # byte arrives, matching what httpx's ``Timeout.connect`` gives
+        # us on the other backend.
         total = (
-            self._args.read_timeout_override
-            if self._args.read_timeout_override is not None
+            self._args.per_call_timeout_override
+            if self._args.per_call_timeout_override is not None
             else timeout
         )
-        return aiohttp.ClientTimeout(total=total)
+        return aiohttp.ClientTimeout(
+            total=total, sock_connect=self._args.connect_timeout
+        )
 
     def _build_session(self) -> aiohttp.ClientSession:
         connector = aiohttp.TCPConnector(
@@ -60,8 +67,8 @@ class AiohttpClient(MmHttpClient):
                     "keepalive_timeout=%.1fs%s",
                     self._args.max_connections,
                     self._args.keepalive_timeout,
-                    f", read timeout forced to {self._args.read_timeout_override:.1f}s via env"
-                    if self._args.read_timeout_override is not None
+                    f", total timeout forced to {self._args.per_call_timeout_override:.1f}s via env"
+                    if self._args.per_call_timeout_override is not None
                     else "; total timeout set per-request",
                 )
         return self._session
