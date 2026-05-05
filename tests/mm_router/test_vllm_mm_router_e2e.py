@@ -95,7 +95,10 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
 
 
 def _prepare_log_dir(request, suffix: str) -> str:
-    log_dir = f"{request.node.name}_{suffix}"
+    # Include the pid so parallel pytest subprocesses (gpu_parallel runner)
+    # don't collide on a shared log_dir — request.node.name is the module
+    # basename for module-scoped fixtures, same across all subprocesses.
+    log_dir = f"{request.node.name}_{suffix}_{os.getpid()}"
     shutil.rmtree(log_dir, ignore_errors=True)
     return log_dir
 
