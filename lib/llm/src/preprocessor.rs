@@ -37,7 +37,6 @@ use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
-use crate::agents::context::AgentContext;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -146,13 +145,6 @@ struct ReasoningState {
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
 }
 
-struct AgentTraceRequestEndState {
-    agent_context: AgentContext,
-    request_model: String,
-    request_tracker: Option<Arc<RequestTracker>>,
-    x_request_id: Option<String>,
-}
-
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -217,44 +209,6 @@ impl OpenAIPreprocessor {
             media_loader,
             context_length,
         }))
-    }
-
-    fn wrap_agent_trace_request_end_stream<Resp>(
-        stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
-        trace_state: Option<AgentTraceRequestEndState>,
-        request_id: String,
-    ) -> Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>
-    where
-        Resp: Send + 'static,
-    {
-        let Some(AgentTraceRequestEndState {
-            agent_context,
-            request_model,
-            request_tracker,
-            x_request_id,
-        }) = trace_state
-        else {
-            return stream;
-        };
-
-        let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(stream);
-        tokio::spawn(async move {
-            done_fut.await;
-            if request_tracker.is_none() {
-                tracing::warn!(
-                    request_id,
-                    "agent_context present but request tracker is missing; emitting partial trace"
-                );
-            }
-            let metrics = crate::agents::trace::request_metrics(
-                request_id,
-                x_request_id,
-                request_model,
-                request_tracker.as_deref(),
-            );
-            crate::agents::trace::emit_request_end(agent_context, metrics);
-        });
-        stream
     }
 
     /// Encode a string to it's tokens
@@ -1510,28 +1464,8 @@ impl
             .preprocess_request(&request, tracker.as_deref())
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = if crate::agents::trace::is_enabled() {
-            common_request.agent_context.clone().map(|agent_context| {
-                let request_model = common_request.model.clone();
-                let request_tracker = tracker.clone();
-                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-                    .and_then(|context| context.x_request_id)
-                    .or_else(|| {
-                        context
-                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
-                            .ok()
-                            .map(|value| value.as_ref().clone())
-                    });
-                AgentTraceRequestEndState {
-                    agent_context,
-                    request_model,
-                    request_tracker,
-                    x_request_id,
-                }
-            })
-        } else {
-            None
-        };
+        let trace_state =
+            crate::agents::trace::build_agent_trace_request_end_state(&common_request, &tracker, &context);
         let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
@@ -1605,7 +1539,7 @@ impl
         );
 
         let final_stream =
-            Self::wrap_agent_trace_request_end_stream(final_stream, trace_state, request_id);
+            crate::agents::trace::wrap_agent_trace_request_end_stream(final_stream, trace_state, request_id);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -1672,28 +1606,8 @@ impl
 
         let mut common_request = builder.build()?;
 
-        let trace_state = if crate::agents::trace::is_enabled() {
-            common_request.agent_context.clone().map(|agent_context| {
-                let request_model = common_request.model.clone();
-                let request_tracker = tracker.clone();
-                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-                    .and_then(|context| context.x_request_id)
-                    .or_else(|| {
-                        context
-                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
-                            .ok()
-                            .map(|value| value.as_ref().clone())
-                    });
-                AgentTraceRequestEndState {
-                    agent_context,
-                    request_model,
-                    request_tracker,
-                    x_request_id,
-                }
-            })
-        } else {
-            None
-        };
+        let trace_state =
+            crate::agents::trace::build_agent_trace_request_end_state(&common_request, &tracker, &context);
         let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
@@ -1733,7 +1647,7 @@ impl
         );
 
         let stream =
-            Self::wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id);
+            crate::agents::trace::wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
