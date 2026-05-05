@@ -176,7 +176,7 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", dstRaw)
 	}
 
-	dst.ObjectMeta = src.ObjectMeta
+	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	if err := convertDGDRSpecTo(&src.Spec, &dst.Spec, dst); err != nil {
 		return err
@@ -194,7 +194,7 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", srcRaw)
 	}
 
-	dst.ObjectMeta = src.ObjectMeta
+	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	convertDGDRSpecFrom(&src.Spec, &dst.Spec, src)
 	convertDGDRStatusFrom(&src.Status, &dst.Status, src)
@@ -657,6 +657,11 @@ func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 		if v, ok := srcObj.Annotations[annDGDRDeploymentStatus]; ok && v != "" {
 			var depStatus DeploymentStatus
 			if err := json.Unmarshal([]byte(v), &depStatus); err == nil {
+				// Live status wins over stale preserved deployment annotations, including clears.
+				depStatus.Name = src.DGDName
+				if src.Phase == v1beta1.DGDRPhaseReady {
+					depStatus.Created = false
+				}
 				dst.Deployment = &depStatus
 			}
 		}
