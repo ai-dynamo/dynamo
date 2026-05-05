@@ -321,17 +321,32 @@ reuse structure without storing the prompt text. Use the audit sink for
 request/response payload capture and OpenTelemetry export for span-based
 observability.
 
-For local payload debugging, enable audit logging while running the backend:
+For local payload debugging, enable audit logging alongside agent tracing.
+Audit and agent trace share the same `jsonl` and `jsonl_gz` sink primitives, so
+both streams can be captured to disk in parallel:
 
 ```bash
-export DYN_AUDIT_SINKS=stderr
+export DYN_AGENT_TRACE_SINKS=jsonl_gz
+export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
+export DYN_AUDIT_SINKS=jsonl_gz
+export DYN_AUDIT_OUTPUT_PATH=/tmp/dynamo-audit
 export DYN_AUDIT_FORCE_LOGGING=true
 ```
 
 Audit records include the raw OpenAI-compatible request, the final aggregated
 response, and any `nvext.agent_context` supplied by the harness. Join audit
-records to agent trace records by `request_id` when correlating payload text with
-replay hashes and timing metrics.
+records to agent trace records by `request_id` when correlating payload text
+with replay hashes and timing metrics:
+
+```bash
+gzip -cd /tmp/dynamo-audit.*.jsonl.gz   | jq -c '.event' > /tmp/audit.jsonl
+gzip -cd /tmp/dynamo-trace.*.jsonl.gz   | jq -c '.event' > /tmp/trace.jsonl
+jq -s 'group_by(.request_id // .request.request_id)' \
+  /tmp/audit.jsonl /tmp/trace.jsonl
+```
+
+Audit also accepts `stderr` and `nats` sinks; `DYN_AUDIT_SINKS` takes a
+comma-separated list (for example `jsonl_gz,nats`).
 
 Replay hashes describe the cumulative input presented to each LLM request. They
 do not by themselves declare cache movement, observed reuse, or that a prior
