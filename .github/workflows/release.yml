@@ -19,9 +19,31 @@ on:
         required: false
         type: boolean
         default: false
+      skip_gitlab_pipeline:
+        description: 'Skip the GitLab release automation pipeline trigger. Emergency use only.'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      rc_number:
+        required: false
+        type: string
+      nightly:
+        required: false
+        type: boolean
+        default: false
+      skip_gitlab_pipeline:
+        required: false
+        type: boolean
+        default: false
 
 # Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
-# This is enforced in the prepare-release job via branch validation
+# This is enforced in the prepare-release job via branch validation. workflow_call paths
+# (e.g. nightly-ci.yml) inherit the caller's ref — the same branch rules apply.
 
 permissions:
   contents: write
@@ -48,9 +70,9 @@ jobs:
       - name: Extract version and validate inputs
         id: extract
         env:
-          COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
           BRANCH_NAME: ${{ github.ref_name }}
-          NIGHTLY: ${{ github.event.inputs.nightly }}
+          NIGHTLY: ${{ inputs.nightly }}
         run: |
           set -euo pipefail
 
@@ -96,7 +118,7 @@ jobs:
       - name: Determine next RC number
         id: rc_tag
         env:
-          INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
+          INPUT_RC_NUMBER: ${{ inputs.rc_number }}
           VERSION: ${{ steps.extract.outputs.version }}
           COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
           NIGHTLY: ${{ steps.extract.outputs.nightly }}
@@ -265,23 +287,30 @@ jobs:
           # ---- EFA runtime images ----
           # vllm/trtllm EFA are amd64 only; sglang EFA is multi-arch (amd64+arm64).
           # crane copy preserves multi-arch manifests automatically.
+          # Nightly publishes EFA under the `-efa-amd64` suffix; releases use `-efa`.
           echo ""
           echo "=== EFA Runtime Images ==="
 
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            EFA_SUFFIX="efa-amd64"
+          else
+            EFA_SUFFIX="efa"
+          fi
+
           # vllm EFA (CUDA 12, amd64 only)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
+          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
 
           # sglang EFA (CUDA 12, multi-arch)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
+          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
 
           # trtllm EFA (CUDA 13, amd64 only)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
+          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
 
           # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
           echo ""
@@ -408,10 +437,15 @@ jobs:
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            EFA_SUFFIX="efa-amd64"
+          else
+            EFA_SUFFIX="efa"
+          fi
           echo "EFA runtime images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\` (amd64)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\` (amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}\` (amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}\` (amd64)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
@@ -571,3 +605,120 @@ jobs:
             rm -f "${BODY_FILE}"
           done
 
+  # ============================================================================
+  # GITLAB RELEASE AUTOMATION TRIGGER
+  # Fires the GitLab release-automation pipeline (project 191080) once images
+  # and wheels are staged. Variable shape mirrors aiperf's nightly trigger and
+  # is consumed by GITLAB/release-automation/projects/dynamo.yml:
+  #   PIPELINE_TYPE  — `security` for nightly/ondemand, `rc` for RC.
+  #   RELEASE_TYPE   — `nightly` or `rc`. Drives nspect version-name and
+  #                    Artifactory wheel path resolution in dynamo.yml.
+  #   ARTIFACTS      — comma-separated artifact types; matched on word
+  #                    boundary by every scan/promote rule.
+  #   GITHUB_RUN_ID  — required for nightly Artifactory wheel path
+  #                    (<NIGHTLY_BASE>/nightly/<run_id>/<wheel>).
+  #   NIGHTLY_TAG    — human label surfaced in the GitLab summary; nspect
+  #                    version-name is hardcoded to "Dynamo Nightlies" inside
+  #                    dynamo.yml's register-nspect rule.
+  #   WHEEL_VERSION / CONTAINER_TAG — both set to ngc_version_tag because
+  #                    dynamo.yml interpolates WHEEL_VERSION into NGC image
+  #                    tags (e.g. vllm-runtime:${WHEEL_VERSION}-amd64).
+  # Skipped only when `skip_gitlab_pipeline` is set (emergency bypass).
+  # ============================================================================
+
+  trigger-gitlab-release-pipeline:
+    name: Trigger GitLab Release Pipeline
+    needs: [prepare-release, release-publish, stage-wheels-artifactory]
+    if: ${{ inputs.skip_gitlab_pipeline != true }}
+    runs-on:
+      group: gitlab_ci_runners
+    environment: automated-release
+    env:
+      # Project ID 191080 = ai-dynamo/dynamo on gitlab-master. Public, hardcoded.
+      GITLAB_TRIGGER_URL: 'https://gitlab-master.nvidia.com/api/v4/projects/191080/trigger/pipeline'
+    steps:
+      - name: Trigger GitLab pipeline
+        env:
+          GITLAB_TRIGGER_TOKEN: ${{ secrets.GITLAB_TRIGGER_TOKEN }}
+          VERSION:              ${{ needs.prepare-release.outputs.version }}
+          NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          HELM_CHART_VERSION:   ${{ needs.prepare-release.outputs.helm_chart_version }}
+          COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
+          NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
+          RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
+        run: |
+          set -euo pipefail
+
+          # PIPELINE_TYPE / RELEASE_TYPE drive every rule in dynamo.yml.
+          # ARTIFACTS gates per-artifact scans and promotions.
+          # Nightly omits `helm` because release-publish skips the Helm push
+          # for nightlies (see env.NIGHTLY guard on the chart-push step). RC
+          # includes it — dynamo.yml's promote:helm consumes it.
+          if [ "${NIGHTLY}" = "true" ]; then
+            PIPELINE_TYPE="security"
+            RELEASE_TYPE="nightly"
+            ARTIFACTS="wheel,container"
+            NIGHTLY_TAG="Dynamo Nightlies"
+            RC_TAG=""
+          else
+            PIPELINE_TYPE="rc"
+            RELEASE_TYPE="rc"
+            ARTIFACTS="wheel,container,helm"
+            NIGHTLY_TAG=""
+            RC_TAG="v${VERSION}-rc${RC_NUMBER}"
+          fi
+
+          # Pipe the trigger token via @file rather than inline form value so
+          # it never appears in process listings or `set -x` output.
+          TOKEN_FILE=$(mktemp)
+          echo -n "${GITLAB_TRIGGER_TOKEN}" > "${TOKEN_FILE}"
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+
+          RESPONSE=$(curl -fsSL \
+            --request POST \
+            --form "token=<${TOKEN_FILE}" \
+            --form "ref=main" \
+            --form "variables[PIPELINE_TYPE]=${PIPELINE_TYPE}" \
+            --form "variables[RELEASE_TYPE]=${RELEASE_TYPE}" \
+            --form "variables[DRY_RUN]=false" \
+            --form "variables[PROJECT]=dynamo" \
+            --form "variables[SOURCE_BRANCH]=${GITHUB_REF_NAME}" \
+            --form "variables[NIGHTLY_TAG]=${NIGHTLY_TAG}" \
+            --form "variables[RC_TAG]=${RC_TAG}" \
+            --form "variables[WHEEL_VERSION]=${NGC_VERSION_TAG}" \
+            --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
+            --form "variables[HELM_CHART_VERSION]=${HELM_CHART_VERSION}" \
+            --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
+            --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
+            --form "variables[ARTIFACTS]=${ARTIFACTS}" \
+            --form "variables[ENABLE_PULSE_SCAN]=true" \
+            --form "variables[ENABLE_WHEEL_SCAN]=true" \
+            --form "variables[ENABLE_SONARQUBE]=true" \
+            --form "variables[SONAR_REPO]=dynamo" \
+            --form "variables[SONAR_BRANCH]=main" \
+            "${GITLAB_TRIGGER_URL}")
+
+          PIPELINE_ID=$(echo "${RESPONSE}" | jq -r '.id // empty')
+          PIPELINE_URL=$(echo "${RESPONSE}" | jq -r '.web_url // empty')
+          if [ -z "${PIPELINE_ID}" ]; then
+            echo "::error::Failed to trigger GitLab pipeline or parse response"
+            echo "Response: ${RESPONSE}"
+            exit 1
+          fi
+
+          echo "GitLab release pipeline triggered: pipeline ID ${PIPELINE_ID}"
+
+          {
+            echo "## GitLab Release Pipeline"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Pipeline ID | ${PIPELINE_ID} |"
+            echo "| Pipeline URL | ${PIPELINE_URL:-n/a} |"
+            echo "| PIPELINE_TYPE | ${PIPELINE_TYPE} |"
+            echo "| RELEASE_TYPE | ${RELEASE_TYPE} |"
+            echo "| Version | ${VERSION} |"
+            echo "| NGC tag | ${NGC_VERSION_TAG} |"
+            echo "| Commit | ${COMMIT_SHA} |"
+            echo "| Artifacts | ${ARTIFACTS} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
