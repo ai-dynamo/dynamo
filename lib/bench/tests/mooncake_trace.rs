@@ -3,7 +3,7 @@
 
 mod support;
 
-#[path = "../kv_router/common/shared.rs"]
+#[path = "../kv_router/common/mod.rs"]
 mod common;
 
 #[path = "../kv_router/mooncake_shared.rs"]
@@ -480,7 +480,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
             };
             let run = run_benchmark(
                 indexer,
-                input,
+                &input,
                 MooncakeBenchmarkConfig {
                     benchmark_duration_ms: BENCHMARK_DURATION_MS,
                     inference_worker_duplication_factor: 1,

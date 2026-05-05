@@ -21,8 +21,8 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{
-    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run, make_progress_bar,
-    rescale_trace_timestamps,
+    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run,
+    trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines},
 };
 
 #[allow(dead_code)]
@@ -326,44 +326,69 @@ struct WorkerTrace {
 }
 
 #[derive(Clone)]
+pub(crate) struct MergedMooncakeBenchmark {
+    worker_traces: WorkerTimelines<WorkerTrace>,
+    block_size: u32,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedTraceTotals {
+    requests: usize,
+    events: usize,
+    approx_writes: usize,
+    request_blocks: usize,
+    event_blocks: usize,
+}
+
+pub(crate) struct PreparedMooncakeBenchmark {
+    worker_traces: WorkerTimelines<WorkerTrace>,
+    seq_pool: Arc<Vec<Vec<LocalBlockHash>>>,
+    totals: PreparedTraceTotals,
+    benchmark_duration_ms: u64,
+    block_size: u32,
+}
+
+#[derive(Clone)]
 pub enum MooncakeBenchmarkInput {
     KvEvents(Vec<WorkerReplayArtifacts>),
     Approx(Vec<Trace>),
 }
 
-fn prepare_event_worker_traces(
-    artifacts: Vec<WorkerReplayArtifacts>,
-    benchmark_duration_ms: u64,
-) -> Vec<Vec<WorkerTrace>> {
-    let traces = artifacts
-        .into_iter()
-        .map(|artifact| {
-            let mut merged = artifact
-                .requests
-                .into_iter()
-                .map(|request| WorkerTrace {
-                    timestamp_us: request.timestamp_us,
-                    entry: WorkerTraceEntry::Request(request.replay_hashes.local_block_hashes),
-                })
-                .chain(artifact.kv_events.into_iter().map(|event| WorkerTrace {
-                    timestamp_us: event.timestamp_us,
-                    entry: WorkerTraceEntry::Event(event.event),
-                }))
-                .collect::<Vec<_>>();
-            merged.sort_by_key(|entry| entry.timestamp_us);
-            merged
-        })
-        .collect::<Vec<_>>();
-
-    rescale_trace_timestamps(
-        &traces,
-        benchmark_duration_ms,
-        |entry| entry.timestamp_us,
-        |entry, timestamp_us| WorkerTrace {
-            entry: entry.entry.clone(),
-            timestamp_us,
+fn merge_event_worker_trace(
+    worker_idx: usize,
+    artifact: &WorkerReplayArtifacts,
+) -> anyhow::Result<Vec<WorkerTrace>> {
+    OrderedMerge::left_first(
+        worker_idx,
+        "requests",
+        &artifact.requests,
+        "kv_events",
+        &artifact.kv_events,
+    )
+    .merge(
+        |request| request.timestamp_us,
+        |event| event.timestamp_us,
+        |request| WorkerTrace {
+            timestamp_us: request.timestamp_us,
+            entry: WorkerTraceEntry::Request(request.replay_hashes.local_block_hashes.clone()),
+        },
+        |event| WorkerTrace {
+            timestamp_us: event.timestamp_us,
+            entry: WorkerTraceEntry::Event(event.event.clone()),
         },
     )
+}
+
+fn merge_event_worker_traces(
+    artifacts: &[WorkerReplayArtifacts],
+) -> anyhow::Result<WorkerTimelines<WorkerTrace>> {
+    let worker_traces = artifacts
+        .iter()
+        .enumerate()
+        .map(|(worker_idx, artifact)| merge_event_worker_trace(worker_idx, artifact))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(WorkerTimelines::new(worker_traces))
 }
 
 fn synthesized_tokens(
@@ -381,23 +406,22 @@ fn synthesized_tokens(
     tokens
 }
 
-fn prepare_approx_worker_traces(
-    traces: Vec<Trace>,
+fn merge_approx_worker_traces(
+    traces: &[Trace],
     block_size: u32,
-    benchmark_duration_ms: u64,
-) -> anyhow::Result<Vec<Vec<WorkerTrace>>> {
+) -> anyhow::Result<WorkerTimelines<WorkerTrace>> {
     let mut worker_traces = Vec::with_capacity(traces.len());
     for trace in traces {
         let trace_block_size = trace.block_size;
         let mut entries = Vec::new();
-        for session in trace.sessions {
+        for session in &trace.sessions {
             let mut timestamp_ms = session.first_arrival_timestamp_ms.unwrap_or(0.0);
-            for (turn_idx, turn) in session.turns.into_iter().enumerate() {
+            for (turn_idx, turn) in session.turns.iter().enumerate() {
                 if turn_idx > 0 {
                     timestamp_ms += turn.delay_after_previous_ms;
                 }
                 let replay_hashes = turn.to_replay_hashes(trace_block_size, block_size as usize)?;
-                let tokens = synthesized_tokens(&turn, trace_block_size);
+                let tokens = synthesized_tokens(turn, trace_block_size);
                 let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
                 entries.push(WorkerTrace {
                     timestamp_us,
@@ -415,172 +439,229 @@ fn prepare_approx_worker_traces(
         entries.sort_by_key(|entry| entry.timestamp_us);
         worker_traces.push(entries);
     }
-    Ok(rescale_trace_timestamps(
-        &worker_traces,
-        benchmark_duration_ms,
+
+    Ok(WorkerTimelines::new(worker_traces))
+}
+
+pub(crate) fn merge_worker_traces(
+    input: &MooncakeBenchmarkInput,
+    block_size: u32,
+) -> anyhow::Result<MergedMooncakeBenchmark> {
+    let worker_traces = match input {
+        MooncakeBenchmarkInput::KvEvents(artifacts) => merge_event_worker_traces(artifacts)?,
+        MooncakeBenchmarkInput::Approx(traces) => merge_approx_worker_traces(traces, block_size)?,
+    };
+
+    Ok(MergedMooncakeBenchmark {
+        worker_traces,
+        block_size,
+    })
+}
+
+pub(crate) fn prepare_scaled_benchmark(
+    merged: &MergedMooncakeBenchmark,
+    config: MooncakeBenchmarkConfig,
+) -> PreparedMooncakeBenchmark {
+    let worker_traces = merged.worker_traces.rescale(
+        config.benchmark_duration_ms,
         |entry| entry.timestamp_us,
         |entry, timestamp_us| WorkerTrace {
             entry: entry.entry.clone(),
             timestamp_us,
         },
-    ))
-}
+    );
 
-fn prepare_worker_traces(
-    input: MooncakeBenchmarkInput,
-    config: MooncakeBenchmarkConfig,
-) -> anyhow::Result<Vec<Vec<WorkerTrace>>> {
-    match input {
-        MooncakeBenchmarkInput::KvEvents(artifacts) => Ok(prepare_event_worker_traces(
-            artifacts,
-            config.benchmark_duration_ms,
-        )),
-        MooncakeBenchmarkInput::Approx(traces) => {
-            prepare_approx_worker_traces(traces, config.block_size, config.benchmark_duration_ms)
+    let mut seq_pool = Vec::new();
+    let mut totals = PreparedTraceTotals {
+        requests: 0,
+        events: 0,
+        approx_writes: 0,
+        request_blocks: 0,
+        event_blocks: 0,
+    };
+
+    for entry in worker_traces.iter().flatten() {
+        match &entry.entry {
+            WorkerTraceEntry::Request(hashes) => {
+                totals.requests += 1;
+                totals.request_blocks += hashes.len();
+                seq_pool.push(hashes.clone());
+            }
+            WorkerTraceEntry::Event(event) => {
+                totals.events += 1;
+                totals.event_blocks += match &event.data {
+                    KvCacheEventData::Stored(store) => store.blocks.len(),
+                    _ => 0,
+                };
+            }
+            WorkerTraceEntry::ApproxWrite { num_blocks, .. } => {
+                totals.approx_writes += 1;
+                totals.event_blocks += *num_blocks;
+            }
         }
+    }
+
+    PreparedMooncakeBenchmark {
+        worker_traces,
+        seq_pool: Arc::new(seq_pool),
+        totals,
+        benchmark_duration_ms: config.benchmark_duration_ms,
+        block_size: merged.block_size,
     }
 }
 
+#[allow(dead_code)]
 pub async fn run_benchmark(
     indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
-    input: MooncakeBenchmarkInput,
+    input: &MooncakeBenchmarkInput,
     config: MooncakeBenchmarkConfig,
 ) -> anyhow::Result<BenchmarkRun> {
-    let worker_traces = prepare_worker_traces(input, config)?;
-    let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
+    let merged = merge_worker_traces(input, config.block_size)?;
+    let prepared = prepare_scaled_benchmark(&merged, config);
+    run_prepared_benchmark(indexer, &prepared, config).await
+}
 
-    let progress = make_progress_bar(Some(
-        worker_traces
-            .iter()
-            .map(|trace| trace.len() as u64)
-            .sum::<u64>()
-            * config.inference_worker_duplication_factor as u64,
-    ));
+pub(crate) async fn run_prepared_benchmark(
+    indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
+    prepared: &PreparedMooncakeBenchmark,
+    config: MooncakeBenchmarkConfig,
+) -> anyhow::Result<BenchmarkRun> {
+    if prepared.benchmark_duration_ms != config.benchmark_duration_ms {
+        anyhow::bail!(
+            "prepared benchmark duration mismatch: prepared={}ms, requested={}ms",
+            prepared.benchmark_duration_ms,
+            config.benchmark_duration_ms
+        );
+    }
+    if prepared.block_size != config.block_size {
+        anyhow::bail!(
+            "prepared benchmark block size mismatch: prepared={}, requested={}",
+            prepared.block_size,
+            config.block_size
+        );
+    }
+
+    let num_trace_workers = prepared.worker_traces.len();
+    let mut task_inputs =
+        Vec::with_capacity(num_trace_workers * config.inference_worker_duplication_factor);
+    for replica in 0..config.inference_worker_duplication_factor {
+        for (worker_id, worker_trace) in prepared.worker_traces.iter().enumerate() {
+            let worker_id = worker_id + replica * num_trace_workers;
+            task_inputs.push((worker_id, worker_trace.clone()));
+        }
+    }
+
+    let num_find_match_tasks =
+        if config.find_matches_concurrency > 0 && !prepared.seq_pool.is_empty() {
+            config.find_matches_concurrency
+        } else {
+            0
+        };
+    let num_timed_tasks = task_inputs.len() + num_find_match_tasks;
+    let start_gate = ReplayStartGate::new(num_timed_tasks);
 
     let mut tasks = Vec::new();
-    for replica in 0..config.inference_worker_duplication_factor {
-        for (worker_id, worker_trace) in worker_traces.iter().enumerate() {
-            let indexer = Arc::clone(&indexer);
-            let trace = Arc::clone(worker_trace);
-            let progress = progress.clone();
-            let worker_id = worker_id + replica * worker_traces.len();
-            tasks.push(tokio::spawn(async move {
-                let mut request_latencies = Vec::with_capacity(trace.len());
+    for (worker_id, trace) in task_inputs {
+        let indexer = Arc::clone(&indexer);
+        let start_gate = start_gate.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut request_latencies = Vec::with_capacity(trace.len());
 
-                let submit = |entry: WorkerTrace| async {
-                    match entry.entry {
-                        WorkerTraceEntry::Request(request) => {
-                            let start = minstant::Instant::now();
-                            indexer.find_matches(request).await?;
-                            Ok::<Option<u64>, anyhow::Error>(
-                                Some(start.elapsed().as_nanos() as u64),
+            start_gate.wait_for_start().await;
+
+            let submit = |entry: WorkerTrace| async {
+                match entry.entry {
+                    WorkerTraceEntry::Request(request) => {
+                        let start = minstant::Instant::now();
+                        indexer.find_matches(request).await?;
+                        Ok::<Option<u64>, anyhow::Error>(Some(start.elapsed().as_nanos() as u64))
+                    }
+                    WorkerTraceEntry::Event(event) => {
+                        indexer
+                            .apply_event(RouterEvent::new(worker_id as u64, event))
+                            .await;
+                        Ok(None)
+                    }
+                    WorkerTraceEntry::ApproxWrite { tokens, .. } => {
+                        let mut tokens_with_hashes =
+                            TokensWithHashes::new(tokens, config.block_size);
+                        indexer
+                            .process_routing_decision_for_request(
+                                &mut tokens_with_hashes,
+                                WorkerWithDpRank::from_worker_id(worker_id as u64),
                             )
+                            .await?;
+                        Ok(None)
+                    }
+                }
+            };
+
+            let mut target = Instant::now();
+            let mut trace = trace.into_iter().peekable();
+
+            while let Some(entry) = trace.next() {
+                let entry_timestamp_us = entry.timestamp_us;
+
+                if let Some(latency) = submit(entry).await? {
+                    request_latencies.push(latency);
+                }
+
+                while let Some(next) = trace.peek() {
+                    if next.timestamp_us == entry_timestamp_us {
+                        if let Some(latency) = submit(trace.next().unwrap()).await? {
+                            request_latencies.push(latency);
                         }
-                        WorkerTraceEntry::Event(event) => {
-                            indexer
-                                .apply_event(RouterEvent::new(worker_id as u64, event))
-                                .await;
-                            Ok(None)
-                        }
-                        WorkerTraceEntry::ApproxWrite { tokens, .. } => {
-                            let mut tokens_with_hashes =
-                                TokensWithHashes::new(tokens, config.block_size);
-                            indexer
-                                .process_routing_decision_for_request(
-                                    &mut tokens_with_hashes,
-                                    WorkerWithDpRank::from_worker_id(worker_id as u64),
-                                )
-                                .await?;
-                            Ok(None)
-                        }
-                    }
-                };
-
-                let mut target = Instant::now();
-                let mut trace = trace.iter().peekable();
-                let mut local_count = 0;
-
-                while let Some(entry) = trace.next() {
-                    let mut processed = 1;
-                    let entry_timestamp_us = entry.timestamp_us;
-
-                    if let Some(latency) = submit(entry.clone()).await? {
-                        request_latencies.push(latency);
-                    }
-
-                    while let Some(next) = trace.peek() {
-                        if next.timestamp_us == entry_timestamp_us {
-                            if let Some(latency) = submit(trace.next().unwrap().clone()).await? {
-                                request_latencies.push(latency);
-                            }
-                            processed += 1;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if let Some(next) = trace.peek() {
-                        target += Duration::from_micros(next.timestamp_us - entry_timestamp_us);
-                    }
-
-                    if target > Instant::now() {
-                        tokio::time::sleep_until(target).await;
-                    }
-
-                    local_count += processed;
-
-                    if local_count > 100 {
-                        progress.inc(local_count);
-                        local_count = 0;
+                    } else {
+                        break;
                     }
                 }
 
-                progress.inc(local_count);
+                if let Some(next) = trace.peek() {
+                    target += Duration::from_micros(next.timestamp_us - entry_timestamp_us);
+                }
 
-                Ok::<_, anyhow::Error>(request_latencies)
-            }));
-        }
+                if target > Instant::now() {
+                    tokio::time::sleep_until(target).await;
+                }
+            }
+
+            Ok::<_, anyhow::Error>(request_latencies)
+        }));
     }
 
     let fm_stop = Arc::new(AtomicBool::new(false));
     let mut fm_tasks = Vec::new();
-    if config.find_matches_concurrency > 0 {
-        let seq_pool: Arc<Vec<Vec<LocalBlockHash>>> = Arc::new(
-            worker_traces
-                .iter()
-                .flat_map(|trace| trace.iter())
-                .filter_map(|entry| match &entry.entry {
-                    WorkerTraceEntry::Request(hashes) => Some(hashes.clone()),
-                    WorkerTraceEntry::Event(_) | WorkerTraceEntry::ApproxWrite { .. } => None,
-                })
-                .collect(),
-        );
+    if num_find_match_tasks > 0 {
+        for task_id in 0..num_find_match_tasks {
+            let indexer = Arc::clone(&indexer);
+            let pool = Arc::clone(&prepared.seq_pool);
+            let stop = Arc::clone(&fm_stop);
+            let start_gate = start_gate.clone();
+            fm_tasks.push(tokio::spawn(async move {
+                let mut latencies = Vec::new();
+                let mut idx = task_id % pool.len();
 
-        if !seq_pool.is_empty() {
-            for task_id in 0..config.find_matches_concurrency {
-                let indexer = Arc::clone(&indexer);
-                let pool = Arc::clone(&seq_pool);
-                let stop = Arc::clone(&fm_stop);
-                fm_tasks.push(tokio::spawn(async move {
-                    let mut latencies = Vec::new();
-                    let mut idx = task_id % pool.len();
-                    while !stop.load(Ordering::Relaxed) {
-                        let seq = pool[idx].clone();
-                        let start = minstant::Instant::now();
-                        let _ = indexer.find_matches(seq).await;
-                        latencies.push(start.elapsed().as_nanos() as u64);
-                        idx = (idx + 1) % pool.len();
-                    }
-                    latencies
-                }));
-            }
+                start_gate.wait_for_start().await;
+
+                while !stop.load(Ordering::Relaxed) {
+                    let seq = pool[idx].clone();
+                    let start = minstant::Instant::now();
+                    let _ = indexer.find_matches(seq).await;
+                    latencies.push(start.elapsed().as_nanos() as u64);
+                    idx = (idx + 1) % pool.len();
+                }
+                latencies
+            }));
         }
     }
+
+    let started_at = start_gate.start().await;
 
     let mut latencies = Vec::new();
     for task in tasks {
         latencies.extend(task.await??);
     }
+    let total_duration = started_at.elapsed();
 
     fm_stop.store(true, Ordering::Relaxed);
     for task in fm_tasks {
@@ -589,58 +670,12 @@ pub async fn run_benchmark(
         }
     }
 
-    let total_duration = progress.elapsed();
-    let total_events = worker_traces
-        .iter()
-        .map(|trace| {
-            trace
-                .iter()
-                .filter(|entry| matches!(entry.entry, WorkerTraceEntry::Event(_)))
-                .count()
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
-    let total_approx_writes = worker_traces
-        .iter()
-        .map(|trace| {
-            trace
-                .iter()
-                .filter(|entry| matches!(entry.entry, WorkerTraceEntry::ApproxWrite { .. }))
-                .count()
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
+    let replay_factor = config.inference_worker_duplication_factor;
+    let total_requests = prepared.totals.requests * replay_factor;
+    let total_writes = (prepared.totals.events + prepared.totals.approx_writes) * replay_factor;
+    let total_request_blocks = prepared.totals.request_blocks * replay_factor;
+    let total_event_blocks = prepared.totals.event_blocks * replay_factor;
 
-    let total_requests = worker_traces.iter().map(|trace| trace.len()).sum::<usize>()
-        * config.inference_worker_duplication_factor
-        - total_events
-        - total_approx_writes;
-
-    let total_request_blocks = worker_traces
-        .iter()
-        .flat_map(|trace| trace.iter())
-        .filter_map(|entry| match &entry.entry {
-            WorkerTraceEntry::Request(hashes) => Some(hashes.len()),
-            WorkerTraceEntry::Event(_) | WorkerTraceEntry::ApproxWrite { .. } => None,
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
-
-    let total_event_blocks = worker_traces
-        .iter()
-        .flat_map(|trace| trace.iter())
-        .filter_map(|entry| match &entry.entry {
-            WorkerTraceEntry::Event(event) => match &event.data {
-                KvCacheEventData::Stored(store) => Some(store.blocks.len()),
-                _ => Some(0),
-            },
-            WorkerTraceEntry::ApproxWrite { num_blocks, .. } => Some(*num_blocks),
-            WorkerTraceEntry::Request(_) => None,
-        })
-        .sum::<usize>()
-        * config.inference_worker_duplication_factor;
-
-    let total_writes = total_events + total_approx_writes;
     let counted_events = if config.count_events { total_writes } else { 0 };
     let counted_event_blocks = if config.count_events {
         total_event_blocks
