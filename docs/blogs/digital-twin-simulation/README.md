@@ -3,9 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# [placeholder: final title and subtitle]
-
-Working title: **Dynamo As A Digital Twin For LLM Serving**
+# Working title: A Dynamo Digital Twin
 
 [placeholder: final author list and publication date]
 
