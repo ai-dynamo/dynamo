@@ -538,6 +538,10 @@ impl PartialEq<&[Token]> for Tokens {
 }
 
 impl Tokens {
+    fn with_capacity(capacity: usize) -> Self {
+        Tokens(Vec::with_capacity(capacity))
+    }
+
     /// Consumes the [`Tokens`] object and creates a [`TokenBlockSequence`].
     ///
     /// The sequence is initialized with the provided tokens, splitting them into blocks
@@ -594,7 +598,7 @@ impl PartialTokenBlock {
     /// * `salt_hash` - The [`SaltHash`] for the sequence.
     pub(crate) fn create_sequence_root(block_size: u32, salt_hash: SaltHash) -> Self {
         Self {
-            tokens: Tokens::default(),
+            tokens: Tokens::with_capacity(block_size as usize),
             block_size,
             salt_hash,
             parent_sequence_hash: None, // Root has no parent
@@ -683,7 +687,10 @@ impl PartialTokenBlock {
         }
 
         // Take ownership of the tokens, leaving the internal tokens empty
-        let tokens = std::mem::take(&mut self.tokens);
+        let tokens = std::mem::replace(
+            &mut self.tokens,
+            Tokens::with_capacity(self.block_size as usize),
+        );
 
         let chunk = TokenBlockChunk::new(tokens, self.salt_hash);
         let block = TokenBlock::from_chunk(chunk, self.parent_sequence_hash, self.position);
@@ -691,7 +698,6 @@ impl PartialTokenBlock {
         // Reset self to be the next block in the sequence
         self.parent_sequence_hash = Some(block.sequence_hash());
         self.position += 1; // Increment position for the next block
-        // self.tokens is already empty due to mem::take
         // self.block_size and self.salt_hash remain the same
 
         Ok(block)
@@ -782,7 +788,7 @@ impl TokenBlock {
     /// The new partial block will have the correct `parent_sequence_hash` and `position` set.
     pub fn next_block(&self) -> PartialTokenBlock {
         PartialTokenBlock {
-            tokens: Tokens::default(),
+            tokens: Tokens::with_capacity(self.tokens.len()),
             block_size: self.tokens.len() as u32, // Should be == self.block_size
             salt_hash: self.salt_hash,
             parent_sequence_hash: Some(self.sequence_hash), // Link to this block
@@ -1307,8 +1313,11 @@ impl TokenBlockSequence {
 
         let next_position = result_blocks.len(); // Position for the next block to be committed
 
+        let mut partial_tokens = Tokens::with_capacity(block_size as usize);
+        partial_tokens.0.extend_from_slice(remainder);
+
         let current_block = PartialTokenBlock {
-            tokens: remainder.into(),
+            tokens: partial_tokens,
             block_size,
             salt_hash,
             // Parent hash is the sequence hash of the last *full* block computed
