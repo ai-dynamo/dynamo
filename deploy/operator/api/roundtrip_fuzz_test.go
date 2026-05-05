@@ -207,176 +207,10 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
 			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
-		func(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
-			c.FillNoCustom(s)
-
-			s.Backend = oneOf(c, "auto", "vllm", "sglang", "trtllm")
-
-			// Empty resources do not survive the alpha resources to beta profiling job projection.
-			if s.ProfilingConfig.Resources != nil &&
-				len(s.ProfilingConfig.Resources.Requests) == 0 &&
-				len(s.ProfilingConfig.Resources.Limits) == 0 {
-				s.ProfilingConfig.Resources = nil
-			}
-
-			// TODO: fix this conversion bug: NodeSelector is not mapped into the v1beta1 profiling job override.
-			// Example:
-			//   spec:
-			//     profilingConfig:
-			//       nodeSelector:
-			//         accelerator: h100
-			// round-trips without nodeSelector.
-			s.ProfilingConfig.NodeSelector = nil
-
-			// Only true EnableGPUDiscovery is annotation-preserved; false is dropped.
-			if s.EnableGPUDiscovery != nil {
-				*s.EnableGPUDiscovery = true
-			}
-
-			// WorkersImage maps to Image and is not restored as a deployment override.
-			if s.DeploymentOverrides != nil {
-				s.DeploymentOverrides.WorkersImage = ""
-
-				// Empty deployment overrides are not annotation-preserved.
-				if s.DeploymentOverrides.Name == "" &&
-					s.DeploymentOverrides.Namespace == "" &&
-					len(s.DeploymentOverrides.Labels) == 0 &&
-					len(s.DeploymentOverrides.Annotations) == 0 {
-					s.DeploymentOverrides = nil
-				}
-			}
-		},
-		func(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
-			c.FillNoCustom(s)
-
-			// TODO: fix this conversion bug: Initializing and DeploymentDeleted are lossy through the v1beta1 phase enum.
-			// Example:
-			//   status:
-			//     state: DeploymentDeleted
-			//     deployment:
-			//       created: true
-			// round-trips as Ready with created=false.
-			s.State = oneOf(c, v1alpha1.DGDRStatePending, v1alpha1.DGDRStateProfiling, v1alpha1.DGDRStateReady, v1alpha1.DGDRStateDeploying, v1alpha1.DGDRStateFailed)
-		},
-		func(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
-			c.FillNoCustom(s)
-
-			s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
-
-			// TODO: fix this conversion bug: Hardware is not annotation-preserved through v1alpha1.
-			// Example:
-			//   spec:
-			//     hardware:
-			//       gpuSku: h100_sxm
-			//       totalGpus: 8
-			// round-trips without hardware.
-			s.Hardware = nil
-
-			// Concurrency and RequestRate have no v1alpha1 DGDR fields.
-			if s.Workload != nil {
-				s.Workload.Concurrency = nil
-				s.Workload.RequestRate = nil
-
-				// Empty Workload is not reconstructed from the alpha profiling config blob.
-				if s.Workload.ISL == nil && s.Workload.OSL == nil {
-					s.Workload = nil
-				} else if s.SLA == nil {
-					// Workload-only blob reconstruction creates an empty SLA shell.
-					s.SLA = &v1beta1.SLASpec{}
-				}
-			}
-
-			// E2ELatency has no v1alpha1 DGDR field.
-			if s.SLA != nil {
-				s.SLA.E2ELatency = nil
-			}
-
-			// Empty ModelCache is not reconstructed from the alpha profiling config blob.
-			if s.ModelCache != nil &&
-				s.ModelCache.PVCName == "" &&
-				s.ModelCache.PVCModelPath == "" &&
-				s.ModelCache.PVCMountPath == "" {
-				s.ModelCache = nil
-			}
-
-			// TODO: fix this conversion bug: Overrides beyond alpha resources/tolerations are not annotation-preserved.
-			// Example:
-			//   spec:
-			//     overrides:
-			//       profilingJob:
-			//         activeDeadlineSeconds: 3600
-			// round-trips without overrides.profilingJob.
-			s.Overrides = nil
-
-			if s.Features != nil {
-				// False Mocker is not reconstructed because alpha only records enabled mocker.
-				if s.Features.Mocker != nil {
-					s.Features.Mocker.Enabled = true
-				}
-
-				// Empty Features is not reconstructed without Planner or enabled Mocker.
-				if s.Features.Planner == nil && s.Features.Mocker == nil {
-					s.Features = nil
-				}
-			}
-
-			// TODO: fix this conversion bug: SearchStrategy is not annotation-preserved through v1alpha1.
-			// Example:
-			//   spec:
-			//     searchStrategy: thorough
-			// round-trips without searchStrategy.
-			s.SearchStrategy = ""
-
-			// Nil AutoApply round-trips as the v1beta1 default true.
-			if s.AutoApply == nil {
-				autoApply := true
-				s.AutoApply = &autoApply
-			}
-		},
-		func(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
-			c.FillNoCustom(s)
-
-			// TODO: fix this conversion bug: Deployed is not preserved through the alpha deployment state.
-			// Example:
-			//   status:
-			//     phase: Deployed
-			// round-trips as Ready.
-			s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseFailed)
-
-			// TODO: fix this conversion bug: ProfilingPhase is not annotation-preserved through v1alpha1.
-			// Example:
-			//   status:
-			//     phase: Profiling
-			//     profilingPhase: SweepingDecode
-			// round-trips without profilingPhase.
-			s.ProfilingPhase = ""
-
-			if s.ProfilingResults != nil {
-				// TODO: fix this conversion bug: Pareto is not annotation-preserved through v1alpha1.
-				// Example:
-				//   status:
-				//     profilingResults:
-				//       pareto:
-				//       - config:
-				//           spec: {}
-				// round-trips without pareto.
-				s.ProfilingResults.Pareto = nil
-
-				// Empty ProfilingResults is not reconstructed without SelectedConfig.
-				if s.ProfilingResults.SelectedConfig == nil {
-					s.ProfilingResults = nil
-				}
-			}
-
-			// TODO: fix this conversion bug: DeploymentInfo is not annotation-preserved through v1alpha1.
-			// Example:
-			//   status:
-			//     deploymentInfo:
-			//       replicas: 2
-			//       availableReplicas: 1
-			// round-trips without deploymentInfo.
-			s.DeploymentInfo = nil
-		},
+		fuzzAlphaDGDRSpec,
+		fuzzAlphaDGDRStatus,
+		fuzzBetaDGDRSpec,
+		fuzzBetaDGDRStatus,
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.
@@ -390,6 +224,180 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 			}
 		},
 	}
+}
+
+func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.Backend = oneOf(c, "auto", "vllm", "sglang", "trtllm")
+
+	// Empty resources do not survive the alpha resources to beta profiling job projection.
+	if s.ProfilingConfig.Resources != nil &&
+		len(s.ProfilingConfig.Resources.Requests) == 0 &&
+		len(s.ProfilingConfig.Resources.Limits) == 0 {
+		s.ProfilingConfig.Resources = nil
+	}
+
+	// TODO: fix this conversion bug: NodeSelector is not mapped into the v1beta1 profiling job override.
+	// Example:
+	//   spec:
+	//     profilingConfig:
+	//       nodeSelector:
+	//         accelerator: h100
+	// round-trips without nodeSelector.
+	s.ProfilingConfig.NodeSelector = nil
+
+	// Only true EnableGPUDiscovery is annotation-preserved; false is dropped.
+	if s.EnableGPUDiscovery != nil {
+		*s.EnableGPUDiscovery = true
+	}
+
+	// WorkersImage maps to Image and is not restored as a deployment override.
+	if s.DeploymentOverrides != nil {
+		s.DeploymentOverrides.WorkersImage = ""
+
+		// Empty deployment overrides are not annotation-preserved.
+		if s.DeploymentOverrides.Name == "" &&
+			s.DeploymentOverrides.Namespace == "" &&
+			len(s.DeploymentOverrides.Labels) == 0 &&
+			len(s.DeploymentOverrides.Annotations) == 0 {
+			s.DeploymentOverrides = nil
+		}
+	}
+}
+
+func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	// TODO: fix this conversion bug: Initializing and DeploymentDeleted are lossy through the v1beta1 phase enum.
+	// Example:
+	//   status:
+	//     state: DeploymentDeleted
+	//     deployment:
+	//       created: true
+	// round-trips as Ready with created=false.
+	s.State = oneOf(c, v1alpha1.DGDRStatePending, v1alpha1.DGDRStateProfiling, v1alpha1.DGDRStateReady, v1alpha1.DGDRStateDeploying, v1alpha1.DGDRStateFailed)
+}
+
+func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
+
+	// TODO: fix this conversion bug: Hardware is not annotation-preserved through v1alpha1.
+	// Example:
+	//   spec:
+	//     hardware:
+	//       gpuSku: h100_sxm
+	//       totalGpus: 8
+	// round-trips without hardware.
+	s.Hardware = nil
+
+	// Concurrency and RequestRate have no v1alpha1 DGDR fields.
+	if s.Workload != nil {
+		s.Workload.Concurrency = nil
+		s.Workload.RequestRate = nil
+
+		// Empty Workload is not reconstructed from the alpha profiling config blob.
+		if s.Workload.ISL == nil && s.Workload.OSL == nil {
+			s.Workload = nil
+		} else if s.SLA == nil {
+			// Workload-only blob reconstruction creates an empty SLA shell.
+			s.SLA = &v1beta1.SLASpec{}
+		}
+	}
+
+	// E2ELatency has no v1alpha1 DGDR field.
+	if s.SLA != nil {
+		s.SLA.E2ELatency = nil
+	}
+
+	// Empty ModelCache is not reconstructed from the alpha profiling config blob.
+	if s.ModelCache != nil &&
+		s.ModelCache.PVCName == "" &&
+		s.ModelCache.PVCModelPath == "" &&
+		s.ModelCache.PVCMountPath == "" {
+		s.ModelCache = nil
+	}
+
+	// TODO: fix this conversion bug: Overrides beyond alpha resources/tolerations are not annotation-preserved.
+	// Example:
+	//   spec:
+	//     overrides:
+	//       profilingJob:
+	//         activeDeadlineSeconds: 3600
+	// round-trips without overrides.profilingJob.
+	s.Overrides = nil
+
+	if s.Features != nil {
+		// False Mocker is not reconstructed because alpha only records enabled mocker.
+		if s.Features.Mocker != nil {
+			s.Features.Mocker.Enabled = true
+		}
+
+		// Empty Features is not reconstructed without Planner or enabled Mocker.
+		if s.Features.Planner == nil && s.Features.Mocker == nil {
+			s.Features = nil
+		}
+	}
+
+	// TODO: fix this conversion bug: SearchStrategy is not annotation-preserved through v1alpha1.
+	// Example:
+	//   spec:
+	//     searchStrategy: thorough
+	// round-trips without searchStrategy.
+	s.SearchStrategy = ""
+
+	// Nil AutoApply round-trips as the v1beta1 default true.
+	if s.AutoApply == nil {
+		autoApply := true
+		s.AutoApply = &autoApply
+	}
+}
+
+func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	// TODO: fix this conversion bug: Deployed is not preserved through the alpha deployment state.
+	// Example:
+	//   status:
+	//     phase: Deployed
+	// round-trips as Ready.
+	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseFailed)
+
+	// TODO: fix this conversion bug: ProfilingPhase is not annotation-preserved through v1alpha1.
+	// Example:
+	//   status:
+	//     phase: Profiling
+	//     profilingPhase: SweepingDecode
+	// round-trips without profilingPhase.
+	s.ProfilingPhase = ""
+
+	if s.ProfilingResults != nil {
+		// TODO: fix this conversion bug: Pareto is not annotation-preserved through v1alpha1.
+		// Example:
+		//   status:
+		//     profilingResults:
+		//       pareto:
+		//       - config:
+		//           spec: {}
+		// round-trips without pareto.
+		s.ProfilingResults.Pareto = nil
+
+		// Empty ProfilingResults is not reconstructed without SelectedConfig.
+		if s.ProfilingResults.SelectedConfig == nil {
+			s.ProfilingResults = nil
+		}
+	}
+
+	// TODO: fix this conversion bug: DeploymentInfo is not annotation-preserved through v1alpha1.
+	// Example:
+	//   status:
+	//     deploymentInfo:
+	//       replicas: 2
+	//       availableReplicas: 1
+	// round-trips without deploymentInfo.
+	s.DeploymentInfo = nil
 }
 
 func newRoundTripFiller(seed int64) *randfill.Filler {

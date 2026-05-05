@@ -152,6 +152,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
@@ -375,10 +376,10 @@ func convertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1
 		if len(podSpec.Containers) == 0 {
 			podSpec.Containers = []corev1.Container{{}}
 		}
-		podSpec.Containers[0].Resources = *src.Resources
+		podSpec.Containers[0].Resources = *src.Resources.DeepCopy()
 	}
 	if len(src.Tolerations) > 0 {
-		podSpec.Tolerations = src.Tolerations
+		podSpec.Tolerations = cloneDGDRTolerations(src.Tolerations)
 	}
 }
 
@@ -602,11 +603,11 @@ func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec,
 	if len(podSpec.Containers) > 0 {
 		res := podSpec.Containers[0].Resources
 		if len(res.Requests) > 0 || len(res.Limits) > 0 {
-			dst.ProfilingConfig.Resources = &res
+			dst.ProfilingConfig.Resources = res.DeepCopy()
 		}
 	}
 	if len(podSpec.Tolerations) > 0 {
-		dst.ProfilingConfig.Tolerations = podSpec.Tolerations
+		dst.ProfilingConfig.Tolerations = cloneDGDRTolerations(podSpec.Tolerations)
 	}
 }
 
@@ -614,7 +615,7 @@ func restoreProfilingJobResources(src *v1beta1.DynamoGraphDeploymentRequestSpec,
 func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.Phase = dgdrStateToPhase(string(src.State), src.Deployment)
 	dst.ObservedGeneration = src.ObservedGeneration
-	dst.Conditions = src.Conditions
+	dst.Conditions = cloneDGDRConditions(src.Conditions)
 
 	if src.Backend != "" {
 		setAnnotation(dstObj, annDGDRStatusBackend, src.Backend)
@@ -626,7 +627,7 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 		if dst.ProfilingResults == nil {
 			dst.ProfilingResults = &v1beta1.ProfilingResultsStatus{}
 		}
-		dst.ProfilingResults.SelectedConfig = src.GeneratedDeployment
+		dst.ProfilingResults.SelectedConfig = src.GeneratedDeployment.DeepCopy()
 	}
 	if src.Deployment != nil {
 		dst.DGDName = src.Deployment.Name
@@ -649,7 +650,7 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, srcObj *v1beta1.DynamoGraphDeploymentRequest) {
 	dst.State = DGDRState(dgdrPhaseToState(src.Phase))
 	dst.ObservedGeneration = src.ObservedGeneration
-	dst.Conditions = src.Conditions
+	dst.Conditions = cloneDGDRConditions(src.Conditions)
 
 	if srcObj.Annotations != nil {
 		if v, ok := srcObj.Annotations[annDGDRStatusBackend]; ok {
@@ -661,7 +662,7 @@ func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 	}
 
 	if src.ProfilingResults != nil && src.ProfilingResults.SelectedConfig != nil {
-		dst.GeneratedDeployment = src.ProfilingResults.SelectedConfig
+		dst.GeneratedDeployment = src.ProfilingResults.SelectedConfig.DeepCopy()
 	}
 
 	if srcObj.Annotations != nil {
@@ -690,13 +691,53 @@ func restoreDGDRDeploymentStatus(raw string, src *v1beta1.DynamoGraphDeploymentR
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return DeploymentStatus{}, "", false
 	}
+	if !isValidDGDRRequestState(payload.RequestState) {
+		return DeploymentStatus{}, "", false
+	}
 	if payload.Name != src.DGDName {
 		return DeploymentStatus{}, "", false
 	}
-	if payload.RequestState != "" && dgdrStateToPhase(string(payload.RequestState), &payload.DeploymentStatus) != src.Phase {
+	if dgdrStateToPhase(string(payload.RequestState), &payload.DeploymentStatus) != src.Phase {
 		return DeploymentStatus{}, "", false
 	}
 	return payload.DeploymentStatus, payload.RequestState, true
+}
+
+func isValidDGDRRequestState(state DGDRState) bool {
+	switch state {
+	case DGDRStateInitializing,
+		DGDRStatePending,
+		DGDRStateProfiling,
+		DGDRStateDeploying,
+		DGDRStateReady,
+		DGDRStateDeploymentDeleted,
+		DGDRStateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneDGDRConditions(src []metav1.Condition) []metav1.Condition {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]metav1.Condition, 0, len(src))
+	for _, condition := range src {
+		out = append(out, *condition.DeepCopy())
+	}
+	return out
+}
+
+func cloneDGDRTolerations(src []corev1.Toleration) []corev1.Toleration {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]corev1.Toleration, 0, len(src))
+	for _, toleration := range src {
+		out = append(out, *toleration.DeepCopy())
+	}
+	return out
 }
 
 // dgdrStateToPhase maps v1alpha1 state strings to v1beta1 DGDRPhase.
