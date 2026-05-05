@@ -43,6 +43,11 @@ fn single_turn_mooncake_requests(
     trace: &Trace,
 ) -> Result<Option<Vec<DirectRequest>>> {
     if trace_format == TraceFileFormat::Mooncake && trace.is_single_turn() {
+        // The timestamped request path expects every request to carry an
+        // arrival timestamp; without this guard a trace missing
+        // `first_arrival_timestamp_ms` would panic in
+        // `normalize_trace_requests` instead of returning a clear error.
+        trace.validate_for_trace_mode()?;
         Ok(Some(trace.to_single_turn_requests()?))
     } else {
         Ok(None)
@@ -1000,6 +1005,31 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].arrival_timestamp_ms, Some(0.0));
         assert_eq!(requests[1].arrival_timestamp_ms, Some(0.0));
+    }
+
+    #[test]
+    fn single_turn_mooncake_trace_without_timestamps_is_rejected() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "request_1".to_string(),
+                first_arrival_timestamp_ms: None,
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    arrival_timestamp_ms: None,
+                    delay_after_previous_ms: 0.0,
+                }],
+            }],
+        };
+
+        let err = single_turn_mooncake_requests(TraceFileFormat::Mooncake, &trace)
+            .expect_err("missing first_arrival_timestamp_ms must error before reaching the timestamped request path");
+        assert!(
+            err.to_string().contains("first_arrival_timestamp_ms"),
+            "expected validation error to mention first_arrival_timestamp_ms, got {err}",
+        );
     }
 
     #[test]
