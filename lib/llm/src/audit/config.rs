@@ -3,25 +3,36 @@
 
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy)]
+use dynamo_runtime::config::environment_names::llm::audit as env_audit;
+
+const DEFAULT_CAPACITY: usize = 1024;
+
+#[derive(Clone, Copy, Debug)]
 pub struct AuditPolicy {
     pub enabled: bool,
     pub force_logging: bool,
+    pub capacity: usize,
 }
 
 static POLICY: OnceLock<AuditPolicy> = OnceLock::new();
 
 /// Audit is enabled if we have at least one sink
-pub fn init_from_env() -> AuditPolicy {
+fn load_from_env() -> AuditPolicy {
+    let capacity = std::env::var(env_audit::DYN_AUDIT_CAPACITY)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_CAPACITY);
     AuditPolicy {
-        enabled: std::env::var("DYN_AUDIT_SINKS").is_ok(),
-        force_logging: std::env::var("DYN_AUDIT_FORCE_LOGGING")
+        enabled: std::env::var(env_audit::DYN_AUDIT_SINKS).is_ok(),
+        force_logging: std::env::var(env_audit::DYN_AUDIT_FORCE_LOGGING)
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(false),
+        capacity,
     }
 }
 
 pub fn policy() -> AuditPolicy {
-    *POLICY.get_or_init(init_from_env)
+    *POLICY.get_or_init(load_from_env)
 }

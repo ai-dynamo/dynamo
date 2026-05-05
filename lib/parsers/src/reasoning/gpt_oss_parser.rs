@@ -18,8 +18,18 @@ static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::
     OnceLock::new();
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
-    GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+    GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
+        // load_harmony_encoding internally constructs a reqwest::blocking::Client,
+        // which builds and drops a Tokio Runtime. Dropping a Runtime from inside
+        // an async context (e.g. when this is called for the first time during
+        // an HTTP request handler) panics with "Cannot drop a runtime in a
+        // context where blocking is not allowed". Run the load on a fresh OS
+        // thread so the inner Runtime is dropped outside any async context.
+        // The init runs at most once per process via OnceLock.
+        std::thread::spawn(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("harmony encoding loader thread panicked")))
+    })
 }
 
 pub struct GptOssReasoningParser {
