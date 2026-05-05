@@ -200,6 +200,13 @@ then estimates the duration of that chosen pass. The combination is the point:
 AIC informs the speed of the pass, while the mocker/replay scheduler models the
 serving behavior around the pass.
 
+The figure below shows why that scheduler layer matters. AIC gives strong
+fidelity to real silicon for engine-side performance, especially for throughput
+and token time. But TTFT is sensitive to how requests wait, batch, chunk, and
+enter prefill under high concurrency. That is expected: pass-level performance
+estimates tell us how fast a selected batch runs, while scheduler simulation
+models how that batch was formed and when each request first gets admitted.
+
 ![Throughput (TPS per GPU) vs. Interactivity (TPS per User) for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K, concurrencies c=8 to c=64.](./images/hw_mocker_aic_pareto.png)
 
 ![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/hw_mocker_aic_4panel.png)
@@ -214,13 +221,6 @@ The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at conc
 | TTFT | 8.8% | 10.6% |
 
 Mocker achieved comparable or better accuracy across all metrics, notably with better TTFT estimation at high concurrency (64).
-
-[placeholder: validate image interpretation with AIC/mocker owners]
-
-The claim should stay precise. This kind of plot is directional validation of
-the simulation loop for a specific model, hardware, backend, tensor-parallel
-shape, and traffic setup. It is not a universal proof that every future workload
-or backend is modeled perfectly.
 
 ### 2.2 Multi Engine Simulation: From Workers To Systems
 
