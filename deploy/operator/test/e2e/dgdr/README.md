@@ -5,30 +5,61 @@ Go, Ginkgo v2, and typed CRD structs.
 
 ## Prerequisites
 
-1. Kubernetes cluster with Dynamo operator CRDs and webhooks installed
+1. Kubernetes cluster with Dynamo operator CRDs and webhooks installed.
+   The operator can be deployed via Helm (`deploy/helm/`) or via Tilt for
+   development branches. If running against a fix branch, build and push your
+   own operator image and install with:
+   ```bash
+   helm upgrade --install dynamo-platform deploy/helm/dynamo-platform \
+     --set operator.image.repository=<your-registry>/kubernetes-operator \
+     --set operator.image.tag=<your-branch-tag>
+   ```
 2. `kubectl` configured for the cluster
 3. Go 1.25+
+
+## Image Override
+
+The `-dgdr-image` flag specifies the container image used for profiling jobs.
+
+- **Operator ≤ 1.0.x**: uses `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:<tag>`
+- **Operator on main (≥ 1.1.0)**: uses `nvcr.io/nvidia/ai-dynamo/dynamo-planner:<tag>`
+
+To test with your own image (e.g. from a fix branch), build and push it, then
+pass the image via the `-dgdr-image` flag or `DGDR_IMAGE` Makefile variable:
+
+```bash
+# Using your own registry/tag
+make test-e2e-dgdr DGDR_IMAGE=myregistry/dynamo-planner:my-fix-branch
+```
 
 ## Running
 
 ```bash
 cd deploy/operator
 
+# Set the image to match your operator version:
+#   Operator 1.0.x  → dynamo-frontend:1.0.2
+#   Operator ≥1.1.0 → dynamo-planner:1.1.0
+IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
+
 # Mocker mode (no GPU, default)
+make test-e2e-dgdr DGDR_NAMESPACE=default DGDR_IMAGE=$IMAGE
+
+# Or directly with go test:
 go test ./test/e2e/dgdr/ -v -ginkgo.v \
   -dgdr-namespace=default \
-  -dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2
+  -dgdr-image=$IMAGE
 
 # Real GPU mode
 go test ./test/e2e/dgdr/ -v -ginkgo.v \
   -dgdr-namespace=dynamo-test \
-  -dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2 \
+  -dgdr-image=$IMAGE \
   -dgdr-no-mocker
 
-# Validation only (fastest)
+# Validation only (fastest — no profiling jobs)
 go test ./test/e2e/dgdr/ -v -ginkgo.v \
   -dgdr-namespace=default \
-  -dgdr-image=nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2 \
+  -dgdr-image=$IMAGE \
   -ginkgo.label-filter="gpu_0"
 ```
 

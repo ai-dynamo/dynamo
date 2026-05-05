@@ -28,6 +28,7 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -73,7 +74,6 @@ func newDGDR(name string, opts ...func(*v1beta1.DynamoGraphDeploymentRequest)) *
 }
 
 // Option functions for newDGDR
-
 func withAutoApply(v bool) func(*v1beta1.DynamoGraphDeploymentRequest) {
 	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
 		d.Spec.AutoApply = ptr.To(v)
@@ -273,6 +273,20 @@ func plannerRawExtension(m map[string]interface{}) *k8sruntime.RawExtension {
 	raw, err := json.Marshal(m)
 	Expect(err).NotTo(HaveOccurred())
 	return &k8sruntime.RawExtension{Raw: raw}
+}
+
+// verifyProfilingJobCompleted fetches the profiling Job by name and asserts it completed successfully.
+func verifyProfilingJobCompleted(jobName string) {
+	var job batchv1.Job
+	Expect(k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: flagNamespace,
+		Name:      jobName,
+	}, &job)).To(Succeed(), "profiling job %q should exist", jobName)
+
+	// A completed job has status.succeeded >= 1
+	Expect(job.Status.Succeeded).To(BeNumerically(">=", int32(1)),
+		"profiling job %q should have succeeded (status: succeeded=%d, failed=%d)",
+		jobName, job.Status.Succeeded, job.Status.Failed)
 }
 
 // waitForDGDSuccessful polls until the DynamoGraphDeployment reaches state=successful or times out.

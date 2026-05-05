@@ -40,6 +40,9 @@ var _ = Describe("DGDR Lifecycle", Label("gpu_0", "nightly", "integration", "k8s
 			Expect(result.Status.Phase).To(Equal(v1beta1.DGDRPhaseReady))
 			Expect(result.Status.ProfilingJobName).NotTo(BeEmpty(),
 				"profilingJobName should be set after profiling completes")
+
+			// Verify the profiling job itself completed successfully
+			verifyProfilingJobCompleted(result.Status.ProfilingJobName)
 		})
 
 		It("should reach Deployed with autoApply=true (non-mocker only)", func() {
@@ -58,6 +61,11 @@ var _ = Describe("DGDR Lifecycle", Label("gpu_0", "nightly", "integration", "k8s
 			Expect(result.Status.Phase).To(Equal(v1beta1.DGDRPhaseDeployed))
 			Expect(result.Status.DGDName).NotTo(BeEmpty(),
 				"dgdName should be set after deployment")
+
+			// Verify the DGD reaches successful state
+			dgdTimeout := time.Duration(flagDeployTimeout) * time.Second
+			dgd := waitForDGDSuccessful(result.Status.DGDName, dgdTimeout)
+			Expect(dgd).NotTo(BeNil())
 		})
 	})
 })
