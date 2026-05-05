@@ -152,8 +152,7 @@ impl DefaultWorkerSelector {
         // prefill-token sum instead of the (coarser) tracker block count,
         // giving finer ISL discrimination without re-hashing.
         let load_block_size = load_block_size_override().unwrap_or(block_size);
-        let potential_prefill_block =
-            (adjusted_prefill_token as f64) / (load_block_size as f64);
+        let potential_prefill_block = (adjusted_prefill_token as f64) / (load_block_size as f64);
         let decode_block = if load_block_size_override().is_some() {
             (prefill_token as f64) / (load_block_size as f64)
         } else {
