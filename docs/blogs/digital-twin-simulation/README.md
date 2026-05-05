@@ -265,7 +265,7 @@ router decisions still to come, and the engine queues already forming. That lets
 us test whether a policy is responsive enough without making it oscillate under
 changing load.
 
-### 2.5 KV, KVBM, And Cache Simulation
+### 2.5 KV Block Manager Simulation
 
 [placeholder: exact wording for current KVBM simulation status and near-future WIP]
 
