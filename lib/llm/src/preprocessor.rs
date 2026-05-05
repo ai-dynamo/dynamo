@@ -379,6 +379,16 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<Option<String>> {
+        // Renderer / TITO callers post `prompt_token_ids` (or legacy
+        // `nvext.token_data`); chat templating is bypassed entirely.
+        // `gather_tokens` reads the same channel via `get_pretokenized_input`
+        // and feeds the engine directly, so we must not attempt to render
+        // a chat template here (would fail with "undefined value" when
+        // `messages` is empty).
+        if request.get_pretokenized_input().is_some() {
+            return Ok(None);
+        }
+
         if let PromptInput::Text(_) = request.prompt_input_type()
             && let Some(TextInput::Single(_)) = request.extract_text()
         {
@@ -593,8 +603,12 @@ impl OpenAIPreprocessor {
                                 .and_then(|ext| ext.backend_instance_id)
                                 .is_some();
 
-                            let token_data =
-                                request.nvext().and_then(|ext| ext.token_data.as_ref());
+                            // get_pretokenized_input() consults both
+                            // `nvext.token_data` (legacy GAIE/EPP/TITO path) AND
+                            // top-level `prompt_token_ids` extension (renderer / TITO
+                            // canonical path now that `/v1/chat/completions/tokens` is
+                            // dropped). Either channel produces the same engine input.
+                            let token_data = request.get_pretokenized_input();
 
                             // Use token_data when provided (TITO / EPP / RL),
                             // regardless of backend_instance_id.
@@ -611,9 +625,9 @@ impl OpenAIPreprocessor {
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
                                     backend_instance_id = has_backend_instance_id,
-                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+                                    "[SIDECAR-SKIP-TOKENIZE] Found pre-tokenized input (nvext.token_data or prompt_token_ids extension) — using pre-computed tokens, SKIPPING tokenization"
                                 );
-                                (tokens.clone(), has_backend_instance_id)
+                                (tokens, has_backend_instance_id)
                             } else if has_backend_instance_id {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"

@@ -1578,7 +1578,19 @@ pub fn validate_chat_completion_required_fields(
 ) -> Result<(), ErrorResponse> {
     let inner = &request.inner;
 
-    if inner.messages.is_empty() {
+    // RL renderer / TITO callers send `prompt_token_ids` (or legacy
+    // `nvext.token_data`) in place of `messages`. Treat either pre-tokenized
+    // input as satisfying the "non-empty input" requirement.
+    let has_pretokenized_input = request
+        .unsupported_fields
+        .contains_key("prompt_token_ids")
+        || request
+            .nvext
+            .as_ref()
+            .and_then(|ext| ext.token_data.as_ref())
+            .is_some();
+
+    if inner.messages.is_empty() && !has_pretokenized_input {
         return Err(ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string()

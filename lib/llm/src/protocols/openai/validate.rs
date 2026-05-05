@@ -137,6 +137,16 @@ const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     // Opt-in for `nvext.prompt_logprobs` on the response. Aliased through
     // to vLLM's `sampling_params.prompt_logprobs` in a follow-up.
     "return_prompt_logprobs",
+    // Token-level sampling controls. Without these, callers in renderer /
+    // TITO mode can't express stop-on-token-id, constrained sampling, or
+    // bad-word filtering — which is the whole reason vLLM 0.20's
+    // `/inference/v1/generate` exists. Promoting them to the chat-completions
+    // surface as PASSTHROUGH extras keeps `/v1/chat/completions` as the
+    // single canonical RL data path with full SamplingParams parity.
+    "stop_token_ids",
+    "bad_words_token_ids",
+    "allowed_token_ids",
+    "truncate_prompt_tokens",
 ];
 
 /// Validates that no unsupported fields are present in the request

@@ -81,6 +81,17 @@ pub(crate) trait OpenAIStopConditionsProvider {
     fn get_max_thinking_tokens(&self) -> Option<u32> {
         self.nvext().and_then(|nv| nv.max_thinking_tokens)
     }
+
+    /// Get token-id-based stop conditions (renderer / TITO parity with vLLM
+    /// `/inference/v1/generate`'s `sampling_params.stop_token_ids`).
+    ///
+    /// Default returns None; chat-completions / completions impls override to
+    /// read the field from `unsupported_fields["stop_token_ids"]` after the
+    /// `validate.rs` PASSTHROUGH allowlist accepts it. Plumbed through into
+    /// `common::StopConditions::stop_token_ids_hidden` by `extract_stop_conditions`.
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::protocols::TokenIdType>> {
+        None
+    }
 }
 
 pub(crate) trait OpenAIOutputOptionsProvider {
@@ -181,6 +192,11 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
         let max_thinking_tokens = self.get_max_thinking_tokens();
+        // Token-id stop conditions ride through PASSTHROUGH_EXTRA_FIELDS on the
+        // chat-completions surface; impls of this trait read it from the
+        // request's `unsupported_fields` map. Engine receives it as
+        // `stop_token_ids_hidden` (already wired in `common::StopConditions`).
+        let stop_token_ids_hidden = self.get_stop_token_ids();
 
         if let Some(stop) = &stop
             && stop.len() > 4
@@ -195,7 +211,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             max_tokens,
             min_tokens,
             stop,
-            stop_token_ids_hidden: None,
+            stop_token_ids_hidden,
             ignore_eos,
             max_thinking_tokens,
         })

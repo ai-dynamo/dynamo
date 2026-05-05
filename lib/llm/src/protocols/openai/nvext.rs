@@ -73,6 +73,26 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
+
+    /// Pre-tokenized input that bypasses chat templating.
+    ///
+    /// Two callers populate this today:
+    /// - GAIE EPP / TITO via `nvext.token_data` (existing path).
+    /// - Renderer / TITO via top-level `prompt_token_ids` extension on
+    ///   `/v1/chat/completions` (allowlisted by `validate.rs`
+    ///   PASSTHROUGH_EXTRA_FIELDS). This is the canonical home now that
+    ///   `/v1/chat/completions/tokens` is dropped.
+    ///
+    /// Default reads only `nvext.token_data`; the chat-completions impl
+    /// also falls back to `unsupported_fields["prompt_token_ids"]` so the
+    /// preprocessor sees one effective value regardless of which channel
+    /// the client used. Returns owned Vec because the top-level field
+    /// arrives as a JSON value that has to be deserialized fresh.
+    fn get_pretokenized_input(&self) -> Option<Vec<u32>> {
+        self.nvext()
+            .and_then(|ext| ext.token_data.as_ref())
+            .cloned()
+    }
 }
 
 /// Worker ID information for disaggregated serving
