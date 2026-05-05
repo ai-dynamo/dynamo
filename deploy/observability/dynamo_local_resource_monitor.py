@@ -423,9 +423,10 @@ class PrometheusUpdater:
         NET_SENT_MBPS.set(sent_rate)
         NET_RECV_MBPS.set(recv_rate)
 
-        # Per-process-name CPU usage
-        if cpu_by_name:
-            # Clear old labels and set current values
+        # Per-process-name CPU usage. Use `is not None` so that an empty dict
+        # still clears the prior cycle's labels — otherwise a tick with zero
+        # active processes would leak stale per-process CPU values.
+        if cpu_by_name is not None:
             CPU_PROC_PCT.clear()
             for name, pct in cpu_by_name.items():
                 if pct > 0.1:
