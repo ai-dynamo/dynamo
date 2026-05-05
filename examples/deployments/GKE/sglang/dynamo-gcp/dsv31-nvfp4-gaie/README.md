@@ -102,7 +102,6 @@ for KV cache transfer using NIXL. **Agg total: 8 GPUs on 1 node.**
 | ---------------------------- | --------------------------------------------------------------------------- |
 | `dgd-disagg-gaie-nvfp4.yaml` | DynamoGraphDeployment — NVFP4 disagg (prefill, decode, EPP)                   |
 | `dgd-agg-gaie.yaml`          | DynamoGraphDeployment — NVFP4 aggregated GAIE (EPP + worker sidecar)         |
-| `dgd-agg-native.yaml`        | DynamoGraphDeployment — NVFP4 aggregated native (no Gateway / no EPP)        |
 | `httproute.yaml`             | HTTPRoute — `x-pool: gaie-agg`, `gaie-disagg-nvfp4`, default → agg pool     |
 | `health-check-policy.yaml`   | HealthCheckPolicy — `:8000/health` for **agg** and **disagg** pool Services |
 | `backend-policy.yaml`        | GCPBackendPolicy — 600s timeout for **agg** and **disagg** pool Services    |
@@ -336,7 +335,7 @@ spec:
   targetRef:
     group: ""
     kind: Service
-    name: sglang-dsv31-nvfp4-disagg-gaie-pool-ips-c01ab801  # <-- auto-generated pool-ips Service
+    name: REPLACE_ME_DISAGG_POOL_IPS_SERVICE  # <-- auto-generated pool-ips Service; find with: kubectl get svc -n dynamo-system | grep pool-ips
 ```
 
 **Key details:**

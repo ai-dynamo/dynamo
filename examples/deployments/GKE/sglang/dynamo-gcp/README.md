@@ -52,13 +52,19 @@ flowchart TB
 | `dsv31-fp8/dgd-agg.yaml` | DynamoGraphDeployment | Aggregated: Frontend (KV router) + Worker (TP=8, EP=8, 8 GPUs) |
 | `dsv31-fp8/dgd-disagg-1p1d.yaml` | DynamoGraphDeployment | Disaggregated 1P1D: Frontend + Prefill + Decode, NIXL/RoCE, EAGLE spec decode |
 
+### NVFP4 — Dynamo-native (no Gateway)
+
+| File | Resource | Purpose |
+|---|---|---|
+| `dsv31-nvfp4/dgd-agg-nvfp4.yaml` | DynamoGraphDeployment | Aggregated: Frontend (KV router) + Worker (TP=8, EP=8, 8 GPUs, NVFP4) |
+| `dsv31-nvfp4/dgd-disagg-1p1d-nvfp4.yaml` | DynamoGraphDeployment | Disaggregated 1P1D: Frontend + Prefill + Decode, NIXL/RoCE, EAGLE spec decode, NVFP4 |
+
 ### NVFP4 — GAIE (GKE Inference Gateway + EPP)
 
 | File | Purpose |
 |---|---|
 | [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md) | **Full GAIE deployment package** — [own README](dsv31-nvfp4-gaie/README.md) |
 | `dsv31-nvfp4-gaie/dgd-agg-gaie.yaml` | Aggregated DGD with EPP |
-| `dsv31-nvfp4-gaie/dgd-agg-native.yaml` | Aggregated DGD native (no Gateway) |
 | `dsv31-nvfp4-gaie/dgd-disagg-gaie-nvfp4.yaml` | Disaggregated 1P1D DGD with EPP |
 | `dsv31-nvfp4-gaie/httproute.yaml` | HTTPRoute (agg/disagg pool routing) |
 | `dsv31-nvfp4-gaie/health-check-policy.yaml` | HealthCheckPolicy for both pools |
@@ -203,7 +209,7 @@ kubectl delete dynamographdeployment sglang-disagg-1p1d-roce -n dynamo-system
 
 NVIDIA provides a pre-quantized FP4 checkpoint of DeepSeek-V3.1 at [nvidia/DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4). This reduces the per-parameter precision from 8 bits to 4 bits, cutting disk size and GPU memory requirements by ~1.6x while maintaining competitive accuracy.
 
-All NVFP4 configs (native + GAIE) live under [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md). See its [README](dsv31-nvfp4-gaie/README.md) for full deployment steps, Gateway setup, and benchmarking.
+Native NVFP4 configs (no Gateway) live under `dsv31-nvfp4/`. GAIE configs (with GKE Inference Gateway + EPP) live under [`dsv31-nvfp4-gaie/`](dsv31-nvfp4-gaie/README.md). See the [GAIE README](dsv31-nvfp4-gaie/README.md) for Gateway setup and benchmarking.
 
 Key differences from the FP8 configs:
 - Model path: `nvidia/DeepSeek-V3.1-NVFP4` (instead of `deepseek-ai/DeepSeek-V3.1`)

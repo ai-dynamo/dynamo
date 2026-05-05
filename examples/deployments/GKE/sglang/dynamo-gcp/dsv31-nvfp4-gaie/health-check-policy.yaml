@@ -21,7 +21,7 @@ spec:
   targetRef:
     group: ""
     kind: Service
-    name: sglang-dsv31-nvfp4-agg-gaie-pool-ips-e00ef715
+    name: REPLACE_ME_AGG_POOL_IPS_SERVICE
 ---
 apiVersion: networking.gke.io/v1
 kind: HealthCheckPolicy
@@ -40,4 +40,4 @@ spec:
   targetRef:
     group: ""
     kind: Service
-    name: sglang-dsv31-nvfp4-disagg-gaie-pool-ips-c01ab801
+    name: REPLACE_ME_DISAGG_POOL_IPS_SERVICE
