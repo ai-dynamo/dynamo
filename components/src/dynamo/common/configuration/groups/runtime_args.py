@@ -11,7 +11,10 @@ from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.utils.namespace import get_worker_namespace
-from dynamo.common.utils.output_modalities import OutputModality
+from dynamo.common.utils.output_modalities import (
+    OutputModality,
+    normalize_output_modalities,
+)
 
 
 class DynamoRuntimeConfig(ConfigBase):
@@ -49,13 +52,14 @@ class DynamoRuntimeConfig(ConfigBase):
         if not self.output_modalities:
             return
         valid = OutputModality.valid_names()
-        normalized = [m.lower() for m in self.output_modalities]
+        normalized = normalize_output_modalities(self.output_modalities)
         invalid = [m for m in normalized if m not in valid]
         if invalid:
             raise ValueError(
                 f"Invalid output modality: {', '.join(invalid)}. "
                 f"Valid options are: {', '.join(sorted(valid))}"
             )
+        self.output_modalities = normalized
 
 
 # For simplicity, we do not prepend "dyn-" unless it's absolutely necessary. These are

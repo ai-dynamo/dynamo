@@ -13,8 +13,9 @@ reference point the Dynamo agg + disagg topologies are compared against.
 
 1. Pre-existing `model-cache` PVC.
 2. `hf-token-secret` Secret in the target namespace.
-3. `nvcr-imagepullsecret` Secret to pull `nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-<YYYYMMDD>-<sha>`
-   (nightly Dynamo runtime; includes `vllm-omni` on `$PATH`):
+3. `nvcr-imagepullsecret` Secret to pull the Dynamo vLLM runtime image used by
+   `deploy.yaml`: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2`.
+   The container installs `vllm-omni` from the pinned `v0.20.0rc1` tag at startup:
 
    ```bash
    kubectl create secret docker-registry nvcr-imagepullsecret \

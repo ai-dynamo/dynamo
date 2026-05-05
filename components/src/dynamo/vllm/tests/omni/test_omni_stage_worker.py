@@ -13,7 +13,7 @@ import pytest
 
 try:
     from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
-    from dynamo.vllm.omni.utils import _build_sampling_params
+    from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -30,16 +30,26 @@ class _MockEngine:
 
     engine = None  # satisfies StageEngine.engine
 
-    def __init__(self, output=None):
+    def __init__(self, output=None, input_preprocessor=None):
         self.received_prompt = None
         self.received_request_id = None
         self.received_sampling_params_list = None
+        self.received_output_modalities = None
         self._output = output or {"output": "mock", "finished": True}
+        self._input_preprocessor = input_preprocessor
 
-    def generate(self, prompt, request_id="", *, sampling_params_list=None):
+    def generate(
+        self,
+        prompt,
+        request_id="",
+        *,
+        sampling_params_list=None,
+        output_modalities=None,
+    ):
         self.received_prompt = prompt
         self.received_request_id = request_id
         self.received_sampling_params_list = sampling_params_list
+        self.received_output_modalities = output_modalities
 
         async def _gen():
             yield self._output
@@ -49,9 +59,19 @@ class _MockEngine:
     async def get_tokenizer(self):
         return None
 
+    async def get_input_preprocessor(self):
+        return self._input_preprocessor
+
 
 class _ErrorEngine:
-    def generate(self, prompt, request_id="", *, sampling_params_list=None):
+    def generate(
+        self,
+        prompt,
+        request_id="",
+        *,
+        sampling_params_list=None,
+        output_modalities=None,
+    ):
         async def _gen():
             raise RuntimeError("engine exploded")
             yield  # make it an async generator
@@ -62,6 +82,30 @@ class _ErrorEngine:
 class _MockContext:
     def id(self):
         return "test-req-id"
+
+
+class _FakeTokenizer:
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        assert not tokenize
+        assert add_generation_prompt
+        return f"templated:{messages[-1]['content']}"
+
+
+class _FakeRenderer:
+    async def render_chat_async(self, conversations, chat_params, prompt_extras=None):
+        assert chat_params.chat_template_kwargs["add_generation_prompt"] is True
+        assert chat_params.chat_template_kwargs["tokenize"] is False
+        assert prompt_extras is None
+        return conversations, [
+            {
+                "prompt_token_ids": [151644, 872, 198, 9906, 151645],
+                "multi_modal_data": {"audio": "decoded"},
+            }
+        ]
+
+
+class _FakeInputPreprocessor:
+    renderer = _FakeRenderer()
 
 
 def _make_stage_config(**overrides):
@@ -233,6 +277,146 @@ async def test_stage_connector_refs_with_processor():
 
 
 @pytest.mark.asyncio
+async def test_text_chat_stage_final_output_writes_shm_instead_of_connector():
+    engine = _MockEngine()
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref0"})
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): out_connector},
+        stage_id=0,
+        stage_config=_make_stage_config(final_output=True, final_output_type="text"),
+    )
+    worker._output_modalities = ["text", "audio"]
+    request = {
+        "request_id": "req-chat",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    with patch(
+        "dynamo.vllm.omni.stage_worker.serialize_obj", return_value=b"payload"
+    ) as serialize_obj:
+        with patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "req-chat"},
+        ) as shm_write_bytes:
+            chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    out_connector.put.assert_not_called()
+    serialize_obj.assert_called_once()
+    shm_write_bytes.assert_called_once_with(b"payload", name="req-chat")
+    assert chunks == [{"shm_meta": {"name": "req-chat"}, "finished": True}]
+
+
+@pytest.mark.asyncio
+async def test_audio_request_stage_final_output_still_writes_connector():
+    engine = _MockEngine()
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref0"})
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): out_connector},
+        stage_id=0,
+        stage_config=_make_stage_config(final_output=True, final_output_type="text"),
+    )
+    worker._output_modalities = ["text", "audio"]
+    request = {
+        "request_id": "req-audio",
+        "input": "hello",
+        "voice": "ethan",
+    }
+
+    with patch("dynamo.vllm.omni.stage_worker.shm_write_bytes") as shm_write_bytes:
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    shm_write_bytes.assert_not_called()
+    out_connector.put.assert_called_once()
+    assert chunks[0]["stage_connector_refs"]["0"] == {"name": "ref0"}
+    assert chunks[0]["output_modalities"] == ["audio"]
+    assert engine.received_output_modalities is None
+
+
+@pytest.mark.asyncio
+async def test_parse_audio_request_uses_chat_template_when_available():
+    async def get_tokenizer():
+        return _FakeTokenizer()
+
+    parsed = await parse_omni_request(
+        {"input": "hello"},
+        ["text", "audio"],
+        tokenizer_getter=get_tokenizer,
+    )
+
+    assert parsed["engine_inputs"] == "templated:hello"
+    assert parsed["original_prompt"] == {"prompt": "hello"}
+    assert parsed["output_modalities"] == ["audio"]
+
+
+@pytest.mark.asyncio
+async def test_chat_audio_request_renders_with_vllm_and_forwards_modalities():
+    engine = _MockEngine(input_preprocessor=_FakeInputPreprocessor())
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref0"})
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): out_connector},
+        stage_id=0,
+        stage_config=_make_stage_config(final_output=True, final_output_type="text"),
+    )
+    worker._output_modalities = ["text", "audio"]
+    request = {
+        "request_id": "req-chat-audio",
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["text", "audio"],
+        "audio": {"voice": "Ethan"},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert chunks[0]["output_modalities"] == ["text", "audio"]
+    assert engine.received_output_modalities == ["text"]
+    assert engine.received_prompt["prompt_token_ids"] == [
+        151644,
+        872,
+        198,
+        9906,
+        151645,
+    ]
+    assert chunks[0]["original_prompt"]["additional_information"]["speaker"] == [
+        "ethan"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_output_modalities_propagate_from_connector_request_to_engine():
+    engine = _MockEngine()
+    fetched_prompt = {"prior_token_ids": [1, 2, 3]}
+
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": fetched_prompt}
+
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): in_connector, ("1", "2"): out_connector},
+        stage_id=1,
+    )
+    request = {
+        "request_id": "req-audio",
+        "original_prompt": {"prompt": "hello"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "output_modalities": ["audio"],
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert engine.received_output_modalities is None
+    assert chunks[0]["output_modalities"] == ["audio"]
+
+
+@pytest.mark.asyncio
 async def test_engine_error_yields_error_chunk():
     """Engine raises → yields {error: ..., finished: True}, no crash."""
     worker = _make_worker(engine=_ErrorEngine())
@@ -293,6 +477,22 @@ def test_fetch_stage_inputs_calls_correct_connector():
     connector.get.assert_called_once_with("0", "1", "r1", metadata=meta0)
     assert result is not None
     assert result[0].engine_outputs == [{"tok": [1, 2]}]
+
+
+def test_fetch_stage_inputs_preserves_source_stage_index():
+    meta1 = {"name": "ref1"}
+    connector = MagicMock()
+    connector.get.return_value = {"engine_inputs": {"codes": [3, 4]}}
+
+    worker = _make_worker_at_stage(
+        2, connectors={("1", "2"): connector}, engine_input_source=[1]
+    )
+    result = worker._fetch_stage_inputs({1: meta1}, "r1")
+
+    connector.get.assert_called_once_with("1", "2", "r1", metadata=meta1)
+    assert len(result) == 2
+    assert result[0].engine_outputs is None
+    assert result[1].engine_outputs == [{"codes": [3, 4]}]
 
 
 def test_fetch_stage_inputs_raises_on_missing_connector():

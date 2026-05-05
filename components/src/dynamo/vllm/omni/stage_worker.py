@@ -14,7 +14,6 @@ from typing import Any, AsyncGenerator
 import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
-from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 from vllm_omni.inputs.data import OmniTokensPrompt
@@ -26,7 +25,11 @@ from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
-from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
+from dynamo.vllm.omni.utils import (
+    _build_sampling_params,
+    parse_omni_request,
+    stage_satisfies_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +88,10 @@ class OmniStageWorker:
         original_prompt = req.original_prompt
         # JSON sends dict keys as strings; normalize to int for stage_connector_refs.
         stage_connector_refs = _int_keyed(req.stage_connector_refs)
+        request_output_modalities = req.output_modalities
 
         # --- Resolve engine inputs ---
+        router_consumes_stage_output = False
         sampling_params_list_override: dict | None = None
         if stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
@@ -97,14 +102,15 @@ class OmniStageWorker:
                 yield {"error": str(e), "finished": True}
                 return
 
-            if len(stage_list) != len(
-                self._engine_input_source or stage_connector_refs
-            ):
+            input_count = sum(
+                1 for item in stage_list if item.engine_outputs is not None
+            )
+            if input_count != len(self._engine_input_source or stage_connector_refs):
                 logger.warning(
                     "Stage %d: expected %d stage inputs, got %d",
                     self.stage_id,
                     len(self._engine_input_source or stage_connector_refs),
-                    len(stage_list),
+                    input_count,
                 )
 
             if self._processor is not None:
@@ -139,10 +145,17 @@ class OmniStageWorker:
                 self._output_modalities,
                 self._default_video_fps,
                 tokenizer_getter=self.engine.get_tokenizer,
+                input_preprocessor_getter=getattr(
+                    self.engine, "get_input_preprocessor", None
+                ),
             )
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
             sampling_params_list_override = parsed["sampling_params_list"]
+            request_output_modalities = parsed["output_modalities"]
+            router_consumes_stage_output = stage_satisfies_request(
+                self.stage_config, parsed["request_type"], request
+            )
         else:
             # Direct frontend → stage (single-stage, no router).
             prompt = request
@@ -155,11 +168,17 @@ class OmniStageWorker:
         )
 
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
+        engine_output_modalities = _engine_output_modalities_for_stage(
+            self.stage_config, request_output_modalities
+        )
         last_result = None
 
         try:
             async for chunk in self.engine.generate(
-                prompt, request_id=request_id, sampling_params_list=sp
+                prompt,
+                request_id=request_id,
+                sampling_params_list=sp,
+                output_modalities=engine_output_modalities,
             ):
                 last_result = chunk
         except Exception as e:
@@ -173,6 +192,8 @@ class OmniStageWorker:
             yield {"error": str(e), "finished": True}
             return
 
+        _ensure_cumulative_token_ids(last_result)
+
         # --- Write output ---
         # Check for a downstream connector first, regardless of final_output.
         # In vllm-omni's native mode, multiple stages can set final_output=True
@@ -181,7 +202,7 @@ class OmniStageWorker:
         # determines whether output should go to a connector or to SHM.
         from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
         connector = self.connectors.get((from_s, to_s))
-        if connector is not None:
+        if connector is not None and not router_consumes_stage_output:
             try:
                 ok, _, metadata = connector.put(  # type: ignore[arg-type]
                     from_s, to_s, request_id, last_result
@@ -209,6 +230,8 @@ class OmniStageWorker:
             }
             if sampling_params_list_override is not None:
                 out["sampling_params_list"] = sampling_params_list_override
+            if request_output_modalities is not None:
+                out["output_modalities"] = request_output_modalities
             yield out
             return
 
@@ -282,11 +305,12 @@ class OmniStageWorker:
         """Fetch previous stage outputs from connectors for the processor/engine.
 
         Fetches only the stages listed in engine_input_source (or all refs if empty).
-        Returns _Proxy objects in engine_input_source order.
+        Returns a sparse list indexed by original stage id because vLLM-Omni
+        processors dereference stage_list[stage_id].
         Raises RuntimeError on any failure so the caller can propagate it as an error chunk.
         """
         sources = self._engine_input_source or sorted(stage_connector_refs.keys())
-        stage_list = []
+        stage_list = [_Proxy() for _ in range(max(sources, default=-1) + 1)]
         for stage_k in sources:
             if (meta_k := stage_connector_refs.get(stage_k)) is None:
                 raise RuntimeError(
@@ -316,7 +340,8 @@ class OmniStageWorker:
                 if isinstance(payload_data, dict)
                 else payload_data
             )
-            stage_list.append(_Proxy(engine_outputs=[engine_inputs]))
+            _ensure_cumulative_token_ids(engine_inputs)
+            stage_list[stage_k] = _Proxy(engine_outputs=[engine_inputs])
         return stage_list
 
 
@@ -418,8 +443,33 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
+def _ensure_cumulative_token_ids(result: Any) -> None:
+    """Bridge vLLM 0.20 CompletionOutput into vLLM-Omni rc1 stage processors."""
+    for output in getattr(result, "outputs", []) or []:
+        if not hasattr(output, "cumulative_token_ids") and hasattr(output, "token_ids"):
+            output.cumulative_token_ids = list(output.token_ids)
+
+
+def _engine_output_modalities_for_stage(
+    stage_config: Any, request_output_modalities: list[str] | None
+) -> list[str] | None:
+    """Return only modalities valid for this worker's single-stage Omni engine."""
+    if not request_output_modalities or not getattr(
+        stage_config, "final_output", False
+    ):
+        return None
+
+    final_output_type = str(getattr(stage_config, "final_output_type", "")).lower()
+    requested = {str(modality).lower() for modality in request_output_modalities}
+    if final_output_type and final_output_type in requested:
+        return [final_output_type]
+    return None
+
+
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
     """Create AsyncOmni with a single-stage YAML."""
+    from vllm_omni.entrypoints.async_omni import AsyncOmni
+
     single_stage_config = {
         "stage_args": [_stage_config_to_dict(stage_config, stage_type)],
         "runtime": {"edges": []},

@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dyn2581-qwen3-omni-v020rc1
+  namespace: ptarasiewicz-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dyn2581-qwen3-omni-v020rc1
+  template:
+    metadata:
+      labels:
+        app: dyn2581-qwen3-omni-v020rc1
+    spec:
+      imagePullSecrets:
+      - name: nvcr-imagepullsecret
+      containers:
+      - name: vllm-omni
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        args:
+        - |
+          set -euo pipefail
+          python3 -m pip install --no-deps --force-reinstall git+https://github.com/vllm-project/vllm-omni.git@v0.20.0rc1
+          python3 - <<'PY'
+          import importlib.metadata as im
+          import vllm
+
+          print(f"vllm {vllm.__version__}", flush=True)
+          print(f"vllm-omni {im.version('vllm-omni')}", flush=True)
+          print(f"ai-dynamo {im.version('ai-dynamo')}", flush=True)
+          PY
+          exec /opt/dynamo/venv/bin/vllm-omni serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8000 --trust-remote-code
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+        env:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: FLASHINFER_DISABLE_VERSION_CHECK
+          value: "1"
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        resources:
+          requests:
+            memory: 200Gi
+            nvidia.com/gpu: "2"
+          limits:
+            memory: 300Gi
+            nvidia.com/gpu: "2"
+        volumeMounts:
+        - mountPath: /home/dynamo/.cache/huggingface
+          name: model-cache
+        - mountPath: /dev/shm
+          name: dshm
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 0
+        runAsUser: 1000
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+        name: dshm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dyn2581-qwen3-omni-v020rc1
+  namespace: ptarasiewicz-test
+spec:
+  selector:
+    app: dyn2581-qwen3-omni-v020rc1
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP

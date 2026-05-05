@@ -19,10 +19,9 @@ HTTP endpoint.
 1. Dynamo Platform installed — see [Kubernetes Deployment Guide](../../../../docs/kubernetes/README.md).
 2. Pre-existing `model-cache` and `compilation-cache` PVCs.
 3. `hf-token-secret` Secret in the target namespace.
-4. `nvcr-imagepullsecret` Secret to pull from `nvcr.io/nvstaging` (the nightly
-   Dynamo runtime — `nvcr.io/nvstaging/ai-dynamo/vllm-runtime:nightly-<YYYYMMDD>-<sha>`).
-   The cluster cannot reach `gitlab-master.nvidia.com` (NVIDIA-internal DNS), so
-   we rely on the NGC nvstaging mirror that the team's release pipeline pushes.
+4. `nvcr-imagepullsecret` Secret to pull the Dynamo vLLM runtime image used by
+   `deploy.yaml`: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2`.
+   The worker installs `vllm-omni` from the pinned `v0.20.0rc1` tag at startup.
 
 ```bash
 export NAMESPACE=your-namespace

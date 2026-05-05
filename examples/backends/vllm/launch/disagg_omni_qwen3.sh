@@ -59,7 +59,7 @@ CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8081 \
     --model "$MODEL" \
     --stage-id 0 \
     --stage-configs-path "$STAGE_CONFIG" \
-    --output-modalities text,audio \
+    --output-modalities text audio \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
     "${EXTRA_ARGS[@]}" &
@@ -72,7 +72,7 @@ CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8082 \
     --model "$MODEL" \
     --stage-id 1 \
     --stage-configs-path "$STAGE_CONFIG" \
-    --output-modalities text,audio \
+    --output-modalities text audio \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
     "${EXTRA_ARGS[@]}" &
@@ -85,7 +85,7 @@ CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8083 \
     --model "$MODEL" \
     --stage-id 2 \
     --stage-configs-path "$STAGE_CONFIG" \
-    --output-modalities text,audio \
+    --output-modalities text audio \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
     "${EXTRA_ARGS[@]}" &
@@ -98,7 +98,7 @@ DYN_SYSTEM_PORT=8084 \
     --model "$MODEL" \
     --omni-router \
     --stage-configs-path "$STAGE_CONFIG" \
-    --output-modalities text,audio \
+    --output-modalities text audio \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
     "${EXTRA_ARGS[@]}" &

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from pydantic import BaseModel
 
@@ -59,7 +59,7 @@ def get_output_modalities(cli_input: List[str], model_repo: str) -> Optional[Mod
     """
     # For now, we ignore model repo and just use cli input to determine output modalities.
     output_modalities = None
-    for name in cli_input:
+    for name in normalize_output_modalities(cli_input):
         modality = OutputModality.from_name(name)
         for flag in modality.value:
             output_modalities = (
@@ -68,31 +68,69 @@ def get_output_modalities(cli_input: List[str], model_repo: str) -> Optional[Mod
     return output_modalities
 
 
+def normalize_output_modalities(cli_input: Iterable[str] | None) -> List[str]:
+    """Normalize modality tokens from CLI/env input.
+
+    ``--output-modalities`` uses ``nargs="*"`` for shell-friendly invocations
+    such as ``--output-modalities text audio``. The environment variable and
+    older launchers can still arrive as a single comma-separated token. Split
+    both forms into the canonical lowercase list while preserving user order.
+    """
+    if not cli_input:
+        return []
+
+    normalized: list[str] = []
+    for raw in cli_input:
+        for part in str(raw).split(","):
+            token = part.strip().lower()
+            if token:
+                normalized.append(token)
+    return normalized
+
+
 def parse_request_type(
     raw_request: Dict[str, Any],
     output_modalities: List[str],
 ) -> Tuple[Union[BaseModel, Dict[str, Any]], RequestType]:
     """
-    Classify the endpoint based on the output modality and serialize the request if necessary.
+    Classify an OpenAI request by payload shape and enabled output modalities.
 
-    Assumption: Right now we only consider user passes only one modality at a time.
+    Omni workers can enable multiple modalities behind one Dynamo endpoint.
+    In that mode the endpoint payload, not the first configured modality, is
+    the only reliable discriminator: chat requests contain ``messages``, TTS
+    requests contain ``input``, and image/video generation requests contain a
+    top-level ``prompt`` with modality-specific fields.
     """
-    # Fetch the first output modality from the list.
-    if not output_modalities:
+    modality_names = normalize_output_modalities(output_modalities)
+    if not modality_names:
         raise ValueError("output_modalities must not be empty")
-    output_modality = output_modalities[0]
-    modality = OutputModality.from_name(output_modality)
 
-    if modality is OutputModality.IMAGE:
-        if "messages" in raw_request:
-            return raw_request, RequestType.CHAT_COMPLETION
-        return NvCreateImageRequest(**raw_request), RequestType.IMAGE_GENERATION
+    modalities = {OutputModality.from_name(name) for name in modality_names}
 
-    if modality is OutputModality.VIDEO:
-        return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
+    if "messages" in raw_request:
+        return raw_request, RequestType.CHAT_COMPLETION
 
-    if modality is OutputModality.AUDIO:
+    if OutputModality.AUDIO in modalities and "input" in raw_request:
         return NvCreateAudioSpeechRequest(**raw_request), RequestType.AUDIO_GENERATION
 
-    # Text Modality
+    if OutputModality.VIDEO in modalities and (
+        OutputModality.IMAGE not in modalities or _looks_like_video_request(raw_request)
+    ):
+        return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
+
+    if OutputModality.IMAGE in modalities:
+        return NvCreateImageRequest(**raw_request), RequestType.IMAGE_GENERATION
+
     return raw_request, RequestType.CHAT_COMPLETION
+
+
+def _looks_like_video_request(raw_request: Dict[str, Any]) -> bool:
+    """Return True for fields that only video generation requests use."""
+    if any(key in raw_request for key in ("seconds", "output_format", "stream")):
+        return True
+
+    nvext = raw_request.get("nvext") or {}
+    return isinstance(nvext, dict) and any(
+        key in nvext
+        for key in ("fps", "num_frames", "boundary_ratio", "guidance_scale_2")
+    )

@@ -1,144 +1,88 @@
 # Qwen3-Omni Benchmark Results (DYN-2581)
 
-Per-cell AIPerf results from `run_sweep.sh`. Topologies compared: vllm_serve.
+Fresh pure `vllm-omni serve` baseline results only. Older AIPerf text-only
+tables were removed to keep this file scoped to the current DYN-2581
+mixed-modality experiment.
 
-## chat — prompt=long
+## Mixed-Modality E2E — `vllm-omni serve` v0.20.0rc1
 
-### TTFT (ms)
+Run date: 2026-05-04
 
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 84.8 | 89.1 | 91.3 | 116.4 |
-| 4 | 112.9 | 105.0 | 158.0 | 181.1 |
-| 8 | 111.5 | 105.4 | 189.2 | 225.7 |
-| 16 | 97.0 | 82.2 | 166.3 | 240.7 |
-| 32 | 134.4 | 117.5 | 161.8 | 573.6 |
-| 64 | 366.6 | 324.2 | 587.5 | 781.1 |
-| 128 | 1,456 | 1,415 | 2,318 | 3,061 |
-| 256 | 3,202 | 1,897 | 8,175 | 10,770 |
+Environment:
 
-### ITL (ms)
+| Field | Value |
+|---|---|
+| Cluster context | `nv-prd-dgxc.teleport.sh-dynamo-nebius-2` |
+| Namespace | `ptarasiewicz-test` |
+| 2-GPU node | `computeinstance-e01sbamysmcch7djdn` |
+| 3-GPU node | `computeinstance-e01dckvphr0q1xphw5` |
+| GPU node type | Nebius `gpu-h200-sxm`, `nvidia.com/gpu.product=NVIDIA-H200` |
+| 2-GPU deployment | `dyn2581-qwen3-omni-v020rc1` |
+| 3-GPU deployment | `dyn2581-qwen3-omni-v020rc1-3gpu` |
+| Image | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` |
+| Image digest | `nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:ecab3c0b376bda94748c30ca980063580a0154647c4b0495f3d76f6667589815` |
+| Runtime versions | `vllm 0.20.0`, `vllm-omni 0.20.0rc1`, `ai-dynamo 1.2.0` |
+| `vllm-omni` source | `git+https://github.com/vllm-project/vllm-omni.git@v0.20.0rc1` (`704b6bb6e6315bb500f9418a8d53c079fc21017f`) |
+| Model | `Qwen/Qwen3-Omni-30B-A3B-Instruct` |
+| Serving stack | Pure `vllm-omni serve`; Dynamo container is used only as the runtime image |
+| 3-GPU stage placement | Stage 0 thinker on GPU 0, stage 1 talker on GPU 1, stage 2 code2wav on GPU 2 |
 
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 4.555 | 4.581 | 4.775 | 4.950 |
-| 4 | 6.073 | 6.080 | 6.428 | 6.709 |
-| 8 | 7.323 | 7.319 | 7.712 | 8.039 |
-| 16 | 8.852 | 8.854 | 9.300 | 9.892 |
-| 32 | 10.6 | 10.5 | 11.1 | 12.0 |
-| 64 | 14.7 | 15.1 | 16.7 | 19.0 |
-| 128 | 23.4 | 25.1 | 31.2 | 37.4 |
-| 256 | 34.3 | 30.4 | 65.9 | 71.5 |
+Request shape:
 
-### E2E (ms)
+- Inputs: text + image URL + audio URL + video URL in one `/v1/chat/completions` request.
+- Outputs: `modalities=["text","audio"]` for the sweep rows below.
+- 2-GPU client: `benchmarks/omni/qwen3/run_mixed_modalities.py` through a local `kubectl port-forward`.
+- 3-GPU client: same driver copied into the serving pod and run through `kubectl exec` against `http://127.0.0.1:8000` to remove local port-forward instability from the measurements.
+- 2-GPU artifacts: `benchmarks/omni/qwen3/results/v020rc1_vllm_serve/`.
+- 3-GPU artifacts: `benchmarks/omni/qwen3/results/v020rc1_vllm_serve_3gpu/`.
 
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 716.4 | 720.4 | 722.8 | 754.3 |
-| 4 | 951.2 | 948.4 | 1,002 | 1,039 |
-| 8 | 1,125 | 1,118 | 1,189 | 1,221 |
-| 16 | 1,317 | 1,307 | 1,404 | 1,455 |
-| 32 | 1,593 | 1,578 | 1,621 | 1,983 |
-| 64 | 2,399 | 2,399 | 2,577 | 2,968 |
-| 128 | 4,690 | 4,859 | 5,291 | 5,798 |
-| 256 | 7,934 | 7,892 | 10,541 | 12,736 |
+### Text + Audio Output — 2 GPUs
 
-### Out Tok/s
+| Concurrency | Requests | HTTP 200 | Full text+audio | Req/s | Full req/s | Avg E2E (ms) | p50 E2E (ms) | p90 E2E (ms) | p99 E2E (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 3 | 3 | 3 | 0.264 | 0.264 | 3,789 | 4,035 | 4,203 | 4,240 |
+| 4 | 8 | 8 | 8 | 0.712 | 0.712 | 5,507 | 5,556 | 6,433 | 6,647 |
+| 8 | 16 | 16 | 16 | 0.941 | 0.941 | 8,335 | 8,351 | 9,054 | 9,312 |
+| 16 | 32 | 32 | 32 | 1.107 | 1.107 | 13,628 | 12,739 | 20,298 | 21,097 |
+| 32 | 32 | 32 | 32 | 1.545 | 1.545 | 18,559 | 19,588 | 20,253 | 20,674 |
+| 64 | 64 | 64 | 64 | 1.786 | 1.786 | 33,260 | 34,377 | 35,421 | 35,810 |
+| 128 | 128 | 128 | 124 | 2.277 | 2.205 | 45,729 | 47,215 | 55,018 | 55,856 |
+| 256 | 256 | 256 | 252 | 2.516 | 2.476 | 72,986 | 75,667 | 98,729 | 100,866 |
+| 512 | 512 | 512 | 511 | 2.460 | 2.455 | 135,625 | 143,882 | 201,828 | 207,431 |
 
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 194.9 | — | — | — |
-| 4 | 584.7 | — | — | — |
-| 8 | 989.5 | — | — | — |
-| 16 | 1,685 | — | — | — |
-| 32 | 2,786 | — | — | — |
-| 64 | 3,701 | — | — | — |
-| 128 | 3,747 | — | — | — |
-| 256 | 3,506 | — | — | — |
+### Text + Audio Output — 3 GPUs
 
-### Req/s
+The 3-GPU deployment uses
+[`k8s/vllm_serve_v020rc1_3gpu.yaml`](k8s/vllm_serve_v020rc1_3gpu.yaml),
+which passes a custom `--stage-configs-path` so the three Qwen3-Omni stages
+are placed on separate GPUs.
 
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 1.393 | — | — | — |
-| 4 | 4.185 | — | — | — |
-| 8 | 7.078 | — | — | — |
-| 16 | 12.1 | — | — | — |
-| 32 | 20.0 | — | — | — |
-| 64 | 26.6 | — | — | — |
-| 128 | 26.8 | — | — | — |
-| 256 | 25.2 | — | — | — |
+| Concurrency | Requests | HTTP 200 | Full text+audio | Req/s | Full req/s | Avg E2E (ms) | p50 E2E (ms) | p90 E2E (ms) | p99 E2E (ms) | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 3 | 3 | 3 | 0.242 | 0.242 | 4,122 | 4,114 | 4,238 | 4,266 |  |
+| 4 | 8 | 8 | 8 | 0.479 | 0.479 | 8,199 | 8,341 | 9,086 | 9,161 |  |
+| 8 | 16 | 16 | 16 | 0.380 | 0.380 | 20,718 | 21,042 | 28,299 | 28,388 |  |
+| 16 | 32 | 32 | 32 | 0.419 | 0.419 | 37,770 | 37,911 | 38,516 | 39,381 |  |
+| 32 | 32 | 32 | 32 | 0.334 | 0.334 | 94,358 | 94,677 | 95,533 | 95,853 |  |
+| 48 | 48 | 0 | 0 | 0.000 | 0.000 | - | - | - | - | Stalled after stage-0 admission; all GPUs idle; client killed |
+| 64 | 64 | 0 | 0 | 0.000 | 0.000 | - | - | - | - | Stalled after stage-0 admission; all GPUs idle; client killed |
 
+Smoke checks:
 
-## chat — prompt=short
+| Modalities | Concurrency | Requests | Successes | Req/s | p50 E2E (ms) | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| `text` | 1 | 1 | 1 | 0.226 | 4,421 | Same mixed inputs, text-only output |
+| `text,audio` | 1 | 1 | 1 | 0.192 | 5,202 | Returned 762,820 base64 audio chars |
 
-### TTFT (ms)
+Current read: on the 2-GPU pure `vllm-omni serve` baseline, raw HTTP
+throughput peaks at concurrency 256 for this request shape, at 2.516 req/s.
+The practical knee is lower: throughput gains flatten after c128/c256 while
+p50 latency rises from ~47.2s at c128 to ~75.7s at c256 and ~143.9s at c512.
+A few high-concurrency HTTP-200 responses returned audio without a text choice,
+so `Full text+audio` is tracked separately from HTTP success.
 
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 63.6 | 63.5 | 64.6 | 65.4 |
-| 4 | 119.4 | 78.1 | 241.9 | 335.8 |
-| 8 | 103.9 | 100.4 | 121.9 | 186.5 |
-| 16 | 107.0 | 112.2 | 126.9 | 272.2 |
-| 32 | 113.1 | 113.1 | 131.8 | 274.2 |
-| 64 | 315.1 | 289.7 | 494.8 | 792.2 |
-| 128 | 1,469 | 1,226 | 2,704 | 3,200 |
-| 256 | 3,947 | 3,114 | 7,886 | 12,689 |
-
-### ITL (ms)
-
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 4.504 | 4.527 | 4.729 | 4.947 |
-| 4 | 6.202 | 6.154 | 6.756 | 7.653 |
-| 8 | 7.211 | 7.219 | 7.705 | 8.014 |
-| 16 | 8.798 | 8.802 | 9.328 | 9.677 |
-| 32 | 10.3 | 10.3 | 10.8 | 11.3 |
-| 64 | 14.9 | 15.5 | 16.7 | 17.6 |
-| 128 | 23.4 | 25.6 | 31.7 | 34.6 |
-| 256 | 27.3 | 28.3 | 43.0 | 46.6 |
-
-### E2E (ms)
-
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 690.0 | 689.7 | 692.2 | 693.9 |
-| 4 | 971.9 | 922.1 | 1,116 | 1,408 |
-| 8 | 1,105 | 1,105 | 1,129 | 1,218 |
-| 16 | 1,327 | 1,329 | 1,355 | 1,505 |
-| 32 | 1,527 | 1,524 | 1,552 | 1,661 |
-| 64 | 2,365 | 2,407 | 2,517 | 2,639 |
-| 128 | 4,691 | 4,904 | 5,112 | 5,315 |
-| 256 | 7,716 | 7,381 | 11,601 | 13,692 |
-
-### Out Tok/s
-
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 202.9 | — | — | — |
-| 4 | 568.2 | — | — | — |
-| 8 | 1,006 | — | — | — |
-| 16 | 1,683 | — | — | — |
-| 32 | 2,905 | — | — | — |
-| 64 | 3,752 | — | — | — |
-| 128 | 3,713 | — | — | — |
-| 256 | 3,545 | — | — | — |
-
-### Req/s
-
-| Concurrency | vllm_serve avg | vllm_serve p50 | vllm_serve p90 | vllm_serve p99 |
-|---|---|---|---|---|
-| 1 | 1.446 | — | — | — |
-| 4 | 4.097 | — | — | — |
-| 8 | 7.171 | — | — | — |
-| 16 | 12.0 | — | — | — |
-| 32 | 20.9 | — | — | — |
-| 64 | 27.0 | — | — | — |
-| 128 | 26.7 | — | — | — |
-| 256 | 25.5 | — | — | — |
-
-
-## Summary
-
-_Recommendation paragraph: which (workload, concurrency, prompt-len) regimes favor disagg, where vllm-serve still wins. Fill in once the full sweep completes._
-
+The 3-GPU split did not improve this e2e workload. Its best completed point is
+c4 at 0.479 req/s, and throughput falls at c8/c16/c32. Both c48 and c64 stalled
+after requests were admitted to stage 0, with no stage progress and idle GPUs;
+the benchmark client was killed and the server logged request aborts. Because
+c48/c64 stall, c128+ was not run for this topology.

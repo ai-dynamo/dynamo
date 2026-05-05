@@ -24,7 +24,7 @@ from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.stage_worker import _resolve_model_type
 from dynamo.vllm.omni.types import StageOutput
-from dynamo.vllm.omni.utils import shm_deserialize
+from dynamo.vllm.omni.utils import shm_deserialize, stage_satisfies_request
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ class OmniStageRouter:
             if stage_outputs[-1].error:
                 yield {"error": stage_outputs[-1].error, "finished": True}
                 return
+            if stage_satisfies_request(stage_cfg, request_type, request):
+                break
 
         final = stage_outputs[-1]
         if not final.shm_meta:

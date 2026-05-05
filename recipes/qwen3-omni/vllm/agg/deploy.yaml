@@ -22,9 +22,9 @@ spec:
           value: /home/dynamo/.cache/huggingface
       extraPodSpec:
         imagePullSecrets:
-          - name: nvcr-dynamo-dev-pullsecret
+          - name: nvcr-imagepullsecret
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           workingDir: /workspace
           command:
             - python3
@@ -43,7 +43,7 @@ spec:
         useAsCompilationCache: true
       extraPodSpec:
         imagePullSecrets:
-          - name: nvcr-dynamo-dev-pullsecret
+          - name: nvcr-imagepullsecret
         # See vllm-serve/deploy.yaml — fsGroup=1000 unbreaks HF cache writes
         # to the freshly-provisioned model-cache PVC (default owned by root).
         securityContext:
@@ -52,18 +52,26 @@ spec:
           fsGroup: 1000
         mainContainer:
           args:
-          - --model
-          - Qwen/Qwen3-Omni-30B-A3B-Instruct
-          - --output-modalities
-          - text,audio
-          - --media-output-fs-url
-          - file:///tmp/dynamo_media
-          - --trust-remote-code
+          - |
+            set -euo pipefail
+            python3 -m pip install --no-deps --force-reinstall git+https://github.com/vllm-project/vllm-omni.git@v0.20.0rc1
+            python3 - <<'PY'
+            import importlib.metadata as im
+            import vllm
+
+            print(f"vllm {vllm.__version__}", flush=True)
+            print(f"vllm-omni {im.version('vllm-omni')}", flush=True)
+            print(f"ai-dynamo {im.version('ai-dynamo')}", flush=True)
+            PY
+            exec python3 -m dynamo.vllm.omni \
+              --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
+              --output-modalities text audio \
+              --media-output-fs-url file:///tmp/dynamo_media \
+              --trust-remote-code
           command:
-          - python3
-          - -m
-          - dynamo.vllm.omni
-          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
+          - bash
+          - -lc
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"

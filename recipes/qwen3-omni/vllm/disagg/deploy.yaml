@@ -143,10 +143,20 @@ data:
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
     export HF_HOME=/home/dynamo/.cache/huggingface
 
+    python3 -m pip install --no-deps --force-reinstall git+https://github.com/vllm-project/vllm-omni.git@v0.20.0rc1
+    python3 - <<'PY'
+    import importlib.metadata as im
+    import vllm
+
+    print(f"vllm {vllm.__version__}", flush=True)
+    print(f"vllm-omni {im.version('vllm-omni')}", flush=True)
+    print(f"ai-dynamo {im.version('ai-dynamo')}", flush=True)
+    PY
+
     OMNI_FLAGS=(
       --model "$MODEL"
       --stage-configs-path "$STAGE_CONFIG"
-      --output-modalities text,audio
+      --output-modalities text audio
       --media-output-fs-url file:///tmp/dynamo_media
       --trust-remote-code
     )
@@ -201,7 +211,7 @@ spec:
         app: disagg-qwen3-omni
     spec:
       imagePullSecrets:
-        - name: nvcr-dynamo-dev-pullsecret
+        - name: nvcr-imagepullsecret
       # See vllm-serve/deploy.yaml for rationale — same PVC-ownership story.
       securityContext:
         runAsUser: 1000
@@ -209,7 +219,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: omni-disagg
-          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           command: ["bash", "/etc/dynamo/launcher/launch.sh"]
           ports:
             - containerPort: 8000

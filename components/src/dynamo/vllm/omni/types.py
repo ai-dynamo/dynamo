@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Protocol types for disaggregated omni stage workers and connectors.
-"""
+"""Protocol types for disaggregated omni stage workers and connectors."""
 
 import dataclasses
 import logging
@@ -27,11 +26,16 @@ class StageEngine(Protocol):
         request_id: str = "",
         *,
         sampling_params_list: Any = None,
+        output_modalities: list[str] | None = None,
     ) -> AsyncGenerator[Any, None]:
         ...
 
     def get_tokenizer(self) -> Any:
         """Return the tokenizer (may be async — callers should await)."""
+        ...
+
+    def get_input_preprocessor(self) -> Any:
+        """Return the vLLM input preprocessor for renderer-based chat parsing."""
         ...
 
 
@@ -54,6 +58,7 @@ class StageOutput(BaseModel):
                 "original_prompt",
                 "stage_connector_refs",
                 "sampling_params_list",
+                "output_modalities",
                 "finished",
                 "error",
             }
@@ -78,6 +83,7 @@ class StageOutput(BaseModel):
     # Keys arrive as strings from JSON; workers normalize them to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
+    output_modalities: list[str] | None = None
     finished: bool | None = None
     error: str | None = None
 
@@ -87,7 +93,12 @@ class StageOutput(BaseModel):
         shm_meta is intentionally excluded — it is final-stage → router only.
         """
         fields = self.model_dump(
-            include={"original_prompt", "stage_connector_refs", "sampling_params_list"},
+            include={
+                "original_prompt",
+                "stage_connector_refs",
+                "sampling_params_list",
+                "output_modalities",
+            },
             exclude_none=True,
         )
         fields["request_id"] = request_id
@@ -112,6 +123,7 @@ class StageRequest(BaseModel):
     # StageOutput.stage_connector_refs). Callers normalize string keys to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
+    output_modalities: list[str] | None = None
 
 
 def _int_keyed(d: dict | None) -> dict[int, Any]:

@@ -44,10 +44,14 @@ class _StageClient:
         return _gen()
 
 
-def _make_stage_cfg(stage_id: int):
-    return SimpleNamespace(
+def _make_stage_cfg(stage_id: int, **overrides):
+    defaults = dict(
         stage_id=stage_id,
         engine_args=SimpleNamespace(model_stage=f"stage{stage_id}"),
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(
+        **defaults,
     )
 
 
@@ -197,6 +201,103 @@ async def test_generate_stage_error_stops_pipeline():
 
     assert chunks == [{"error": "thinker exploded", "finished": True}]
     assert not stage1_called
+
+
+@pytest.mark.asyncio
+async def test_generate_text_chat_stops_at_text_stage():
+    """Text-only chat requests must not be forwarded into audio-only stages."""
+    stage1_called = False
+    fake_result = SimpleNamespace(final_output_type="text")
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"choices": [{"message": {"content": "hi"}}]}
+
+    async def stage0_handler(request):
+        return {"shm_meta": {"text": "meta"}, "finished": True}
+
+    async def stage1_handler(request):
+        nonlocal stage1_called
+        stage1_called = True
+        return {"shm_meta": {"audio": "meta"}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[
+            _make_stage_cfg(0, final_output=True, final_output_type="text"),
+            _make_stage_cfg(1, final_output=True, final_output_type="audio"),
+        ],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
+    request = {"messages": [{"role": "user", "content": "hello"}]}
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, RequestType.CHAT_COMPLETION),
+    ):
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-text"):
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=fake_result
+            ):
+                chunks = [c async for c in router.generate(request, None)]
+
+    assert chunks == [{"choices": [{"message": {"content": "hi"}}]}]
+    assert not stage1_called
+    mock_formatter.format.assert_awaited_once_with(
+        fake_result, "req-text", request_type=RequestType.CHAT_COMPLETION
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_audio_chat_continues_to_audio_stage():
+    """Chat requests that ask for audio output continue past the text stage."""
+    stage1_received = {}
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"audio": "ok"}
+
+    async def stage0_handler(request):
+        return {
+            "original_prompt": {"prompt": "hello"},
+            "stage_connector_refs": {"0": {"name": "ref0"}},
+            "finished": True,
+        }
+
+    async def stage1_handler(request):
+        stage1_received.update(request)
+        return {"shm_meta": {"audio": "meta"}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[
+            _make_stage_cfg(0, final_output=True, final_output_type="text"),
+            _make_stage_cfg(1, final_output=True, final_output_type="audio"),
+        ],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
+    request = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["text", "audio"],
+    }
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, RequestType.CHAT_COMPLETION),
+    ):
+        with patch(
+            "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-audio"
+        ):
+            with patch.object(
+                stage_router, "shm_deserialize", return_value=SimpleNamespace()
+            ):
+                chunks = [c async for c in router.generate(request, None)]
+
+    assert chunks == [{"audio": "ok"}]
+    assert stage1_received["stage_connector_refs"] == {"0": {"name": "ref0"}}
+    assert stage1_received["request_id"] == "req-audio"
 
 
 # ── existing tests (formatting + error paths) ────────────

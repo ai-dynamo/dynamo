@@ -50,7 +50,7 @@ echo "Starting Aggregated Omni worker..."
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
-    --output-modalities text,audio \
+    --output-modalities text audio \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
     "${EXTRA_ARGS[@]}" &

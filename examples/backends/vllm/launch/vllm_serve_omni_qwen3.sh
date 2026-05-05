@@ -53,7 +53,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 # OpenAI-compatible endpoints (/v1/chat/completions, /v1/audio/speech, ...).
 exec vllm-omni serve \
     "$MODEL" \
+    --omni \
     --port "$PORT" \
-    --output-modalities text,audio \
     --trust-remote-code \
     "${EXTRA_ARGS[@]}"

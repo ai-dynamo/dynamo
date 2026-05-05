@@ -1,0 +1,216 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dyn2581-qwen3-omni-3gpu-stage-config
+  namespace: ptarasiewicz-test
+data:
+  qwen3_omni_moe_3gpu.yaml: |
+    async_chunk: false
+    stage_args:
+      - stage_id: 0
+        stage_type: llm
+        runtime:
+          devices: "0"
+        engine_args:
+          model_stage: thinker
+          max_num_seqs: 64
+          model_arch: Qwen3OmniMoeForConditionalGeneration
+          worker_type: ar
+          scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+          gpu_memory_utilization: 0.9
+          enforce_eager: false
+          trust_remote_code: true
+          engine_output_type: latent
+          distributed_executor_backend: "mp"
+          enable_prefix_caching: false
+          max_num_batched_tokens: 32768
+          hf_config_name: thinker_config
+          tensor_parallel_size: 1
+        final_output: true
+        final_output_type: text
+        is_comprehension: true
+        default_sampling_params:
+          temperature: 0.4
+          top_p: 0.9
+          top_k: 1
+          max_tokens: 2048
+          seed: 42
+          detokenize: True
+          repetition_penalty: 1.05
+
+      - stage_id: 1
+        stage_type: llm
+        runtime:
+          devices: "1"
+        engine_args:
+          model_stage: talker
+          max_num_seqs: 64
+          model_arch: Qwen3OmniMoeForConditionalGeneration
+          worker_type: ar
+          scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+          gpu_memory_utilization: 0.6
+          enforce_eager: false
+          trust_remote_code: true
+          engine_output_type: latent
+          enable_prefix_caching: false
+          max_num_batched_tokens: 32768
+          distributed_executor_backend: "mp"
+          hf_config_name: talker_config
+          tensor_parallel_size: 1
+        engine_input_source: [0]
+        custom_process_input_func: vllm_omni.model_executor.stage_input_processors.qwen3_omni.thinker2talker
+        default_sampling_params:
+          temperature: 0.9
+          top_k: 50
+          max_tokens: 4096
+          seed: 42
+          detokenize: False
+          repetition_penalty: 1.05
+          stop_token_ids: [2150]
+
+      - stage_id: 2
+        stage_type: llm
+        runtime:
+          devices: "2"
+        engine_args:
+          model_stage: code2wav
+          max_num_seqs: 32
+          model_arch: Qwen3OmniMoeForConditionalGeneration
+          worker_type: generation
+          scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
+          enforce_eager: true
+          trust_remote_code: true
+          async_scheduling: false
+          enable_prefix_caching: false
+          engine_output_type: audio
+          gpu_memory_utilization: 0.1
+          distributed_executor_backend: "mp"
+          max_num_batched_tokens: 1000000
+          hf_config_name: thinker_config
+          tensor_parallel_size: 1
+        engine_input_source: [1]
+        custom_process_input_func: vllm_omni.model_executor.stage_input_processors.qwen3_omni.talker2code2wav
+        final_output: true
+        final_output_type: audio
+        default_sampling_params:
+          temperature: 0.0
+          top_p: 1.0
+          top_k: -1
+          max_tokens: 65536
+          seed: 42
+          detokenize: True
+          repetition_penalty: 1.1
+
+    runtime:
+      enabled: true
+      defaults:
+        window_size: -1
+        max_inflight: 1
+
+      edges:
+        - from: 0
+          to: 1
+          window_size: -1
+        - from: 1
+          to: 2
+          window_size: -1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dyn2581-qwen3-omni-v020rc1-3gpu
+  namespace: ptarasiewicz-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dyn2581-qwen3-omni-v020rc1-3gpu
+  template:
+    metadata:
+      labels:
+        app: dyn2581-qwen3-omni-v020rc1-3gpu
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H200
+      imagePullSecrets:
+      - name: nvcr-imagepullsecret
+      containers:
+      - name: vllm-omni
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        args:
+        - |
+          set -euo pipefail
+          python3 -m pip install --no-deps --force-reinstall git+https://github.com/vllm-project/vllm-omni.git@v0.20.0rc1
+          python3 - <<'PY'
+          import importlib.metadata as im
+          import vllm
+
+          print(f"vllm {vllm.__version__}", flush=True)
+          print(f"vllm-omni {im.version('vllm-omni')}", flush=True)
+          print(f"ai-dynamo {im.version('ai-dynamo')}", flush=True)
+          PY
+          exec /opt/dynamo/venv/bin/vllm-omni serve Qwen/Qwen3-Omni-30B-A3B-Instruct \
+            --omni \
+            --port 8000 \
+            --trust-remote-code \
+            --stage-configs-path /etc/vllm-omni/stage_configs/qwen3_omni_moe_3gpu.yaml
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+        env:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: FLASHINFER_DISABLE_VERSION_CHECK
+          value: "1"
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        resources:
+          requests:
+            memory: 260Gi
+            nvidia.com/gpu: "3"
+          limits:
+            memory: 380Gi
+            nvidia.com/gpu: "3"
+        volumeMounts:
+        - mountPath: /home/dynamo/.cache/huggingface
+          name: model-cache
+        - mountPath: /etc/vllm-omni/stage_configs
+          name: stage-config
+          readOnly: true
+        - mountPath: /dev/shm
+          name: dshm
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 0
+        runAsUser: 1000
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
+      - name: stage-config
+        configMap:
+          name: dyn2581-qwen3-omni-3gpu-stage-config
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+        name: dshm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dyn2581-qwen3-omni-v020rc1-3gpu
+  namespace: ptarasiewicz-test
+spec:
+  selector:
+    app: dyn2581-qwen3-omni-v020rc1-3gpu
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP

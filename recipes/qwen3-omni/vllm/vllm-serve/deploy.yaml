@@ -32,7 +32,7 @@ spec:
         app: vllm-serve-qwen3-omni
     spec:
       imagePullSecrets:
-        - name: nvcr-dynamo-dev-pullsecret
+        - name: nvcr-imagepullsecret
       # PVC is mounted RWX from a CSI provisioner that owns the directory as
       # root by default; fsGroup=1000 lets kubelet chown it to the dynamo user
       # (uid/gid 1000) on mount so HF model downloads don't hit PermissionError.
@@ -42,17 +42,28 @@ spec:
         fsGroup: 1000
       containers:
         - name: vllm-omni
-          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-vllm0.20-omni-tzhouam-rebase-714694f8
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
           command: ["bash", "-lc"]
           # NB: vllm-omni serve auto-discovers the model's modality stages from
           # the checkpoint and does NOT take --output-modalities (that flag is
           # dynamo.vllm.omni-only).
           args:
-            - >-
-              vllm-omni serve
-              Qwen/Qwen3-Omni-30B-A3B-Instruct
-              --port 8000
-              --trust-remote-code
+            - |
+              set -euo pipefail
+              python3 -m pip install --no-deps --force-reinstall git+https://github.com/vllm-project/vllm-omni.git@v0.20.0rc1
+              python3 - <<'PY'
+              import importlib.metadata as im
+              import vllm
+
+              print(f"vllm {vllm.__version__}", flush=True)
+              print(f"vllm-omni {im.version('vllm-omni')}", flush=True)
+              print(f"ai-dynamo {im.version('ai-dynamo')}", flush=True)
+              PY
+              exec /opt/dynamo/venv/bin/vllm-omni serve \
+                Qwen/Qwen3-Omni-30B-A3B-Instruct \
+                --omni \
+                --port 8000 \
+                --trust-remote-code
           env:
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface

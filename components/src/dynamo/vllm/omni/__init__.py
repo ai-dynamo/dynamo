@@ -3,7 +3,16 @@
 
 """vLLM-Omni integration for Dynamo."""
 
-from .base_handler import BaseOmniHandler
-from .omni_handler import OmniHandler
-
 __all__ = ["BaseOmniHandler", "OmniHandler"]
+
+
+def __getattr__(name: str):
+    if name == "BaseOmniHandler":
+        from .base_handler import BaseOmniHandler
+
+        return BaseOmniHandler
+    if name == "OmniHandler":
+        from .omni_handler import OmniHandler
+
+        return OmniHandler
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
