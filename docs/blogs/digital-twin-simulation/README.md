@@ -56,7 +56,7 @@ not a caveat. The point is to replay the traffic shape we care about, compare
 system designs under the same workload, and reduce a large search space to a few
 strong candidates for real cluster validation.
 
-## 1. Architecture: Composing Dynamo In Simulation
+## 1. Architecture And DES: Composing Dynamo As Events
 
 The key design choice is composition. Dynamo's simulation story is not one
 monolithic model. It is a set of components that mirror serving-system concepts
@@ -105,7 +105,7 @@ offloading hooks, the KV router, and the planner. KVBM and distributed cache
 simulation are treated as near-future component work in this draft rather than
 as a fully hooked-up claim today.
 
-## 2. DES Basics: LLM Inference As Events
+### 1.1 DES Basics: LLM Inference As Events
 
 Discrete-event simulation, or DES, is a simple idea with a lot of leverage. The
 simulator has a virtual clock and an event queue. Components do not wait in real
@@ -120,7 +120,7 @@ The trace collector then computes metrics from the simulated timeline: TTFT,
 TPOT, end-to-end latency, output throughput, cache reuse, and feasibility against
 the selected objective or SLA.
 
-### 2.1 A Request's Journey Through The Twin
+### 1.2 A Request's Journey Through The Twin
 
 [placeholder: request lifecycle diagram if we decide to turn the numbered walkthrough into a figure]
 
@@ -142,7 +142,7 @@ timeline. A router decision affects the worker's future queue. A planner scaling
 decision has a delay before capacity appears. A KV movement decision can change
 when decode begins. DES gives those interactions a concrete place to happen.
 
-### 2.2 Replay Harness: Driving The Twin
+### 1.3 Replay Harness: Driving The Twin
 
 [placeholder: replay harness Mermaid diagram polish or replacement with production graphic]
 
@@ -170,15 +170,16 @@ The collector is the other end of the loop. It turns the simulated lifecycle int
 observable serving metrics: throughput, TTFT, TPOT, end-to-end latency, prefix
 cache reuse, and feasibility.
 
-## 3. Simulating The Dynamo Digital Twin
+## 2. Simulating The Dynamo Digital Twin
 
-The DES basics above explain the mechanism. The Dynamo-specific value comes from
-which components are placed into that mechanism: engine schedulers, forward-pass
-timing, routers, planner decisions, and KV/cache behavior. This is the meaty part
-of the twin. Each component observes simulated state, makes decisions, and
-changes the future event stream for the rest of the system.
+The architecture and DES overview above explain the mechanism. The
+Dynamo-specific value comes from which components are placed into that mechanism:
+engine schedulers, forward-pass timing, routers, planner decisions, and KV/cache
+behavior. This is the meaty part of the twin. Each component observes simulated
+state, makes decisions, and changes the future event stream for the rest of the
+system.
 
-### 3.1 Single Engine Simulation: Scheduler Fidelity Matters
+### 2.1 Single Engine Simulation: Scheduler Fidelity Matters
 
 A single engine is not just a tokens-per-second estimate. The scheduler decides
 which requests enter a pass, how prefill and decode work are batched, whether
@@ -212,7 +213,7 @@ the simulation loop for a specific model, hardware, backend, tensor-parallel
 shape, and traffic setup. It is not a universal proof that every future workload
 or backend is modeled perfectly.
 
-### 3.2 Multi Engine Simulation: From Workers To Systems
+### 2.2 Multi Engine Simulation: From Workers To Systems
 
 Once multiple engines exist, the central question becomes: where should this
 request go, and what future bottleneck does that choice create?
@@ -226,7 +227,7 @@ That is where single-engine fidelity becomes system-level fidelity. Each worker
 still uses the single-engine core, but the multi-engine runtime adds admission,
 handoff, queueing, and routing decisions around those cores.
 
-### 3.3 Router As A Simulated Dynamo Component
+### 2.3 Router As A Simulated Dynamo Component
 
 The router is part of the simulated system, not a post-processing heuristic.
 
@@ -244,7 +245,7 @@ may increase queueing somewhere else. A route that balances load may give up a
 cache hit. A good simulation lets us study those tradeoffs without deploying a
 new router policy first.
 
-### 3.4 Planner As A Feedback-Driven Component
+### 2.4 Planner As A Feedback-Driven Component
 
 Like the router, the planner makes decisions from feedback produced by the rest
 of the system. Dynamo components are not isolated knobs: they observe engine
@@ -266,7 +267,7 @@ router decisions still to come, and the engine queues already forming. That lets
 us test whether a policy is responsive enough without making it oscillate under
 changing load.
 
-### 3.5 KV, KVBM, And Cache Simulation
+### 2.5 KV, KVBM, And Cache Simulation
 
 [placeholder: exact wording for current KVBM simulation status and near-future WIP]
 
@@ -287,7 +288,7 @@ The longer-term direction is distributed cache simulation: CMX-style
 cross-machine movement, topology-aware routing, bandwidth-sensitive placement,
 and policies for when to reuse, move, offload, or recompute KV.
 
-## 4. Optimization And Discovery With The Twin
+## 3. Optimization And Discovery With The Twin
 
 Once the twin can run a workload through composed components, it can also search
 the design space. The optimizer uses replay as the scoring function: propose a
@@ -316,7 +317,7 @@ still maximizes a single score. Feasible states are ranked by the selected
 objective. If all states are infeasible, the fallback is to rank by violation
 penalty instead of pretending the best infeasible result is acceptable.
 
-### 4.1 Example Result: A Workload-Relative Candidate
+### 3.1 Example Result: A Workload-Relative Candidate
 
 [placeholder: compact optimizer result table]
 
@@ -338,7 +339,7 @@ The takeaway is not that one configuration is always best. The takeaway is that
 the digital twin can turn a large configuration space into a smaller set of
 hardware candidates, with each result tied to the workload that produced it.
 
-### 4.2 Discovery Examples Beyond The Current Optimizer
+### 3.2 Discovery Examples Beyond The Current Optimizer
 
 The same simulation loop can be used for research, not just configuration search.
 Some experiments tune exposed parameters. Others change the algorithm itself.
@@ -395,7 +396,7 @@ would become a testbed for algorithm discovery, where humans still own the
 system direction and validation bar, but agents can help explore the design space
 between hardware experiments.
 
-## 5. Simulation As The Inner Loop
+## 4. Simulation As The Inner Loop
 
 The goal is not to replace hardware validation. The goal is to make hardware
 validation more focused.
