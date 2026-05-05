@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,11 +39,14 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
 	}
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1beta1 to scheme: %v", err)
+	}
 
 	tests := []struct {
 		name                   string
 		adapter                *v1alpha1.DynamoGraphDeploymentScalingAdapter
-		dgd                    *v1alpha1.DynamoGraphDeployment
+		dgd                    *v1beta1.DynamoGraphDeployment
 		expectedDGDReplicas    int32
 		expectedStatusReplicas int32
 		expectError            bool
@@ -63,7 +67,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			},
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -75,7 +79,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 						},
 					},
 				},
-			},
+			}),
 			expectedDGDReplicas:    5,
 			expectedStatusReplicas: 5,
 			expectError:            false,
@@ -95,7 +99,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			},
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -107,7 +111,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 						},
 					},
 				},
-			},
+			}),
 			expectedDGDReplicas:    3,
 			expectedStatusReplicas: 3,
 			expectError:            false,
@@ -127,7 +131,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			},
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -137,7 +141,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 						"worker": {}, // no replicas set
 					},
 				},
-			},
+			}),
 			expectedDGDReplicas:    4,
 			expectedStatusReplicas: 4,
 			expectError:            false,
@@ -157,7 +161,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			},
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -169,7 +173,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 						},
 					},
 				},
-			},
+			}),
 			expectError: true,
 		},
 	}
@@ -224,13 +228,13 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			}
 
 			// Verify DGD replicas were updated
-			updatedDGD := &v1alpha1.DynamoGraphDeployment{}
+			updatedDGD := betaDGD(t, &v1alpha1.DynamoGraphDeployment{})
 			if err := fakeClient.Get(ctx, types.NamespacedName{Name: tt.dgd.Name, Namespace: tt.dgd.Namespace}, updatedDGD); err != nil {
 				t.Fatalf("Failed to get updated DGD: %v", err)
 			}
 
-			service, exists := updatedDGD.Spec.Services[tt.adapter.Spec.DGDRef.ServiceName]
-			if !exists {
+			service := updatedDGD.GetComponentByName(tt.adapter.Spec.DGDRef.ServiceName)
+			if service == nil {
 				t.Fatalf("Service %s not found in updated DGD", tt.adapter.Spec.DGDRef.ServiceName)
 			}
 
@@ -266,6 +270,9 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *tes
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
 	}
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1beta1 to scheme: %v", err)
+	}
 
 	// Create fake client with no objects
 	fakeClient := fake.NewClientBuilder().
@@ -300,6 +307,9 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_DGDNotFound(t *
 	// Register custom types with the scheme
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1beta1 to scheme: %v", err)
 	}
 
 	adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
@@ -347,6 +357,9 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
 	}
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1beta1 to scheme: %v", err)
+	}
 
 	now := metav1.Now()
 	adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
@@ -365,7 +378,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 		},
 	}
 
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
@@ -377,7 +390,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 				},
 			},
 		},
-	}
+	})
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
@@ -408,13 +421,17 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 	}
 
 	// DGD replicas should NOT be updated (still 2)
-	updatedDGD := &v1alpha1.DynamoGraphDeployment{}
+	updatedDGD := betaDGD(t, &v1alpha1.DynamoGraphDeployment{})
 	if err := fakeClient.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, updatedDGD); err != nil {
 		t.Fatalf("Failed to get DGD: %v", err)
 	}
 
-	if *updatedDGD.Spec.Services["Frontend"].Replicas != 2 {
-		t.Errorf("DGD replicas should remain unchanged, got %d", *updatedDGD.Spec.Services["Frontend"].Replicas)
+	frontend := updatedDGD.GetComponentByName("Frontend")
+	if frontend == nil {
+		t.Fatalf("Frontend service not found in updated DGD")
+	}
+	if *frontend.Replicas != 2 {
+		t.Errorf("DGD replicas should remain unchanged, got %d", *frontend.Replicas)
 	}
 }
 
@@ -423,13 +440,16 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_findAdaptersForDGD(t *tes
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
 	}
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1beta1 to scheme: %v", err)
+	}
 
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
 		},
-	}
+	})
 
 	// Adapters belonging to test-dgd
 	adapter1 := &v1alpha1.DynamoGraphDeploymentScalingAdapter{

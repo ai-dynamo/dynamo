@@ -38,6 +38,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -73,7 +74,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	}
 
 	// 2. Fetch the referenced DGD
-	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	dgdKey := types.NamespacedName{
 		Name:      adapter.Spec.DGDRef.Name,
 		Namespace: adapter.Namespace,
@@ -87,14 +88,15 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		return ctrl.Result{}, err
 	}
 
-	// 3. Find the target service in DGD's spec.services map
-	component, exists := dgd.Spec.Services[adapter.Spec.DGDRef.ServiceName]
-	if !exists || component == nil {
-		logger.Error(nil, "Service not found in DGD",
-			"service", adapter.Spec.DGDRef.ServiceName,
+	// 3. Find the target component in DGD's spec.components list.
+	componentName := adapter.Spec.DGDRef.ServiceName
+	component := dgd.GetComponentByName(componentName)
+	if component == nil {
+		logger.Error(nil, "Component not found in DGD",
+			"component", componentName,
 			"dgd", dgd.Name,
-			"availableServices", getServiceKeys(dgd.Spec.Services))
-		return ctrl.Result{}, fmt.Errorf("service %s not found in DGD", adapter.Spec.DGDRef.ServiceName)
+			"availableComponents", getComponentNames(dgd.Spec.Components))
+		return ctrl.Result{}, fmt.Errorf("component %s not found in DGD", componentName)
 	}
 
 	// Get current replicas from DGD (default to 1 if not set)
@@ -105,9 +107,8 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 4. Update DGD if replicas changed (DGDSA is the source of truth)
 	if currentReplicas != adapter.Spec.Replicas {
-		// Update the service's replicas in DGD
+		// Update the component's replicas in DGD.
 		component.Replicas = &adapter.Spec.Replicas
-		dgd.Spec.Services[adapter.Spec.DGDRef.ServiceName] = component
 
 		if err := r.Update(ctx, dgd); err != nil {
 			logger.Error(err, "Failed to update DGD")
@@ -116,14 +117,14 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			return ctrl.Result{}, err
 		}
 
-		logger.Info("Scaled service",
+		logger.Info("Scaled component",
 			"dgd", dgd.Name,
-			"service", adapter.Spec.DGDRef.ServiceName,
+			"component", componentName,
 			"from", currentReplicas,
 			"to", adapter.Spec.Replicas)
 
 		r.Recorder.Eventf(adapter, corev1.EventTypeNormal, "Scaled",
-			"Scaled service %s from %d to %d replicas", adapter.Spec.DGDRef.ServiceName, currentReplicas, adapter.Spec.Replicas)
+			"Scaled component %s from %d to %d replicas", componentName, currentReplicas, adapter.Spec.Replicas)
 
 		// Record scaling event
 		now := metav1.Now()
@@ -132,7 +133,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 5. Update adapter status
 	adapter.Status.Replicas = adapter.Spec.Replicas
-	adapter.Status.Selector = r.buildPodSelector(dgd, adapter.Spec.DGDRef.ServiceName)
+	adapter.Status.Selector = r.buildPodSelector(dgd, componentName)
 
 	if err := r.Status().Update(ctx, adapter); err != nil {
 		logger.Error(err, "Failed to update adapter status")
@@ -142,14 +143,14 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	return ctrl.Result{}, nil
 }
 
-// buildPodSelector constructs a label selector for the pods managed by this service
-func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) string {
+// buildPodSelector constructs a label selector for the pods managed by this component.
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string) string {
 	// Pods are labeled with:
 	// - nvidia.com/dynamo-graph-deployment-name = dgd.Name
-	// - nvidia.com/dynamo-component = serviceName (the key from spec.services map)
+	// - nvidia.com/dynamo-component = componentName
 	return fmt.Sprintf("%s=%s,%s=%s",
 		consts.KubeLabelDynamoGraphDeploymentName, dgd.Name,
-		consts.KubeLabelDynamoComponent, serviceName)
+		consts.KubeLabelDynamoComponent, componentName)
 }
 
 // SetupWithManager sets up the controller with the Manager
@@ -159,22 +160,22 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 			predicate.GenerationChangedPredicate{},
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeploymentScalingAdapter).
-		// Watch DGDs to sync status when DGD service replicas change
+		// Watch DGDs to sync status when DGD component replicas change.
 		Watches(
-			&nvidiacomv1alpha1.DynamoGraphDeployment{},
+			&nvidiacomv1beta1.DynamoGraphDeployment{},
 			handler.EnqueueRequestsFromMapFunc(r.findAdaptersForDGD),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc: func(ce event.CreateEvent) bool { return false },
 				DeleteFunc: func(de event.DeleteEvent) bool { return true },
 				UpdateFunc: func(ue event.UpdateEvent) bool {
 					// Only trigger on spec changes (not status)
-					oldDGD, okOld := ue.ObjectOld.(*nvidiacomv1alpha1.DynamoGraphDeployment)
-					newDGD, okNew := ue.ObjectNew.(*nvidiacomv1alpha1.DynamoGraphDeployment)
+					oldDGD, okOld := ue.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+					newDGD, okNew := ue.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
 					if !okOld || !okNew {
 						return false
 					}
-					// Trigger if services map changed
-					return !servicesEqual(oldDGD.Spec.Services, newDGD.Spec.Services)
+					// Trigger if components changed.
+					return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components)
 				},
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),
@@ -186,7 +187,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests
 // Uses label selector to efficiently query only adapters for this specific DGD
 func (r *DynamoGraphDeploymentScalingAdapterReconciler) findAdaptersForDGD(ctx context.Context, obj client.Object) []reconcile.Request {
-	dgd, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
+	dgd, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeployment)
 	if !ok {
 		return nil
 	}
