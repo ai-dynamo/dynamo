@@ -116,6 +116,30 @@ class ImageLoader:
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP {e.response.status_code} loading image: '{image_url}'")
             raise
+        except httpx.PoolTimeout as e:
+            logger.error(
+                f"PoolTimeout loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)"
+            )
+            raise ValueError(f"PoolTimeout loading image: '{image_url}'") from e
+        except httpx.ConnectTimeout as e:
+            logger.error(
+                f"ConnectTimeout loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)"
+            )
+            raise ValueError(f"ConnectTimeout loading image: '{image_url}'") from e
+        except httpx.ReadTimeout as e:
+            logger.error(
+                f"ReadTimeout loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)"
+            )
+            raise ValueError(f"ReadTimeout loading image: '{image_url}'") from e
+        except httpx.WriteTimeout as e:
+            logger.error(
+                f"WriteTimeout loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)"
+            )
+            raise ValueError(f"WriteTimeout loading image: '{image_url}'") from e
         except httpx.TimeoutException as e:
             logger.error(
                 f"{type(e).__name__} loading image: '{image_url}' "
