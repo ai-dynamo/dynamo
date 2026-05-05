@@ -145,7 +145,7 @@ class DiffusionEngine:
 
         Maps dynamo's DiffusionConfig fields to TensorRT-LLM's VisualGenArgs
         structure with its nested sub-configs (PipelineConfig, TorchCompileConfig,
-        CudaGraphConfig, AttentionConfig, ParallelConfig, TeaCacheConfig,
+        CudaGraphConfig, AttentionConfig, ParallelConfig, optional cache config,
         quant_config).
 
         Returns:
@@ -199,14 +199,14 @@ class DiffusionEngine:
                 dit_cfg_size=self.config.dit_cfg_size,
                 dit_fsdp_size=self.config.dit_fsdp_size,
             ),
-            teacache=TeaCacheConfig(
-                enable_teacache=self.config.enable_teacache,
-                use_ret_steps=self.config.teacache_use_ret_steps,
-                teacache_thresh=self.config.teacache_thresh,
-            ),
         )
 
         # Add optional fields
+        if self.config.enable_teacache:
+            args_kwargs["cache"] = TeaCacheConfig(
+                use_ret_steps=self.config.teacache_use_ret_steps,
+                teacache_thresh=self.config.teacache_thresh,
+            )
         if self.config.revision:
             args_kwargs["revision"] = self.config.revision
         if quant_config is not None:
