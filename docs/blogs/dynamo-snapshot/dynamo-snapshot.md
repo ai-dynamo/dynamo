@@ -2,22 +2,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
-subtitle: "Schwinn Saereesitthipitak, Dan Feigin — May 2026"
+subtitle: "Schwinn Saereesitthipitak, Dan Feigin, Vikram Sharma Mailthody — May 2026"
 description: "Dynamo Snapshot uses CRIU, cuda-checkpoint, and a per-GPU memory service to bring inference worker startup down to 5 seconds or less."
 keywords: checkpoint restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
 last-updated: May 4, 2026
 ---
 
 ## The Cold-Start Problem
-The primary objective when optimizing LLM inference workloads is tokens per second — the higher the productive output per second of GPU time, the better the economics. Every second the GPU isn't producing tokens is money lost.
+The primary objective in optimizing LLM inference is maximizing tokens per second — because every second a GPU isn't producing tokens directly translates to lost revenue.
 
-But steady-state performance numbers only tell us part of the story. When serving inference workloads in production, there are many reasons why a workload cannot run in the same configuration forever: customer demand fluctuates, model preferences shift, configurations are updated to chase better numbers, and workloads themselves occasionally fail and have to be restarted. The ability to bring up new instances of inference engines for a particular model/configuration, even on a single GPU, can take on the order of minutes. That is a long time to be paying for GPUs that aren't producing any tokens.
+Steady-state throughput metrics, while useful, capture only a narrow slice of the system's true behavior. In production inference environments, workloads are inherently dynamic: demand varies over time, model selections evolve, configurations are continuously tuned in pursuit of better efficiency, and failures necessitate periodic restarts. Each of these events disrupts the steady state.
+
+Crucially, the system's responsiveness to these disruptions becomes a first-order concern. Bringing up a new inference instance — even for a single GPU under a fixed model and configuration — can take on the order of minutes. From a systems perspective, this is not merely latency; it is a prolonged interval of resource underutilization. During this time, expensive GPU capacity is allocated but not generating tokens, and therefore not generating revenue.
 
 Here is a breakdown of the cold start time of various models for a single-GPU workload:
 
 ![Cold start time breakdown across model sizes on a single B200 GPU.](./figures/cold_start_bench.svg)
 
-In our setup, weights are loaded from a very fast (VAST) PVC. For smaller models, almost all of the startup time comes from other sources of overhead. Even in a "warm" start scenario where certain artifacts (e.g. from torch.compile, kernel warmup, etc.) are cached, the reduction in cold start time is still not significant enough — much of the work that is done during the earlier phases of initialization cannot easily be cached.
+In our setup, weights are loaded from a very fast (VAST) PVC. For smaller models, the majority of cold-start time is consumed by upstream initialization overheads rather than weight loading itself. Even under so-called "warm start" conditions — where artifacts from mechanisms such as torch.compile and kernel warmup are cached — the observed reduction in startup time is modest. The reason is structural: much of the early-phase initialization work is inherently stateful, context-dependent, and therefore not amenable to straightforward caching.
 
 Driving cold-start time down means tracking every contributor across every layer of the stack and getting all of them to cooperate. Even then, maintaining low cold start times while new features are constantly added to each inference engine is an uphill battle, not to mention that each inference engine needs to be optimized individually.
 
@@ -28,15 +30,15 @@ In this post, we introduce **Dynamo Snapshot** — our solution for checkpoint/r
 ## CRIU and cuda-checkpoint
 A running inference worker's checkpointable state has two components:
 
-- Device state (GPU-side): CUDA contexts, streams, device memory, virtual address mappings, etc. This is not visible to the host. To serialize this state, we use the checkpointing capability of the CUDA driver (which is also exposed by the `cuda-checkpoint` command line tool) to dump the device state to CPU memory of the process owning each CUDA context.
-- Host state (CPU-side): CPU memory, threads, file descriptors, namespaces, etc. The Linux kernel has all the bookkeeping necessary to be able to serialize this state. We use an open-source tool, **CRIU (Checkpoint/Restore in Userspace)** to walk the kernel's bookkeeping and serialize the process tree's state to disk.
+- Device state (GPU-side): CUDA contexts, streams, device memory, virtual address mappings, etc. This is not visible to the host. To serialize this state, we use the [checkpointing capability of the CUDA driver](https://developer.nvidia.com/blog/checkpointing-cuda-applications-with-criu/) (which is also exposed by the `cuda-checkpoint` command line tool) to dump the device state to CPU memory of the process owning each CUDA context.
+- Host state (CPU-side): CPU memory, threads, file descriptors, namespaces, etc. The Linux kernel has all the bookkeeping necessary to be able to serialize this state. We use an open-source tool, **[CRIU](https://github.com/checkpoint-restore/criu)** (Checkpoint/Restore in Userspace) to walk the Linux kernel's bookkeeping and serialize the process tree's state to disk.
 
 These two tools compose cleanly to allow checkpoint/restore of the full inference worker state. When checkpointing:
 
 1. `cuda-checkpoint` dumps all device state into CPU memory. It becomes a pure host process.
 2. CRIU dumps all host-side process tree state to a folder in storage.
 
-When restoring (potentially on a different node):
+When restoring (same or different node):
 
 1. CRIU restores the process tree according to the serialized state from the same folder (note: distributed storage like NFS/SMB allows us to fetch the checkpointed artifact from a different node).
 2. `cuda-checkpoint` restores the GPU state from what is serialized in CPU memory onto the new GPUs.
@@ -124,21 +126,21 @@ In upstream CRIU, that fill was a synchronous `preadv` loop. The restorer pulls 
 
 ![Synchronous preadv loop: one read in flight at a time, storage device idle between requests.](./figures/preadv_serial_before.svg)
 
-We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read jobs ahead of time — each job is an `iocb` describing a file offset, a byte count, and an iovec pointing at the destination VMA pages. The restorer creates an AIO context, which holds many distinct read transactions simultaneously, allowing the storage device to run them concurrently across its internal channels. The restorer then submits a batch of those iocbs with `io_submit`, and keeps a window of up to 128 in flight. As completions come back via `io_getevents`, new submissions backfill the window until every job is done.
+We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read jobs ahead of time — each job is an `iocb` describing a file offset, a byte count, and an `iovec` pointing at the destination VMA pages. The restorer creates an AIO context, which holds many distinct read transactions simultaneously, allowing the storage device to run them concurrently across its internal channels. The restorer then submits a batch of those iocbs with `io_submit`, and keeps a window of up to 128 in flight. As completions come back via `io_getevents`, new submissions backfill the window until every job is done.
 
 ![Native AIO pipeline: up to 128 reads in flight via io_submit and io_getevents, storage device runs them concurrently.](./figures/aio_pipeline_after.svg)
 
 ### Optimization #2.2: Parallel memfd Restore
-vLLM's sleep mode reduces GPU memory pressure by moving tagged GPU allocations into pinned CPU shadow buffers. Those buffers are not ordinary Python heap memory. vLLM asks PyTorch for pinned CPU tensors, PyTorch allocates them through CUDA's pinned-memory allocator, and CUDA backs them with shared anonymous memory that is then pinned through the NVIDIA driver. Inside the Linux kernel, these are memfds — anonymous, RAM-backed files that can be mapped with MAP_SHARED.
+vLLM's sleep mode reduces GPU memory pressure by moving tagged GPU allocations into pinned CPU shadow buffers. Those buffers are not ordinary Python heap memory. vLLM asks PyTorch for pinned CPU tensors, PyTorch allocates them through CUDA's pinned-memory allocator, and CUDA backs them with shared anonymous memory that is then pinned through the NVIDIA driver. Inside the Linux kernel, these are memfds — anonymous, RAM-backed files that can be mapped with `MAP_SHARED`.
 
 For GPT-OSS 120B, we saw these buffers consume more than 120 GiB, but split up into many 2 GiB (or even smaller) buffers. These buffers are also independent. However, CRIU restored these serially — it would create one shmem-backed object, resize it, map it, read its contents from the checkpoint image, and only then move on to the next object.
 
 The solution was to modify CRIU to first enumerate all the unique shmem-backed objects, then launch a thread pool to parallelize the restore. Each worker allocates its buffer and reads from the checkpoint independently, allowing them to use the available storage bandwidth and CPU parallelism instead of processing buffers one at a time.
 
 #### The Page Cache
-Where the storage backend supports it, both anonymous and shared memory reads use O_DIRECT. Restore is mostly a one-pass stream from checkpoint files into destination memory, so caching the input pages in the kernel page cache is usually wasteful. Without direct I/O, a large restore can temporarily fill the page cache with checkpoint data while also allocating the destination shmem pages, increasing memory pressure and evicting useful data for other workloads.
+Where the storage backend supports it, both anonymous and shared memory reads use `O_DIRECT`. Restore is mostly a one-pass stream from checkpoint files into destination memory, so caching the input pages in the kernel page cache is usually wasteful. Without direct I/O, a large restore can temporarily fill the page cache with checkpoint data while also allocating the destination shmem pages, increasing memory pressure and evicting useful data for other workloads.
 
-Even more importantly, Linux native AIO is only truly asynchronous on files opened with O_DIRECT. On filesystems where O_DIRECT is unavailable or unreliable, such as some NFS deployments, restore falls back to buffered I/O with sequential readahead so the kernel still sees a predictable streaming access pattern, but the gains from AIO are significantly reduced.
+Even more importantly, Linux native AIO is only truly asynchronous on files opened with `O_DIRECT`. On filesystems where `O_DIRECT` is unavailable or unreliable, such as some NFS deployments, restore falls back to buffered I/O with sequential readahead so the kernel still sees a predictable streaming access pattern, but the gains from AIO are significantly reduced.
 
 ### I/O Configuration for CRIU Restore Performance
 Restore performance is sensitive to several I/O configuration choices:
@@ -169,11 +171,13 @@ On the same setup, we saw a massive improvement in CRIU restore time, and it is 
 At this point CRIU is no longer the bottleneck on its own, but the wall-clock time is still dominated by moving the model weights from PVC, through host memory, onto the GPU. That part is fundamentally serial: cuda-checkpoint cannot start copying weights to the GPU until CRIU has materialized them in host memory, and both halves are constrained by NFS bandwidth on one end and a single sequential `cudaMemcpy` on the other. The weights also dominate checkpoint size by a wide margin, which puts a hard ceiling on how fast restore can ever get if the weights stay inside the CRIU image.
 
 ## Optimization #3: GPU Memory Service
-We would like to take the weights out of the CRIU image entirely. If they are not in the checkpoint, the weight restoration time can be unbound from CRIU's timeline. Plus, they won't even have to come from the same place as the rest of the checkpoint. They could come from local NVMe, or from a peer GPU that already has them resident (e.g. when scaling up a DynamoGraphDeployment), over whatever channel that source supports. The weight restore can then run *in parallel* with CRIU instead of after it, on a path that is free to saturate bandwidth that NFS alone cannot deliver.
+A central limitation of today's checkpoint/restore mechanisms is that they treat GPU memory as an artifact of a process, rather than as a first-class system resource. In large-scale inference systems, this coupling is fundamentally misaligned with how modern GPU clusters operate: memory is expensive to construct, expensive to move, and yet unnecessarily tied to short-lived compute lifecycles. A more principled approach is to decouple memory ownership from process lifetime, allowing long-lived state — such as model weights — to persist independently and be reattached to compute on demand. This is precisely the role of a GPU Memory Service (GMS): to externalize memory as a managed, shareable, and location-agnostic resource.
 
-The catch is that we still need the restored worker to come back with its weight tensors mapped at exactly the same virtual addresses as before, since those VAs are baked into the CUDA graph. So whatever we do externally has to land the weight bytes at the same VAs the worker had pre-checkpoint, with no copy at the moment of resume. This is similar in spirit to the KV cache `sleep()`/`wake_up()` trick from Optimization #1, except this time we actually *care* about the contents of the tensors post-restore.
+With this perspective, we would like to take the weights out of the CRIU image entirely. If they are not embedded within the checkpoint, then their restoration is no longer serialized with CRIU's timeline. Instead, weight reconstruction becomes an independent, parallelizable operation. Moreover, the source of these weights need not be tied to the checkpoint itself — they may be retrieved from local NVMe, reconstructed from peer GPUs that already hold them resident (e.g. during scale-out of a DynamoGraphDeployment), or streamed over any available high-bandwidth channel. This decoupling allows weight restoration to proceed in parallel with CRIU, and along data paths capable of saturating bandwidths far beyond what a traditional NFS-based restore can achieve.
 
-The **GPU Memory Service (GMS)** is what makes this work.
+The subtle constraint, however, lies in preserving execution correctness. The restored worker must observe its weight tensors at precisely the same virtual addresses as before, since these addresses are embedded within CUDA graphs captured during initialization. Consequently, any external restoration mechanism must materialize the weight bytes directly at those original virtual addresses, without introducing a copy at resume time. This requirement mirrors the KV-cache virtualization strategy discussed in Optimization #1, except this time we actually *care* about the contents of the tensors post-restore.
+
+The **GPU Memory Service (GMS)** is what makes this possible.
 
 ### Memory Model
 GMS is a per-GPU sidecar process that owns physical GPU memory on behalf of inference workers. It is built on top of the CUDA Virtual Memory Management API, which lets us separate a physical allocation from the virtual address it's mapped at, and share that physical allocation across processes.
