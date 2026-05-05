@@ -250,7 +250,7 @@ fn start_shard_sampler(
             tokio::select! {
                 _ = interval.tick() => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;
-                    for snap in indexer.shard_sizes() {
+                    for snap in indexer.shard_sizes().await {
                         rows.push(ShardSampleRow { elapsed_ms, snapshot: snap });
                     }
                 }
@@ -685,7 +685,7 @@ async fn run_single_trial(
 
     let run = run?;
     warn_if_bench_did_not_keep_up(run.kept_up);
-    print_indexer_report(&indexer);
+    print_indexer_report(&indexer).await;
     Ok(run.results)
 }
 
@@ -697,17 +697,17 @@ fn warn_if_bench_did_not_keep_up(kept_up: bool) {
     }
 }
 
-fn print_indexer_report(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
+async fn print_indexer_report(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
     let report = indexer.timing_report();
     if !report.is_empty() {
         println!("{}", report);
     }
-    print_shard_distribution(indexer);
+    print_shard_distribution(indexer).await;
     print_node_edge_lengths(indexer);
 }
 
-fn print_shard_distribution(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
-    let sizes = indexer.shard_sizes();
+async fn print_shard_distribution(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
+    let sizes = indexer.shard_sizes().await;
     if sizes.len() <= 1 {
         return;
     }

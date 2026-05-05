@@ -116,6 +116,10 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run KVBM offload Mooncake trace test
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- --nocapture
 
   rust-clippy:
     needs: changed-files
@@ -159,6 +163,10 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Run KVBM offload Mooncake trace clippy
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --no-deps -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- -D warnings
     - name: Install and Run cargo-machete
       working-directory: ${{ matrix.dir }}
       run: |
