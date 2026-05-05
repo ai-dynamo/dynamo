@@ -85,12 +85,14 @@ pub(crate) trait OpenAIStopConditionsProvider {
     /// Get token-id-based stop conditions (renderer / TITO parity with vLLM
     /// `/inference/v1/generate`'s `sampling_params.stop_token_ids`).
     ///
-    /// Default returns None; chat-completions / completions impls override to
-    /// read the field from `unsupported_fields["stop_token_ids"]` after the
-    /// `validate.rs` PASSTHROUGH allowlist accepts it. Plumbed through into
-    /// `common::StopConditions::stop_token_ids_hidden` by `extract_stop_conditions`.
-    fn get_stop_token_ids(&self) -> Option<Vec<crate::protocols::TokenIdType>> {
-        None
+    /// Default returns `Ok(None)`; chat-completions / completions impls
+    /// override to read the field from `unsupported_fields["stop_token_ids"]`
+    /// after the `validate.rs` PASSTHROUGH allowlist accepts it. Plumbed
+    /// through into `common::StopConditions::stop_token_ids_hidden` by
+    /// `extract_stop_conditions`. Returns `Result` so malformed payloads
+    /// surface as a typed 400 instead of silently dropping the field.
+    fn get_stop_token_ids(&self) -> anyhow::Result<Option<Vec<crate::protocols::TokenIdType>>> {
+        Ok(None)
     }
 }
 
@@ -196,7 +198,9 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         // chat-completions surface; impls of this trait read it from the
         // request's `unsupported_fields` map. Engine receives it as
         // `stop_token_ids_hidden` (already wired in `common::StopConditions`).
-        let stop_token_ids_hidden = self.get_stop_token_ids();
+        // The `?` propagates a typed 400 on malformed payloads (e.g.
+        // `stop_token_ids: "not-an-array"`).
+        let stop_token_ids_hidden = self.get_stop_token_ids()?;
 
         if let Some(stop) = &stop
             && stop.len() > 4

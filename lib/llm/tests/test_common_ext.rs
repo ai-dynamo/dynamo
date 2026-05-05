@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::{
-    common::StopConditionsProvider,
-    openai::{
-        chat_completions::NvCreateChatCompletionRequest,
-        common_ext::{CommonExt, CommonExtProvider},
-        completions::NvCreateCompletionRequest,
-        nvext::NvExt,
+use dynamo_llm::{
+    engines::ValidateRequest,
+    protocols::{
+        common::StopConditionsProvider,
+        openai::{
+            chat_completions::NvCreateChatCompletionRequest,
+            common_ext::{CommonExt, CommonExtProvider},
+            completions::NvCreateCompletionRequest,
+            nvext::NvExt,
+        },
     },
 };
 
@@ -70,6 +73,8 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
         chat_template_args: None,
         media_io_kwargs: None,
         unsupported_fields: Default::default(),
+        tokens: None,
+        return_token_ids: None,
     };
 
     let sampling = request.extract_sampling_options().unwrap();
@@ -214,6 +219,54 @@ fn test_max_thinking_tokens_extraction() {
 }
 
 #[test]
+fn test_chat_completions_stop_token_ids_extraction() {
+    // Renderer / TITO callers send `stop_token_ids` as a top-level field
+    // alongside `nvext.token_data`. Both ride PASSTHROUGH_EXTRA_FIELDS;
+    // `extract_stop_conditions` plumbs the IDs into
+    // `common::StopConditions::stop_token_ids_hidden` so the engine layer
+    // honors them. (Lifted from PR #9141.)
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "(token-in mode)"}],
+        "nvext": {
+            "token_data": [1, 2, 3]
+        },
+        "stop_token_ids": [151645, 151643]
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    request.validate().unwrap();
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(
+        stop_conditions.stop_token_ids_hidden,
+        Some(vec![151645, 151643])
+    );
+}
+
+#[test]
+fn test_chat_completions_stop_token_ids_malformed_returns_400() {
+    // Malformed stop_token_ids must NOT silently fall back to None — it
+    // surfaces as a typed anyhow::Error so the HTTP layer returns 400 with
+    // a useful diagnostic. (PR #9141 contract.)
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "x"}],
+        "stop_token_ids": "not-an-array"
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+    let err = request
+        .extract_stop_conditions()
+        .expect_err("malformed stop_token_ids should error");
+    assert!(
+        err.to_string()
+            .contains("stop_token_ids must be an array of unsigned token IDs"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn test_chat_completions_no_common_values() {
     // Test that when no common values are set, we get None
     let json_str = r#"{
@@ -300,6 +353,8 @@ fn test_serialization_preserves_structure() {
         chat_template_args: None,
         media_io_kwargs: None,
         unsupported_fields: Default::default(),
+        tokens: None,
+        return_token_ids: None,
     };
 
     let json = serde_json::to_value(&request).unwrap();
@@ -352,6 +407,8 @@ fn test_sampling_parameters_extraction() {
         chat_template_args: None,
         media_io_kwargs: None,
         unsupported_fields: Default::default(),
+        tokens: None,
+        return_token_ids: None,
     };
 
     let sampling_options = request.extract_sampling_options().unwrap();

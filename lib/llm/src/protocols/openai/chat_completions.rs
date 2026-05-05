@@ -345,13 +345,20 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// `validate.rs` PASSTHROUGH_EXTRA_FIELDS). RL renderer / TITO callers
     /// rely on this for stop-on-token-id conditions that don't tokenize
     /// cleanly as strings (custom EOS, model-specific control tokens).
-    /// Malformed values silently fall back to None — `validate.rs` already
-    /// took the "is this allowed at all" decision; here we only choose
-    /// between "we got a usable list" and "we got nothing".
-    fn get_stop_token_ids(&self) -> Option<Vec<crate::protocols::TokenIdType>> {
-        self.unsupported_fields
-            .get("stop_token_ids")
-            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok())
+    /// Malformed values surface as a typed `anyhow::Error` so the caller
+    /// gets a 400 with a useful diagnostic rather than a silent drop.
+    fn get_stop_token_ids(&self) -> anyhow::Result<Option<Vec<crate::protocols::TokenIdType>>> {
+        let Some(value) = self.unsupported_fields.get("stop_token_ids") else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|err| {
+                anyhow::anyhow!("stop_token_ids must be an array of unsigned token IDs: {err}")
+            })
     }
 }
 
@@ -385,26 +392,29 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
-        // Mutual-exclusivity: messages OR prompt_token_ids extension, not both.
-        // When prompt_token_ids is present (renderer / TITO), messages can be
-        // empty and chat templating is bypassed by the preprocessor's
-        // `get_pretokenized_input()` path.
-        let has_pretokenized_input =
-            self.unsupported_fields.contains_key("prompt_token_ids")
-                || self
-                    .nvext
-                    .as_ref()
-                    .and_then(|ext| ext.token_data.as_ref())
-                    .is_some();
-        if has_pretokenized_input {
-            if !self.inner.messages.is_empty() {
-                anyhow::bail!(
-                    "messages and prompt_token_ids are mutually exclusive; \
-                     send one (use prompt_token_ids for renderer / TITO mode, \
-                     messages for MITO mode)"
-                );
-            }
-        } else {
+        // Mutual-exclusivity applies ONLY to the canonical top-level
+        // `prompt_token_ids` extension (the new vLLM-0.20-aligned channel).
+        // The legacy `nvext.token_data` channel is intentionally allowed to
+        // coexist with non-empty messages — that's how the renderer transport
+        // ships pre-tokenized inputs alongside placeholder messages
+        // (PrimeIntellect-ai/verifiers PR #1287's `dynamo_chat_nvext` mode).
+        // Empty messages are accepted when EITHER channel carries tokens.
+        let has_top_level_prompt_token_ids =
+            self.unsupported_fields.contains_key("prompt_token_ids");
+        let has_nvext_token_data = self
+            .nvext
+            .as_ref()
+            .and_then(|ext| ext.token_data.as_ref())
+            .is_some();
+
+        if has_top_level_prompt_token_ids && !self.inner.messages.is_empty() {
+            anyhow::bail!(
+                "messages and prompt_token_ids are mutually exclusive; \
+                 send one (use prompt_token_ids for renderer / TITO mode, \
+                 messages for MITO mode)"
+            );
+        }
+        if !has_top_level_prompt_token_ids && !has_nvext_token_data {
             validate::validate_messages(&self.inner.messages)?;
         }
         validate::validate_model(&self.inner.model)?;
