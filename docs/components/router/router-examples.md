@@ -120,7 +120,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: my-namespace
       componentType: frontend
       replicas: 1
       envs:
