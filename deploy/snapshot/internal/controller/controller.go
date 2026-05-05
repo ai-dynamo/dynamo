@@ -77,8 +77,8 @@ func NewNodeController(
 func (w *NodeController) Run(ctx context.Context) error {
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
-		"checkpoint", snapshotprotocol.CheckpointSourceLabel,
-		"restore", snapshotprotocol.RestoreTargetLabel,
+		"checkpoint_source_label", snapshotprotocol.CheckpointSourceLabel,
+		"checkpoint_id_label", snapshotprotocol.CheckpointIDLabel,
 	)
 
 	var nsOptions []informers.SharedInformerOption
@@ -128,10 +128,12 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go ckptFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, ckptInformer.HasSynced)
 
-	// Restore informer
-	restoreSelector := labels.SelectorFromSet(labels.Set{
-		snapshotprotocol.RestoreTargetLabel: "true",
-	}).String()
+	// Restore pods carry a checkpoint ID but are not checkpoint sources.
+	restoreSel, err := labels.Parse(snapshotprotocol.CheckpointIDLabel + ",!" + snapshotprotocol.CheckpointSourceLabel)
+	if err != nil {
+		return fmt.Errorf("failed to build restore label selector: %w", err)
+	}
+	restoreSelector := restoreSel.String()
 
 	restoreFactoryOpts := append([]informers.SharedInformerOption{
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
@@ -202,6 +204,14 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 		return
 	}
 
+	// Checkpoint contract: exactly one target container per job.
+	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
+	if err != nil {
+		w.log.Error(err, "Checkpoint pod missing target-containers annotation", "pod", podKey)
+		return
+	}
+	containerName := targets[0]
+
 	if !w.tryAcquire(podKey) {
 		return
 	}
@@ -229,7 +239,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointID))
 
 	go func() {
-		if err := w.runCheckpoint(ctx, pod, job, checkpointID, checkpointLocation, podKey, startedAt); err != nil {
+		if err := w.runCheckpoint(ctx, pod, job, checkpointID, containerName, checkpointLocation, podKey, startedAt); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
 			opLog.Error(err, "Checkpoint controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointWorkerFailed", err.Error())
@@ -269,12 +279,37 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	containerName := resolveMainContainerName(pod)
-	if containerName == "" {
-		w.log.Info("Restore pod has no containers", "pod", podKey)
+	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 0)
+	if err != nil {
+		w.log.Error(err, "Restore pod missing target-containers annotation", "pod", podKey)
 		return
 	}
+	for _, containerName := range targets {
+		if _, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName); err != nil {
+			w.log.Error(
+				err,
+				"Restore target container name cannot be used in restore status annotation key",
+				"pod", podKey,
+				"container", containerName,
+			)
+			return
+		}
+	}
 
+	for _, containerName := range targets {
+		w.maybeStartRestoreForContainer(ctx, pod, containerName, checkpointID, checkpointLocation, podKey)
+	}
+}
+
+// maybeStartRestoreForContainer starts one restore worker per fresh container.
+func (w *NodeController) maybeStartRestoreForContainer(
+	ctx context.Context,
+	pod *corev1.Pod,
+	containerName string,
+	checkpointID string,
+	checkpointLocation string,
+	podKey string,
+) {
 	containerID := ""
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name != containerName || cs.ContainerID == "" {
@@ -284,28 +319,37 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		break
 	}
 	if containerID == "" {
-		w.log.V(1).Info("Restore pod has no running main container yet", "pod", podKey, "container", containerName)
+		w.log.V(1).Info("Restore pod has no running container yet", "pod", podKey, "container", containerName)
 		return
 	}
 
-	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotation]
-	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotation]
+	annotationKeys, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName)
+	if err != nil {
+		w.log.Error(err, "Restore target container name cannot be used in restore status annotation key", "pod", podKey, "container", containerName)
+		return
+	}
+	annotationStatus := pod.Annotations[annotationKeys.Status]
+	annotationContainerID := pod.Annotations[annotationKeys.ContainerID]
 	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
 		return
 	}
 
-	restoreAttemptKey := fmt.Sprintf("%s/%s", podKey, containerID)
+	restoreAttemptKey := fmt.Sprintf("%s/%s/%s", podKey, containerName, containerID)
 	if !w.tryAcquire(restoreAttemptKey) {
 		return
 	}
 
 	startedAt := time.Now()
-	w.log.Info("Restore target detected, triggering external restore", "pod", podKey, "checkpoint_id", checkpointID)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointID))
+	w.log.Info("Restore target detected, triggering external restore",
+		"pod", podKey,
+		"checkpoint_id", checkpointID,
+		"container", containerName,
+	)
+	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s for container %s", checkpointID, containerName))
 
 	go func() {
 		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey, startedAt); err != nil {
-			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
+			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", containerName)
 			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		}
@@ -320,7 +364,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 //     volume on success (observed by the workload via inotify), or SIGKILL
 //     on failure (unrecoverable CUDA-locked process)
 //  5. Mark job as completed or failed
-func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, checkpointLocation, podKey string, startedAt time.Time) error {
+func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, containerName, checkpointLocation, podKey string, startedAt time.Time) error {
 	releasePodOnExit := true
 	defer func() {
 		if releasePodOnExit {
@@ -356,17 +400,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		return nil
 	}
 
-	// Resolve the target container
-	containerName := resolveMainContainerName(pod)
-	if containerName == "" {
-		err := fmt.Errorf("no containers found in pod spec")
-		log.Error(err, "Checkpoint failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", err.Error())
-		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		return nil
-	}
+	// Resolve the target container ID from pod status.
 	var containerID string
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == containerName {
@@ -375,7 +409,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		}
 	}
 	if containerID == "" {
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", "Could not resolve target container ID")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Could not resolve container %q ID", containerName))
 		if statusErr := setCheckpointStatus(snapshotprotocol.CheckpointStatusFailed); statusErr != nil {
 			return statusErr
 		}
@@ -461,13 +495,8 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	return nil
 }
 
-// runRestore runs the full restore workflow for a pod:
-//  1. Mark the current container instance as in_progress
-//  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
-//  3. Write a restore-complete sentinel into the pod's snapshot-control
-//     volume to wake the workload (observed via inotify)
-//  4. Wait for the pod to become Ready
-//  5. Mark the container instance as completed
+// runRestore restores one target container. Kubernetes readiness is gated by
+// the shaped startup probe, not by the snapshot-agent worker.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
@@ -484,9 +513,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
-		annotations := map[string]string{
-			snapshotprotocol.RestoreStatusAnnotation:      value,
-			snapshotprotocol.RestoreContainerIDAnnotation: containerID,
+		annotations, err := snapshotprotocol.RestoreStatusAnnotations(containerName, value, containerID)
+		if err != nil {
+			return err
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
@@ -502,7 +531,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
 
-	// Step 1: Run the restore orchestrator (inspect + nsrestore)
+	// Run the restore orchestrator (inspect + nsrestore).
 	req := executor.RestoreRequest{
 		CheckpointID:       checkpointID,
 		CheckpointLocation: checkpointLocation,
@@ -531,9 +560,8 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return nil
 	}
 
-	// Step 2: Write restore-complete sentinel. placeholderHostPID came back
-	// from executor.Restore — any PID inside the container's mount namespace
-	// reaches /snapshot-control via /host/proc/<pid>/root.
+	// Any PID inside the container mount namespace reaches the control
+	// volume through /host/proc/<pid>/root.
 	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
 		log.Error(err, "Failed to write restore-complete sentinel")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -544,19 +572,6 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			log.Error(killErr, "Failed to kill placeholder after restore sentinel failure")
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
-	}
-
-	// Step 3: Wait for the pod to become Ready
-	if err := waitForPodReady(restoreCtx, w.clientset, pod.Namespace, pod.Name, containerName); err != nil {
-		log.Error(err, "Restore post-sentinel readiness check failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore readiness failed"); killErr != nil {
-			log.Error(killErr, "Failed to kill placeholder after restore readiness failure")
-		}
-		return fmt.Errorf("restore post-sentinel readiness check failed: %w", err)
 	}
 
 	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointID))

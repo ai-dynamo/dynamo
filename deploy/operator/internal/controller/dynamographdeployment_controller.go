@@ -1359,6 +1359,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			logger.Error(err, "Failed to resolve checkpoint for service", "service", serviceName)
 			return nil, nil, fmt.Errorf("failed to resolve checkpoint for service %s: %w", serviceName, err)
 		}
+		if dynamo.IsIntraPodFailoverEnabled(component) {
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+		}
 
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[serviceName] = info

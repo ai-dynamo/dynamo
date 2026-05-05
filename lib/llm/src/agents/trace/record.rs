@@ -158,6 +158,8 @@ mod tests {
             tool: Some(AgentToolEvent {
                 tool_call_id: "tool-123".to_string(),
                 tool_class: "web_search".to_string(),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: None,
                 status: Some(AgentToolStatus::Succeeded),
                 duration_ms: Some(12.5),
                 output_tokens: Some(9),

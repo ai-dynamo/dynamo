@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use super::{KvIndexerMetrics, KvRouterError, WorkerTask};
+use super::{AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::protocols::*;
 
 /// Trait for querying an external shared KV cache pool.
@@ -176,6 +176,30 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
+    /// Install a shared structural anchor for branch-sharded suffix routing.
+    ///
+    /// Backends that do not support anchor-aware routing keep the default
+    /// unsupported response. This is only called by the branch-sharded wrapper
+    /// when a routed subtree starts on a different shard than its parent prefix.
+    fn apply_anchor(
+        &self,
+        _worker: WorkerWithDpRank,
+        _anchor: AnchorTask,
+    ) -> Result<(), KvCacheEventError> {
+        Err(KvCacheEventError::InvalidBlockSequence)
+    }
+
+    /// Find matches under a previously installed shared structural anchor.
+    fn find_matches_from_anchor(
+        &self,
+        _anchor: AnchorRef,
+        _suffix: &[LocalBlockHash],
+    ) -> Result<OverlapScores, KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "backend does not support anchor-aware find_matches".to_string(),
+        ))
+    }
+
     /// Returns true when a maintenance task should be enqueued.
     fn try_schedule_cleanup(&self) -> bool {
         false
@@ -203,6 +227,11 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Total cached blocks across all workers.
     fn block_count(&self) -> usize {
         0
+    }
+
+    /// Return a human-readable backend-specific timing or instrumentation report.
+    fn timing_report(&self) -> String {
+        String::new()
     }
 
     /// Number of radix-tree nodes created since construction.
