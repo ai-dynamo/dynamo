@@ -1,5 +1,7 @@
 # NVFP4 GAIE Aggregated — sglang-runtime:1.0.0, EPP dp-main, tracing, KV routing
 # Deploy: kubectl apply -f dgd-agg-gaie.yaml -n dynamo-system
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:

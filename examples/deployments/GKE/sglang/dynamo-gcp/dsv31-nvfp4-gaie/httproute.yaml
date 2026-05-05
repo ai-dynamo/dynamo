@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Unified HTTPRoute — GAIE aggregated + NVFP4 GAIE disaggregated via Inference Gateway (EPP).
 # Native benchmarks: hit worker frontends directly (no x-pool), e.g.
 #   disagg: http://sglang-dsv31-nvfp4-disagg-native-frontend.dynamo-system.svc.cluster.local:8000

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # NVFP4 GAIE benchmarks via Inference Gateway + aiperf
 #
 # Run inside a pod that has `aiperf` and tokenizer cache (e.g. perf-gaie-fp8):

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # NVFP4 Native Aggregated — sglang-runtime:1.0.0, tracing, KV routing
 # Deploy: kubectl apply -f dgd-agg-native.yaml -n dynamo-system
 apiVersion: nvidia.com/v1alpha1

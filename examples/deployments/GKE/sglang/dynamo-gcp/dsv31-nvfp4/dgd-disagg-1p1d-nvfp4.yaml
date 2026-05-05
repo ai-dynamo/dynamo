@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Disaggregated DeepSeek-V3.1-NVFP4 (1P1D) with native Dynamo frontend (no GAIE/EPP)
 # RoCE networking, NIXL transfer backend, SGLang 1.0.0
 # Deploy with: kubectl apply -f dgd-disagg-native-nvfp4.yaml -n dynamo-system

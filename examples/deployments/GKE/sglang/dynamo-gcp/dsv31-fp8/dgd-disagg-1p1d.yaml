@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # 1P1D disagg with NCCL-test-aligned RoCE settings (single decode pool; NVLS off, MNNVL on, IB, GID_INDEX=3, etc.).
 # Use when 1P2D has RoCE/latency issues; same RoCE config, decode stays single-node.
 # Deploy with: kubectl apply -f dgd-disagg-1p1d.yaml -n dynamo-system
