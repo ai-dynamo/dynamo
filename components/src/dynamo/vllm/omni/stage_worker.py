@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 _ASYNC_PREPARE_KEY = "__dynamo_omni_prepare"
 _ASYNC_PREWARM_KEY = "__dynamo_omni_async_prewarm"
+_ASYNC_PREWARM_READY_KEY = "__dynamo_omni_async_prewarm_ready"
 
 
 @dataclass
@@ -127,6 +128,7 @@ class OmniStageWorker:
             except RuntimeError as e:
                 yield {"error": str(e), "finished": True}
                 return
+            yield {_ASYNC_PREWARM_READY_KEY: True}
         elif stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
             sampling_params_list_override = req.sampling_params_list
@@ -274,7 +276,10 @@ class OmniStageWorker:
         # worker and the router to reside on the same machine. A proper multi-node
         # solution would use a connector edge (like inter-stage connectors) instead.
         # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
-        shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
+        shm_name = (
+            f"{request_id}-stage-{self.stage_id}" if self._async_chunk else request_id
+        )
+        shm_meta = shm_write_bytes(serialize_obj(last_result), name=shm_name)
         yield {"shm_meta": shm_meta, "finished": True}
 
     async def _prepare_router_request(self, request: dict) -> dict:

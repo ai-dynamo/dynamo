@@ -15,6 +15,7 @@ try:
     from dynamo.vllm.omni.stage_worker import (
         _ASYNC_PREPARE_KEY,
         _ASYNC_PREWARM_KEY,
+        _ASYNC_PREWARM_READY_KEY,
         OmniStageWorker,
         _ensure_cumulative_token_ids,
         _prepare_connector_payload,
@@ -313,22 +314,30 @@ async def test_async_chunk_prewarm_uses_placeholder_tokens_and_skips_connector_p
         ),
     )
 
-    chunks = [
-        chunk
-        async for chunk in worker.generate(
-            {
-                "request_id": "req-prewarm",
-                "prompt_token_ids": [0, 0, 0],
-                _ASYNC_PREWARM_KEY: True,
-            },
-            _MockContext(),
-        )
-    ]
+    with patch(
+        "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+        return_value={"name": "req-prewarm-stage-1"},
+    ) as shm_write:
+        chunks = [
+            chunk
+            async for chunk in worker.generate(
+                {
+                    "request_id": "req-prewarm",
+                    "prompt_token_ids": [0, 0, 0],
+                    _ASYNC_PREWARM_KEY: True,
+                },
+                _MockContext(),
+            )
+        ]
 
     assert engine.received_prompt.prompt_token_ids == [0, 0, 0]
     engine.engine.output_processors[0].add_request.assert_called_once()
     out_connector.put.assert_not_called()
-    assert chunks[0]["shm_meta"]
+    shm_write.assert_called_once()
+    assert shm_write.call_args.kwargs["name"] == "req-prewarm-stage-1"
+    assert len(chunks) == 2
+    assert chunks[0] == {_ASYNC_PREWARM_READY_KEY: True}
+    assert chunks[1]["shm_meta"]
 
 
 @pytest.mark.asyncio

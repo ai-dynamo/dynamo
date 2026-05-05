@@ -44,6 +44,14 @@ class _StageClient:
         return _gen()
 
 
+class _StreamingStageClient:
+    def __init__(self, handler):
+        self._handler = handler
+
+    async def round_robin(self, request):
+        return self._handler(request)
+
+
 def _make_stage_cfg(stage_id: int):
     return SimpleNamespace(
         stage_id=stage_id,
@@ -223,8 +231,9 @@ async def test_async_chunk_prepares_and_prewarms_downstream_stages():
     async def stage1_handler(request):
         calls.append(("stage1", dict(request)))
         stage1_started.set()
+        yield _Chunk({stage_router._ASYNC_PREWARM_READY_KEY: True})
         await stage0_started.wait()
-        return {"shm_meta": {"final": True}, "finished": True}
+        yield _Chunk({"shm_meta": {"final": True}, "finished": True})
 
     formatter = AsyncMock()
     formatter.format.return_value = {"finished": True}
@@ -232,7 +241,7 @@ async def test_async_chunk_prepares_and_prewarms_downstream_stages():
         stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
         stage_clients={
             "stage0": _StageClient(stage0_handler),
-            "stage1": _StageClient(stage1_handler),
+            "stage1": _StreamingStageClient(stage1_handler),
         },
         formatter=formatter,
     )
@@ -276,6 +285,95 @@ async def test_async_chunk_prepares_and_prewarms_downstream_stages():
         request_type="chat",
         text="hello",
     )
+
+
+@pytest.mark.asyncio
+async def test_async_chunk_waits_for_downstream_prewarm_ack_before_stage0_request():
+    order: list[str] = []
+
+    async def stage0_handler(request):
+        if request.get(stage_router._ASYNC_PREPARE_KEY):
+            return {
+                "original_prompt": {"prompt": "hi"},
+                "prompt_token_ids": [1],
+                "finished": True,
+            }
+        order.append("stage0")
+        return {"shm_meta": {"stage": 0}, "finished": True}
+
+    async def stage1_handler(request):
+        order.append("stage1-start")
+        await asyncio.sleep(0)
+        order.append("stage1-ready")
+        yield _Chunk({stage_router._ASYNC_PREWARM_READY_KEY: True})
+        yield _Chunk({"shm_meta": {"final": True}, "finished": True})
+
+    formatter = AsyncMock()
+    formatter.format.return_value = {"finished": True}
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StreamingStageClient(stage1_handler),
+        },
+        formatter=formatter,
+    )
+    router._async_chunk = True
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, "chat"),
+    ):
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-ac"):
+            with patch.object(
+                stage_router,
+                "shm_deserialize",
+                side_effect=[SimpleNamespace(), SimpleNamespace()],
+            ):
+                chunks = [c async for c in router.generate({"prompt": "x"}, None)]
+
+    assert chunks == [{"finished": True}]
+    assert order == ["stage1-start", "stage1-ready", "stage0"]
+
+
+@pytest.mark.asyncio
+async def test_async_chunk_cancels_downstream_tasks_on_stage0_error():
+    stage1_cancelled = asyncio.Event()
+
+    async def stage0_handler(request):
+        if request.get(stage_router._ASYNC_PREPARE_KEY):
+            return {
+                "original_prompt": {"prompt": "hi"},
+                "prompt_token_ids": [1],
+                "finished": True,
+            }
+        return {"error": "stage0 failed", "finished": True}
+
+    async def stage1_handler(request):
+        yield _Chunk({stage_router._ASYNC_PREWARM_READY_KEY: True})
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stage1_cancelled.set()
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StreamingStageClient(stage1_handler),
+        },
+    )
+    router._async_chunk = True
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, "chat"),
+    ):
+        with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-ac"):
+            chunks = [c async for c in router.generate({"prompt": "x"}, None)]
+
+    assert chunks == [{"error": "stage0 failed", "finished": True}]
+    assert stage1_cancelled.is_set()
 
 
 # ── existing tests (formatting + error paths) ────────────

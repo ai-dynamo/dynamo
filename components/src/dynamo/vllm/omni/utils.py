@@ -44,20 +44,20 @@ def load_omni_stage_configs(model: str, stage_configs_path: str | None) -> list:
 
     try:
         from vllm_omni.engine.async_omni_engine import load_and_resolve_stage_configs
-
-        _, stage_configs = load_and_resolve_stage_configs(
-            model,
-            stage_configs_path,
-            {},
-            default_stage_cfg_factory=None,
-        )
-        return stage_configs
-    except Exception:
+    except (AttributeError, ImportError, ModuleNotFoundError):
         logging.getLogger(__name__).debug(
             "Falling back to legacy vLLM-Omni stage config loader",
             exc_info=True,
         )
         return load_stage_configs_from_yaml(stage_configs_path)
+
+    _, stage_configs = load_and_resolve_stage_configs(
+        model,
+        stage_configs_path,
+        {},
+        default_stage_cfg_factory=None,
+    )
+    return stage_configs
 
 
 def stage_configs_use_async_chunk(stage_configs: list) -> bool:
@@ -202,14 +202,22 @@ async def _render_chat_request(
 ) -> dict | None:
     """Render chat the same way vLLM-Omni's OpenAI server does."""
     messages = request.get("messages")
-    if not messages or renderer is None or model_config is None:
+    if not messages:
+        return None
+    if renderer is None or model_config is None:
+        if _has_non_text_chat_parts(messages):
+            raise ValueError("Cannot process multimodal chat without a vLLM renderer")
         return None
 
     try:
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionRequest,
         )
-    except ImportError:
+    except ImportError as e:
+        if _has_non_text_chat_parts(messages):
+            raise ValueError(
+                "Cannot process multimodal chat without ChatCompletionRequest support"
+            ) from e
         return None
 
     try:

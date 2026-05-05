@@ -15,6 +15,7 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni import utils as omni_utils
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
@@ -397,6 +398,66 @@ class TestParseOmniRequest:
                 renderer=BrokenRenderer(),
                 model_config=SimpleNamespace(max_model_len=1024),
             )
+
+    @pytest.mark.asyncio
+    async def test_multimodal_chat_without_renderer_fails_fast(self):
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav"}},
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="without a vLLM renderer"):
+            await parse_omni_request(request, ["text", "audio"])
+
+    @pytest.mark.asyncio
+    async def test_multimodal_chat_without_chat_protocol_import_fails_fast(self):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "vllm.entrypoints.openai.chat_completion.protocol":
+                raise ImportError("missing protocol")
+            return real_import(name, *args, **kwargs)
+
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav"}},
+                    ],
+                }
+            ],
+        }
+
+        with patch.object(builtins, "__import__", side_effect=fake_import):
+            with pytest.raises(ValueError, match="ChatCompletionRequest support"):
+                await parse_omni_request(
+                    request,
+                    ["text", "audio"],
+                    renderer=MagicMock(),
+                    model_config=SimpleNamespace(max_model_len=1024),
+                )
+
+    def test_load_omni_stage_configs_reraises_deploy_loader_errors(self):
+        with patch(
+            "vllm_omni.engine.async_omni_engine.load_and_resolve_stage_configs",
+            side_effect=RuntimeError("bad deploy yaml"),
+        ):
+            with patch.object(omni_utils, "load_stage_configs_from_yaml") as legacy:
+                with pytest.raises(RuntimeError, match="bad deploy yaml"):
+                    omni_utils.load_omni_stage_configs("qwen3-omni", "/tmp/stages.yaml")
+
+        legacy.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):

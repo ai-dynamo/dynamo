@@ -24,6 +24,7 @@ from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.stage_worker import (
     _ASYNC_PREPARE_KEY,
     _ASYNC_PREWARM_KEY,
+    _ASYNC_PREWARM_READY_KEY,
     _resolve_model_type,
 )
 from dynamo.vllm.omni.types import StageOutput
@@ -163,73 +164,121 @@ class OmniStageRouter:
         }
 
         downstream_tasks: dict[int, asyncio.Task[StageOutput]] = {}
-        for stage_idx, stage_cfg in enumerate(self.stage_configs[1:], start=1):
-            model_stage = _model_stage_name(stage_cfg, stage_idx)
-            client = self.stage_clients.get(model_stage)
-            if client is None:
-                yield {
-                    "error": f"No client for stage '{model_stage}'",
-                    "finished": True,
-                }
-                return
-            downstream_tasks[stage_idx] = asyncio.create_task(
-                self._call_stage(client, dict(prewarm_request))
-            )
+        prewarm_ready: dict[int, asyncio.Future[str | None]] = {}
+        try:
+            for stage_idx, stage_cfg in enumerate(self.stage_configs[1:], start=1):
+                model_stage = _model_stage_name(stage_cfg, stage_idx)
+                client = self.stage_clients.get(model_stage)
+                if client is None:
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {
+                        "error": f"No client for stage '{model_stage}'",
+                        "finished": True,
+                    }
+                    return
+                ready_future = asyncio.get_running_loop().create_future()
+                prewarm_ready[stage_idx] = ready_future
+                downstream_tasks[stage_idx] = asyncio.create_task(
+                    self._call_stage(
+                        client,
+                        dict(prewarm_request),
+                        prewarm_ready=ready_future,
+                    )
+                )
 
-        await asyncio.sleep(0)
-        stage0_output = await self._call_stage(
-            stage0_client,
-            {"request_id": request_id, **request},
-        )
-        if stage0_output.error:
-            for task in downstream_tasks.values():
-                task.cancel()
-            yield {"error": stage0_output.error, "finished": True}
-            return
-        stage0_text = _stage_output_text(stage0_output)
-
-        final: StageOutput | None = None
-        for stage_idx in range(1, len(self.stage_configs)):
             try:
-                output = await downstream_tasks[stage_idx]
-            except asyncio.CancelledError:
-                raise
+                ready_errors = await asyncio.gather(*prewarm_ready.values())
+                if ready_error := next((e for e in ready_errors if e), None):
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {"error": ready_error, "finished": True}
+                    return
+                stage0_output = await self._call_stage(
+                    stage0_client,
+                    {"request_id": request_id, **request},
+                )
             except Exception as e:
+                await _cancel_downstream_tasks(downstream_tasks)
                 yield {"error": str(e), "finished": True}
                 return
-            if output.error:
-                for later_idx, task in downstream_tasks.items():
-                    if later_idx > stage_idx:
-                        task.cancel()
-                yield {"error": output.error, "finished": True}
+            if stage0_output.error:
+                await _cancel_downstream_tasks(downstream_tasks)
+                yield {"error": stage0_output.error, "finished": True}
                 return
-            final = output
+            stage0_text = _stage_output_text(stage0_output)
 
-        if final is None:
-            yield {"error": "No final stage output", "finished": True}
-            return
+            final: StageOutput | None = None
+            for stage_idx in range(1, len(self.stage_configs)):
+                try:
+                    output = await downstream_tasks[stage_idx]
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {"error": str(e), "finished": True}
+                    return
+                if output.error:
+                    await _cancel_downstream_tasks(downstream_tasks)
+                    yield {"error": output.error, "finished": True}
+                    return
+                final = output
 
-        async for chunk in self._format_final_output(
-            final,
-            request,
-            request_id,
-            request_type,
-            extra_ctx={"text": stage0_text} if stage0_text else None,
-        ):
-            yield chunk
+            if final is None:
+                yield {"error": "No final stage output", "finished": True}
+                return
 
-    async def _call_stage(self, client: Any, stage_request: dict) -> StageOutput:
+            async for chunk in self._format_final_output(
+                final,
+                request,
+                request_id,
+                request_type,
+                extra_ctx={"text": stage0_text} if stage0_text else None,
+            ):
+                yield chunk
+        finally:
+            await _cancel_downstream_tasks(downstream_tasks)
+
+    async def _call_stage(
+        self,
+        client: Any,
+        stage_request: dict,
+        *,
+        prewarm_ready: asyncio.Future[str | None] | None = None,
+    ) -> StageOutput:
         return StageOutput.model_validate(
-            await self._call_stage_raw(client, stage_request)
+            await self._call_stage_raw(
+                client,
+                stage_request,
+                prewarm_ready=prewarm_ready,
+            )
         )
 
-    async def _call_stage_raw(self, client: Any, stage_request: dict) -> dict:
+    async def _call_stage_raw(
+        self,
+        client: Any,
+        stage_request: dict,
+        *,
+        prewarm_ready: asyncio.Future[str | None] | None = None,
+    ) -> dict:
         raw_stage_output = {}
-        async for chunk in await client.round_robin(stage_request):
-            data = chunk.data()
-            if isinstance(data, (str, bytes)):
-                data = json.loads(data)
-            raw_stage_output.update(data)
+        try:
+            async for chunk in await client.round_robin(stage_request):
+                data = chunk.data()
+                if isinstance(data, (str, bytes)):
+                    data = json.loads(data)
+                if data.pop(_ASYNC_PREWARM_READY_KEY, False):
+                    if prewarm_ready is not None and not prewarm_ready.done():
+                        prewarm_ready.set_result(None)
+                raw_stage_output.update(data)
+        except Exception as e:
+            if prewarm_ready is not None and not prewarm_ready.done():
+                prewarm_ready.set_result(str(e))
+            raise
+        if prewarm_ready is not None and not prewarm_ready.done():
+            error = raw_stage_output.get("error")
+            if error:
+                prewarm_ready.set_result(str(error))
+            else:
+                prewarm_ready.set_result("Stage prewarm completed without ready ack")
         return raw_stage_output
 
     async def _format_final_output(
@@ -355,6 +404,15 @@ def _compute_async_prewarm_prompt_len(prompt_token_ids: list[int]) -> int:
         except Exception:
             logger.debug("Failed to compute Qwen3 talker prompt length", exc_info=True)
     return max(1, len(prompt_token_ids), 1)
+
+
+async def _cancel_downstream_tasks(tasks: dict[int, asyncio.Task[StageOutput]]) -> None:
+    if not tasks:
+        return
+    for task in tasks.values():
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
 
 
 def _stage_output_text(stage_output: StageOutput) -> str:
