@@ -66,11 +66,14 @@ navigation:
   - section: Kubernetes Deployment
     contents:
       - section: Deployment Guide
-        path: kubernetes/README.md
         contents:
-          - page: Detailed Installation Guide
+          - page: Quickstart
+            path: kubernetes/README.md
+          - page: Installation Guide
             path: kubernetes/installation-guide.md
-          - page: Deploying Your First Model
+          - page: Model Deployment Guide
+            path: kubernetes/model-deployment-guide.md
+          - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
@@ -112,6 +115,32 @@ navigation:
             path: kubernetes/grove.md
           - page: Topology Aware Scheduling
             path: kubernetes/topology-aware-scheduling.md
+      - section: Cloud Provider Guides
+        contents:
+          - section: AWS
+            contents:
+              - page: EKS Setup
+                path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFS
+                path: kubernetes/cloud-providers/eks/efs.md
+              - page: ECS
+                path: kubernetes/cloud-providers/ecs/ecs.md
+          - section: Azure
+            contents:
+              - page: AKS Setup
+                path: kubernetes/cloud-providers/aks/aks.md
+              - page: RDMA / InfiniBand
+                path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+              - page: AKS Storage
+                path: kubernetes/cloud-providers/aks/storage.md
+              - page: Azure Lustre CSI Driver
+                path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+              - page: Spot VMs
+                path: kubernetes/cloud-providers/aks/spot-vms.md
+          - section: GCP
+            contents:
+              - page: GKE Setup
+                path: kubernetes/cloud-providers/gke/gke.md
 
   # ==================== User Guides ====================
   - section: User Guides

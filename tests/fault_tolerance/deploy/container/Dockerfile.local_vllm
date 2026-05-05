@@ -127,12 +127,12 @@ ENV CPATH=/usr/local/cuda/include
 
 # Install Dynamo and dependencies (following Dockerfile.vllm pattern)
 # First install basic Python packages
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     uv pip install pip setuptools wheel
 
 # Copy and install Dynamo wheels from dynamo_base
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -144,7 +144,7 @@ COPY container/deps/requirements.common.txt /tmp/requirements.common.txt
 COPY container/deps/requirements.vllm.txt /tmp/requirements.vllm.txt
 COPY container/deps/requirements.benchmark.txt /tmp/requirements.benchmark.txt
 COPY container/deps/requirements.test.txt /tmp/requirements.test.txt
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
@@ -205,7 +205,7 @@ COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
 COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin for development
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     uv pip install maturin[patchelf] && \
     uv pip install --no-deps -e .
 
