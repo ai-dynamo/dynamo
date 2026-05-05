@@ -21,35 +21,102 @@ use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
+use dynamo_runtime::metrics::prometheus_names::labels;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
+use prometheus::core::Collector;
 
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
-const UNSET_DP_RANK_LABEL: &str = "none";
 
-/// Clean up all Prometheus metrics for a worker across the specified dp_ranks.
+/// Return the `dp_rank` label values currently present in `collector` for
+/// series that match `worker_id` and `worker_type`.
 ///
-/// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
-/// Called when workers are removed to prevent stale metrics from accumulating.
-fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
-    let worker_id_str = worker_id.to_string();
-    let m = &*WORKER_LOAD_METRICS;
-    for dp_rank in dp_ranks {
-        let dp_rank_str = dp_rank.to_string();
-        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
-        let _ = m.active_decode_blocks.remove_label_values(labels);
-        let _ = m.active_prefill_tokens.remove_label_values(labels);
-        let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(labels);
-        let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(labels);
-        let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(labels);
+/// Reading the dp_rank from the live series (rather than from a separately
+/// tracked map) is what makes cleanup robust: the per-request `LAST_*`
+/// gauges in `protocols::common::timing` use the dp_rank carried on the
+/// request, which can differ from the value reported via runtime config
+/// or `ActiveLoad` events.
+fn dp_ranks_for_worker(
+    collector: &dyn Collector,
+    worker_id: &str,
+    worker_type: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for mf in collector.collect() {
+        for metric in mf.get_metric() {
+            let mut wid_ok = false;
+            let mut wt_ok = false;
+            let mut dp: Option<String> = None;
+            for lp in metric.get_label() {
+                match lp.get_name() {
+                    n if n == labels::WORKER_ID => wid_ok = lp.get_value() == worker_id,
+                    n if n == labels::WORKER_TYPE => wt_ok = lp.get_value() == worker_type,
+                    n if n == labels::DP_RANK => dp = Some(lp.get_value().to_string()),
+                    _ => {}
+                }
+            }
+            if wid_ok
+                && wt_ok
+                && let Some(d) = dp
+            {
+                out.push(d);
+            }
+        }
     }
+    out
+}
 
-    let unset_labels = &[worker_id_str.as_str(), UNSET_DP_RANK_LABEL, worker_type];
-    let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(unset_labels);
-    let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(unset_labels);
-    let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(unset_labels);
+/// Clean up all Prometheus metrics for a worker.
+///
+/// For each per-worker metric vec, enumerate the live series and remove
+/// any whose `worker_id` + `worker_type` labels match. The dp_rank value
+/// is taken from the live series, so cleanup is correct even when the
+/// `LAST_*` gauges were written with a dp_rank the monitor never observed
+/// via runtime config or `ActiveLoad` events.
+fn cleanup_worker_metrics(worker_id: u64, worker_type: &str) {
+    let wid = worker_id.to_string();
+    let m = &*WORKER_LOAD_METRICS;
+
+    let active_decode = dp_ranks_for_worker(&m.active_decode_blocks, &wid, worker_type);
+    let active_prefill = dp_ranks_for_worker(&m.active_prefill_tokens, &wid, worker_type);
+    let last_ttft = dp_ranks_for_worker(&*WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE, &wid, worker_type);
+    let last_isl = dp_ranks_for_worker(&*WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, &wid, worker_type);
+    let last_itl = dp_ranks_for_worker(&*WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE, &wid, worker_type);
+
+    // Diagnostic: if the `last_*` lists contain dp_ranks that aren't in the
+    // `active_*` lists, the previous cleanup path (which derived dp_ranks
+    // from runtime config + ActiveLoad events) would have left those
+    // `last_*` series orphaned when the worker was removed. Logged at info
+    // because cleanup events are rare and this is the smoking-gun for the
+    // multi-replica stale-metrics symptom.
+    tracing::info!(
+        worker_id,
+        worker_type,
+        ?active_decode,
+        ?active_prefill,
+        ?last_ttft,
+        ?last_isl,
+        ?last_itl,
+        "cleanup_worker_metrics: per-gauge dp_ranks found in live series"
+    );
+
+    for dp in &active_decode {
+        let _ = m.active_decode_blocks.remove_label_values(&[&wid, dp, worker_type]);
+    }
+    for dp in &active_prefill {
+        let _ = m.active_prefill_tokens.remove_label_values(&[&wid, dp, worker_type]);
+    }
+    for dp in &last_ttft {
+        let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(&[&wid, dp, worker_type]);
+    }
+    for dp in &last_isl {
+        let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(&[&wid, dp, worker_type]);
+    }
+    for dp in &last_itl {
+        let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(&[&wid, dp, worker_type]);
+    }
 }
 
 /// Default value for `max_num_batched_tokens` when the runtime config does not
@@ -527,9 +594,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 std::collections::HashSet::new();
             let mut prefill_instances_rx: Option<tokio::sync::watch::Receiver<Vec<u64>>> = None;
 
-            let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
-                HashMap::new();
-
             loop {
                 // Create a future that either reads from kv_metrics or pends forever if unavailable
                 let kv_event_future = async {
@@ -551,25 +615,27 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
 
-                        // Find workers that are being removed (not in runtime_configs anymore)
-                        let removed_workers: Vec<u64> = known_worker_dp_ranks
-                            .keys()
+                        // Find workers that we were tracking but that runtime_configs
+                        // no longer reports. Use worker_load_states as the source of
+                        // truth for "previously known workers" — it's populated by
+                        // both runtime config events (below) and ActiveLoad events.
+                        let removed_workers: Vec<u64> = worker_load_states
+                            .iter()
+                            .map(|e| *e.key())
                             .filter(|id| !runtime_configs.contains_key(id))
-                            .copied()
                             .collect();
 
-                        // Clean up Prometheus metrics for removed workers
+                        // Clean up Prometheus metrics for removed workers. We don't
+                        // know whether a given worker was decode or prefill, so
+                        // attempt both — cleanup is a no-op for combinations that
+                        // don't exist in the live series.
                         for worker_id in &removed_workers {
-                            if let Some(dp_ranks) = known_worker_dp_ranks.remove(worker_id) {
-                                let dp_ranks_vec: Vec<u32> = dp_ranks.into_iter().collect();
-                                // Clean up metrics for both worker types since we don't know which type this worker was
-                                cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_DECODE);
-                                cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_PREFILL);
-                                tracing::debug!(
-                                    "Removed Prometheus metrics for worker {}",
-                                    worker_id
-                                );
-                            }
+                            cleanup_worker_metrics(*worker_id, WORKER_TYPE_DECODE);
+                            cleanup_worker_metrics(*worker_id, WORKER_TYPE_PREFILL);
+                            tracing::debug!(
+                                "Removed Prometheus metrics for worker {}",
+                                worker_id
+                            );
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
@@ -581,12 +647,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                             let dp_start = runtime_config.data_parallel_start_rank;
                             let dp_end = dp_start + runtime_config.data_parallel_size;
-
-                            // Track dp_ranks for this worker (for cleanup when worker disappears)
-                            let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
-                            for dp_rank in dp_start..dp_end {
-                                dp_ranks_set.insert(dp_rank);
-                            }
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
                             if let Some(total_blocks) = runtime_config.total_kv_blocks {
@@ -619,13 +679,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         };
 
                         let worker_id = active_load.worker_id;
-                        let dp_rank = active_load.dp_rank;
-
-                        // Track known worker/dp_rank combinations for cleanup
-                        known_worker_dp_ranks
-                            .entry(worker_id)
-                            .or_default()
-                            .insert(dp_rank);
 
                         // Snapshot thresholds once per event — rare writes (HTTP endpoint)
                         // mean RwLock contention is effectively zero.
@@ -675,20 +728,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             .copied()
                             .collect();
 
-                        if !removed_workers.is_empty() {
-                            // Clean up metrics for removed decode workers (with worker_type=decode label)
-                            for worker_id in &removed_workers {
-                                // Get dp_ranks from known_worker_dp_ranks if available, otherwise use [0]
-                                let dp_ranks: Vec<u32> = known_worker_dp_ranks
-                                    .get(worker_id)
-                                    .map(|ranks| ranks.iter().copied().collect())
-                                    .unwrap_or_else(|| vec![0]);
-                                cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
-                                tracing::debug!(
-                                    "Cleaned up metrics for removed decode worker {}",
-                                    worker_id
-                                );
-                            }
+                        for worker_id in &removed_workers {
+                            cleanup_worker_metrics(*worker_id, WORKER_TYPE_DECODE);
+                            tracing::debug!(
+                                "Cleaned up metrics for removed decode worker {}",
+                                worker_id
+                            );
                         }
 
                         known_decode_workers = current_instances;
@@ -724,20 +769,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             .copied()
                             .collect();
 
-                        if !removed_workers.is_empty() {
-                            // Clean up metrics for removed prefill workers (with worker_type=prefill label)
-                            for worker_id in &removed_workers {
-                                // Get dp_ranks from known_worker_dp_ranks if available, otherwise use [0]
-                                let dp_ranks: Vec<u32> = known_worker_dp_ranks
-                                    .get(worker_id)
-                                    .map(|ranks| ranks.iter().copied().collect())
-                                    .unwrap_or_else(|| vec![0]);
-                                cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_PREFILL);
-                                tracing::debug!(
-                                    "Cleaned up metrics for removed prefill worker {}",
-                                    worker_id
-                                );
-                            }
+                        for worker_id in &removed_workers {
+                            cleanup_worker_metrics(*worker_id, WORKER_TYPE_PREFILL);
+                            tracing::debug!(
+                                "Cleaned up metrics for removed prefill worker {}",
+                                worker_id
+                            );
                         }
 
                         known_prefill_workers = current_instances;
@@ -1063,5 +1100,125 @@ mod tests {
         state.active_prefill_tokens.insert(0, 2_500);
 
         assert!(state.is_busy(None, None, Some(2.0)));
+    }
+
+    /// Regression: cleanup must remove `WORKER_LAST_*` series even when the
+    /// dp_rank used at write time was not reported via runtime config or
+    /// `ActiveLoad` events. The `LAST_*` gauges are written by per-request
+    /// timing observation (see `protocols::common::timing`), which uses the
+    /// dp_rank carried on the request. Before this regression test, cleanup
+    /// only removed the dp_ranks it had tracked separately, so a request
+    /// dp_rank that the monitor never saw would leave the LAST_* series
+    /// orphaned across frontend replicas (causing the planner to read stale
+    /// per-worker metrics from whichever replica it scraped).
+    #[test]
+    fn cleanup_removes_last_gauges_with_untracked_dp_rank() {
+        use crate::http::service::metrics::{
+            WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
+            WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
+        };
+        use crate::kv_router::metrics::WORKER_LOAD_METRICS;
+        use prometheus::core::Collector;
+
+        let worker_id = 0xdead_beef_0001_u64;
+        let worker_id_str = worker_id.to_string();
+        // Use a dp_rank value the cleanup path would NOT have tracked
+        // (the old implementation iterated tracked dp_ranks + "none").
+        let dp_rank = "7";
+        let labels: &[&str] = &[worker_id_str.as_str(), dp_rank, super::WORKER_TYPE_DECODE];
+
+        WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(labels)
+            .set(0.123);
+        WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            .with_label_values(labels)
+            .set(456);
+        WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            .with_label_values(labels)
+            .set(0.789);
+        WORKER_LOAD_METRICS
+            .active_decode_blocks
+            .with_label_values(labels)
+            .set(42);
+
+        let count_for = |c: &dyn Collector| -> usize {
+            c.collect()
+                .iter()
+                .flat_map(|mf| mf.get_metric().iter())
+                .filter(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|lp| lp.get_name() == "worker_id" && lp.get_value() == worker_id_str)
+                })
+                .count()
+        };
+
+        // Sanity: the series we just wrote are present.
+        assert_eq!(count_for(&*WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE), 1);
+        assert_eq!(count_for(&*WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE), 1);
+        assert_eq!(count_for(&*WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE), 1);
+        assert_eq!(count_for(&WORKER_LOAD_METRICS.active_decode_blocks), 1);
+
+        super::cleanup_worker_metrics(worker_id, super::WORKER_TYPE_DECODE);
+
+        // Every series for this worker_id must be gone, including the
+        // dp_rank=7 one the old cleanup wouldn't have touched.
+        assert_eq!(count_for(&*WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE), 0);
+        assert_eq!(count_for(&*WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE), 0);
+        assert_eq!(count_for(&*WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE), 0);
+        assert_eq!(count_for(&WORKER_LOAD_METRICS.active_decode_blocks), 0);
+    }
+
+    /// Cleanup for a given worker_type must not touch series for the other
+    /// worker_type belonging to the same worker_id (a worker could in
+    /// principle appear under both prefill and decode gauges in tests, and
+    /// running `cleanup_worker_metrics(_, DECODE)` should leave the prefill
+    /// series intact).
+    #[test]
+    fn cleanup_only_affects_matching_worker_type() {
+        use crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE;
+        use prometheus::core::Collector;
+
+        let worker_id = 0xdead_beef_0002_u64;
+        let worker_id_str = worker_id.to_string();
+        WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(&[worker_id_str.as_str(), "0", super::WORKER_TYPE_DECODE])
+            .set(0.1);
+        WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            .with_label_values(&[worker_id_str.as_str(), "0", super::WORKER_TYPE_PREFILL])
+            .set(0.2);
+
+        let count_with_type = |wt: &str| -> usize {
+            WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .collect()
+                .iter()
+                .flat_map(|mf| mf.get_metric().iter())
+                .filter(|m| {
+                    let mut wid_match = false;
+                    let mut wt_match = false;
+                    for lp in m.get_label() {
+                        if lp.get_name() == "worker_id" && lp.get_value() == worker_id_str {
+                            wid_match = true;
+                        }
+                        if lp.get_name() == "worker_type" && lp.get_value() == wt {
+                            wt_match = true;
+                        }
+                    }
+                    wid_match && wt_match
+                })
+                .count()
+        };
+
+        assert_eq!(count_with_type(super::WORKER_TYPE_DECODE), 1);
+        assert_eq!(count_with_type(super::WORKER_TYPE_PREFILL), 1);
+
+        super::cleanup_worker_metrics(worker_id, super::WORKER_TYPE_DECODE);
+
+        assert_eq!(count_with_type(super::WORKER_TYPE_DECODE), 0);
+        assert_eq!(count_with_type(super::WORKER_TYPE_PREFILL), 1);
+
+        // Clean up the prefill side so we don't pollute other tests.
+        super::cleanup_worker_metrics(worker_id, super::WORKER_TYPE_PREFILL);
+        assert_eq!(count_with_type(super::WORKER_TYPE_PREFILL), 0);
     }
 }
