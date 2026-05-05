@@ -61,6 +61,15 @@ const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
 const INLINE_PREFIX_KEY_CAP: usize = 16;
 
+type PartialFnvState = (u64, usize, usize);
+
+struct StoredRoutingDecision {
+    shard_idx: usize,
+    new_fnv_state: Option<PartialFnvState>,
+    parent_found: bool,
+    branch_keys: Vec<u64>,
+}
+
 /// Fold one `u64` value into an FNV-1a accumulator.
 #[inline(always)]
 fn fnv_fold(state: u64, value: u64) -> u64 {
@@ -152,7 +161,7 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     ///
     /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
     /// `Cleared` events; only `Removed` events prune them.
-    block_to_fnv_state: DashMap<u64, (u64, usize, usize), FxBuildHasher>,
+    block_to_fnv_state: DashMap<u64, PartialFnvState, FxBuildHasher>,
 
     kv_block_size: u32,
 
@@ -429,9 +438,9 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     ///    shorter than `prefix_depth` this is a partial key; a future
     ///    continuation in case A will extend it to the full depth.
     ///
-    /// Returns `(shard_idx, fnv_state, parent_found, branch_keys)`.
+    /// Returns a [`StoredRoutingDecision`].
     ///
-    /// `fnv_state` is `Some` only while the chain has not yet reached
+    /// `new_fnv_state` is `Some` only while the chain has not yet reached
     /// `prefix_depth`; the caller records it on the last block of the batch so
     /// the next continuation can extend it.  The shard in the state tuple is the
     /// sticky shard so continuations never cross shards mid-chain.
@@ -445,10 +454,7 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     /// during this call.  The caller uses this list to correct `branch_to_shard`
     /// when the canonical shard (`actual_shard`, determined after inspecting
     /// `block_to_shard`) differs from `shard_idx`.
-    fn compute_stored_routing(
-        &self,
-        store_data: &KvCacheStoreData,
-    ) -> (usize, Option<(u64, usize, usize)>, bool, Vec<u64>) {
+    fn compute_stored_routing(&self, store_data: &KvCacheStoreData) -> StoredRoutingDecision {
         if let Some(parent_hash) = &store_data.parent_hash {
             if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
                 // Case A: parent is shallow — extend FNV accumulator.
@@ -473,14 +479,29 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                     vec![]
                 };
                 let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth, shard));
-                (shard, state, true, branch_keys)
+                StoredRoutingDecision {
+                    shard_idx: shard,
+                    new_fnv_state: state,
+                    parent_found: true,
+                    branch_keys,
+                }
             } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
                 // Case B: deep chain — inherit shard.
-                (shard, None, true, vec![])
+                StoredRoutingDecision {
+                    shard_idx: shard,
+                    new_fnv_state: None,
+                    parent_found: true,
+                    branch_keys: vec![],
+                }
             } else {
                 // Case C (OOO): parent not in either map; best-effort key from this batch.
                 let key = self.branch_key_for_stored_blocks(&store_data.blocks);
-                (self.assign_shard(key), None, false, vec![key])
+                StoredRoutingDecision {
+                    shard_idx: self.assign_shard(key),
+                    new_fnv_state: None,
+                    parent_found: false,
+                    branch_keys: vec![key],
+                }
             }
         } else {
             // Case C (root): start FNV accumulation from scratch.
@@ -494,7 +515,12 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             let depth = to_process;
             let shard = self.assign_shard_for_prefix_keys(&prefix_keys);
             let state = (depth < self.prefix_depth).then_some((fnv, depth, shard));
-            (shard, state, true, prefix_keys)
+            StoredRoutingDecision {
+                shard_idx: shard,
+                new_fnv_state: state,
+                parent_found: true,
+                branch_keys: prefix_keys,
+            }
         }
     }
 
@@ -503,8 +529,12 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             return;
         };
 
-        let (shard_idx, new_fnv_state, parent_found, branch_keys) =
-            self.compute_stored_routing(store_data);
+        let StoredRoutingDecision {
+            shard_idx,
+            new_fnv_state,
+            parent_found,
+            branch_keys,
+        } = self.compute_stored_routing(store_data);
 
         // Resolve the canonical shard for Case C (root or OOO) by atomically
         // inserting the first block into `block_to_shard`.  Two concurrent
@@ -583,10 +613,8 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         // OOO event: parent is unknown so the target CRTC cannot chain these
         // blocks.  Strip parent_hash so they are stored as an orphan root
         // rather than being silently dropped by the CRTC with a warning.
-        if !parent_found {
-            if let KvCacheEventData::Stored(ref mut data) = event.event.data {
-                data.parent_hash = None;
-            }
+        if let (false, KvCacheEventData::Stored(data)) = (parent_found, &mut event.event.data) {
+            data.parent_hash = None;
         }
 
         self.shards[actual_shard].apply_event(event).await;
