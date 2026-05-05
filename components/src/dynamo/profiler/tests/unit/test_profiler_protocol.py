@@ -45,7 +45,7 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="Qwen/Qwen3-30B-A3B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -70,7 +70,7 @@ def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="meta-llama/Llama-3-70B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -95,7 +95,7 @@ def test_build_dgd_config_multinode_parses_shell_joined_parallelism_args() -> No
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="meta-llama/Llama-3-70B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,

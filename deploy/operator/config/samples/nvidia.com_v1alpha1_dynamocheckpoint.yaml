@@ -27,7 +27,8 @@ spec:
     dtype: "bfloat16"
     maxModelLen: 2048
 
-  # Optional: enable GMS-specific checkpoint capture and restore helpers.
+  # GMS-specific checkpoint capture and restore is temporarily disabled
+  # because of known GPU driver restore issues. Keep this false.
   gpuMemoryService:
     enabled: false
 

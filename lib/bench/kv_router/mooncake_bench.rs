@@ -11,7 +11,9 @@ mod mooncake_shared;
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
 use mooncake_shared::{
-    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig, run_benchmark,
+    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig,
+    PreparedMooncakeBenchmark, merge_worker_traces, prepare_scaled_benchmark,
+    run_prepared_benchmark,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -170,6 +172,11 @@ struct Args {
     #[clap(long, default_value = "200")]
     shard_metrics_interval_ms: u64,
 
+    /// Number of independent benchmark trials to run over the same generated
+    /// benchmark input. Each trial builds a fresh indexer.
+    #[clap(long, default_value = "1")]
+    benchmark_runs: usize,
+
     /// Indexer backend to benchmark (defaults to radix-tree if not specified).
     #[clap(subcommand)]
     indexer: Option<IndexerArgs>,
@@ -187,6 +194,31 @@ struct SweepStepResult {
     duration_ms: u64,
     #[serde(flatten)]
     results: BenchmarkResults,
+}
+
+fn shard_metrics_output_path(
+    base_path: &str,
+    indexer_name: &str,
+    compare_count: usize,
+    run_idx: usize,
+    run_count: usize,
+) -> String {
+    if compare_count <= 1 && run_count <= 1 {
+        return base_path.to_string();
+    }
+
+    let stem = base_path.trim_end_matches(".csv");
+    let mut path = stem.to_string();
+    if compare_count > 1 {
+        path.push('_');
+        path.push_str(indexer_name);
+    }
+    if run_count > 1 {
+        path.push_str("_run");
+        path.push_str(&(run_idx + 1).to_string());
+    }
+    path.push_str(".csv");
+    path
 }
 
 // ---------------------------------------------------------------------------
@@ -376,23 +408,74 @@ fn plot_shard_metrics(rows: &[ShardSampleRow], svg_path: &str) -> anyhow::Result
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
+fn validate_args(args: &Args) -> anyhow::Result<()> {
     if args.common.test {
         anyhow::bail!(
             "mooncake_bench no longer supports --test; run `cargo test --package dynamo-bench --test mooncake_trace` instead"
         );
     }
+    if args.benchmark_runs == 0 {
+        anyhow::bail!("--benchmark-runs must be at least 1");
+    }
+    if args.common.sweep && args.benchmark_runs != 1 {
+        anyhow::bail!("--benchmark-runs is only supported outside --sweep mode");
+    }
+    Ok(())
+}
 
-    let path = match args.common.mooncake_trace_path.as_deref() {
-        Some(p) => p,
-        None => {
-            eprintln!("No mooncake_trace_path provided, skipping benchmark");
-            return Ok(());
-        }
+fn indexer_names(args: &Args) -> Vec<String> {
+    if args.compare.is_empty() {
+        vec![args.get_indexer().to_config().short_name().to_string()]
+    } else {
+        args.compare.clone()
+    }
+}
+
+fn indexer_config(args: &Args, name: &str) -> anyhow::Result<MooncakeIndexerConfig> {
+    if args.compare.is_empty() {
+        Ok(args.get_indexer().to_config())
+    } else {
+        MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)
+    }
+}
+
+fn build_indexer(
+    args: &Args,
+    config: &MooncakeIndexerConfig,
+) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+    if args.approx {
+        config.build_approximate(
+            args.common.block_size,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        )
+    } else {
+        Ok(config.build(
+            args.common.block_size,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        ))
+    }
+}
+
+fn benchmark_config(
+    args: &Args,
+    indexer_config: &MooncakeIndexerConfig,
+    benchmark_duration_ms: u64,
+) -> MooncakeBenchmarkConfig {
+    MooncakeBenchmarkConfig {
+        benchmark_duration_ms,
+        inference_worker_duplication_factor: args.common.inference_worker_duplication_factor,
+        count_events: indexer_config.supports_remove(),
+        find_matches_concurrency: args.find_matches_concurrency,
+        block_size: args.common.block_size,
+    }
+}
+
+async fn prepare_benchmark_input(args: &Args) -> anyhow::Result<Option<MooncakeBenchmarkInput>> {
+    let Some(path) = args.common.mooncake_trace_path.as_deref() else {
+        eprintln!("No mooncake_trace_path provided, skipping benchmark");
+        return Ok(None);
     };
+
     let traces = process_mooncake_trace(
         path,
         args.common.block_size,
@@ -415,237 +498,270 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
-    let indexer_names: Vec<String> = if args.compare.is_empty() {
-        vec![args.get_indexer().to_config().short_name().to_string()]
+    Ok(Some(benchmark_input))
+}
+
+async fn run_sweep_mode(
+    args: &Args,
+    indexer_names: &[String],
+    benchmark_input: &MooncakeBenchmarkInput,
+) -> anyhow::Result<()> {
+    let merged = merge_worker_traces(benchmark_input, args.common.block_size)?;
+    let durations_low_to_high = compute_sweep_durations(
+        args.common.sweep_min_ms,
+        args.common.sweep_max_ms,
+        args.common.sweep_steps,
+    );
+    let durations_high_to_low: Vec<u64> = durations_low_to_high.iter().copied().rev().collect();
+
+    let mut all_results: Vec<(&str, Vec<(u64, BenchmarkResults)>)> = Vec::new();
+
+    for name in indexer_names {
+        println!("\n{}", "=".repeat(60));
+        println!("Benchmarking indexer: {}", name);
+        println!("{}", "=".repeat(60));
+
+        let config = indexer_config(args, name)?;
+        let multi_threaded = config.is_multi_threaded();
+        let durations = if multi_threaded {
+            &durations_high_to_low
+        } else {
+            &durations_low_to_high
+        };
+
+        let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
+        let mut consecutive_keeping_up = 0u32;
+
+        for &dur_ms in durations {
+            println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
+            let indexer = build_indexer(args, &config)?;
+            let bench_config = benchmark_config(args, &config, dur_ms);
+            let prepared = prepare_scaled_benchmark(&merged, bench_config);
+            let run = run_prepared_benchmark(indexer, &prepared, bench_config).await?;
+            warn_if_bench_did_not_keep_up(run.kept_up);
+            let result = run.results;
+
+            if multi_threaded {
+                if result.block_throughput >= result.offered_block_throughput * 0.95 {
+                    consecutive_keeping_up += 1;
+                } else {
+                    consecutive_keeping_up = 0;
+                }
+                results.push((dur_ms, result));
+                if consecutive_keeping_up >= 5 {
+                    println!("Early stop: achieved >= 95% offered for 5 consecutive steps");
+                    break;
+                }
+            } else {
+                let saturated = result.offered_block_throughput > result.block_throughput * 5.0;
+                results.push((dur_ms, result));
+                if saturated {
+                    println!("Early stop: offered throughput >5x achieved throughput");
+                    break;
+                }
+            }
+        }
+
+        results.sort_by_key(|(dur, _)| std::cmp::Reverse(*dur));
+        print_sweep_summary(name, &results);
+
+        all_results.push((name, results));
+    }
+
+    plot_sweep(&all_results, &args.sweep_output)?;
+    write_sweep_json(args, &all_results)?;
+    Ok(())
+}
+
+fn write_sweep_json(
+    args: &Args,
+    all_results: &[(&str, Vec<(u64, BenchmarkResults)>)],
+) -> anyhow::Result<()> {
+    let json_path = args
+        .sweep_output
+        .replace(".png", ".json")
+        .replace(".svg", ".json");
+    let json_map: std::collections::BTreeMap<&str, Vec<SweepStepResult>> = all_results
+        .iter()
+        .map(|(name, results)| {
+            let steps = results
+                .iter()
+                .map(|(dur, r)| SweepStepResult {
+                    duration_ms: *dur,
+                    results: BenchmarkResults {
+                        offered_ops_throughput: r.offered_ops_throughput,
+                        ops_throughput: r.ops_throughput,
+                        offered_block_throughput: r.offered_block_throughput,
+                        block_throughput: r.block_throughput,
+                        latency_p99_us: r.latency_p99_us,
+                    },
+                })
+                .collect();
+            (*name, steps)
+        })
+        .collect();
+    std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
+    println!("Sweep results saved to {}", json_path);
+    Ok(())
+}
+
+async fn run_repeated_mode(
+    args: &Args,
+    indexer_names: &[String],
+    benchmark_input: &MooncakeBenchmarkInput,
+) -> anyhow::Result<()> {
+    let merged = merge_worker_traces(benchmark_input, args.common.block_size)?;
+
+    for name in indexer_names {
+        let config = indexer_config(args, name)?;
+        let mut repeated_results = Vec::with_capacity(args.benchmark_runs);
+        let bench_config = benchmark_config(args, &config, args.common.benchmark_duration_ms);
+        let prepared = prepare_scaled_benchmark(&merged, bench_config);
+
+        for run_idx in 0..args.benchmark_runs {
+            print_trial_header(name, run_idx, args.benchmark_runs);
+            repeated_results.push(
+                run_single_trial(args, name, &config, &prepared, bench_config, run_idx).await?,
+            );
+        }
+
+        let title = format!("Repeated Benchmark Summary: {name}");
+        print_benchmark_results_percentiles(&title, &repeated_results);
+    }
+
+    Ok(())
+}
+
+fn print_trial_header(name: &str, run_idx: usize, run_count: usize) {
+    if run_count == 1 {
+        println!("\nBenchmarking indexer: {}", name);
     } else {
-        args.compare.clone()
+        println!(
+            "\nBenchmarking indexer: {} (run {}/{})",
+            name,
+            run_idx + 1,
+            run_count,
+        );
+    }
+}
+
+async fn run_single_trial(
+    args: &Args,
+    name: &str,
+    config: &MooncakeIndexerConfig,
+    prepared: &PreparedMooncakeBenchmark,
+    bench_config: MooncakeBenchmarkConfig,
+    run_idx: usize,
+) -> anyhow::Result<BenchmarkResults> {
+    let indexer = build_indexer(args, config)?;
+
+    let shard_cancel = CancellationToken::new();
+    let shard_sampler = if !args.shard_metrics_csv.is_empty() {
+        Some(start_shard_sampler(
+            indexer.clone(),
+            args.shard_metrics_interval_ms,
+            shard_cancel.clone(),
+        ))
+    } else {
+        None
     };
 
-    if args.common.sweep {
-        let durations_low_to_high = compute_sweep_durations(
-            args.common.sweep_min_ms,
-            args.common.sweep_max_ms,
-            args.common.sweep_steps,
+    let run = run_prepared_benchmark(indexer.clone(), prepared, bench_config).await;
+
+    shard_cancel.cancel();
+    if let Some(handle) = shard_sampler {
+        let rows = handle.await?;
+        let csv_path = shard_metrics_output_path(
+            &args.shard_metrics_csv,
+            name,
+            args.compare.len(),
+            run_idx,
+            args.benchmark_runs,
         );
-        let durations_high_to_low: Vec<u64> = durations_low_to_high.iter().copied().rev().collect();
+        write_shard_metrics_csv(&rows, &csv_path)?;
+        let svg = format!("{}.svg", csv_path.trim_end_matches(".csv"));
+        plot_shard_metrics(&rows, &svg)?;
+    }
 
-        let mut all_results: Vec<(&str, Vec<(u64, BenchmarkResults)>)> = Vec::new();
+    let run = run?;
+    warn_if_bench_did_not_keep_up(run.kept_up);
+    print_indexer_report(&indexer);
+    Ok(run.results)
+}
 
-        for name in &indexer_names {
-            println!("\n{}", "=".repeat(60));
-            println!("Benchmarking indexer: {}", name);
-            println!("{}", "=".repeat(60));
+fn warn_if_bench_did_not_keep_up(kept_up: bool) {
+    if !kept_up {
+        eprintln!(
+            "WARNING: The benchmarker is unable to keep up with the request/event generation rate. Rerun with a larger --benchmark-duration-ms."
+        );
+    }
+}
 
-            let config = if args.compare.is_empty() {
-                args.get_indexer().to_config()
-            } else {
-                MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)?
-            };
+fn print_indexer_report(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
+    let report = indexer.timing_report();
+    if !report.is_empty() {
+        println!("{}", report);
+    }
+    print_shard_distribution(indexer);
+    print_node_edge_lengths(indexer);
+}
 
-            let multi_threaded = config.is_multi_threaded();
-            let durations = if multi_threaded {
-                &durations_high_to_low
-            } else {
-                &durations_low_to_high
-            };
+fn print_shard_distribution(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
+    let sizes = indexer.shard_sizes();
+    if sizes.len() <= 1 {
+        return;
+    }
 
-            let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
-            let mut consecutive_keeping_up = 0u32;
+    let total_blocks: usize = sizes.iter().map(|s| s.block_count).sum();
+    let total_nodes: usize = sizes.iter().map(|s| s.node_count).sum();
+    println!("Shard block distribution:");
+    for s in &sizes {
+        let pct = if total_blocks > 0 {
+            100.0 * s.block_count as f64 / total_blocks as f64
+        } else {
+            0.0
+        };
+        println!(
+            "  shard {}: {} blocks ({:.1}%), {} workers, {} nodes",
+            s.shard_idx, s.block_count, pct, s.worker_count, s.node_count
+        );
+    }
+    if total_nodes > 0 {
+        println!("  total nodes across shards: {}", total_nodes);
+    }
+}
 
-            for &dur_ms in durations {
-                println!("\n=== Sweep: benchmark_duration_ms = {} ===", dur_ms);
-                let indexer = if args.approx {
-                    config.build_approximate(
-                        args.common.block_size,
-                        Arc::new(KvIndexerMetrics::new_unregistered()),
-                    )?
-                } else {
-                    config.build(
-                        args.common.block_size,
-                        Arc::new(KvIndexerMetrics::new_unregistered()),
-                    )
-                };
-                let run = run_benchmark(
-                    indexer,
-                    benchmark_input.clone(),
-                    MooncakeBenchmarkConfig {
-                        benchmark_duration_ms: dur_ms,
-                        inference_worker_duplication_factor: args
-                            .common
-                            .inference_worker_duplication_factor,
-                        count_events: config.supports_remove(),
-                        find_matches_concurrency: args.find_matches_concurrency,
-                        block_size: args.common.block_size,
-                    },
-                )
-                .await?;
-                if !run.kept_up {
-                    eprintln!(
-                        "WARNING: The benchmarker is unable to keep up with the request/event generation rate. Rerun with a larger --benchmark-duration-ms."
-                    );
-                }
-                let result = run.results;
+fn print_node_edge_lengths(indexer: &Arc<dyn KvIndexerInterface + Send + Sync>) {
+    let mut edge_lengths = indexer.node_edge_lengths();
+    if edge_lengths.is_empty() {
+        return;
+    }
 
-                if multi_threaded {
-                    if result.block_throughput >= result.offered_block_throughput * 0.95 {
-                        consecutive_keeping_up += 1;
-                    } else {
-                        consecutive_keeping_up = 0;
-                    }
-                    results.push((dur_ms, result));
-                    if consecutive_keeping_up >= 5 {
-                        println!("Early stop: achieved >= 95% offered for 5 consecutive steps");
-                        break;
-                    }
-                } else {
-                    let saturated = result.offered_block_throughput > result.block_throughput * 5.0;
-                    results.push((dur_ms, result));
-                    if saturated {
-                        println!("Early stop: offered throughput >5x achieved throughput");
-                        break;
-                    }
-                }
-            }
+    let avg = edge_lengths.iter().sum::<usize>() as f64 / edge_lengths.len() as f64;
+    edge_lengths.sort_unstable();
+    let p99 = edge_lengths[edge_lengths.len() * 99 / 100];
+    println!(
+        "Node edge lengths ({} nodes): avg={:.1} hashes/node, p99={} hashes/node",
+        edge_lengths.len(),
+        avg,
+        p99,
+    );
+}
 
-            results.sort_by_key(|(dur, _)| std::cmp::Reverse(*dur));
-            print_sweep_summary(name, &results);
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    validate_args(&args)?;
 
-            all_results.push((name, results));
-        }
+    let Some(benchmark_input) = prepare_benchmark_input(&args).await? else {
+        return Ok(());
+    };
+    let indexer_names = indexer_names(&args);
 
-        plot_sweep(&all_results, &args.sweep_output)?;
-
-        let json_path = args
-            .sweep_output
-            .replace(".png", ".json")
-            .replace(".svg", ".json");
-        let json_map: std::collections::BTreeMap<&str, Vec<SweepStepResult>> = all_results
-            .iter()
-            .map(|(name, results)| {
-                let steps = results
-                    .iter()
-                    .map(|(dur, r)| SweepStepResult {
-                        duration_ms: *dur,
-                        results: BenchmarkResults {
-                            offered_ops_throughput: r.offered_ops_throughput,
-                            ops_throughput: r.ops_throughput,
-                            offered_block_throughput: r.offered_block_throughput,
-                            block_throughput: r.block_throughput,
-                            latency_p99_us: r.latency_p99_us,
-                        },
-                    })
-                    .collect();
-                (*name, steps)
-            })
-            .collect();
-        std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
-        println!("Sweep results saved to {}", json_path);
+    if args.common.sweep {
+        run_sweep_mode(&args, &indexer_names, &benchmark_input).await?;
     } else {
-        for name in &indexer_names {
-            println!("\nBenchmarking indexer: {}", name);
-            let config = if args.compare.is_empty() {
-                args.get_indexer().to_config()
-            } else {
-                MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)?
-            };
-            let indexer = if args.approx {
-                config.build_approximate(
-                    args.common.block_size,
-                    Arc::new(KvIndexerMetrics::new_unregistered()),
-                )?
-            } else {
-                config.build(
-                    args.common.block_size,
-                    Arc::new(KvIndexerMetrics::new_unregistered()),
-                )
-            };
-
-            // Start shard-size sampler if a CSV path was provided.
-            let shard_cancel = CancellationToken::new();
-            let shard_sampler = if !args.shard_metrics_csv.is_empty() {
-                Some(start_shard_sampler(
-                    indexer.clone(),
-                    args.shard_metrics_interval_ms,
-                    shard_cancel.clone(),
-                ))
-            } else {
-                None
-            };
-
-            let run = run_benchmark(
-                indexer.clone(),
-                benchmark_input.clone(),
-                MooncakeBenchmarkConfig {
-                    benchmark_duration_ms: args.common.benchmark_duration_ms,
-                    inference_worker_duplication_factor: args
-                        .common
-                        .inference_worker_duplication_factor,
-                    count_events: config.supports_remove(),
-                    find_matches_concurrency: args.find_matches_concurrency,
-                    block_size: args.common.block_size,
-                },
-            )
-            .await?;
-            if !run.kept_up {
-                eprintln!(
-                    "WARNING: The benchmarker is unable to keep up with the request/event generation rate. Rerun with a larger --benchmark-duration-ms."
-                );
-            }
-
-            // Stop sampler and write CSV + plot.
-            shard_cancel.cancel();
-            if let Some(handle) = shard_sampler {
-                let rows = handle.await?;
-                // In compare mode, prefix the indexer name to distinguish outputs.
-                let csv_path = if args.compare.len() > 1 {
-                    let stem = args.shard_metrics_csv.trim_end_matches(".csv");
-                    format!("{stem}_{name}.csv")
-                } else {
-                    args.shard_metrics_csv.clone()
-                };
-                write_shard_metrics_csv(&rows, &csv_path)?;
-                let svg = format!("{}.svg", csv_path.trim_end_matches(".csv"));
-                plot_shard_metrics(&rows, &svg)?;
-            }
-
-            let report = indexer.timing_report();
-            if !report.is_empty() {
-                println!("{}", report);
-            }
-            let sizes = indexer.shard_sizes();
-            if sizes.len() > 1 {
-                let total_blocks: usize = sizes.iter().map(|s| s.block_count).sum();
-                let total_nodes: usize = sizes.iter().map(|s| s.node_count).sum();
-                println!("Shard block distribution:");
-                for s in &sizes {
-                    let pct = if total_blocks > 0 {
-                        100.0 * s.block_count as f64 / total_blocks as f64
-                    } else {
-                        0.0
-                    };
-                    println!(
-                        "  shard {}: {} blocks ({:.1}%), {} workers, {} nodes",
-                        s.shard_idx, s.block_count, pct, s.worker_count, s.node_count
-                    );
-                }
-                if total_nodes > 0 {
-                    println!("  total nodes across shards: {}", total_nodes);
-                }
-            }
-
-            let mut edge_lengths = indexer.node_edge_lengths();
-            if !edge_lengths.is_empty() {
-                let avg = edge_lengths.iter().sum::<usize>() as f64 / edge_lengths.len() as f64;
-                edge_lengths.sort_unstable();
-                let p99 = edge_lengths[edge_lengths.len() * 99 / 100];
-                println!(
-                    "Node edge lengths ({} nodes): avg={:.1} hashes/node, p99={} hashes/node",
-                    edge_lengths.len(),
-                    avg,
-                    p99,
-                );
-            }
-        }
+        run_repeated_mode(&args, &indexer_names, &benchmark_input).await?;
     }
 
     Ok(())
