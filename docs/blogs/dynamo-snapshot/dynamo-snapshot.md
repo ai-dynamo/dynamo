@@ -51,13 +51,13 @@ Since CRIU is run via an external process, **the restored workload process picks
 ## Dynamo Snapshot: Kubernetes
 In Kubernetes, all workloads run inside containers, inside of pods. These containers abide by the OCI runtime specification which gives us a stable scaffold to design a checkpoint/restore solution around. Typically CRIU checkpoints will also have references to mounts/files in the overlay that need to be restored in tandem with the process as well. Therefore, we perform checkpoints at the container level.
 
-Some OCI runtimes, namely `runc`, `runsc` and `podman` already have built-in container-level checkpoint/restore capabilities. `runc` and `podman` in particular delegate to CRIU. The checkpoints produced are full OCI images with the checkpointed process tree state baked in. However, we had a few requirements that prevented us from using these native checkpoint/restore capabilities.
+Some OCI runtimes — namely `runc` and `runsc` — already have built-in container-level checkpoint/restore capabilities, and `runc` in particular delegates to CRIU. Higher-level container managers like `podman` and `docker` expose checkpoint/restore by going through the underlying runtime. The checkpoints produced are full OCI images with the checkpointed process tree state baked in. However, we had a few requirements that prevented us from using these native checkpoint/restore capabilities.
 
 - We needed to perform heavy customization/optimization of both CRIU and cuda-checkpoint.
 - We couldn't rely on whether or not checkpoint/restore feature gates were exposed, even at the CRI level, because some cloud service providers do not offer control of kubelet at all. Moreover, this would also require installing CRIU on the host, which isn't always possible.
 - We wanted flexibility to configure different storage backends for different parts of the checkpoint artifacts, instead of baking the checkpoint into an OCI image. Only the upperdir overlay and CRIU artifacts should be sufficient given a fixed "base" image.
 
-The only portable, robust option was to spin up our own privileged DaemonSet (we call this `snapshot-agent`), easily installable via a Helm chart. The agent handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. in an OCI-runtime-compatible fashion.
+The only portable, robust option was to spin up our own privileged DaemonSet (we call this `snapshot-agent`), easily installable via a Helm chart. The agent handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. for `runc`-managed containers (the OCI runtime we currently target).
 
 At a high level, the lifecycle of a checkpoint and a restore goes pod-by-pod, with the snapshot agent reaching in from outside the workload's container.
 
