@@ -633,6 +633,20 @@ impl PartialTokenBlock {
         }
     }
 
+    /// Attempts to push a single token onto the block.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the token was successfully added.
+    /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
+    pub(crate) fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
+        if self.tokens.0.len() >= self.block_size as usize {
+            return Err(TokenBlockError::Full);
+        }
+        self.tokens.0.push(token);
+        Ok(())
+    }
+
     /// Attempts to remove the last `count` tokens from the block.
     ///
     /// # Arguments
@@ -991,26 +1005,20 @@ impl TokenBlockSequence {
     /// * `Ok(None)` - No block was completed by adding this token.
     /// * `Err(TokenBlockError)` - If an internal error occurs during processing.
     pub fn append(&mut self, token: Token) -> Result<Option<usize>, TokenBlockError> {
-        // Create a single-token Tokens object
-        let tokens = Tokens::from(vec![token]);
-
-        // Call extend
-        let range_option = self.extend(tokens)?;
-
-        // Convert the range to Option<usize>
-        match range_option {
-            None => Ok(None),
-            Some(range) => {
-                // Since we only added one token, the range can only be empty or have one element.
-                // If it's not empty, it must be `n..(n+1)`.
-                assert_eq!(
-                    range.len(),
-                    1,
-                    "Appending a single token completed more than one block, which should be impossible."
-                );
-                Ok(Some(range.start))
-            }
+        if self.current_block.remaining() == 0 {
+            let new_block = self.current_block.commit()?;
+            self.blocks.push(new_block);
         }
+
+        self.current_block.push_token(token)?;
+        if self.current_block.remaining() != 0 {
+            return Ok(None);
+        }
+
+        let completed_idx = self.blocks.len();
+        let new_block = self.current_block.commit()?;
+        self.blocks.push(new_block);
+        Ok(Some(completed_idx))
     }
 
     /// Shortens the sequence, keeping the first `len` tokens and removing the rest.
@@ -1359,24 +1367,6 @@ mod tests {
     const SEQ_HASH_9_12: SequenceHash = 12583592247330656132; // hash([SEQ_HASH_5_8, HASH_9_12], 1337)
 
     impl PartialTokenBlock {
-        /// Attempts to push a single token onto the block.
-        ///
-        /// # Arguments
-        ///
-        /// * `token` - The [`Token`] to push.
-        ///
-        /// # Returns
-        ///
-        /// * `Ok(())` - If the token was successfully added.
-        /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
-        pub fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
-            if self.tokens.0.len() >= self.block_size as usize {
-                return Err(TokenBlockError::Full);
-            }
-            self.tokens.0.push(token);
-            Ok(())
-        }
-
         /// Attempts to remove the last token from the block.
         ///
         /// # Returns
