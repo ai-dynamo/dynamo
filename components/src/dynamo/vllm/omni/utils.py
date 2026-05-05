@@ -22,19 +22,6 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
 _STAGE_OVERRIDES_KEY = "__stage_overrides__"
-_OPENAI_SAMPLING_FIELDS = {
-    "temperature",
-    "top_p",
-    "top_k",
-    "max_tokens",
-    "min_tokens",
-    "seed",
-    "ignore_eos",
-    "stop",
-    "stop_token_ids",
-    "frequency_penalty",
-    "presence_penalty",
-}
 
 
 def load_omni_stage_configs(model: str, stage_configs_path: str | None) -> list:
@@ -83,76 +70,6 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
     return prompt
 
 
-def _chat_content_to_text(content: Any) -> str:
-    """Extract text parts from OpenAI chat content blocks."""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "text" and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    return "\n".join(parts)
-
-
-def _messages_with_text_content(messages: list) -> list:
-    """Return messages that tokenizer.apply_chat_template can handle."""
-    normalized: list = []
-    for message in messages:
-        if not isinstance(message, dict):
-            normalized.append(message)
-            continue
-        msg = dict(message)
-        if isinstance(msg.get("content"), list):
-            msg["content"] = _chat_content_to_text(msg["content"])
-        normalized.append(msg)
-    return normalized
-
-
-def _has_non_text_chat_parts(messages: list) -> bool:
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if isinstance(item, dict) and item.get("type") not in (None, "text"):
-                return True
-    return False
-
-
-def _attach_additional_information(prompt: Any, request: dict) -> None:
-    """Attach vLLM-Omni runtime fields consumed by stage processors."""
-    if not isinstance(prompt, dict):
-        return
-
-    additional_information = prompt.setdefault("additional_information", {})
-    if not isinstance(additional_information, dict):
-        additional_information = {}
-        prompt["additional_information"] = additional_information
-
-    for request_key, prompt_key in (
-        ("speaker", "speaker"),
-        ("voice", "speaker"),
-        ("language", "language"),
-    ):
-        value = request.get(request_key)
-        if isinstance(value, str) and value.strip():
-            additional_information[prompt_key] = [value.strip()]
-            continue
-        if isinstance(value, list) and value:
-            additional_information[prompt_key] = value
-
-    instructions = request.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
-        additional_information["instruction"] = instructions.strip()
-
-
 def _json_safe_prompt(prompt: Any) -> dict:
     """Keep only prompt fields that can cross the router as JSON."""
     if not isinstance(prompt, dict):
@@ -177,75 +94,146 @@ def _json_safe_prompt(prompt: Any) -> dict:
     return result or {"prompt": prompt.get("prompt", "")}
 
 
-def _chat_sampling_overrides(request: dict) -> dict | None:
+def _chat_sampling_overrides(request: Any) -> dict | None:
     """Return OpenAI sampling overrides for the comprehension stage."""
+    sampling_fields = _openai_sampling_fields(request)
+    explicit_fields = getattr(request, "model_fields_set", None)
     overrides: dict[str, Any] = {}
-    for field in _OPENAI_SAMPLING_FIELDS:
-        if field not in request:
+
+    for field in sampling_fields:
+        if explicit_fields is not None:
+            if field not in explicit_fields:
+                continue
+            value = getattr(request, field, None)
+        elif isinstance(request, dict):
+            if field not in request:
+                continue
+            value = request.get(field)
+        else:
             continue
-        value = request.get(field)
         if value is None:
             continue
         if isinstance(value, list) and not value:
             continue
         overrides[field] = value
 
+    if explicit_fields is not None and "max_completion_tokens" in explicit_fields:
+        max_completion_tokens = getattr(request, "max_completion_tokens", None)
+        if max_completion_tokens is not None:
+            overrides["max_tokens"] = max_completion_tokens
+    elif isinstance(request, dict) and request.get("max_completion_tokens") is not None:
+        overrides["max_tokens"] = request["max_completion_tokens"]
+
     if not overrides:
         return None
     return {_STAGE_OVERRIDES_KEY: {"0": overrides}}
+
+
+def _openai_sampling_fields(request: Any) -> set[str]:
+    model_fields = getattr(request.__class__, "model_fields", None)
+    if model_fields is not None:
+        return set(getattr(SamplingParams, "__struct_fields__", ())).intersection(
+            model_fields
+        )
+    try:
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+    except ImportError:
+        return set()
+
+    return set(getattr(SamplingParams, "__struct_fields__", ())).intersection(
+        ChatCompletionRequest.model_fields
+    )
 
 
 async def _render_chat_request(
     request: dict,
     renderer: Any,
     model_config: Any,
-) -> dict | None:
-    """Render chat the same way vLLM-Omni's OpenAI server does."""
+) -> tuple[dict, Any] | None:
+    """Render chat through vLLM-Omni's OpenAI server preprocessing path."""
     messages = request.get("messages")
     if not messages:
         return None
     if renderer is None or model_config is None:
-        if _has_non_text_chat_parts(messages):
-            raise ValueError("Cannot process multimodal chat without a vLLM renderer")
-        return None
+        raise ValueError("Cannot process chat without a vLLM renderer")
 
     try:
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionRequest,
         )
     except ImportError as e:
-        if _has_non_text_chat_parts(messages):
-            raise ValueError(
-                "Cannot process multimodal chat without ChatCompletionRequest support"
-            ) from e
-        return None
+        raise ValueError(
+            "Cannot process chat without ChatCompletionRequest support"
+        ) from e
 
     try:
-        chat_request = ChatCompletionRequest.model_validate(request)
-        chat_params = chat_request.build_chat_params(None, "auto")
-        tok_params = chat_request.build_tok_params(model_config)
-        prompt_extras = {
-            key: value
-            for key in ("mm_processor_kwargs", "cache_salt")
-            if (value := getattr(chat_request, key, None)) is not None
-        }
-
-        (_,), (engine_prompt,) = await renderer.render_chat_async(
-            [chat_request.messages],
-            chat_params,
-            tok_params,
-            prompt_extras=prompt_extras,
+        chat_request = ChatCompletionRequest.model_validate(
+            _normalize_chat_request(request)
         )
-        _attach_additional_information(engine_prompt, request)
-        return engine_prompt
+        engine_prompt = await _render_chat_with_vllm(
+            chat_request, renderer, model_config
+        )
+        _attach_omni_chat_metadata(engine_prompt, chat_request)
+        return engine_prompt, chat_request
     except Exception as e:
-        if _has_non_text_chat_parts(messages):
-            raise ValueError(f"Failed to render multimodal chat request: {e}") from e
-        logging.getLogger(__name__).debug(
-            "Renderer chat preprocessing failed, falling back to tokenizer template",
-            exc_info=True,
-        )
-        return None
+        raise ValueError(f"Failed to render chat request: {e}") from e
+
+
+async def _render_chat_with_vllm(
+    chat_request: Any,
+    renderer: Any,
+    model_config: Any,
+) -> dict:
+    chat_params = chat_request.build_chat_params(None, "auto")
+    tok_params = chat_request.build_tok_params(model_config)
+    prompt_extras = {
+        key: value
+        for key in ("mm_processor_kwargs", "cache_salt")
+        if (value := getattr(chat_request, key, None)) is not None
+    }
+    (_,), (engine_prompt,) = await renderer.render_chat_async(
+        [chat_request.messages],
+        chat_params,
+        tok_params,
+        prompt_extras=prompt_extras,
+    )
+    return engine_prompt
+
+
+def _attach_omni_chat_metadata(prompt: Any, request: Any) -> None:
+    if not isinstance(prompt, dict):
+        return
+    additional_information = prompt.setdefault("additional_information", {})
+    if not isinstance(additional_information, dict):
+        additional_information = {}
+        prompt["additional_information"] = additional_information
+
+    speaker = getattr(request, "speaker", None) or getattr(request, "voice", None)
+    if isinstance(speaker, str) and speaker.strip():
+        additional_information["speaker"] = [speaker.lower().strip()]
+    elif isinstance(speaker, list) and speaker:
+        additional_information["speaker"] = [
+            item.lower().strip() if isinstance(item, str) else item for item in speaker
+        ]
+
+    language = getattr(request, "language", None)
+    if isinstance(language, str) and language.strip():
+        additional_information["language"] = [language.strip()]
+    elif isinstance(language, list) and language:
+        additional_information["language"] = language
+
+    instructions = getattr(request, "instructions", None)
+    if isinstance(instructions, str) and instructions.strip():
+        additional_information["instruction"] = instructions.strip()
+
+
+def _normalize_chat_request(request: dict) -> dict:
+    chat_request = dict(request)
+    if "voice" in chat_request and "speaker" not in chat_request:
+        chat_request["speaker"] = chat_request["voice"]
+    return chat_request
 
 
 async def parse_omni_request(
@@ -260,7 +248,7 @@ async def parse_omni_request(
 
     Args:
       tokenizer_getter: async callable returning a tokenizer (e.g. engine.get_tokenizer).
-          Used as a fallback when the vLLM renderer is unavailable.
+          Retained for compatibility with older call sites.
       renderer/model_config: vLLM renderer inputs.  When available, chat
           requests are rendered like native ``vllm serve --omni`` so stage 0
           receives tokenized multimodal/chat-template inputs.
@@ -281,12 +269,15 @@ async def parse_omni_request(
             "messages": [{"role": "user", "content": text}],
             "modalities": request.get("modalities") or ["audio"],
         }
-        rendered = await _render_chat_request(chat_request, renderer, model_config)
+        rendered = None
+        if renderer is not None and model_config is not None:
+            rendered = await _render_chat_request(chat_request, renderer, model_config)
         if rendered is not None:
+            engine_prompt, chat_request_model = rendered
             return {
-                "engine_inputs": rendered,
-                "original_prompt": _json_safe_prompt(rendered),
-                "sampling_params_list": _chat_sampling_overrides(chat_request),
+                "engine_inputs": engine_prompt,
+                "original_prompt": _json_safe_prompt(engine_prompt),
+                "sampling_params_list": _chat_sampling_overrides(chat_request_model),
             }
         return {
             "engine_inputs": OmniTextPrompt(prompt=text),
@@ -314,42 +305,16 @@ async def parse_omni_request(
         }
 
     # Chat / text
-    messages = request.get("messages", [])
     rendered = await _render_chat_request(request, renderer, model_config)
     if rendered is not None:
+        engine_prompt, chat_request = rendered
         return {
-            "engine_inputs": rendered,
-            "original_prompt": _json_safe_prompt(rendered),
-            "sampling_params_list": _chat_sampling_overrides(request),
+            "engine_inputs": engine_prompt,
+            "original_prompt": _json_safe_prompt(engine_prompt),
+            "sampling_params_list": _chat_sampling_overrides(chat_request),
         }
 
-    text = _chat_content_to_text(
-        next(
-            (
-                m.get("content", "")
-                for m in reversed(messages)
-                if m.get("role") == "user"
-            ),
-            request.get("prompt", ""),
-        )
-    )
-
-    # Apply chat template when a tokenizer is available.  The native
-    # OpenAI API server applies the template before the engine sees it;
-    # without it the thinker receives bare text instead of the full
-    # chat-formatted prompt.
-    if messages and tokenizer_getter is not None:
-        try:
-            tokenizer = await tokenizer_getter()
-            text = tokenizer.apply_chat_template(
-                _messages_with_text_content(messages),
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Chat template not available, using raw text"
-            )
+    text = request.get("prompt", "")
 
     return {
         "engine_inputs": text,

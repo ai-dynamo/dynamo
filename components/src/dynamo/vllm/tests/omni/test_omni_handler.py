@@ -271,6 +271,11 @@ class TestParseOmniRequest:
     @pytest.mark.asyncio
     async def test_chat_uses_renderer_and_preserves_runtime_metadata(self):
         class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
             async def render_chat_async(
                 self, conversations, chat_params, tok_params, *, prompt_extras=None
             ):
@@ -311,13 +316,13 @@ class TestParseOmniRequest:
             151645,
         ]
         assert result["engine_inputs"]["additional_information"] == {
-            "speaker": ["Chelsie"],
+            "speaker": ["chelsie"],
             "language": ["English"],
         }
         assert result["original_prompt"] == {
             "prompt_token_ids": [151644, 872, 198, 151645],
             "additional_information": {
-                "speaker": ["Chelsie"],
+                "speaker": ["chelsie"],
                 "language": ["English"],
             },
         }
@@ -326,17 +331,7 @@ class TestParseOmniRequest:
         }
 
     @pytest.mark.asyncio
-    async def test_chat_template_fallback_handles_openai_text_parts(self):
-        class FakeTokenizer:
-            def apply_chat_template(self, messages, **kwargs):
-                assert messages == [{"role": "user", "content": "first\nsecond"}]
-                assert kwargs["tokenize"] is False
-                assert kwargs["add_generation_prompt"] is True
-                return "<|im_start|>user\nfirst\nsecond<|im_end|>"
-
-        async def get_tokenizer():
-            return FakeTokenizer()
-
+    async def test_chat_without_renderer_fails_fast(self):
         request = {
             "messages": [
                 {
@@ -349,15 +344,20 @@ class TestParseOmniRequest:
             ],
         }
 
-        result = await parse_omni_request(
-            request, ["text"], tokenizer_getter=get_tokenizer
-        )
-
-        assert result["engine_inputs"] == "<|im_start|>user\nfirst\nsecond<|im_end|>"
-        assert result["original_prompt"]["prompt"] == result["engine_inputs"]
+        with pytest.raises(ValueError, match="without a vLLM renderer"):
+            await parse_omni_request(request, ["text"])
 
     @pytest.mark.asyncio
     async def test_chat_sampling_params_are_stage_scoped_to_comprehension(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(self, *args, **kwargs):
+                return (["conversation"],), ({"prompt": "rendered"},)
+
         request = {
             "messages": [{"role": "user", "content": "say more than one word"}],
             "max_tokens": 32,
@@ -365,7 +365,12 @@ class TestParseOmniRequest:
             "temperature": 0.2,
         }
 
-        result = await parse_omni_request(request, ["text"])
+        result = await parse_omni_request(
+            request,
+            ["text"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
 
         assert result["sampling_params_list"] == {
             "__stage_overrides__": {
@@ -391,7 +396,7 @@ class TestParseOmniRequest:
             ],
         }
 
-        with pytest.raises(ValueError, match="Failed to render multimodal chat"):
+        with pytest.raises(ValueError, match="Failed to render chat"):
             await parse_omni_request(
                 request,
                 ["text", "audio"],
