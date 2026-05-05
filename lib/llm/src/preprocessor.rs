@@ -219,6 +219,31 @@ impl OpenAIPreprocessor {
         }))
     }
 
+    fn build_agent_trace_request_end_state(
+        common_request: &PreprocessedRequest,
+        tracker: &Option<Arc<RequestTracker>>,
+        context: &dynamo_runtime::pipeline::Context<()>,
+    ) -> Option<AgentTraceRequestEndState> {
+        if !crate::agents::trace::is_enabled() {
+            return None;
+        }
+        let agent_context = common_request.agent_context.clone()?;
+        let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
+            .and_then(|c| c.x_request_id)
+            .or_else(|| {
+                context
+                    .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
+                    .ok()
+                    .map(|v| v.as_ref().clone())
+            });
+        Some(AgentTraceRequestEndState {
+            agent_context,
+            request_model: common_request.model.clone(),
+            request_tracker: tracker.clone(),
+            x_request_id,
+        })
+    }
+
     fn wrap_agent_trace_request_end_stream<Resp>(
         stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
         trace_state: Option<AgentTraceRequestEndState>,
@@ -1510,28 +1535,8 @@ impl
             .preprocess_request(&request, tracker.as_deref())
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = if crate::agents::trace::is_enabled() {
-            common_request.agent_context.clone().map(|agent_context| {
-                let request_model = common_request.model.clone();
-                let request_tracker = tracker.clone();
-                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-                    .and_then(|context| context.x_request_id)
-                    .or_else(|| {
-                        context
-                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
-                            .ok()
-                            .map(|value| value.as_ref().clone())
-                    });
-                AgentTraceRequestEndState {
-                    agent_context,
-                    request_model,
-                    request_tracker,
-                    x_request_id,
-                }
-            })
-        } else {
-            None
-        };
+        let trace_state =
+            Self::build_agent_trace_request_end_state(&common_request, &tracker, &context);
         let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
@@ -1672,28 +1677,8 @@ impl
 
         let mut common_request = builder.build()?;
 
-        let trace_state = if crate::agents::trace::is_enabled() {
-            common_request.agent_context.clone().map(|agent_context| {
-                let request_model = common_request.model.clone();
-                let request_tracker = tracker.clone();
-                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-                    .and_then(|context| context.x_request_id)
-                    .or_else(|| {
-                        context
-                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
-                            .ok()
-                            .map(|value| value.as_ref().clone())
-                    });
-                AgentTraceRequestEndState {
-                    agent_context,
-                    request_model,
-                    request_tracker,
-                    x_request_id,
-                }
-            })
-        } else {
-            None
-        };
+        let trace_state =
+            Self::build_agent_trace_request_end_state(&common_request, &tracker, &context);
         let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
