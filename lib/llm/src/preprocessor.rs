@@ -1276,8 +1276,16 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
-        matches!(tool_call_parser, Some("gemma4") | Some("gemma-4"))
-            || matches!(reasoning_parser, Some("gemma4") | Some("gemma-4"))
+        // gpt-oss / harmony parsers consume `<|channel|>analysis<|message|>...<|end|>`
+        // markers; without them the parser silently produces empty
+        // reasoning_content. Same shape as gemma4's `<|think|>` markers.
+        matches!(
+            tool_call_parser,
+            Some("gemma4") | Some("gemma-4") | Some("harmony")
+        ) || matches!(
+            reasoning_parser,
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss")
+        )
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -1809,6 +1817,7 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
@@ -1844,6 +1853,24 @@ mod tests {
             ),
             (Some("hermes"), None, false, "hermes → not required"),
             (
+                Some("harmony"),
+                None,
+                true,
+                "harmony tool-call only → required",
+            ),
+            (
+                None,
+                Some("gpt_oss"),
+                true,
+                "gpt_oss reasoning only → required",
+            ),
+            (
+                Some("harmony"),
+                Some("gpt_oss"),
+                true,
+                "harmony + gpt_oss paired → required",
+            ),
+            (
                 Some("kimi_k2"),
                 Some("kimi_k25"),
                 false,
@@ -1860,6 +1887,7 @@ mod tests {
         }
     }
 
+    /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_is_reasoning_disabled_by_request() {
         let thinking_true = {
