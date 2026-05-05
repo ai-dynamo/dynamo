@@ -80,12 +80,13 @@ func setAnnOnObj(obj metav1.Object, key, value string) {
 	obj.SetAnnotations(anns)
 }
 
-func setJSONAnnOnObj(obj metav1.Object, key string, value any) {
+func setJSONAnnOnObj(obj metav1.Object, key string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
-		return
+		return fmt.Errorf("marshal %s annotation: %w", key, err)
 	}
 	setAnnOnObj(obj, key, string(data))
+	return nil
 }
 
 func getAnnFromObj(obj metav1.Object, key string) (string, bool) {
@@ -97,16 +98,16 @@ func getAnnFromObj(obj metav1.Object, key string) (string, bool) {
 	return v, ok
 }
 
-func getJSONAnnFromObj[T any](obj metav1.Object, key string) (T, bool) {
+func getJSONAnnFromObj[T any](obj metav1.Object, key string) (T, bool, error) {
 	var out T
 	raw, ok := getAnnFromObj(obj, key)
 	if !ok || raw == "" {
-		return out, false
+		return out, false, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return out, false
+		return out, false, fmt.Errorf("unmarshal %s annotation: %w", key, err)
 	}
-	return out, true
+	return out, true, nil
 }
 
 func delAnnFromObj(obj metav1.Object, key string) {
@@ -206,7 +207,9 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 		return err
 	}
 
-	restoreSharedHubOnlyFields(dst, restored, src)
+	if err := restoreSharedHubOnlyFields(dst, restored, src); err != nil {
+		return err
+	}
 	if save != nil {
 		saveSharedAlphaOnlySpec(src, save, ctx.includeOriginSplits)
 	}
@@ -775,10 +778,14 @@ func sparseSharedHubOnlyVolumeMounts(src, projected []corev1.VolumeMount) []core
 }
 
 func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return save == nil ||
-		save.FrontendSidecar == nil &&
-			save.PodTemplate == nil &&
-			save.Experimental == nil
+	if save == nil {
+		return true
+	}
+	normalized := save.DeepCopy()
+	// ComponentName is the list-map key for DGD component preservation. It
+	// identifies the sparse save entry, but is not itself hub-only payload.
+	normalized.ComponentName = ""
+	return apiequality.Semantic.DeepEqual(*normalized, v1beta1.DynamoComponentDeploymentSharedSpec{})
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,15 +1294,20 @@ func restoredDefaultFrontendSidecar(src *v1beta1.DynamoComponentDeploymentShared
 	return restored.FrontendSidecar, true
 }
 
-func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec, src *DynamoComponentDeploymentSharedSpec) {
+func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec, src *DynamoComponentDeploymentSharedSpec) error {
 	if dst == nil || preserved == nil {
-		return
+		return nil
 	}
-	dst.PodTemplate = restoreSharedPodTemplateHubOnlyFields(preserved, dst.PodTemplate, dst.CompilationCache, src)
+	podTemplate, err := restoreSharedPodTemplateHubOnlyFields(preserved, dst.PodTemplate, dst.CompilationCache, src)
+	if err != nil {
+		return err
+	}
+	dst.PodTemplate = podTemplate
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
 	}
+	return nil
 }
 
 func restoreSharedHubOnlyFrontendSidecar(dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -1324,12 +1336,12 @@ func podTemplateHasContainer(podTemplate *corev1.PodTemplateSpec, name string) b
 	return ok
 }
 
-func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDeploymentSharedSpec, semantic *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
+func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDeploymentSharedSpec, semantic *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) (*corev1.PodTemplateSpec, error) {
 	if preserved == nil || preserved.PodTemplate == nil {
 		if semantic == nil {
-			return nil
+			return nil, nil
 		}
-		return semantic.DeepCopy()
+		return semantic.DeepCopy(), nil
 	}
 	out := &corev1.PodTemplateSpec{}
 	if semantic != nil {
@@ -1338,14 +1350,16 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	dropGeneratedCompilationCacheMount(out, preserved.PodTemplate, compilationCache, src)
 	dropGeneratedMainContainer(out, preserved.PodTemplate, compilationCache, src)
 	restoreSharedPodTemplateMissingHubOnlyContainers(out, preserved.PodTemplate, src)
-	restoreSharedPodTemplateExistingHubOnlyContainers(out, preserved.PodTemplate, src)
+	if err := restoreSharedPodTemplateExistingHubOnlyContainers(out, preserved.PodTemplate, src); err != nil {
+		return nil, err
+	}
 	restoreSharedPodTemplateContainerOrder(out, preserved.PodTemplate)
 	restoreSharedHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
 	restoreSharedHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, src)
 	if podTemplateIsZero(preserved.PodTemplate) && podTemplateIsZero(out) {
-		return out
+		return out, nil
 	}
-	return nilIfEmptyPodTemplate(out)
+	return nilIfEmptyPodTemplate(out), nil
 }
 
 func restoreSharedPodTemplateMissingHubOnlyContainers(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) {
@@ -1369,24 +1383,24 @@ func preservedGeneratedFrontendSidecarWasDeleted(savedContainer corev1.Container
 		(src == nil || src.FrontendSidecar == nil)
 }
 
-func restoreSharedPodTemplateExistingHubOnlyContainers(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) {
+func restoreSharedPodTemplateExistingHubOnlyContainers(dst, preserved *corev1.PodTemplateSpec, src *DynamoComponentDeploymentSharedSpec) error {
 	if dst == nil || preserved == nil || src == nil || src.FrontendSidecar == nil {
-		return
+		return nil
 	}
 	savedContainer, ok := findContainerByName(preserved.Spec.Containers, defaultFrontendSidecarContainerName)
 	if !ok || containerHasOnlyName(savedContainer) {
-		return
+		return nil
 	}
 	for i := range dst.Spec.Containers {
 		if dst.Spec.Containers[i].Name != defaultFrontendSidecarContainerName {
 			continue
 		}
-		restoreSharedHubOnlyFrontendSidecarContainerFields(&dst.Spec.Containers[i], savedContainer, src.FrontendSidecar)
-		return
+		return restoreSharedHubOnlyFrontendSidecarContainerFields(&dst.Spec.Containers[i], savedContainer, src.FrontendSidecar)
 	}
+	return nil
 }
 
-func restoreSharedHubOnlyFrontendSidecarContainerFields(dst *corev1.Container, preserved corev1.Container, src *FrontendSidecarSpec) {
+func restoreSharedHubOnlyFrontendSidecarContainerFields(dst *corev1.Container, preserved corev1.Container, src *FrontendSidecarSpec) error {
 	saved := preserved.DeepCopy()
 	saved.Name = ""
 	saved.Image = ""
@@ -1400,7 +1414,10 @@ func restoreSharedHubOnlyFrontendSidecarContainerFields(dst *corev1.Container, p
 			saved.EnvFrom = envFrom
 		}
 	}
-	_ = mergo.Merge(dst, *saved, mergo.WithOverride)
+	if err := mergo.Merge(dst, *saved, mergo.WithOverride); err != nil {
+		return fmt.Errorf("restore frontend sidecar hub-only container fields: %w", err)
+	}
+	return nil
 }
 
 func restoreSharedHubOnlyFrontendSidecarEnvFrom(dst, preserved []corev1.EnvFromSource, src *FrontendSidecarSpec) ([]corev1.EnvFromSource, bool) {

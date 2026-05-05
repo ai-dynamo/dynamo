@@ -79,7 +79,9 @@ func (src *DynamoComponentDeployment) ConvertTo(dstRaw conversion.Hub) error {
 
 	convertDCDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
 	if saveSpec || !dcdAlphaStatusSaveIsZero(&statusSave) {
-		saveDCDSpokeAnnotations(&spokeSave, saveSpec, emptyServiceNameSave, &statusSave, dst)
+		if err := saveDCDSpokeAnnotations(&spokeSave, saveSpec, emptyServiceNameSave, &statusSave, dst); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -131,16 +133,20 @@ func dcdEmptyServiceNameNeedsSave(src *DynamoComponentDeployment, dst *v1beta1.D
 		dst.Spec.ComponentName == src.ObjectMeta.Name
 }
 
-func saveDCDSpokeAnnotations(specSave *DynamoComponentDeploymentSpec, saveSpec bool, emptyServiceName bool, statusSave *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeployment) {
+func saveDCDSpokeAnnotations(specSave *DynamoComponentDeploymentSpec, saveSpec bool, emptyServiceName bool, statusSave *DynamoComponentDeploymentStatus, dst *v1beta1.DynamoComponentDeployment) error {
 	if saveSpec {
 		data, err := marshalDCDSpokeSpec(specSave, emptyServiceName)
-		if err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDCDSpec, string(data))
+		if err != nil {
+			return fmt.Errorf("preserve DCD spoke spec: %w", err)
 		}
+		setAnnOnObj(&dst.ObjectMeta, annDCDSpec, string(data))
 	}
 	if !dcdAlphaStatusSaveIsZero(statusSave) {
-		setJSONAnnOnObj(&dst.ObjectMeta, annDCDStatus, statusSave)
+		if err := setJSONAnnOnObj(&dst.ObjectMeta, annDCDStatus, statusSave); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func restoreDCDAlphaOnlySpecFromSaved(dstSpec *DynamoComponentDeploymentSpec, emptyServiceName bool, objectName string) {
@@ -178,9 +184,7 @@ func saveDCDAlphaOnlyStatus(src *DynamoComponentDeploymentStatus, save *DynamoCo
 }
 
 func dcdAlphaStatusSaveIsZero(save *DynamoComponentDeploymentStatus) bool {
-	return save == nil ||
-		len(save.PodSelector) == 0 &&
-			save.Service == nil
+	return save == nil || apiequality.Semantic.DeepEqual(*save, DynamoComponentDeploymentStatus{})
 }
 
 // ConvertFrom converts from the hub (v1beta1) DynamoComponentDeployment into
@@ -203,7 +207,9 @@ func (dst *DynamoComponentDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 			preservedSpokeEmptyServiceName = emptyServiceName
 		}
 	}
-	if status, ok := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDStatus); ok {
+	if status, ok, err := getJSONAnnFromObj[DynamoComponentDeploymentStatus](&dst.ObjectMeta, annDCDStatus); err != nil {
+		return err
+	} else if ok {
 		preservedSpokeStatus = &status
 	}
 

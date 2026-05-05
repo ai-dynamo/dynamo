@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"slices"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
@@ -84,7 +85,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 
 	convertDGDStatusToHub(&src.Status, &dst.Status, nil, nil, ctx)
 	if !dgdAlphaSpecSaveIsZero(&spokeSave) || !dgdAlphaStatusSaveIsZero(&statusSave) {
-		saveDGDSpokeAnnotations(&spokeSave, &statusSave, dst)
+		if err := saveDGDSpokeAnnotations(&spokeSave, &statusSave, dst); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -171,16 +174,20 @@ func convertDGDSpecToHub(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGrap
 	return nil
 }
 
-func saveDGDSpokeAnnotations(specSave *DynamoGraphDeploymentSpec, statusSave *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeployment) {
+func saveDGDSpokeAnnotations(specSave *DynamoGraphDeploymentSpec, statusSave *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeployment) error {
 	if !dgdAlphaSpecSaveIsZero(specSave) {
 		data, err := marshalDGDSpokeSpec(specSave)
-		if err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDGDSpec, string(data))
+		if err != nil {
+			return fmt.Errorf("preserve DGD spoke spec: %w", err)
 		}
+		setAnnOnObj(&dst.ObjectMeta, annDGDSpec, string(data))
 	}
 	if !dgdAlphaStatusSaveIsZero(statusSave) {
-		setJSONAnnOnObj(&dst.ObjectMeta, annDGDStatus, statusSave)
+		if err := setJSONAnnOnObj(&dst.ObjectMeta, annDGDStatus, statusSave); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func restoredDGDHubComponentsByName(restored *v1beta1.DynamoGraphDeploymentSpec) map[string]*v1beta1.DynamoComponentDeploymentSharedSpec {
@@ -272,9 +279,7 @@ func restoreDGDAlphaOnlyStatusFromSaved(dstStatus *DynamoGraphDeploymentStatus, 
 }
 
 func dgdAlphaSpecSaveIsZero(save *DynamoGraphDeploymentSpec) bool {
-	return save == nil ||
-		len(save.PVCs) == 0 &&
-			len(save.Services) == 0
+	return save == nil || apiequality.Semantic.DeepEqual(*save, DynamoGraphDeploymentSpec{})
 }
 
 func saveDGDAlphaOnlyStatus(src *DynamoGraphDeploymentStatus, save *DynamoGraphDeploymentStatus) {
@@ -296,11 +301,11 @@ func saveDGDAlphaOnlyStatus(src *DynamoGraphDeploymentStatus, save *DynamoGraphD
 }
 
 func dgdAlphaStatusSaveIsZero(save *DynamoGraphDeploymentStatus) bool {
-	return save == nil || len(save.Services) == 0
+	return save == nil || apiequality.Semantic.DeepEqual(*save, DynamoGraphDeploymentStatus{})
 }
 
 func dgdHubSpecSaveIsZero(save *v1beta1.DynamoGraphDeploymentSpec) bool {
-	return save == nil || len(save.Components) == 0
+	return save == nil || apiequality.Semantic.DeepEqual(*save, v1beta1.DynamoGraphDeploymentSpec{})
 }
 
 func dgdHubComponentSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -323,7 +328,7 @@ func shouldRestoreSavedComponentName(dst, saved *ServiceReplicaStatus) bool {
 		dst.ComponentName != saved.ComponentName
 }
 
-func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus) {
+func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus, error) {
 	var restoredSpokeSpec *DynamoGraphDeploymentSpec
 	var restoredSpokeStatus *DynamoGraphDeploymentStatus
 	if raw, ok := getAnnFromObj(obj, annDGDSpec); ok && raw != "" {
@@ -331,10 +336,12 @@ func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, 
 			restoredSpokeSpec = &spec
 		}
 	}
-	if status, ok := getJSONAnnFromObj[DynamoGraphDeploymentStatus](obj, annDGDStatus); ok {
+	if status, ok, err := getJSONAnnFromObj[DynamoGraphDeploymentStatus](obj, annDGDStatus); err != nil {
+		return nil, nil, err
+	} else if ok {
 		restoredSpokeStatus = &status
 	}
-	return restoredSpokeSpec, restoredSpokeStatus
+	return restoredSpokeSpec, restoredSpokeStatus, nil
 }
 
 // ConvertFrom converts from the hub (v1beta1) DynamoGraphDeployment into this
@@ -348,7 +355,10 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	spokeOrigin := hasDGDSpokeAnnotations(&dst.ObjectMeta)
-	restoredSpokeSpec, restoredSpokeStatus := restoreDGDSpokeAnnotations(&dst.ObjectMeta)
+	restoredSpokeSpec, restoredSpokeStatus, err := restoreDGDSpokeAnnotations(&dst.ObjectMeta)
+	if err != nil {
+		return err
+	}
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
 
 	ctx := dgdConversionContext{saveHubOrigin: !spokeOrigin}
@@ -361,9 +371,11 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	restoreDGDAlphaOnlySpecFromSaved(&dst.Spec, restoredSpokeSpec)
 	restoreDGDAlphaOnlyStatusFromSaved(&dst.Status, restoredSpokeStatus)
 	if !dgdHubSpecSaveIsZero(&hubSave) {
-		if data, err := marshalDGDHubSpec(&hubSave); err == nil {
-			setAnnOnObj(&dst.ObjectMeta, annDGDSpec, string(data))
+		data, err := marshalDGDHubSpec(&hubSave)
+		if err != nil {
+			return fmt.Errorf("preserve DGD hub spec: %w", err)
 		}
+		setAnnOnObj(&dst.ObjectMeta, annDGDSpec, string(data))
 	}
 	return nil
 }

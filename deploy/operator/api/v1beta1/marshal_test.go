@@ -8,6 +8,7 @@ package v1beta1
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,6 +28,25 @@ func unmarshalToMap(t *testing.T, b []byte) map[string]any {
 		t.Fatalf("unmarshal json to map: %v", err)
 	}
 	return m
+}
+
+type embeddedJSONCollision struct {
+	Same *struct{} `json:"same,omitempty"`
+}
+
+type outerJSONCollision struct {
+	Same struct{} `json:"same,omitempty"`
+	embeddedJSONCollision
+}
+
+func TestNormalizeJSON_OuterFieldWinsEmbeddedCollision(t *testing.T) {
+	normalized, err := normalizeV1Beta1JSON([]byte(`{"same":{}}`), reflect.TypeOf(outerJSONCollision{}))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if string(normalized) != "{}" {
+		t.Fatalf("expected outer value-typed field to win collision and be stripped, got %s", string(normalized))
+	}
 }
 
 // TestDGDMarshal_StripsEmptyPodTemplateMetadata locks in the fix for the

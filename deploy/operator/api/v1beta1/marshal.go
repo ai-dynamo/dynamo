@@ -209,6 +209,7 @@ func jsonFieldsOf(t reflect.Type) map[string]reflect.StructField {
 }
 
 func collectFields(t reflect.Type, out map[string]reflect.StructField) {
+	var anonymous []reflect.StructField
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
@@ -228,7 +229,7 @@ func collectFields(t reflect.Type, out map[string]reflect.StructField) {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {
-				collectFields(ft, out)
+				anonymous = append(anonymous, f)
 			}
 			continue
 		}
@@ -236,6 +237,19 @@ func collectFields(t reflect.Type, out map[string]reflect.StructField) {
 			name = f.Name
 		}
 		out[name] = f
+	}
+	for _, f := range anonymous {
+		ft := f.Type
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		promoted := make(map[string]reflect.StructField)
+		collectFields(ft, promoted)
+		for name, promotedField := range promoted {
+			if _, exists := out[name]; !exists {
+				out[name] = promotedField
+			}
+		}
 	}
 }
 
