@@ -41,8 +41,8 @@ AIC_PARITY_VERSIONS = {
     "sglang": "0.5.6.post2",
 }
 AIC_PARITY_BACKENDS = [
-    pytest.param("vllm", marks=pytest.mark.vllm, id="vllm"),
-    pytest.param("sglang", marks=pytest.mark.sglang, id="sglang"),
+    pytest.param("vllm", id="vllm"),
+    pytest.param("sglang", id="sglang"),
 ]
 
 

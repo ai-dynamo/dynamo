@@ -138,7 +138,31 @@ fn extract_tool_calls(
 
                 cursor = abs_end;
             } else {
-                // No end token found -> treat the rest as normal text.
+                // Recovery: outer end token absent (max_tokens / EOS truncation).
+                // Gated on `allow_eof_recovery` so streaming early-exit doesn't
+                // fire mid-stream. Recovery also requires the trailing slice
+                // to contain a function-start opener — structural signal that
+                // a real tool call was emitted, so plain text starting with
+                // `<tool_call>` is preserved verbatim.
+                let block = &text[abs_start..];
+                let function_start = &config.function_start_token;
+                let function_end = &config.function_end_token;
+                if config.allow_eof_recovery
+                    && block.contains(function_start.as_str())
+                    && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
+                    && !parsed_calls.is_empty()
+                {
+                    calls.append(&mut parsed_calls);
+                    // Preserve any suffix after the last function close so
+                    // non-tool trailing content isn't dropped.
+                    if let Some(last_end) = block.rfind(function_end.as_str()) {
+                        let suffix_start = abs_start + last_end + function_end.len();
+                        if suffix_start < text.len() {
+                            normal_parts.push(&text[suffix_start..]);
+                        }
+                    }
+                    break;
+                }
                 normal_parts.push(&text[abs_start..]);
                 break;
             }
@@ -902,15 +926,13 @@ rust programming
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
     }
 
-    // Pin current behavior when the OUTER </tool_call> fence is absent due
-    // to max_tokens / EOS truncation. The qwen3_coder dialect (which uses
-    // XmlParserConfig::default()) silently drops the in-flight call today
-    // — the failure mode TEST_CASES.md flags. Distinct
-    // from `test_parse_missing_*_closing_tag` above, which exercises missing
-    // INNER close tags (a separate, already-recovering path).
+    // Recovery for missing outer </tool_call> (max_tokens / EOS truncation):
+    // when the inner function block is well-formed, treat EOF as the end
+    // token and extract the call. Recovery is gated on a function-start
+    // opener in the trailing slice so plain text that happens to start with
+    // `<tool_call>` is preserved verbatim.
     #[test] // CASE.5 — qwen3_coder
-    fn test_parse_qwen3_no_outer_close_silent_drop() {
-        // Inner content fully complete; only outer </tool_call> missing.
+    fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
 <function=get_weather>
 <parameter=city>
@@ -918,18 +940,39 @@ NYC
 </parameter>
 </function>"#;
 
-        let (calls, normal_text) =
-            try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "qwen3_coder today drops the in-flight call when </tool_call> is missing"
+        let config = XmlParserConfig {
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
+    }
+
+    // After EOF-recovery, any non-tool suffix following the last
+    // `</function>` close must surface as normal_text rather than being
+    // dropped along with the recovered call.
+    #[test]
+    fn test_parse_qwen3_no_outer_close_preserves_suffix() {
+        let input = "<tool_call>\n<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\nTRAILING NOTE";
+
+        let config = XmlParserConfig {
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, normal) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        let normal = normal.unwrap_or_default();
+        assert!(
+            normal.contains("TRAILING NOTE"),
+            "normal must keep suffix after </function>: {normal:?}"
         );
-        assert_eq!(normal_text, Some(input.to_string()));
     }
 
     #[test] // CASE.5 — minimax_m2
-    fn test_parse_minimax_m2_no_outer_close_silent_drop() {
+    fn test_parse_minimax_m2_no_outer_close_recovers() {
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
             tool_call_end_token: "</minimax:tool_call>".to_string(),
@@ -937,17 +980,15 @@ NYC
             function_end_token: "</invoke>".to_string(),
             parameter_start_token: "<parameter name=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: true,
         };
-        // Inner invoke fully closed; only outer </minimax:tool_call> missing.
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
 
-        let (calls, normal_text) = try_tool_call_parse_xml(input, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "minimax_m2 today drops the in-flight call when </minimax:tool_call> is missing"
-        );
-        assert_eq!(normal_text, Some(input.to_string()));
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     #[test] // CASE.18
@@ -1130,5 +1171,173 @@ NYC
         assert_eq!(args["param1"], "42");
         assert_eq!(args["param2"], "true");
         assert_eq!(args["param3"], "hello");
+    }
+
+    /// Helper for the new corner-case tests below (CASE.6 / CASE.12 / CASE.14
+    /// / CASE.15) — `allow_eof_recovery: false` because none of these tests
+    /// rely on EOF recovery. The inline config in
+    /// `test_parse_minimax_m2_no_outer_close_recovers` keeps that flag `true`
+    /// because that test specifically exercises the recovery path.
+    fn minimax_m2_config() -> XmlParserConfig {
+        XmlParserConfig {
+            tool_call_start_token: "<minimax:tool_call>".to_string(),
+            tool_call_end_token: "</minimax:tool_call>".to_string(),
+            function_start_token: "<invoke name=".to_string(),
+            function_end_token: "</invoke>".to_string(),
+            parameter_start_token: "<parameter name=".to_string(),
+            parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: false,
+        }
+    }
+
+    /// CASE.6 — empty args. A no-arg call (no `<parameter=...>` block)
+    /// must still surface the function name with empty arguments.
+    #[test] // CASE.6 — qwen3_coder
+    fn test_parse_qwen3_empty_args() {
+        let input = r#"<tool_call>
+<function=current_time>
+</function>
+</tool_call>"#;
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "current_time");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    /// CASE.6 — empty args, minimax_m2 format.
+    #[test] // CASE.6 — minimax_m2
+    fn test_parse_minimax_m2_empty_args() {
+        let config = minimax_m2_config();
+        let input =
+            r#"<minimax:tool_call><invoke name="current_time"></invoke></minimax:tool_call>"#;
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "current_time");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    /// Parser-level invariant: the xml parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output regardless of the
+    /// upstream stream-end reason. Real CASE.12 coverage (stop / tool_calls
+    /// / length mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs`
+    /// and belongs in the cross-parser finish_reason mapping work-item
+    /// (tracked separately).
+    #[test]
+    fn test_xml_qwen3_parser_output_independent_of_upstream_finish() {
+        let input = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+NYC
+</parameter>
+</function>
+</tool_call>"#;
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// Parser-level invariant — minimax_m2 variant. See qwen3 counterpart
+    /// for the rationale.
+    #[test]
+    fn test_xml_minimax_m2_parser_output_independent_of_upstream_finish() {
+        let config = minimax_m2_config();
+        let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke></minimax:tool_call>"#;
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// and whitespace-only inputs must yield no tool calls; normal_text
+    /// collapses to the empty string. Tested under both qwen3_coder and
+    /// minimax_m2 configs.
+    #[test] // CASE.14 — qwen3_coder
+    fn test_parse_qwen3_empty_and_whitespace_inputs() {
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) =
+                try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text (input={:?})",
+                input
+            );
+        }
+    }
+
+    #[test] // CASE.14 — minimax_m2
+    fn test_parse_minimax_m2_empty_and_whitespace_inputs() {
+        let config = minimax_m2_config();
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) = try_tool_call_parse_xml(input, &config, None).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text (input={:?})",
+                input
+            );
+        }
+    }
+
+    /// CASE.15 — duplicate calls (same function name twice). qwen3_coder
+    /// format; pin parser-level behavior — both calls must come back with
+    /// distinct ids.
+    #[test] // CASE.15 — qwen3_coder
+    fn test_parse_qwen3_duplicate_calls_same_name() {
+        let input = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+NYC
+</parameter>
+</function>
+<function=get_weather>
+<parameter=city>
+LA
+</parameter>
+</function>
+</tool_call>"#;
+        let (calls, _) = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
+        assert_eq!(calls.len(), 2, "Both duplicate-name calls must be returned");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let args0: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: serde_json::Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0["city"], "NYC");
+        assert_eq!(args1["city"], "LA");
+    }
+
+    /// CASE.15 — duplicate calls (same function name twice). minimax_m2
+    /// format; pin parser-level behavior — both calls must come back with
+    /// distinct ids.
+    #[test] // CASE.15 — minimax_m2
+    fn test_parse_minimax_m2_duplicate_calls_same_name() {
+        let config = minimax_m2_config();
+        let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke><invoke name="get_weather"><parameter name="city">LA</parameter></invoke></minimax:tool_call>"#;
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2, "Both duplicate-name calls must be returned");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let args0: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: serde_json::Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0["city"], "NYC");
+        assert_eq!(args1["city"], "LA");
     }
 }

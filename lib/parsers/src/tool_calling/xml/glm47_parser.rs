@@ -104,7 +104,25 @@ fn extract_tool_calls(
 
                 cursor = abs_end;
             } else {
-                // No end token found -> treat the rest as normal text
+                // Recovery: outer </tool_call> absent (max_tokens / EOS
+                // truncation). Gated on `allow_eof_recovery` so streaming
+                // early-exit doesn't fire mid-stream. Also requires an
+                // `<arg_key>` opener in the trailing slice as the structural
+                // signal that a real tool call was emitted.
+                let block = &text[abs_start..];
+                let arg_key_start = &config.arg_key_start;
+                if config.allow_eof_recovery && block.contains(arg_key_start.as_str()) {
+                    match parse_tool_call_block(block, config, tools) {
+                        Ok(parsed_call) => {
+                            calls.push(parsed_call);
+                            cursor = text.len();
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse GLM-4.7 tool call block (no end token): {e}");
+                        }
+                    }
+                }
                 normal_parts.push(&text[abs_start..]);
                 break;
             }
@@ -208,10 +226,14 @@ fn parse_tool_call_block(
     let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
 
-    let content = block
+    // Strip the outer start token. The end token is optional so we can
+    // recover from max_tokens / EOS truncation that drops `</tool_call>`.
+    let after_start = block
         .strip_prefix(start_token.as_str())
-        .and_then(|s| s.strip_suffix(end_token.as_str()))
         .ok_or_else(|| anyhow::anyhow!("Invalid tool call block format"))?;
+    let content = after_start
+        .strip_suffix(end_token.as_str())
+        .unwrap_or(after_start);
 
     // Extract function name (everything before first <arg_key> or end)
     let arg_key_start = &config.arg_key_start;
@@ -447,43 +469,39 @@ mod tests {
         assert_eq!(calls.len(), 0);
     }
 
-    // Pin current behavior when the outer `</tool_call>` is absent due to
-    // max_tokens / EOS truncation. GLM 4.7's parser today returns zero calls
-    // and surfaces the unmatched start as normal text — the "silent drop"
-    // failure mode flagged in TEST_CASES.md. Kimi K2
-    // recovers in this scenario (`kimi_k2_parser::test_parse_malformed_no_section_end`);
-    // GLM 4.7 does not. Promoting to recovery is a parser change, not a
-    // test change — these tests catch any drift in either direction.
+    // Recovery for missing outer </tool_call> (max_tokens / EOS truncation):
+    // when the inner arg pairs are well-formed, treat EOF as the end token
+    // and extract the call. The arg_key opener gates recovery so plain text
+    // that happens to start with `<tool_call>` is still preserved verbatim.
     #[test] // CASE.5
-    fn test_parse_no_end_tag_complete_args_silent_drop() {
-        let config = get_test_config();
+    fn test_parse_no_end_tag_complete_args_recovers() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
         // Args complete, only outer </tool_call> missing.
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>";
 
-        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "GLM 4.7 today drops the in-flight call when </tool_call> is missing"
-        );
-        // Unparsed start surfaces as normal text rather than being silently dropped.
-        assert_eq!(normal_text, Some(message.to_string()));
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["location"], "NYC");
     }
 
     #[test] // CASE.5
-    fn test_parse_no_end_tag_multiple_calls_silent_drop() {
-        let config = get_test_config();
+    fn test_parse_no_end_tag_multiple_calls_recovers() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
         // Two complete inner calls, missing only the trailing </tool_call> on the second.
         let message = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>EST</arg_value>";
 
         let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
-        // First call is well-formed and recovered. Second call's missing close drops it.
-        assert_eq!(
-            calls.len(),
-            1,
-            "First call recovers; second call silently drops on missing </tool_call>"
-        );
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
     }
 
     #[test] // CASE.4, CASE.13
@@ -631,5 +649,64 @@ mod tests {
             args.get("count").unwrap().is_string(),
             "Should fall back to string when coercion fails"
         );
+    }
+
+    /// Parser-level invariant: the glm47 parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output regardless of the
+    /// upstream stream-end reason. Real CASE.12 coverage (stop / tool_calls
+    /// / length mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs`
+    /// and belongs in the cross-parser finish_reason mapping work-item
+    /// (tracked separately).
+    #[test]
+    fn test_glm47_parser_output_independent_of_upstream_finish() {
+        let config = get_test_config();
+        let input = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// and whitespace-only inputs must yield no tool calls; normal_text
+    /// collapses to the empty string.
+    #[test] // CASE.14
+    fn test_parse_glm47_empty_and_whitespace_inputs() {
+        let config = get_test_config();
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) = try_tool_call_parse_glm47(input, &config, None).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text (input={:?})",
+                input
+            );
+        }
+    }
+
+    /// CASE.15 — duplicate calls (same function name twice in one section).
+    /// Universal gap noted in the test taxonomy; pin parser-level behavior —
+    /// both calls returned with distinct ids.
+    #[test] // CASE.15
+    fn test_parse_glm47_duplicate_calls_same_name() {
+        let config = get_test_config();
+        let input = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>LA</arg_value></tool_call>";
+        let (calls, _) = try_tool_call_parse_glm47(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2, "Both duplicate-name calls must be returned");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let args0: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: HashMap<String, Value> =
+            serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0.get("location").unwrap().as_str().unwrap(), "NYC");
+        assert_eq!(args1.get("location").unwrap().as_str().unwrap(), "LA");
     }
 }

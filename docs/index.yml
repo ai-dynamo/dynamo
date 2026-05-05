@@ -52,6 +52,9 @@ navigation:
     path: blogs/index.mdx
     slug: blog
     contents:
+      - page: "Multi-Turn Agentic Harnesses"
+        path: blogs/agentic-inference/agentic-harnesses.md
+        slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
         path: blogs/agentic-inference/agentic-inference.md
         slug: agentic-inference
@@ -92,6 +95,8 @@ navigation:
             path: kubernetes/inference-gateway.md
           - page: Snapshot
             path: kubernetes/snapshot.md
+          - page: Shadow Engine Failover
+            path: kubernetes/shadow-engine-failover.md
           - page: Disagg Communication
             path: kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
@@ -241,6 +246,8 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
+          - page: HiCache
+            path: backends/sglang/sglang-hicache.md
           - page: Agentic Workloads
             path: backends/sglang/agents.md
       - section: TensorRT-LLM
@@ -324,8 +331,6 @@ navigation:
     contents:
       - page: LMCache
         path: integrations/lmcache-integration.md
-      - page: SGLang HiCache
-        path: backends/sglang/sglang-hicache.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
