@@ -548,9 +548,11 @@ async def test_scale_down_paired_across_different_dgd(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_same_dgd_pair_preferred_over_cross_dgd(mock_runtime):
-    """When both a same-DGD and a cross-DGD partner qualify, same-DGD wins
-    (single atomic K8s patch)."""
+async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
+    """Multi-partner packing: when same-DGD AND cross-DGD partners both fit
+    within the budget band, BOTH are applied (the user's "larger groups of
+    scaling decisions" property). Same-DGD partners are merged into the
+    request's DGD's atomic patch; cross-DGD partners get their own patch."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -571,6 +573,8 @@ async def test_same_dgd_pair_preferred_over_cross_dgd(mock_runtime):
         parent_dgd_name="dgd-b",
     )
     # Both DGD-A's decode and DGD-B's decode have pending scale-up intents
+    # (each +1 GPU). Cluster baseline = 12; standalone request lands at 11
+    # (below floor strictly). Pack both partners → 11+1+1 = 13 = max+tol.
     handler._intent_cache["default/dgd-a/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
@@ -580,14 +584,21 @@ async def test_same_dgd_pair_preferred_over_cross_dgd(mock_runtime):
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
     results = await _run(handler, req)
     assert results[0]["status"] == "success"
-    # Same-DGD pair → only connector_a called (atomic), connector_b untouched
     connector_a.set_component_replicas.assert_called_once()
-    connector_b.set_component_replicas.assert_not_called()
+    connector_b.set_component_replicas.assert_called_once()
     a_targets = {
         t.sub_component_type.value: t.desired_replicas
         for t in connector_a.set_component_replicas.call_args[0][0]
     }
+    b_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in connector_b.set_component_replicas.call_args[0][0]
+    }
+    # DGD-A patch combines the request's prefill change with the same-DGD
+    # decode partner (one atomic call).
     assert a_targets == {"prefill": 2, "decode": 4}
+    # DGD-B's cross-DGD partner is a separate patch.
+    assert b_targets == {"decode": 4}
 
 
 @pytest.mark.asyncio
@@ -632,7 +643,8 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
     connector_b.set_component_replicas.assert_called_once()
     # Second-patch failure should be logged at ERROR
     assert any(
-        "Cross-DGD pair second-patch failed" in rec.message for rec in caplog.records
+        "Multi-partner transfer" in rec.message and "failed" in rec.message
+        for rec in caplog.records
     )
     # Request response still reports success for the request side
     assert results[0]["status"] == "success"
@@ -1021,12 +1033,12 @@ async def test_satisfied_cached_intent_does_not_pair(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_partner_search_continues_past_infeasible_candidate(mock_runtime):
-    """When the first qualifying partner intent does not bring totals into
-    the band, the search must continue to a later partner that does.
-    Picking a too-small early candidate and rejecting the request would
-    make the outcome depend on connector insertion order rather than the
-    set of feasible partners."""
+async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
+    """When a small partner alone doesn't reach the band, the packing must
+    keep adding additional partners until the band is reached. This test
+    used to verify single-partner search continued to a later candidate;
+    with multi-partner packing we instead apply BOTH the small and the
+    large partner — accumulating to land inside the band."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -1048,10 +1060,12 @@ async def test_partner_search_continues_past_infeasible_candidate(mock_runtime):
         _dgd_spec(prefill_replicas=1, decode_replicas=3),
         parent_dgd_name="dgd-b",
     )
-    # Two cross-DGD candidates in DGD-B, in spec-iteration order:
-    #  1. prefill +1 → +1 GPU. Pair total 9 — below floor band [11, 13].
-    #  2. decode  +4 → +4 GPU. Pair total 12 — in band.
-    # Partner search must skip (1) and pick (2).
+    # Two cross-DGD candidates in DGD-B:
+    #  1. prefill +1 → +1 GPU.
+    #  2. decode  +4 → +4 GPU.
+    # Request: DGD-A prefill 5 → 1 (-4 GPU). Standalone total = 8 (below floor 12).
+    # Packing ascending: prefill (+1) accepted (still below band, total=9),
+    # then decode (+4) accepted (total=13 = max+tol). Both applied.
     handler._intent_cache["default/dgd-b/prefill"] = PoolIntent(
         last_desired=2, last_seen_at=time.time()
     )
@@ -1059,7 +1073,6 @@ async def test_partner_search_continues_past_infeasible_candidate(mock_runtime):
         last_desired=7, last_seen_at=time.time()
     )
 
-    # DGD-A prefill scale-down 5 → 1 (-4 GPU). Standalone cluster total 8 < floor.
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=1)
     results = await _run(handler, req)
     assert results[0]["status"] == "success"
@@ -1074,8 +1087,8 @@ async def test_partner_search_continues_past_infeasible_candidate(mock_runtime):
         for t in connector_b.set_component_replicas.call_args[0][0]
     }
     assert a_targets == {"prefill": 1}
-    # decode (the feasible partner), not prefill (the early infeasible one).
-    assert b_targets == {"decode": 7}
+    # Both DGD-B partners packed into the same per-DGD patch.
+    assert b_targets == {"prefill": 2, "decode": 7}
 
 
 def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
@@ -1149,3 +1162,277 @@ async def test_intent_cache_clears_on_stable_signal(mock_runtime):
     req_decode_up = _scale_req(caller_ns="default-my-dgd", decode=4)
     results = await _run(handler, req_decode_up)
     assert results[0]["status"] == "rejected"
+
+
+# ---------------------------------------------------------------------------- #
+# Multi-partner packing (per tedzhouhk review feedback)                        #
+# ---------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_pair_packing_three_pools_full_consumption(mock_runtime):
+    """tedzhouhk example 1: three pools (P0..P2). P0 has a small cached
+    scale-down, P1 has a larger cached scale-down. Neither alone is enough
+    to satisfy the scale-up request within band; both fully consumed lands
+    on the band edge."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-p0", "default-p1", "default-p2"],
+        k8s_namespace="default",
+        min_total_gpus=10,
+        max_total_gpus=10,
+    )
+    # 1 GPU/worker decode pools; cluster total 3+5+2 = 10.
+    p0 = _install_connector(
+        handler,
+        "default/p0",
+        _dgd_spec(prefill_replicas=0, decode_replicas=3),
+        parent_dgd_name="p0",
+    )
+    p1 = _install_connector(
+        handler,
+        "default/p1",
+        _dgd_spec(prefill_replicas=0, decode_replicas=5),
+        parent_dgd_name="p1",
+    )
+    p2 = _install_connector(
+        handler,
+        "default/p2",
+        _dgd_spec(prefill_replicas=0, decode_replicas=2),
+        parent_dgd_name="p2",
+    )
+    # P0 cached: last_desired=1 → delta -2.
+    # P1 cached: last_desired=1 → delta -4.
+    handler._intent_cache["default/p0/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=time.time()
+    )
+    handler._intent_cache["default/p1/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=time.time()
+    )
+    # P2 request +6 (decode 2 → 8). Standalone cluster total 3+5+8 = 16.
+    # Band = [9, 11] with tol=1. Pack ascending: P0 (-2) takes us to 14
+    # (still above max+tol=11), P1 (-4) takes us to 10 (in band). Both
+    # admitted via the "still_approaching" path then "in_band" accept.
+    req = _scale_req(dgd="p2", caller_ns="default-p2", decode=8)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    # All three connectors called.
+    p0.set_component_replicas.assert_called_once()
+    p1.set_component_replicas.assert_called_once()
+    p2.set_component_replicas.assert_called_once()
+    p0_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p0.set_component_replicas.call_args[0][0]
+    }
+    p1_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p1.set_component_replicas.call_args[0][0]
+    }
+    p2_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p2.set_component_replicas.call_args[0][0]
+    }
+    # Both partners fully consumed (matching their cached last_desired).
+    assert p0_targets["decode"] == 1
+    assert p1_targets["decode"] == 1
+    assert p2_targets["decode"] == 8
+
+
+@pytest.mark.asyncio
+async def test_pair_packing_partial_consumption_leaves_residual(mock_runtime):
+    """tedzhouhk example 2: one cached partner is much larger than needed.
+    Pack the smaller partner fully, then partially consume the larger so the
+    combined transfer lands inside the band. The cached intent's
+    ``last_desired`` is NOT mutated — the partner's residual remains pending
+    in the cache so future requests can pair with it organically."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-p0", "default-p1", "default-p2"],
+        k8s_namespace="default",
+        min_total_gpus=18,
+        max_total_gpus=18,
+    )
+    p0 = _install_connector(
+        handler,
+        "default/p0",
+        _dgd_spec(prefill_replicas=0, decode_replicas=6),
+        parent_dgd_name="p0",
+    )
+    p1 = _install_connector(
+        handler,
+        "default/p1",
+        _dgd_spec(prefill_replicas=0, decode_replicas=10),
+        parent_dgd_name="p1",
+    )
+    _install_connector(
+        handler,
+        "default/p2",
+        _dgd_spec(prefill_replicas=0, decode_replicas=2),
+        parent_dgd_name="p2",
+    )
+    # P0 cached: last_desired=4 → delta -2.
+    # P1 cached: last_desired=2 → delta -8. (Way more than needed.)
+    handler._intent_cache["default/p0/decode"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+    handler._intent_cache["default/p1/decode"] = PoolIntent(
+        last_desired=2, last_seen_at=time.time()
+    )
+    # Cluster total = 6+10+2 = 18. P2 request +4 → standalone total = 22.
+    # Pack P0 fully (-2) → 20. Then P1 needs partial ≤ -1 to land in [17, 19].
+    # P1 partial: K must keep total ∈ [17, 19]. Adding P1 delta = (K-10)*1.
+    # 20 + (K-10) ≤ 19 → K ≤ 9. K ≥ last_desired = 2, so K can be 9 (delta -1).
+    # Final: P0=4 (delta -2), P1=9 (partial; planner still wants 2), P2=6 (delta +4).
+    # Total = 4 + 9 + 6 = 19. In band.
+    req = _scale_req(dgd="p2", caller_ns="default-p2", decode=6)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    p0.set_component_replicas.assert_called_once()
+    p1.set_component_replicas.assert_called_once()
+    p0_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p0.set_component_replicas.call_args[0][0]
+    }
+    p1_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p1.set_component_replicas.call_args[0][0]
+    }
+    # P0 was fully consumed (delta -2)
+    assert p0_targets["decode"] == 4
+    # P1 was partially consumed — applied K is between current(10) and last_desired(2)
+    assert 2 < p1_targets["decode"] < 10
+    # The cached intent must NOT have been mutated — planner still wants 2.
+    assert handler._intent_cache["default/p1/decode"].last_desired == 2
+
+
+@pytest.mark.asyncio
+async def test_pair_packing_single_partner_regression(mock_runtime):
+    """Regression: when only one partner is needed and feasible, packing
+    behaves like the historical single-partner search — exactly one partner
+    gets included, applied via the existing intra/cross-DGD machinery."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+        min_total_gpus=6,
+        max_total_gpus=6,
+    )
+    connector = _install_connector(
+        handler, "default/my-dgd", _dgd_spec(prefill_replicas=3, decode_replicas=3)
+    )
+    handler._intent_cache["default/my-dgd/decode"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+    req = _scale_req(caller_ns="default-my-dgd", prefill=2)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    # Single intra-DGD patch combining request + same-DGD partner.
+    connector.set_component_replicas.assert_called_once()
+    targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in connector.set_component_replicas.call_args[0][0]
+    }
+    assert targets == {"prefill": 2, "decode": 4}
+
+
+@pytest.mark.asyncio
+async def test_pair_packing_overshooting_partner_is_partially_consumed(mock_runtime):
+    """When the next candidate's FULL inclusion would push past the band's
+    far edge, the algorithm tries partial consumption that lands at the
+    edge. Both partners get applied — the small one fully, the big one
+    partially — staying in band."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-p0", "default-p1", "default-p2"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+    )
+    _install_connector(
+        handler,
+        "default/p0",
+        _dgd_spec(prefill_replicas=0, decode_replicas=4),
+        parent_dgd_name="p0",
+    )
+    p1 = _install_connector(
+        handler,
+        "default/p1",
+        _dgd_spec(prefill_replicas=0, decode_replicas=4),
+        parent_dgd_name="p1",
+    )
+    p2 = _install_connector(
+        handler,
+        "default/p2",
+        _dgd_spec(prefill_replicas=0, decode_replicas=4),
+        parent_dgd_name="p2",
+    )
+    # P1 wants -1, P2 wants -4 (both cached). Request: P0 +1.
+    # Cluster total 12 → standalone with request = 13 (above strict ceiling).
+    # Pack P1 (-1) → total 12 (in band [11, 13]). Continue.
+    # Try P2 full (-4) → would push to 8 (below floor-tol=11). Crosses band.
+    # Partial of P2: K=3 lands at total 11 (lower band edge). Apply partial.
+    handler._intent_cache["default/p1/decode"] = PoolIntent(
+        last_desired=3, last_seen_at=time.time()
+    )
+    handler._intent_cache["default/p2/decode"] = PoolIntent(
+        last_desired=0, last_seen_at=time.time()
+    )
+    req = _scale_req(dgd="p0", caller_ns="default-p0", decode=5)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    # P1 was applied (full).
+    p1.set_component_replicas.assert_called_once()
+    p1_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p1.set_component_replicas.call_args[0][0]
+    }
+    assert p1_targets == {"decode": 3}
+    # P2 was applied with PARTIAL consumption — landed at 3 (one worker
+    # shed instead of all four), keeping total at lower band edge (11).
+    p2.set_component_replicas.assert_called_once()
+    p2_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in p2.set_component_replicas.call_args[0][0]
+    }
+    assert 0 < p2_targets["decode"] < 4
+    # Cached intent for P2 is NOT mutated — planner still wants 0.
+    assert handler._intent_cache["default/p2/decode"].last_desired == 0
+
+
+@pytest.mark.asyncio
+async def test_pair_packing_direction_aware_order_multi_dgd(mock_runtime):
+    """When the packing spans multiple DGDs, scale-DOWN DGDs must apply
+    before scale-UP DGDs, freeing GPUs before new pods are submitted."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-up-dgd", "default-down-dgd"],
+        k8s_namespace="default",
+        min_total_gpus=8,
+        max_total_gpus=8,
+    )
+    up_dgd = _install_connector(
+        handler,
+        "default/up-dgd",
+        _dgd_spec(prefill_replicas=0, decode_replicas=3),
+        parent_dgd_name="up-dgd",
+    )
+    down_dgd = _install_connector(
+        handler,
+        "default/down-dgd",
+        _dgd_spec(prefill_replicas=0, decode_replicas=5),
+        parent_dgd_name="down-dgd",
+    )
+    handler._intent_cache["default/down-dgd/decode"] = PoolIntent(
+        last_desired=3, last_seen_at=time.time()
+    )
+    # Track call order
+    call_order: list[str] = []
+    up_dgd.set_component_replicas.side_effect = lambda *a, **kw: call_order.append("up")
+    down_dgd.set_component_replicas.side_effect = lambda *a, **kw: call_order.append(
+        "down"
+    )
+    req = _scale_req(dgd="up-dgd", caller_ns="default-up-dgd", decode=5)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    # Down DGD must apply before up DGD.
+    assert call_order == ["down", "up"]

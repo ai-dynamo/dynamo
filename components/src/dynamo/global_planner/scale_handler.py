@@ -5,7 +5,9 @@
 
 import asyncio
 import logging
+import math
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -435,6 +437,223 @@ class ScaleRequestHandler:
         yield from same_dgd
         yield from cross_dgd
 
+    def _partial_partner(
+        self,
+        candidate: tuple[str, str, int, PoolSpec],
+        all_pools: dict[str, dict[str, PoolSpec]],
+        current_overrides: dict[tuple[str, str], int],
+        tolerance: int,
+    ) -> Optional[int]:
+        """Compute a partial ``applied_desired`` for a candidate whose full
+        consumption would push the combined transfer out of the band.
+
+        Returns an integer ``K`` strictly between ``current_replicas`` and
+        ``last_desired`` (direction-consistent) such that applying ``K``
+        instead of ``last_desired`` lands the combined transfer at the
+        appropriate band edge. ``None`` if no feasible partial exists
+        (e.g., even one worker's contribution overshoots).
+        """
+        _, _, last_desired, spec = candidate
+        current = spec.current_replicas
+        gpu = spec.gpu_per_replica
+        if gpu <= 0 or last_desired == current:
+            return None
+
+        # Combined total assuming this candidate stays at its current count
+        # (i.e., contributes 0). The candidate is NOT in current_overrides
+        # yet, so the snapshot uses its current_replicas naturally.
+        baseline_total = self._total_gpus_from_snapshot(all_pools, current_overrides)
+
+        if last_desired > current:
+            # Scale-up candidate: pick K in [current+1, last_desired] that
+            # keeps total <= max + tolerance.
+            if self.max_total_gpus < 0:
+                return last_desired
+            upper = self.max_total_gpus + tolerance
+            # K <= current + (upper - baseline_total) // gpu
+            headroom = upper - baseline_total
+            if headroom <= 0:
+                return None
+            max_k = current + headroom // gpu
+            k = min(last_desired, max_k)
+            return k if k > current else None
+        else:
+            # Scale-down candidate: pick K in [last_desired, current-1] that
+            # keeps total >= min - tolerance.
+            if self.min_total_gpus < 0:
+                return last_desired
+            lower = self.min_total_gpus - tolerance
+            # K >= current + ceil((lower - baseline_total) / gpu)
+            diff = lower - baseline_total
+            if diff > 0:
+                # Already below floor; further scale-down impossible.
+                return None
+            min_k = current + math.ceil(diff / gpu)
+            k = max(last_desired, min_k)
+            return k if k < current else None
+
+    def _find_pair_partner_set(
+        self,
+        request_dgd_key: str,
+        request_pool_keys: set[tuple[str, str]],
+        all_pools: dict[str, dict[str, PoolSpec]],
+        request_net_delta_gpu: int,
+        standalone_overrides: dict[tuple[str, str], int],
+        changing_request_pools: list[PoolSpec],
+    ) -> tuple[list[tuple[str, str, int, PoolSpec]], int, int]:
+        """Pack as many opposite-direction cached intents as fit alongside
+        the request, partially consuming one over-sized candidate if needed.
+
+        Algorithm: greedy admission, ascending ``abs(delta_gpu)`` order. For
+        each candidate, fully admit if it keeps the combined transfer in
+        ``[min - tolerance, max + tolerance]``; if full admission would
+        overshoot, try partial consumption that lands at the band edge and
+        stop (the band is now tight, larger candidates won't fit either).
+
+        Tolerance is computed **once** over the request's changing pools
+        plus all candidates considered for inclusion, not iteratively
+        widened — this avoids early candidates being admitted under a
+        tighter tolerance that wouldn't admit them after the band widened.
+
+        Returns (selected_partners, total_after, tolerance).
+        ``selected_partners`` is empty when no feasible packing exists.
+        """
+        if request_net_delta_gpu == 0:
+            return [], 0, 0
+
+        all_candidates = list(
+            self._iter_pair_partners(
+                request_dgd_key,
+                request_pool_keys,
+                all_pools,
+                request_net_delta_gpu,
+            )
+        )
+        if not all_candidates:
+            return [], 0, 0
+
+        # Tolerance computed once over the universe of changing pools.
+        candidate_specs = [c[3] for c in all_candidates]
+        tolerance = budget.compute_tolerance(
+            [s.gpu_per_replica for s in changing_request_pools]
+            + [s.gpu_per_replica for s in candidate_specs]
+        )
+
+        # Sort ascending by |delta_gpu| — smaller pieces overshoot less.
+        def cand_delta(c: tuple[str, str, int, PoolSpec]) -> int:
+            _, _, desired, spec = c
+            return (desired - spec.current_replicas) * spec.gpu_per_replica
+
+        all_candidates.sort(key=lambda c: abs(cand_delta(c)))
+
+        selected: list[tuple[str, str, int, PoolSpec]] = []
+        overrides = dict(standalone_overrides)
+
+        for cand in all_candidates:
+            cand_dgd, cand_sub, cand_desired, cand_spec = cand
+
+            # Try full inclusion.
+            full_overrides = dict(overrides)
+            full_overrides[(cand_dgd, cand_sub)] = cand_desired
+            full_total = self._total_gpus_from_snapshot(all_pools, full_overrides)
+            in_band, _ = budget.bounds_for_total(
+                full_total,
+                self.min_total_gpus,
+                self.max_total_gpus,
+                tolerance,
+            )
+            if in_band:
+                # Full inclusion lands in band — accept and continue. The
+                # user's framing is "as long as we stay within the threshold,
+                # do the larger groups of scaling decisions" — so we keep
+                # admitting more candidates while feasible. Subsequent
+                # iterations either continue extending (next full also in
+                # band) or trigger partial-then-break (next full crosses).
+                selected.append(cand)
+                overrides = full_overrides
+                continue
+
+            # Out of band. Did this candidate cross the band, or are we
+            # still on the wrong side and need more help?
+            #
+            # Request delta sign indicates which side we started on:
+            #   request_net_delta > 0 → request alone overshoots ceiling
+            #     (approaching from above; candidates pull down).
+            #   request_net_delta < 0 → request alone undershoots floor
+            #     (approaching from below; candidates push up).
+            above_ceiling = (
+                self.max_total_gpus >= 0
+                and full_total > self.max_total_gpus + tolerance
+            )
+            below_floor = (
+                self.min_total_gpus >= 0
+                and full_total < self.min_total_gpus - tolerance
+            )
+            still_approaching = (request_net_delta_gpu > 0 and above_ceiling) or (
+                request_net_delta_gpu < 0 and below_floor
+            )
+            if still_approaching:
+                # Candidate moved us toward the band but didn't reach it.
+                # Accept full inclusion and try the next candidate.
+                selected.append(cand)
+                overrides = full_overrides
+                continue
+
+            # Full inclusion crossed the band. Try partial consumption that
+            # lands at the appropriate band edge, then stop.
+            partial_k = self._partial_partner(cand, all_pools, overrides, tolerance)
+            if partial_k is not None and partial_k != cand_spec.current_replicas:
+                partial_cand = (cand_dgd, cand_sub, partial_k, cand_spec)
+                selected.append(partial_cand)
+                overrides[(cand_dgd, cand_sub)] = partial_k
+            break
+
+        # Loop ended with the running total possibly still on the wrong side
+        # (no candidate fully reached the band, none of them crossed). Try
+        # partial of the last selected candidate to land in band.
+        if selected:
+            running_total = self._total_gpus_from_snapshot(all_pools, overrides)
+            running_in_band, _ = budget.bounds_for_total(
+                running_total,
+                self.min_total_gpus,
+                self.max_total_gpus,
+                tolerance,
+            )
+            if not running_in_band:
+                last = selected[-1]
+                last_dgd, last_sub, _, last_spec = last
+                # Roll back the last full inclusion so partial uses the
+                # pre-last-candidate baseline.
+                rollback_overrides = dict(overrides)
+                if (last_dgd, last_sub) in standalone_overrides:
+                    rollback_overrides[(last_dgd, last_sub)] = standalone_overrides[
+                        (last_dgd, last_sub)
+                    ]
+                else:
+                    rollback_overrides.pop((last_dgd, last_sub), None)
+                partial_k = self._partial_partner(
+                    last, all_pools, rollback_overrides, tolerance
+                )
+                if partial_k is not None and partial_k != last_spec.current_replicas:
+                    selected[-1] = (last_dgd, last_sub, partial_k, last_spec)
+                    overrides = dict(rollback_overrides)
+                    overrides[(last_dgd, last_sub)] = partial_k
+
+        if not selected:
+            return [], 0, 0
+
+        final_total = self._total_gpus_from_snapshot(all_pools, overrides)
+        ok, _ = budget.bounds_for_total(
+            final_total,
+            self.min_total_gpus,
+            self.max_total_gpus,
+            tolerance,
+        )
+        if not ok:
+            return [], 0, 0
+
+        return selected, final_total, tolerance
+
     # ------------------------------------------------------------------ #
     # Request handling                                                   #
     # ------------------------------------------------------------------ #
@@ -590,12 +809,12 @@ class ScaleRequestHandler:
                     for t in request.target_replicas
                 }
 
-                # Track whether a paired partner is being applied and, if so,
-                # which DGD + pool it's in. Needed to decide atomic vs two-step
-                # execution.
-                partner_info: Optional[
+                # Selected pair-partners (possibly multiple). Empty list
+                # means "no partners involved" — the standalone or
+                # no-budget path.
+                selected_partners: list[
                     tuple[str, str, int, PoolSpec]
-                ] = None  # (dgd_key, sub_type, desired, spec)
+                ] = []  # (dgd_key, sub_type, applied_desired, spec)
 
                 if self._budget_enforcement_enabled():
                     net_delta = self._request_net_delta_gpu(request, dgd_pools)
@@ -608,8 +827,6 @@ class ScaleRequestHandler:
                     )
 
                     # Tolerance depends on which pools are actually changing.
-                    # Standalone uses just the request's changing pools;
-                    # paired adds the candidate partner's gpu_per_replica.
                     changing_request_pools = [
                         dgd_pools[t.sub_component_type.value]
                         for t in request.target_replicas
@@ -627,69 +844,42 @@ class ScaleRequestHandler:
                         total_standalone, internally_paired, standalone_tolerance
                     )
 
-                    # Try every feasible partner in preference order
-                    # (same-DGD first, then cross-DGD). An early candidate
-                    # whose delta is too small or too large must NOT be
-                    # allowed to short-circuit the search; a later candidate
-                    # may bring the totals back into bounds.
-                    paired_ok = False
-                    paired_reason: str = "no partner"
-                    total_paired = total_standalone
-                    paired_tolerance = 0
-                    partner_chosen: Optional[tuple[str, str, int, PoolSpec]] = None
-                    for candidate in self._iter_pair_partners(
-                        request_key, request_pool_keys, all_pools, net_delta
-                    ):
-                        (
-                            cand_dgd,
-                            cand_sub,
-                            cand_desired,
-                            cand_spec,
-                        ) = candidate
-                        cand_overrides = dict(standalone_overrides)
-                        cand_overrides[(cand_dgd, cand_sub)] = cand_desired
-                        cand_total = self._total_gpus_from_snapshot(
-                            all_pools, cand_overrides
-                        )
-                        cand_tolerance = self._pair_tolerance(
-                            changing_request_pools, cand_spec
-                        )
-                        ok, reason = self._bounds_for_total(
-                            cand_total, True, cand_tolerance
-                        )
-                        if ok:
-                            partner_chosen = candidate
-                            total_paired = cand_total
-                            paired_tolerance = cand_tolerance
-                            paired_ok = True
-                            paired_reason = ""
-                            break
-                        # Track the last failure reason for diagnostics on deny.
-                        paired_reason = (
-                            f"{cand_dgd}/{cand_sub}={cand_desired} -> {reason}"
-                        )
+                    # Multi-partner packing: pack as many opposite-direction
+                    # cached intents as fit within the band, partially
+                    # consuming one over-sized candidate if needed.
+                    (
+                        selected_partners,
+                        total_paired,
+                        paired_tolerance,
+                    ) = self._find_pair_partner_set(
+                        request_key,
+                        request_pool_keys,
+                        all_pools,
+                        net_delta,
+                        standalone_overrides,
+                        changing_request_pools,
+                    )
 
                     # Decide:
-                    # 1. If a pair partner brings totals into bounds → apply pair.
-                    # 2. Else if standalone is in bounds → apply standalone.
+                    # 1. Non-empty pair set → apply request + all partners.
+                    # 2. Else if standalone in bounds → apply standalone.
                     # 3. Else deny.
-                    if paired_ok:
-                        partner_info = partner_chosen  # type: ignore[assignment]
-                        (
-                            partner_dgd,
-                            partner_sub,
-                            partner_desired,
-                            _,
-                        ) = partner_chosen  # type: ignore[misc]
-                        pair_scope = (
-                            "intra-DGD" if partner_dgd == request_key else "cross-DGD"
+                    if selected_partners:
+                        scope = (
+                            "intra-DGD"
+                            if all(p[0] == request_key for p in selected_partners)
+                            else "cross-DGD"
+                        )
+                        partners_desc = ", ".join(
+                            f"{p[0]}/{p[1]}={p[2]}" for p in selected_partners
                         )
                         logger.info(
-                            f"Paired transfer ({pair_scope}) for DGD "
+                            f"Paired transfer ({scope}, "
+                            f"{len(selected_partners)} partner(s)) for DGD "
                             f"{request.graph_deployment_name}: "
-                            f"request {sorted(request_pool_keys)} + partner "
-                            f"{partner_dgd}/{partner_sub}={partner_desired}; "
-                            f"total {total_paired} GPUs (bounds "
+                            f"request {sorted(request_pool_keys)} + "
+                            f"[{partners_desc}]; total {total_paired} GPUs "
+                            f"(bounds "
                             f"[{self.min_total_gpus if self.min_total_gpus >= 0 else '-inf'} - {paired_tolerance}, "
                             f"{self.max_total_gpus if self.max_total_gpus >= 0 else '+inf'} + {paired_tolerance}])"
                         )
@@ -701,134 +891,106 @@ class ScaleRequestHandler:
                         )
                     else:
                         # Budget breach: standalone out-of-bounds and no
-                        # partner brought totals back into bounds.
-                        deny_reason = standalone_reason
-                        if paired_reason and paired_reason != "no partner":
-                            deny_reason = (
-                                f"{standalone_reason}; no feasible partner "
-                                f"(last tried: {paired_reason})"
-                            )
+                        # feasible partner set found.
                         logger.warning(
                             f"Rejecting scale request from {request.caller_namespace}: "
-                            f"{deny_reason}"
+                            f"{standalone_reason}; no feasible pair packing"
                         )
                         # Soft denial: budget breach is an expected operational
                         # outcome in fixed-total mode, not a fault. Local
                         # planners should treat this as a no-op for this tick.
                         yield {
                             "status": ScaleStatus.REJECTED.value,
-                            "message": f"GPU budget breach: {deny_reason}",
-                            "current_replicas": {},
-                        }
-                        return
-
-                # Execute the request's own targets on its connector.
-                # If partner is in the same DGD, combine into one call.
-                # If partner is in a different DGD, issue two calls (not atomic).
-                if partner_info is not None and partner_info[0] == request_key:
-                    # Intra-DGD: single atomic call.
-                    combined_targets: list[TargetReplica] = list(
-                        request.target_replicas
-                    )
-                    _, partner_sub, partner_desired, _ = partner_info
-                    combined_targets.append(
-                        TargetReplica(
-                            sub_component_type=SubComponentType(partner_sub),
-                            desired_replicas=partner_desired,
-                        )
-                    )
-                    await connector.set_component_replicas(
-                        combined_targets, blocking=request.blocking
-                    )
-                elif partner_info is None:
-                    # No pair: just apply the request.
-                    await connector.set_component_replicas(
-                        list(request.target_replicas), blocking=request.blocking
-                    )
-                else:
-                    # Cross-DGD pair: apply the scale-DOWN side first so its
-                    # GPUs are freed before the scale-UP side submits new pods.
-                    # Without this ordering, under a tight ceiling new pods
-                    # can sit Pending waiting for the eventual down-patch.
-                    partner_dgd, partner_sub, partner_desired, _ = partner_info
-                    partner_connector = self.connectors.get(partner_dgd)
-                    partner_targets = [
-                        TargetReplica(
-                            sub_component_type=SubComponentType(partner_sub),
-                            desired_replicas=partner_desired,
-                        )
-                    ]
-                    request_targets = list(request.target_replicas)
-
-                    # Partner's direction is opposite of request's net delta by
-                    # construction of _find_pair_partner. If request is net
-                    # scale-down (net_delta < 0), request is the down side;
-                    # otherwise the partner is.
-                    first_connector: Optional[KubernetesConnector]
-                    second_connector: Optional[KubernetesConnector]
-                    if net_delta < 0:
-                        first_label = f"request side ({request_key})"
-                        second_label = f"partner side ({partner_dgd}/{partner_sub})"
-                        first_connector, first_targets = connector, request_targets
-                        second_connector, second_targets = (
-                            partner_connector,
-                            partner_targets,
-                        )
-                    else:
-                        first_label = f"partner side ({partner_dgd}/{partner_sub})"
-                        second_label = f"request side ({request_key})"
-                        first_connector, first_targets = (
-                            partner_connector,
-                            partner_targets,
-                        )
-                        second_connector, second_targets = connector, request_targets
-
-                    if first_connector is None:
-                        logger.error(
-                            f"Cross-DGD pair failed before first patch: "
-                            f"no connector for {first_label}; nothing applied."
-                        )
-                        # Defensive: should be unreachable since partners come
-                        # from self.connectors. Surface as ERROR so the caller
-                        # doesn't see a false success and self-correction is
-                        # left to the next tick.
-                        yield {
-                            "status": ScaleStatus.ERROR.value,
                             "message": (
-                                f"Cross-DGD pair: missing connector for "
-                                f"{first_label}; nothing applied"
+                                f"GPU budget breach: {standalone_reason}; "
+                                f"no feasible pair packing"
                             ),
                             "current_replicas": {},
                         }
                         return
-                    else:
-                        # First patch: let exceptions propagate (outer handler
-                        # reports the error; nothing has been applied yet).
-                        await first_connector.set_component_replicas(
-                            first_targets, blocking=request.blocking
+
+                # Apply: request + selected partners (may be empty), grouped
+                # by DGD with at most one set_component_replicas call per DGD.
+                # Direction-aware order: scale-down DGDs first (most negative
+                # net delta), so that GPUs are freed before scale-up DGDs
+                # submit new pods. Within each DGD, the request's targets and
+                # any same-DGD partners are combined into a single atomic
+                # patch. Cross-DGD partners get separate per-DGD patches.
+                dgd_targets: dict[str, list[TargetReplica]] = defaultdict(list)
+                dgd_targets[request_key].extend(request.target_replicas)
+                for p_dgd, p_sub, p_desired, _ in selected_partners:
+                    dgd_targets[p_dgd].append(
+                        TargetReplica(
+                            sub_component_type=SubComponentType(p_sub),
+                            desired_replicas=p_desired,
                         )
-                        # Second patch: scale-up side may fail independently.
-                        # We've already freed (or claimed) GPUs on the first
-                        # side; log loudly so operators can spot the drift.
-                        if second_connector is None:
+                    )
+
+                # Compute net GPU delta per DGD for ordering.
+                dgd_net_deltas: dict[str, int] = {}
+                for dgd_key_iter, targets in dgd_targets.items():
+                    pools = all_pools.get(dgd_key_iter, {})
+                    net = 0
+                    for t in targets:
+                        spec = pools.get(t.sub_component_type.value)
+                        if spec is not None and spec.gpu_per_replica > 0:
+                            net += (
+                                t.desired_replicas - spec.current_replicas
+                            ) * spec.gpu_per_replica
+                    dgd_net_deltas[dgd_key_iter] = net
+
+                # Sort: most negative (scale-down) first, most positive
+                # (scale-up) last.
+                ordered_dgds = sorted(
+                    dgd_targets.keys(), key=lambda k: dgd_net_deltas[k]
+                )
+
+                applied_dgds: list[str] = []
+                for i, dgd_key_iter in enumerate(ordered_dgds):
+                    targets = dgd_targets[dgd_key_iter]
+                    target_conn = (
+                        connector
+                        if dgd_key_iter == request_key
+                        else self.connectors.get(dgd_key_iter)
+                    )
+                    if target_conn is None:
+                        if i == 0:
+                            # First patch: missing connector is unrecoverable
+                            # since nothing has been applied yet.
                             logger.error(
-                                f"Cross-DGD pair second-patch failed: no "
-                                f"connector for {second_label}; first-patch "
-                                f"({first_label}) already applied. System "
-                                f"will self-correct from new state."
+                                f"Multi-partner transfer aborted: missing "
+                                f"connector for first DGD ({dgd_key_iter})"
                             )
-                        else:
-                            try:
-                                await second_connector.set_component_replicas(
-                                    second_targets, blocking=request.blocking
-                                )
-                            except Exception as pair_err:
-                                logger.error(
-                                    f"Cross-DGD pair second-patch failed "
-                                    f"({second_label}): {pair_err}; first-patch "
-                                    f"({first_label}) already applied. System "
-                                    f"will self-correct from new state."
-                                )
+                            yield {
+                                "status": ScaleStatus.ERROR.value,
+                                "message": (
+                                    f"Multi-partner transfer: missing "
+                                    f"connector for {dgd_key_iter}"
+                                ),
+                                "current_replicas": {},
+                            }
+                            return
+                        logger.error(
+                            f"Multi-partner transfer: missing connector for "
+                            f"{dgd_key_iter} after applying {applied_dgds}; "
+                            f"will self-correct on next tick"
+                        )
+                        continue
+                    try:
+                        await target_conn.set_component_replicas(
+                            targets, blocking=request.blocking
+                        )
+                        applied_dgds.append(dgd_key_iter)
+                    except Exception as patch_err:
+                        if i == 0:
+                            # First patch failure: nothing applied, propagate
+                            # to the outer try so the caller sees ERROR.
+                            raise
+                        logger.error(
+                            f"Multi-partner transfer: patch on {dgd_key_iter} "
+                            f"failed after applying {applied_dgds}: "
+                            f"{patch_err}; will self-correct on next tick"
+                        )
 
             # Get current replica counts
             current_replicas = {}

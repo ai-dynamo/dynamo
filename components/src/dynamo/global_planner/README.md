@@ -144,12 +144,19 @@ Response fields:
 
 When `--min-total-gpus` is set the Global Planner enforces a floor on total GPUs across all managed DGDs. Combined with `--max-total-gpus`, this lets you run a *fixed-size* deployment that scales load between pools without changing the total.
 
-**Arbitration across all pools.** Every scale request triggers a search for an opposite-direction pending intent on any other pool the Global Planner knows about — prefill ↔ decode within the same DGD, or across two different DGDs entirely (e.g., multiple agg DGDs sharing a cluster-wide budget). The search walks every qualifying partner (same-DGD first, then cross-DGD) and applies the first one whose pair total actually lands inside `[min - tolerance, max + tolerance]`. An early candidate whose delta is too small or too large does not short-circuit the search — a later partner with the right magnitude can still pair successfully. If no partner brings totals into the band, both sides of the would-be pair are left alone and the request is rejected. When a feasible partner is found, both sides are applied:
+**Arbitration across all pools.** Every scale request that would breach the budget band triggers a search for opposite-direction pending intents on any other pool the Global Planner knows about — prefill ↔ decode within the same DGD, or across two different DGDs entirely (e.g., multiple agg DGDs sharing a cluster-wide budget).
 
-- **Intra-DGD pair** (prefill + decode of the same disagg DGD, for example): applied as a single atomic `set_component_replicas` call against that DGD.
-- **Cross-DGD pair** (one pool in DGD-A gives up a worker while one pool in DGD-B claims one): applied as two separate `set_component_replicas` calls, one per DGD. Not atomic — if the second patch fails, the first has already landed and the system self-corrects from the new state on the next tick. This scope is needed for "multiple agg pools sharing a budget" deployments such as [`examples/global_planner/global-planner-gpu-budget.yaml`](../../../../examples/global_planner/global-planner-gpu-budget.yaml).
+**Multi-partner packing**: the search packs as many qualifying partners as fit. Candidates are tried in ascending `abs(delta_gpu)` order, fully admitted while the running total stays inside `[min - tolerance, max + tolerance]`. When the next candidate's full inclusion would push past the band's far edge, the algorithm tries **partial consumption** — applying an intermediate replica count between the partner's current and its cached `last_desired` — that lands at the band edge. The cached intent's `last_desired` is **not** mutated by a partial application; the residual stays pending and can pair with future requests.
 
-When both intra-DGD and cross-DGD partners qualify, **intra-DGD wins** (atomicity preference).
+If no packing brings totals into the band, the request is rejected (`REJECTED`) and nothing is applied.
+
+When the selected partners span multiple DGDs:
+
+- **Intra-DGD partners** (same DGD as the request) are merged into the request's atomic `set_component_replicas` call — one patch updates request-side and intra-DGD partner pools together.
+- **Cross-DGD partners** (different DGD) get their own per-DGD patch.
+- **Direction-aware order**: scale-down DGDs apply first (freeing GPUs), then scale-up DGDs. If any second-or-later patch fails, the first has already landed and the system self-corrects from the new state on the next tick.
+
+This scope is needed for "multiple agg pools sharing a budget" deployments such as [`examples/global_planner/global-planner-gpu-budget.yaml`](../../../../examples/global_planner/global-planner-gpu-budget.yaml).
 
 **Tolerance for asymmetric pools.** When two paired pools have different `resources.limits.gpu` per replica, a single-worker step cannot always exactly cancel. Paired transfers are allowed to land up to `max(gpu_per_replica across the two paired pools)` outside `[min, max]` so the pair can still rebalance in whole-worker steps. Standalone (non-paired) requests must stay strictly within `[min, max]`.
 
