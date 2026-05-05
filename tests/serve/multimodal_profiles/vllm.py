@@ -194,7 +194,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "blue",
                     "orange",
                 ],
-                max_attempts=6,
+                max_attempts=5,
             )
         ],
     ),
