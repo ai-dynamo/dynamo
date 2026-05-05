@@ -241,14 +241,14 @@ fn build_score_response(tiered: &TieredMatchDetails, block_size: u32) -> ScoreRe
     // Collect the union of all workers seen in device tier and extension tiers.
     let mut all_workers = std::collections::HashSet::new();
     for worker in device.scores.keys() {
-        all_workers.insert(worker.clone());
+        all_workers.insert(*worker);
     }
     for extension in [host_extension, disk_extension, external_extension]
         .iter()
         .filter_map(|&e| e)
     {
         for worker in extension.hits.keys() {
-            all_workers.insert(worker.clone());
+            all_workers.insert(*worker);
         }
     }
 
