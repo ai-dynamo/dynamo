@@ -88,6 +88,8 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+_GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
+
 
 class _DeferredAbort:
     """Defers engine_client.abort(request_id) until the first engine output.
@@ -479,21 +481,15 @@ def _engine_generate_reasoning_kwargs(
     if reasoning_ended is None and reasoning_parser_kwargs is None:
         return {}
 
-    try:
-        parameters = inspect.signature(engine_client.generate).parameters
-    except (TypeError, ValueError):
-        logger.debug(
-            "Unable to inspect vLLM generate signature; dropping reasoning parser kwargs"
-        )
+    support = _engine_generate_reasoning_support(engine_client)
+    if support is None:
         return {}
+    accepts_reasoning_ended, accepts_reasoning_parser_kwargs = support
 
-    accepts_kwargs = any(
-        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
-    )
     kwargs: dict[str, Any] = {}
-    if accepts_kwargs or "reasoning_ended" in parameters:
+    if accepts_reasoning_ended:
         kwargs["reasoning_ended"] = reasoning_ended
-    if accepts_kwargs or "reasoning_parser_kwargs" in parameters:
+    if accepts_reasoning_parser_kwargs:
         kwargs["reasoning_parser_kwargs"] = reasoning_parser_kwargs
 
     if not kwargs:
@@ -502,6 +498,54 @@ def _engine_generate_reasoning_kwargs(
             "running without request-local reasoning parser metadata"
         )
     return kwargs
+
+
+def _engine_generate_reasoning_support(
+    engine_client: Any,
+) -> tuple[bool, bool] | None:
+    try:
+        cached = vars(engine_client).get(_GENERATE_REASONING_SUPPORT_CACHE_ATTR)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached
+
+    try:
+        parameters = inspect.signature(engine_client.generate).parameters
+    except (TypeError, ValueError):
+        logger.debug(
+            "Unable to inspect vLLM generate signature; dropping reasoning parser kwargs"
+        )
+        return None
+
+    accepts_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
+    support = (
+        accepts_kwargs or "reasoning_ended" in parameters,
+        accepts_kwargs or "reasoning_parser_kwargs" in parameters,
+    )
+    try:
+        setattr(engine_client, _GENERATE_REASONING_SUPPORT_CACHE_ATTR, support)
+    except Exception:
+        pass
+    return support
+
+
+def _request_reasoning_metadata(
+    request: dict[str, Any],
+) -> tuple[bool | None, dict[str, Any] | None]:
+    reasoning_ended = request.get("reasoning_ended")
+    reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
+
+    extra_args = request.get("extra_args")
+    if isinstance(extra_args, dict):
+        if reasoning_ended is None:
+            reasoning_ended = extra_args.get("reasoning_ended")
+        if reasoning_parser_kwargs is None:
+            reasoning_parser_kwargs = extra_args.get("reasoning_parser_kwargs")
+
+    return reasoning_ended, reasoning_parser_kwargs
 
 
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
@@ -2295,8 +2339,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
-        reasoning_ended = request.get("reasoning_ended")
-        reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -2557,8 +2600,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
-        reasoning_ended = request.get("reasoning_ended")
-        reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:

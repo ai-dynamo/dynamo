@@ -104,6 +104,27 @@ def _build_reasoning_parser_metadata(
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
 
 
+def _copy_reasoning_metadata_to_extra_args(
+    dynamo_preproc: dict[str, Any], kv_kwargs: dict[str, Any]
+) -> None:
+    reasoning_extra_args: dict[str, Any] = {}
+    if "reasoning_ended" in dynamo_preproc:
+        reasoning_extra_args["reasoning_ended"] = dynamo_preproc["reasoning_ended"]
+    if "reasoning_parser_kwargs" in dynamo_preproc:
+        reasoning_extra_args["reasoning_parser_kwargs"] = dynamo_preproc[
+            "reasoning_parser_kwargs"
+        ]
+
+    if not reasoning_extra_args:
+        return
+
+    extra_args = kv_kwargs.get("extra_args")
+    if not isinstance(extra_args, dict):
+        extra_args = {}
+        kv_kwargs["extra_args"] = extra_args
+    extra_args.update(reasoning_extra_args)
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -577,6 +598,7 @@ class VllmProcessor:
                         len(ea.get("mm_hashes", [])),
                         len(ea.get("mm_placeholders", [])),
                     )
+                _copy_reasoning_metadata_to_extra_args(dynamo_preproc, kv_kwargs)
                 # Forward mm_processor_kwargs (e.g. use_audio_in_video) to backend.
                 mm_proc_kwargs = dynamo_preproc.get("mm_processor_kwargs")
                 if mm_proc_kwargs is not None:

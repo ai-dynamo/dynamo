@@ -132,6 +132,67 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
 
 
 class TestReasoningParserForwarding:
+    def test_request_reasoning_metadata_reads_extra_args(self):
+        request = {
+            "extra_args": {
+                "reasoning_ended": False,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": {"reasoning_effort": "high"}
+                },
+            }
+        }
+
+        assert mod._request_reasoning_metadata(request) == (
+            False,
+            {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        )
+
+    def test_generate_signature_support_is_cached(self, monkeypatch):
+        class EngineClient:
+            def generate(
+                self,
+                prompt,
+                sampling_params,
+                request_id,
+                *,
+                reasoning_ended=None,
+                reasoning_parser_kwargs=None,
+            ):
+                pass
+
+        engine_client = EngineClient()
+        signature_calls = 0
+        original_signature = mod.inspect.signature
+
+        def counting_signature(obj):
+            nonlocal signature_calls
+            signature_calls += 1
+            return original_signature(obj)
+
+        monkeypatch.setattr(mod.inspect, "signature", counting_signature)
+
+        assert mod._engine_generate_reasoning_kwargs(
+            engine_client,
+            False,
+            {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        ) == {
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        }
+        assert mod._engine_generate_reasoning_kwargs(
+            engine_client,
+            True,
+            {"chat_template_kwargs": {"reasoning_effort": "low"}},
+        ) == {
+            "reasoning_ended": True,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "low"}
+            },
+        }
+        assert signature_calls == 1
+
     @pytest.mark.asyncio
     async def test_generate_tokens_forwards_reasoning_parser_metadata(self):
         from vllm.sampling_params import SamplingParams

@@ -172,3 +172,27 @@ class TestReasoningParserMetadata:
 
         assert reasoning_ended is True
         assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
+
+    def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
+        from dynamo.frontend.vllm_processor import (
+            _copy_reasoning_metadata_to_extra_args,
+        )
+
+        kv_kwargs = {"extra_args": {"mm_hashes": [123]}}
+        _copy_reasoning_metadata_to_extra_args(
+            {
+                "reasoning_ended": False,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": {"reasoning_effort": "high"}
+                },
+            },
+            kv_kwargs,
+        )
+
+        assert kv_kwargs["extra_args"] == {
+            "mm_hashes": [123],
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+        }
