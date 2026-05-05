@@ -42,7 +42,7 @@ testing = []
 testing-kvbm = []
 testing-nixl-gds = []
 testing-xpu-sycl = ["xpu-sycl"]
-xpu-sycl = ["dep:kvbm-kernels", "kvbm-kernels/xpu_permute_kernels", "dep:oneapi-rs", "dynamo-memory/sycl"]
+xpu-sycl = ["dep:kvbm-kernels", "kvbm-kernels/sycl_kernels", "dep:oneapi-rs", "dynamo-memory/sycl"]
 
 [[bin]]
 name = "validate_numa_placement"

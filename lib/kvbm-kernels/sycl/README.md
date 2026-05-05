@@ -1,7 +1,7 @@
 # SYCL Kernels for XPU
 
 SYCL C++ sources compiled into `libkvbm_kernels_xpu.so` and called from Rust
-via `extern "C"` FFI through `tensor_kernels_xpu.rs`.
+via `extern "C"` FFI through `tensor_kernels_sycl.rs`.
 
 ## Files
 
@@ -10,12 +10,12 @@ via `extern "C"` FFI through `tensor_kernels_xpu.rs`.
 
 ## Build
 
-Compiled automatically by `build.rs` when `KVBM_ENABLE_XPU_KERNELS` is set.
-Requires Intel oneAPI DPC++ compiler (`icpx`).
+Compiled automatically by `build.rs` when the `sycl_kernels` Cargo feature is
+enabled. Requires Intel oneAPI DPC++ compiler (`icpx`).
 
 ```bash
 # Automatic (via cargo):
-KVBM_ENABLE_XPU_KERNELS=1 cargo build --features xpu_permute_kernels
+cargo build --features sycl_kernels
 
 # Manual (equivalent):
 source /opt/intel/oneapi/setvars.sh

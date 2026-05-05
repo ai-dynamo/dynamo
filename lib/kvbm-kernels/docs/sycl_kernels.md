@@ -20,20 +20,20 @@ lib/kvbm-kernels/
 │   └── stubs.c                      # abort-on-call stubs when nvcc is absent
 ├── src/
 │   ├── tensor_kernels.rs            # CUDA FFI (always built)
-│   ├── tensor_kernels_xpu.rs        # SYCL FFI (feature xpu_permute_kernels)
+│   ├── tensor_kernels_sycl.rs       # SYCL FFI (feature sycl_kernels)
 │   └── lib.rs
 └── build.rs                         # two-tier build (CUDA + SYCL)
 ```
 
 ## Build pipeline
 
-The XPU branch in `build.rs` is **opt-in**. It only runs when
-`KVBM_ENABLE_XPU_KERNELS=1` is set at build time and compiles every
+The SYCL branch in `build.rs` is driven by the `sycl_kernels` Cargo
+feature. When enabled, it compiles every
 `.cpp` under `sycl/` into a single shared library.
 
 ```mermaid
 flowchart TD
-    A[cargo build] --> B{KVBM_ENABLE_XPU_KERNELS set?}
+    A[cargo build] --> B{sycl_kernels feature enabled?}
     B -- no --> DONE_CUDA[CUDA-only build<br/>links libkvbm_kernels.so]
     B -- yes --> C{icpx on PATH?}
     C -- yes --> D[icpx]
@@ -50,17 +50,15 @@ flowchart TD
 
 Notes:
 
-- The CUDA branch runs regardless of `KVBM_ENABLE_XPU_KERNELS` — a pure
+- The CUDA branch runs regardless of `sycl_kernels` — a pure
   XPU build still needs `cc` (or the stubs) for `libkvbm_kernels.so`.
   This is a known rough edge; see the enablement doc for follow-up
   items.
 - The SYCL library is a single `.so` — `icpx` takes every `.cpp` in
   `sycl/` as one call. Adding a new kernel means adding a new `.cpp`
   alongside the existing two; `build.rs` discovers it automatically.
-- `cargo:rerun-if-env-changed=KVBM_ENABLE_XPU_KERNELS` and
-  `cargo:rerun-if-changed=sycl/*` are declared so `cargo build`
-  incrementally rebuilds when either the env var or a source file
-  changes.
+- `cargo:rerun-if-changed=sycl/*` is declared so `cargo build`
+  incrementally rebuilds when a source file changes.
 
 ## `extern "C"` launcher ABI
 
@@ -102,9 +100,9 @@ inside the launcher. Callers in Rust wrap this with a descriptive
 
 ### The Rust side
 
-`src/tensor_kernels_xpu.rs` exposes one safe-ish `unsafe fn` per
-launcher plus a `XpuBlockLayout` enum (`NHD = 0`, `HND = 1`) that Rust
-callers pass in place of the raw `int`. Tests and `kvbm-physical` call
+`src/tensor_kernels_sycl.rs` exposes one safe-ish `unsafe fn` per
+launcher; the shared `BlockLayout` enum (`NHD = 0`, `HND = 1`) is passed
+in place of the raw `int`. Tests and `kvbm-physical` call
 these functions with the queue pointer obtained via
 `oneapi_rs::safe::SyclQueue::raw_queue_ptr()`.
 
@@ -198,9 +196,10 @@ formatted by `check_ccl_result` in `kvbm-engine`.
 
 | Feature | Effect |
 |---|---|
-| `xpu_permute_kernels` | Builds `src/tensor_kernels_xpu.rs` into the crate; requires `KVBM_ENABLE_XPU_KERNELS=1` at build for the `.so` to exist |
+| `sycl_kernels` | Builds `src/tensor_kernels_sycl.rs` and compiles SYCL kernels via icpx. Requires DPC++ compiler. |
+| `sycl_permute_kernels` | Enables SYCL permute kernel re-exports (implies `sycl_kernels`). |
 | `testing-xpu` | Enables `tests/xpu_kernel_roundtrip_sycl.rs` integration tests; requires a real XPU device |
-| `kvbench-xpu-sycl` | Enables the `kvbench_xpu_sycl.rs` example (pulls in `clap`, `oneapi-rs`, and `xpu_permute_kernels`) |
+| `kvbench-xpu-sycl` | Enables the `kvbench_xpu_sycl.rs` example (pulls in `clap`, `oneapi-rs`, and `sycl_permute_kernels`) |
 
 Kernel dispatch from `kvbm-physical` crosses this FFI boundary only at
 the `kvbm_kernels::xpu_vectorized_copy` / `kvbm_kernels::xpu_*_from_block`

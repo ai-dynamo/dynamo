@@ -3,13 +3,13 @@
 
 //! KV cache transfer benchmark for Intel XPU (SYCL / oneapi-rs).
 //!
-//! Compares `xpu_vectorized_copy` SYCL kernel against individual
+//! Compares `sycl_vectorized_copy` SYCL kernel against individual
 //! `sycl::queue::memcpy` for layerwise vs fully-contiguous block transfers
 //! using Llama 3.1 70B KV cache dimensions.
 //!
 //! # Backends
 //!
-//! - **vectorized** -- `xpu_vectorized_copy` SYCL C++ kernel dispatched via FFI.
+//! - **vectorized** -- `sycl_vectorized_copy` SYCL C++ kernel dispatched via FFI.
 //!   Uploads (src, dst) pointer arrays to device, then one kernel dispatch
 //!   copies all chunks in parallel.  This is the same code path used by
 //!   production `kvbm-physical`.
@@ -73,55 +73,55 @@
 //!
 //! ```sh
 //! # --- D2D, vectorized (SYCL kernel) --- fc_to_fc + lw_to_fc + fc_to_lw
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction d2d --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- D2D, memcpy (sycl::queue::memcpy) --- fc_to_fc + lw_to_fc + fc_to_lw
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction d2d --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- H2D, vectorized --- pinned host mem only
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction h2d --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned 2>/dev/null
 //!
 //! # --- H2D, memcpy --- pinned + system host mem
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction h2d --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- D2H, vectorized --- pinned host mem only
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction d2h --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned 2>/dev/null
 //!
 //! # --- D2H, memcpy --- pinned + system host mem
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction d2h --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- Cross-device D2D, memcpy --- device 0 -> device 1
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \\
+//! cargo run --example kvbench_xpu_sycl \\
 //!   --features kvbench-xpu-sycl --release -- \\
 //!   --direction d2dx --backend memcpy --device 0 --dst-device 1 \\
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- Full sweep (all 4 same-device rows) ---
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --direction d2d,h2d,d2h --backend vectorized,memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- Quick smoke test on device 0 ---
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run --example kvbench_xpu_sycl \
+//! cargo run --example kvbench_xpu_sycl \
 //!   --features kvbench-xpu-sycl --release -- \
 //!   --device 0 --num-blocks 1,4 --tokens-per-block 16 \
 //!   --warmup 3 --iters 10
@@ -133,7 +133,7 @@ use std::sync::Arc;
 use clap::Parser;
 use oneapi_rs::sycl::SyclQueue;
 
-use kvbm_kernels::xpu_vectorized_copy;
+use kvbm_kernels::sycl_vectorized_copy;
 
 // ---------------------------------------------------------------------------
 // Llama 3.1 70B, bf16 KV cache dimensions
@@ -527,7 +527,7 @@ fn build_lw_fc_pairs(
 // Execute one iteration
 // ---------------------------------------------------------------------------
 
-/// Dispatch `xpu_vectorized_copy` SYCL kernel via FFI.
+/// Dispatch `sycl_vectorized_copy` SYCL kernel via FFI.
 ///
 /// Pointer arrays are uploaded to device memory, then the kernel is launched
 /// through the same FFI used by production code.
@@ -557,7 +557,7 @@ fn execute_vectorized(
 
     // Launch kernel — in-order after the uploads above.
     let status = unsafe {
-        xpu_vectorized_copy(
+        sycl_vectorized_copy(
             src_addrs_dev.ptr as *mut *mut c_void,
             dst_addrs_dev.ptr as *mut *mut c_void,
             copy_size,
@@ -565,7 +565,7 @@ fn execute_vectorized(
             queue.raw_queue_ptr(),
         )
     };
-    assert_eq!(status, 0, "xpu_vectorized_copy returned {status}");
+    assert_eq!(status, 0, "sycl_vectorized_copy returned {status}");
 
     queue.synchronize().expect("sync after vectorized_copy");
 }

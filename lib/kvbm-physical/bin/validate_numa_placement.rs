@@ -29,18 +29,16 @@
 //! cargo run -p kvbm-physical --bin validate_numa_placement -- \
 //!     --size 64 --gpus 0,2
 //!
-//! # Intel XPU host — requires BOTH the `xpu-sycl` feature AND the
-//! # KVBM_ENABLE_XPU_KERNELS env var at build time (the latter triggers
-//! # `icpx -fsycl` in `kvbm-kernels` to produce libkvbm_kernels_xpu.so,
-//! # which `xpu-sycl` links against):
-//! KVBM_ENABLE_XPU_KERNELS=1 \
+//! # Intel XPU host — requires the `xpu-sycl` feature (which enables
+//! # `sycl_kernels` in `kvbm-kernels`, triggering `icpx -fsycl`):
+//!
 //!     cargo run -p kvbm-physical \
 //!         --no-default-features --features xpu-sycl \
 //!         --bin validate_numa_placement -- \
 //!         --backend sycl --size 64 --gpus 0,2
 //!
 //! # Mixed host with both backends compiled in:
-//! KVBM_ENABLE_XPU_KERNELS=1 \
+//!
 //!     cargo run -p kvbm-physical --features cuda,xpu-sycl \
 //!         --bin validate_numa_placement -- --backend sycl
 //! ```
@@ -212,16 +210,13 @@ fn print_rebuild_hint(requested: &str) {
         eprintln!("      Rebuild with that feature to enable the {} backend:",
             if feat == "cuda" { "CUDA" } else { "SYCL/XPU" });
         if feat == "xpu-sycl" {
-            // `xpu-sycl` implies `kvbm-kernels/xpu_permute_kernels`, so
-            // `libkvbm_kernels_xpu.so` must exist at link time. That
-            // library is produced only when KVBM_ENABLE_XPU_KERNELS=1
-            // is set at `cargo build` time (triggers icpx -fsycl in
-            // lib/kvbm-kernels/build.rs).
-            eprintln!("      KVBM_ENABLE_XPU_KERNELS=1 \\");
+            // `xpu-sycl` implies `kvbm-kernels/sycl_kernels`, which triggers
+            // icpx -fsycl in lib/kvbm-kernels/build.rs to produce
+            // libkvbm_kernels_xpu.so at link time.
             eprintln!(
-                "          cargo run -p kvbm-physical --features xpu-sycl \\"
+                "      cargo run -p kvbm-physical --features xpu-sycl \\"
             );
-            eprintln!("              --bin validate_numa_placement -- --backend sycl");
+            eprintln!("          --bin validate_numa_placement -- --backend sycl");
         } else {
             eprintln!(
                 "      cargo run -p kvbm-physical --features cuda \\"
@@ -243,10 +238,8 @@ fn print_rebuild_hint(requested: &str) {
                 );
                 eprintln!("      driver was detected on this host. If this is an Intel");
                 eprintln!("      XPU system, rebuild with the SYCL backend enabled.");
-                eprintln!("      The `xpu-sycl` feature links against libkvbm_kernels_xpu.so,");
-                eprintln!("      which is only produced when KVBM_ENABLE_XPU_KERNELS=1 is set");
-                eprintln!("      at build time (triggers icpx -fsycl in kvbm-kernels):");
-                eprintln!("      KVBM_ENABLE_XPU_KERNELS=1 \\");
+                eprintln!("      The `xpu-sycl` feature enables `sycl_kernels` in kvbm-kernels,");
+                eprintln!("      which triggers `icpx -fsycl` at build time:");
                 eprintln!(
                     "          cargo run -p kvbm-physical \\"
                 );
@@ -271,7 +264,7 @@ fn print_rebuild_hint(requested: &str) {
                 );
                 eprintln!("      Rebuild with at least one of:");
                 eprintln!("        --features cuda");
-                eprintln!("        --features xpu-sycl  (requires KVBM_ENABLE_XPU_KERNELS=1 at build time)");
+                eprintln!("        --features xpu-sycl");
             }
             (true, true) => {
                 eprintln!();

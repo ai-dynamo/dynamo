@@ -23,7 +23,7 @@
 //!     --devices 0,1 --page-sizes 128 --concurrency 1,2,4 --iterations 50
 //!
 //! # XPU (SYCL):
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo run -p kvbm-engine \
+//! cargo run -p kvbm-engine \
 //!     --no-default-features --features bench,kvbm-physical/xpu-sycl --bin bench_engine -- \
 //!     --backend sycl --devices 0 --page-sizes 32,64 --concurrency 1,2 --iterations 10 \
 //!     --skip-disk --skip-gds --num-blocks 256

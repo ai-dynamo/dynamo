@@ -6,23 +6,23 @@
 //! Mirrors kernel_roundtrip.rs (CUDA) using the oneAPI-rs safe SYCL API:
 //! - Memory: SyclQueue::alloc_device<T> (typed USM buffers)
 //! - Transfer: SyclQueue::memcpy_sync (auto-detect direction)
-//! - Kernel dispatch: xpu_universal_from_block / xpu_block_from_universal
+//! - Kernel dispatch: sycl_universal_from_block / sycl_block_from_universal
 //!   via FFI with queue.raw_queue_ptr()
 //! - Sync: SyclQueue::synchronize
 //!
 //! Run with:
-//!   KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-kernels \
-//!       --features xpu_permute_kernels,testing-xpu \
+//!   cargo test -p kvbm-kernels \
+//!       --features sycl_permute_kernels,testing-xpu \
 //!       --test xpu_kernel_roundtrip_sycl -- --nocapture
 
-#![cfg(all(feature = "testing-xpu", feature = "xpu_permute_kernels"))]
+#![cfg(all(feature = "testing-xpu", feature = "sycl_permute_kernels"))]
 
 use std::ffi::c_void;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use half::{f16, bf16};
-use kvbm_kernels::{XpuBlockLayout, xpu_block_from_universal, xpu_universal_from_block, xpu_vectorized_copy};
+use kvbm_kernels::{BlockLayout, sycl_block_from_universal, sycl_universal_from_block, sycl_vectorized_copy};
 use oneapi_rs::sycl::SyclQueue;
 
 // ---------------------------------------------------------------------------
@@ -90,11 +90,11 @@ fn assert_close<T: TestDtype>(actual: &[T], expected: &[T], label: &str) {
 }
 
 /// Compute the within-chunk flat element offset for a given (nt, nh, hd) index.
-fn inner_offset(layout: XpuBlockLayout, nt_idx: usize, nh_idx: usize, hd_idx: usize,
+fn inner_offset(layout: BlockLayout, nt_idx: usize, nh_idx: usize, hd_idx: usize,
                 nt: usize, nh: usize, hd: usize) -> usize {
     match layout {
-        XpuBlockLayout::NHD => ((nt_idx * nh) + nh_idx) * hd + hd_idx,
-        XpuBlockLayout::HND => ((nh_idx * nt) + nt_idx) * hd + hd_idx,
+        BlockLayout::NHD => ((nt_idx * nh) + nh_idx) * hd + hd_idx,
+        BlockLayout::HND => ((nh_idx * nt) + nt_idx) * hd + hd_idx,
     }
 }
 
@@ -107,7 +107,7 @@ fn sycl_setup() -> Option<Arc<SyclQueue>> {
 // Core roundtrip test (SYCL path — mirrors CUDA kernel_roundtrip.rs)
 // ---------------------------------------------------------------------------
 
-fn block_universal_roundtrip_inner<T: TestDtype>(layout: XpuBlockLayout) {
+fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
     let queue = match sycl_setup() {
         Some(q) => q,
         None => {
@@ -219,7 +219,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: XpuBlockLayout) {
     // --- Forward: blocks -> universal (SYCL kernel dispatch) ---
     let queue_ptr = queue.raw_queue_ptr();
     let status = unsafe {
-        xpu_universal_from_block(
+        sycl_universal_from_block(
             universal_ptrs_dev.as_mut_ptr() as *const *mut c_void,
             block_ptrs_dev.as_mut_ptr() as *const *const c_void,
             nb, nh, nl, no, nt, hd, elem_size,
@@ -227,7 +227,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: XpuBlockLayout) {
             queue_ptr,
         )
     };
-    assert_eq!(status, 0, "xpu_universal_from_block returned {}", status);
+    assert_eq!(status, 0, "sycl_universal_from_block returned {}", status);
     queue.synchronize().expect("sync after forward kernel failed");
 
     // --- Read back universal buffers and verify against reference ---
@@ -255,7 +255,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: XpuBlockLayout) {
     queue.synchronize().expect("sync after zero fill failed");
 
     let status = unsafe {
-        xpu_block_from_universal(
+        sycl_block_from_universal(
             universal_ptrs_dev.as_mut_ptr() as *const *const c_void,
             block_ptrs_dev.as_mut_ptr() as *const *mut c_void,
             nb, nh, nl, no, nt, hd, elem_size,
@@ -263,7 +263,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: XpuBlockLayout) {
             queue_ptr,
         )
     };
-    assert_eq!(status, 0, "xpu_block_from_universal returned {}", status);
+    assert_eq!(status, 0, "sycl_block_from_universal returned {}", status);
     queue.synchronize().expect("sync after reverse kernel failed");
 
     // --- Read back block chunks and verify full roundtrip ---
@@ -299,14 +299,14 @@ macro_rules! sycl_block_universal_test {
     };
 }
 
-sycl_block_universal_test!(sycl_roundtrip_nhd_f32, f32, XpuBlockLayout::NHD);
-sycl_block_universal_test!(sycl_roundtrip_nhd_f64, f64, XpuBlockLayout::NHD);
-sycl_block_universal_test!(sycl_roundtrip_hnd_f32, f32, XpuBlockLayout::HND);
-sycl_block_universal_test!(sycl_roundtrip_hnd_f64, f64, XpuBlockLayout::HND);
-sycl_block_universal_test!(sycl_roundtrip_nhd_f16, f16, XpuBlockLayout::NHD);
-sycl_block_universal_test!(sycl_roundtrip_nhd_bf16, bf16, XpuBlockLayout::NHD);
-sycl_block_universal_test!(sycl_roundtrip_hnd_f16, f16, XpuBlockLayout::HND);
-sycl_block_universal_test!(sycl_roundtrip_hnd_bf16, bf16, XpuBlockLayout::HND);
+sycl_block_universal_test!(sycl_roundtrip_nhd_f32, f32, BlockLayout::NHD);
+sycl_block_universal_test!(sycl_roundtrip_nhd_f64, f64, BlockLayout::NHD);
+sycl_block_universal_test!(sycl_roundtrip_hnd_f32, f32, BlockLayout::HND);
+sycl_block_universal_test!(sycl_roundtrip_hnd_f64, f64, BlockLayout::HND);
+sycl_block_universal_test!(sycl_roundtrip_nhd_f16, f16, BlockLayout::NHD);
+sycl_block_universal_test!(sycl_roundtrip_nhd_bf16, bf16, BlockLayout::NHD);
+sycl_block_universal_test!(sycl_roundtrip_hnd_f16, f16, BlockLayout::HND);
+sycl_block_universal_test!(sycl_roundtrip_hnd_bf16, bf16, BlockLayout::HND);
 
 /// Empty batch should be a noop — the C++ launcher returns 0 for num_blocks==0.
 #[test]
@@ -320,11 +320,11 @@ fn sycl_empty_batch_noop() {
     };
     let queue_ptr = queue.raw_queue_ptr();
     let status = unsafe {
-        xpu_universal_from_block(
+        sycl_universal_from_block(
             std::ptr::null(),
             std::ptr::null(),
             0, 1, 1, 1, 1, 1, 4,
-            XpuBlockLayout::NHD,
+            BlockLayout::NHD,
             queue_ptr,
         )
     };
@@ -379,10 +379,10 @@ fn sycl_vectorized_copy() {
 
     queue.synchronize().expect("sync before kernel");
 
-    // Dispatch xpu_vectorized_copy
+    // Dispatch sycl_vectorized_copy
     let queue_ptr = queue.raw_queue_ptr();
     let status = unsafe {
-        xpu_vectorized_copy(
+        sycl_vectorized_copy(
             src_ptrs_dev.as_mut_ptr() as *mut *mut std::ffi::c_void,
             dst_ptrs_dev.as_mut_ptr() as *mut *mut std::ffi::c_void,
             copy_size,
@@ -390,7 +390,7 @@ fn sycl_vectorized_copy() {
             queue_ptr,
         )
     };
-    assert_eq!(status, 0, "xpu_vectorized_copy returned {}", status);
+    assert_eq!(status, 0, "sycl_vectorized_copy returned {}", status);
     queue.synchronize().expect("sync after kernel");
 
     // Verify each dst matches src

@@ -235,19 +235,14 @@ cargo run -p kvbm-physical --bin validate_numa_placement
 cargo run -p kvbm-physical --bin validate_numa_placement -- \
     --size 64 --gpus 0,2
 
-# Intel XPU host — requires BOTH the `xpu-sycl` feature AND the
-# KVBM_ENABLE_XPU_KERNELS env var at build time. The env var triggers
-# `icpx -fsycl` in `kvbm-kernels` to produce libkvbm_kernels_xpu.so,
-# which the `xpu-sycl` feature links against. Without it the build
-# fails at link time.
-KVBM_ENABLE_XPU_KERNELS=1 \
+# Intel XPU host — requires the `xpu-sycl` feature (which enables
+# `sycl_kernels` in `kvbm-kernels`, triggering `icpx -fsycl`):
     cargo run -p kvbm-physical \
         --no-default-features --features xpu-sycl \
         --bin validate_numa_placement -- \
         --backend sycl --size 64 --gpus 0,2
 
 # Mixed host with both backends compiled in:
-KVBM_ENABLE_XPU_KERNELS=1 \
     cargo run -p kvbm-physical --features cuda,xpu-sycl \
         --bin validate_numa_placement -- --backend sycl
 ```

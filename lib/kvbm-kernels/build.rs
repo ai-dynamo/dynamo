@@ -75,13 +75,12 @@ fn main() {
         }
     }
 
-    // --- XPU SYCL kernels (opt-in) ---
-    println!("cargo:rerun-if-env-changed=KVBM_ENABLE_XPU_KERNELS");
+    // --- SYCL kernels (driven by sycl_kernels Cargo feature) ---
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(&manifest_dir).join("sycl").display()
     );
-    if env::var("KVBM_ENABLE_XPU_KERNELS").is_ok() {
+    if env::var("CARGO_FEATURE_SYCL_KERNELS").is_ok() {
         build_sycl_library(&manifest_dir, &out_dir);
     }
 }
@@ -394,7 +393,7 @@ fn add_cuda_library_paths() {
 /// Build SYCL XPU kernels from source using icpx.
 ///
 /// Compiles all sycl/*.cpp files into libkvbm_kernels_xpu.so which provides
-/// extern "C" launchers called from tensor_kernels_xpu.rs:
+/// extern "C" launchers called from tensor_kernels_sycl.rs:
 ///   - tensor_permute_kernel.cpp  (block/universal permute)
 ///   - vectorized_copy_kernel.cpp (vectorized copy)
 fn build_sycl_library(manifest_dir: &str, out_dir: &str) {
@@ -426,13 +425,13 @@ fn build_sycl_library(manifest_dir: &str, out_dir: &str) {
             candidate.to_string_lossy().into_owned()
         } else {
             panic!(
-                "KVBM_ENABLE_XPU_KERNELS is set but icpx not found. \
+                "Feature 'sycl_kernels' is enabled but icpx not found. \
                  Install Intel oneAPI DPC++ compiler or set ONEAPI_ROOT."
             );
         }
     } else {
         panic!(
-            "KVBM_ENABLE_XPU_KERNELS is set but icpx not found. \
+            "Feature 'sycl_kernels' is enabled but icpx not found. \
              Install Intel oneAPI DPC++ compiler."
         );
     };

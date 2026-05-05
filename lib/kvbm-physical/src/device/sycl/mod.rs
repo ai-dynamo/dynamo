@@ -348,7 +348,7 @@ impl DeviceStreamOps for SyclStreamWrapper {
         #[cfg(feature = "xpu-sycl")]
         {
             let ret = unsafe {
-                kvbm_kernels::xpu_vectorized_copy(
+                kvbm_kernels::sycl_vectorized_copy(
                     src_ptrs_device as *mut *mut c_void,
                     dst_ptrs_device as *mut *mut c_void,
                     chunk_size,

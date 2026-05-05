@@ -16,13 +16,7 @@
 
 use std::ffi::c_void;
 
-/// Identifies how each `[nt, nh, hd]` chunk is laid out in device memory.
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum XpuBlockLayout {
-    NHD = 0,
-    HND = 1,
-}
+use crate::BlockLayout;
 
 #[allow(dead_code)]
 unsafe extern "C" {
@@ -80,7 +74,7 @@ unsafe extern "C" {
 /// - All pointer arrays must be device-accessible with correct lengths.
 /// - `queue` must be a valid `sycl::queue*` that outlives the kernel execution.
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn xpu_universal_from_block(
+pub unsafe fn sycl_universal_from_block(
     universal_ptrs: *const *mut c_void,
     block_ptrs: *const *const c_void,
     num_blocks: usize,
@@ -90,7 +84,7 @@ pub unsafe fn xpu_universal_from_block(
     nt: usize,
     hd: usize,
     elem_size: usize,
-    layout: XpuBlockLayout,
+    layout: BlockLayout,
     queue: *mut c_void,
 ) -> i32 {
     unsafe {
@@ -113,9 +107,9 @@ pub unsafe fn xpu_universal_from_block(
 /// Copy `num_blocks` universal tensors back into their block stacks (XPU).
 ///
 /// # Safety
-/// Same requirements as [`xpu_universal_from_block`].
+/// Same requirements as [`sycl_universal_from_block`].
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn xpu_block_from_universal(
+pub unsafe fn sycl_block_from_universal(
     universal_ptrs: *const *const c_void,
     block_ptrs: *const *mut c_void,
     num_blocks: usize,
@@ -125,7 +119,7 @@ pub unsafe fn xpu_block_from_universal(
     nt: usize,
     hd: usize,
     elem_size: usize,
-    layout: XpuBlockLayout,
+    layout: BlockLayout,
     queue: *mut c_void,
 ) -> i32 {
     unsafe {
@@ -161,7 +155,7 @@ pub unsafe fn xpu_block_from_universal(
 /// - All pointers in src/dst arrays must be valid device-visible pointers.
 /// - The pointer arrays must reside in device memory with ≥ `num_pairs` entries.
 /// - `queue` must be a valid `sycl::queue*` that outlives the kernel execution.
-pub unsafe fn xpu_vectorized_copy(
+pub unsafe fn sycl_vectorized_copy(
     src_ptrs: *mut *mut c_void,
     dst_ptrs: *mut *mut c_void,
     copy_size_bytes: usize,

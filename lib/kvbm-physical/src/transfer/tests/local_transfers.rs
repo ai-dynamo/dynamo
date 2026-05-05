@@ -17,11 +17,11 @@
 //! cargo test -p kvbm-physical --features testing-kvbm,cuda -- transfer::tests::local_transfers
 //!
 //!
-//! # XPU (SYCL) — requires KVBM_ENABLE_XPU_KERNELS=1 and icpx
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl -- transfer::tests::local_transfers
+//! # XPU (SYCL) — requires icpx (Intel DPC++ compiler)
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl -- transfer::tests::local_transfers
 //!
 //! # Release mode (recommended for GPU-bound tests)
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl --release -- transfer::tests::local_transfers
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl --release -- transfer::tests::local_transfers
 //! ```
 
 use super::*;

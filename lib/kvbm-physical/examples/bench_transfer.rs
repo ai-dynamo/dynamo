@@ -35,7 +35,7 @@
 //! ./target/release/examples/bench_transfer --backend ze --device 0
 //!
 //! # XPU (SYCL)
-//! KVBM_ENABLE_XPU_KERNELS=1 cargo build --example bench_transfer -p kvbm-physical \
+//! cargo build --example bench_transfer -p kvbm-physical \
 //!   --no-default-features --features xpu-sycl --release
 //!   ./target/release/examples/bench_transfer --backend sycl --device 0
 //!

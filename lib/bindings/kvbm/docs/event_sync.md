@@ -181,11 +181,7 @@ without `cuda` or `xpu-sycl` is never useful in production.
   block-manager,cuda,nccl`. `event_sync_blocking` binds to
   `cuEventSynchronize`; MLA broadcasts go through
   `NcclCollectives`.
-- **vLLM on Intel XPU**: export `KVBM_ENABLE_XPU_KERNELS=1` first (the
-  SYCL feature links against `libkvbm_kernels_xpu.so`, which is only
-  produced when that env var is set during the `kvbm-kernels` build —
-  see [`sycl_kernels.md`](../../../kvbm-kernels/docs/sycl_kernels.md)),
-  then build `kvbm-py3` with `--features
+- **vLLM on Intel XPU**: build `kvbm-py3` with `--features
   block-manager,xpu-sycl,oneccl`. `event_sync_blocking` binds to
   `sycl_rs_event_wait`; MLA broadcasts go through `OneCclCollectives`.
 
