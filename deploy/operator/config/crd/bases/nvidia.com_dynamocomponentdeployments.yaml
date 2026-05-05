@@ -36,6 +36,8 @@ spec:
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
+      deprecated: true
+      deprecationWarning: nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment
       name: v1alpha1
       schema:
         openAPIV3Schema:
@@ -11483,10 +11485,10 @@ spec:
           description: |-
             DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-            v1beta1 is currently an UNSERVED version: it is defined so that conversion
-            scaffolding and type generation can land ahead of the full multi-version
-            wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-            served in a subsequent MR.
+            v1beta1 is a served version: the API server accepts reads and writes
+            against it, and transparently converts to/from v1alpha1 (still the
+            storage version until a later MR flips it). Conversion goes through the
+            operator's conversion webhook; see api/v1alpha1/*_conversion.go.
           properties:
             apiVersion:
               description: |-
@@ -19991,7 +19993,6 @@ spec:
                   type: string
               required:
                 - backendFramework
-                - name
               type: object
               x-kubernetes-validations:
                 - message: eppConfig may only be set when type is epp
@@ -20119,7 +20120,7 @@ spec:
                   type: integer
               type: object
           type: object
-      served: false
+      served: true
       storage: false
       subresources:
         status: {}
