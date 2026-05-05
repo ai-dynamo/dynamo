@@ -456,6 +456,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
         MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
 
