@@ -35,8 +35,10 @@ import (
 )
 
 // Default hardware for mocker mode (AIC simulation needs hardware metadata).
+// Use H100_SXM because AIC has complete perf data for all backends (vllm, sglang, trtllm)
+// on this GPU type. A100_SXM has an incomplete sglang 0.5.8 database (missing context_attention_perf.txt).
 var defaultMockerHardware = v1beta1.HardwareSpec{
-	GPUSKU:         v1beta1.GPUSKUTypeA100SXM,
+	GPUSKU:         v1beta1.GPUSKUTypeH100SXM,
 	VRAMMB:         ptr.To(float64(81920)),
 	NumGPUsPerNode: ptr.To(int32(8)),
 	TotalGPUs:      ptr.To(int32(8)),
@@ -171,7 +173,18 @@ func serverDryRun(dgdr *v1beta1.DynamoGraphDeploymentRequest) error {
 	return k8sClient.Create(ctx, dgdr, client.DryRunAll)
 }
 
+// phaseOrder defines the lifecycle ordering for DGDR phases.
+var phaseOrder = map[v1beta1.DGDRPhase]int{
+	v1beta1.DGDRPhasePending:   0,
+	v1beta1.DGDRPhaseProfiling: 1,
+	v1beta1.DGDRPhaseReady:     2,
+	v1beta1.DGDRPhaseDeploying: 3,
+	v1beta1.DGDRPhaseDeployed:  4,
+	v1beta1.DGDRPhaseFailed:    -1,
+}
+
 // waitForPhase polls until the DGDR reaches the target phase or times out.
+// Fails immediately if the DGDR enters the Failed phase (unless that's the target).
 func waitForPhase(name string, target v1beta1.DGDRPhase, timeout time.Duration) *v1beta1.DynamoGraphDeploymentRequest {
 	var dgdr v1beta1.DynamoGraphDeploymentRequest
 	Eventually(func(g Gomega) {
@@ -179,8 +192,49 @@ func waitForPhase(name string, target v1beta1.DGDRPhase, timeout time.Duration) 
 			Namespace: flagNamespace,
 			Name:      name,
 		}, &dgdr)).To(Succeed())
+		if target != v1beta1.DGDRPhaseFailed && dgdr.Status.Phase == v1beta1.DGDRPhaseFailed {
+			msg := "unknown"
+			for _, c := range dgdr.Status.Conditions {
+				if c.Message != "" {
+					msg = c.Message
+					break
+				}
+			}
+			Fail(fmt.Sprintf("DGDR %s entered Failed phase while waiting for %s: %s", name, target, msg))
+		}
 		g.Expect(dgdr.Status.Phase).To(Equal(target),
 			"DGDR %s phase is %s, waiting for %s", name, dgdr.Status.Phase, target)
+	}, timeout, 5*time.Second).Should(Succeed())
+	return &dgdr
+}
+
+// waitForPhaseAtLeast polls until the DGDR reaches the target phase or a later phase.
+// This is useful when autoApply=true causes the operator to skip the Ready phase
+// and transition directly to Deploying.
+// Fails immediately if the DGDR enters the Failed phase.
+func waitForPhaseAtLeast(name string, target v1beta1.DGDRPhase, timeout time.Duration) *v1beta1.DynamoGraphDeploymentRequest {
+	var dgdr v1beta1.DynamoGraphDeploymentRequest
+	targetOrder := phaseOrder[target]
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{
+			Namespace: flagNamespace,
+			Name:      name,
+		}, &dgdr)).To(Succeed())
+		currentOrder, ok := phaseOrder[dgdr.Status.Phase]
+		g.Expect(ok).To(BeTrue(), "unknown phase %q", dgdr.Status.Phase)
+		if dgdr.Status.Phase == v1beta1.DGDRPhaseFailed {
+			msg := "unknown"
+			for _, c := range dgdr.Status.Conditions {
+				if c.Message != "" {
+					msg = c.Message
+					break
+				}
+			}
+			Fail(fmt.Sprintf("DGDR %s entered Failed phase while waiting for at least %s: %s", name, target, msg))
+		}
+		g.Expect(currentOrder).To(BeNumerically(">=", targetOrder),
+			"DGDR %s phase is %s (order %d), waiting for at least %s (order %d)",
+			name, dgdr.Status.Phase, currentOrder, target, targetOrder)
 	}, timeout, 5*time.Second).Should(Succeed())
 	return &dgdr
 }

@@ -104,12 +104,13 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	// Resolve autoApply (default true per CRD)
 	autoApply := input.AutoApply == nil || *input.AutoApply
 
-	// Step 2: Wait for profiling to complete (DGDR reaches Ready)
+	// Step 2: Wait for profiling to complete (DGDR reaches Ready or later)
+	// With autoApply=true the operator may skip Ready and go directly to Deploying.
 	By("Waiting for DGDR to reach Ready phase (profiling complete)")
 	profilingTimeout := time.Duration(flagProfilingTimeout) * time.Second
-	dgdrResult := waitForPhase(input.Name, v1beta1.DGDRPhaseReady, profilingTimeout)
+	dgdrResult := waitForPhaseAtLeast(input.Name, v1beta1.DGDRPhaseReady, profilingTimeout)
 
-	Expect(dgdrResult.Status.Phase).To(Equal(v1beta1.DGDRPhaseReady))
+	Expect(phaseOrder[dgdrResult.Status.Phase]).To(BeNumerically(">=", phaseOrder[v1beta1.DGDRPhaseReady]))
 	Expect(dgdrResult.Status.ProfilingJobName).NotTo(BeEmpty(),
 		"profilingJobName should be set after profiling completes")
 
