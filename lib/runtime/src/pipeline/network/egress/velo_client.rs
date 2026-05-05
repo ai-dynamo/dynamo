@@ -21,6 +21,7 @@ use dashmap::DashMap;
 use ::velo::{InstanceId, Velo};
 
 use super::unified_client::{Headers, RequestPlaneClient};
+use crate::pipeline::network::bidi::BIDI_INIT_HANDLER;
 use crate::pipeline::network::velo::{ENDPOINT_HEADER, REQUEST_PLANE_HANDLER, decode_velo_address};
 
 /// Velo `RequestPlaneClient` implementation.
@@ -38,6 +39,47 @@ impl VeloRequestPlaneClient {
             velo,
             known_peers: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Cloned reference to the underlying velo instance — used by the bidi
+    /// router to call `velo.create_anchor` / `velo.attach_anchor`.
+    pub fn velo(&self) -> &Arc<Velo> {
+        &self.velo
+    }
+
+    /// Issue the bidi-init unary RPC to the target velo instance and return
+    /// the raw ACK bytes (the rmp_serde-encoded
+    /// [`crate::pipeline::network::bidi::BidiInitResponse`]).
+    pub async fn send_bidi_init(
+        &self,
+        address: String,
+        payload: Bytes,
+        mut headers: super::unified_client::Headers,
+    ) -> Result<Bytes> {
+        let parsed = decode_velo_address(&address)
+            .with_context(|| format!("parsing velo address {address}"))?;
+
+        self.ensure_peer(parsed.velo_instance).await?;
+
+        headers.insert(ENDPOINT_HEADER.to_string(), parsed.endpoint_key.clone());
+
+        let response = self
+            .velo
+            .unary(BIDI_INIT_HANDLER)
+            .map_err(|e| anyhow!("creating velo unary builder for {BIDI_INIT_HANDLER}: {e}"))?
+            .raw_payload(payload)
+            .headers(headers)
+            .instance(parsed.velo_instance)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "velo bidi-init send to {} (key {})",
+                    parsed.velo_instance, parsed.endpoint_key
+                )
+            })?;
+
+        Ok(response)
     }
 
     async fn ensure_peer(&self, target: InstanceId) -> Result<()> {

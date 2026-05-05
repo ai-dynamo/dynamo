@@ -17,6 +17,17 @@ use crate::{
     traits::DistributedRuntimeProvider,
     transports::nats,
 };
+#[cfg(feature = "velo-transport")]
+use crate::pipeline::network::ingress::bidi_handler::BidiPushWorkHandler;
+
+/// Internal switch used by [`EndpointConfig::start`] to route through the
+/// unary or bidi registration path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandlerSelection {
+    Unary,
+    #[cfg(feature = "velo-transport")]
+    Bidi,
+}
 
 fn endpoint_device_type() -> Option<DeviceType> {
     // Common CUDA masks that explicitly disable GPU visibility.
@@ -54,9 +65,18 @@ pub struct EndpointConfig {
     #[builder(private)]
     endpoint: Endpoint,
 
-    /// Endpoint handler
+    /// Endpoint handler. Optional only so a `bidi_handler` can be supplied
+    /// instead — `start()` validates that exactly one of the two is set.
     #[educe(Debug(ignore))]
-    handler: Arc<dyn PushWorkHandler>,
+    #[builder(default, setter(strip_option))]
+    handler: Option<Arc<dyn PushWorkHandler>>,
+
+    /// Bidirectional-streaming handler. Mutually exclusive with `handler`.
+    /// Only available when the `velo-transport` feature is enabled.
+    #[cfg(feature = "velo-transport")]
+    #[educe(Debug(ignore))]
+    #[builder(default, setter(strip_option))]
+    bidi_handler: Option<Arc<dyn BidiPushWorkHandler>>,
 
     /// Additional labels for metrics
     #[builder(default, setter(into))]
@@ -79,6 +99,36 @@ impl EndpointConfigBuilder {
         Self::default().endpoint(endpoint)
     }
 
+    /// Wrap a typed `ServiceEngine<ManyIn<T>, ManyOut<U>>` in a `BidiIngress`
+    /// (using the per-process velo handle) and set it as this endpoint's
+    /// bidi handler. Convenience over constructing the ingress yourself and
+    /// calling `.bidi_handler(arc_dyn_handler)`.
+    ///
+    /// `I` is the user-typed init payload carried in the `BidiInitRequest`
+    /// from client to server; default `()`.
+    #[cfg(feature = "velo-transport")]
+    pub fn bidi_engine<T, U, I>(
+        self,
+        engine: crate::pipeline::ServiceEngine<
+            crate::pipeline::ManyIn<T>,
+            crate::pipeline::ManyOut<U>,
+        >,
+    ) -> Result<Self>
+    where
+        T: crate::engine::Data + serde::Serialize + serde::de::DeserializeOwned,
+        U: crate::engine::Data + serde::Serialize + serde::de::DeserializeOwned,
+        I: crate::engine::Data + serde::de::DeserializeOwned + Clone,
+    {
+        let velo = crate::pipeline::network::velo::current_velo()
+            .map_err(|e| anyhow::anyhow!("bidi_engine: {e}"))?
+            .clone();
+        let ingress =
+            crate::pipeline::network::ingress::bidi_handler::BidiIngress::<T, U, I>::for_engine(
+                engine, velo,
+            )?;
+        Ok(self.bidi_handler(ingress as Arc<dyn BidiPushWorkHandler>))
+    }
+
     /// Register an async engine in the local endpoint registry for direct in-process calls
     pub fn register_local_engine(
         self,
@@ -96,8 +146,46 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
+        // Dissolve order matches the field declaration order in the struct.
+        #[cfg(feature = "velo-transport")]
+        let (
+            endpoint,
+            handler,
+            bidi_handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+        ) = self.build_internal()?.dissolve();
+        #[cfg(not(feature = "velo-transport"))]
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
+
+        // Validate exactly one handler kind is set.
+        #[cfg(feature = "velo-transport")]
+        let kind = match (handler.as_ref(), bidi_handler.as_ref()) {
+            (Some(_), None) => HandlerSelection::Unary,
+            (None, Some(_)) => HandlerSelection::Bidi,
+            (Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "EndpointConfig: both `handler` and `bidi_handler` are set; \
+                     pick one"
+                )
+            }
+            (None, None) => {
+                anyhow::bail!(
+                    "EndpointConfig: neither `handler` nor `bidi_handler` is set; \
+                     call .handler(...) or .bidi_handler(...) before .start()"
+                )
+            }
+        };
+        #[cfg(not(feature = "velo-transport"))]
+        let kind = match handler.as_ref() {
+            Some(_) => HandlerSelection::Unary,
+            None => anyhow::bail!(
+                "EndpointConfig: `handler` is not set; call .handler(...) before .start()"
+            ),
+        };
+
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -107,7 +195,21 @@ impl EndpointConfigBuilder {
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
         // Add metrics to the handler. The endpoint provides additional information to the handler.
-        handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
+        match kind {
+            HandlerSelection::Unary => {
+                handler
+                    .as_ref()
+                    .unwrap()
+                    .add_metrics(&endpoint, metrics_labels.as_deref())?;
+            }
+            #[cfg(feature = "velo-transport")]
+            HandlerSelection::Bidi => {
+                bidi_handler
+                    .as_ref()
+                    .unwrap()
+                    .add_metrics(&endpoint, metrics_labels.as_deref())?;
+            }
+        }
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.
@@ -178,7 +280,21 @@ impl EndpointConfigBuilder {
                 health_check_payload.clone(),
             );
             if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
-                handler.set_endpoint_health_check_notifier(notifier)?;
+                match kind {
+                    HandlerSelection::Unary => {
+                        handler
+                            .as_ref()
+                            .unwrap()
+                            .set_endpoint_health_check_notifier(notifier)?;
+                    }
+                    #[cfg(feature = "velo-transport")]
+                    HandlerSelection::Bidi => {
+                        bidi_handler
+                            .as_ref()
+                            .unwrap()
+                            .set_endpoint_health_check_notifier(notifier)?;
+                    }
+                }
             }
         }
 
@@ -189,16 +305,33 @@ impl EndpointConfigBuilder {
         );
 
         // Register endpoint with the server (unified interface)
-        server
-            .register_endpoint(
-                endpoint_name_for_task.clone(),
-                handler,
-                connection_id,
-                namespace_name_for_task.clone(),
-                component_name_for_task.clone(),
-                system_health.clone(),
-            )
-            .await?;
+        match kind {
+            HandlerSelection::Unary => {
+                server
+                    .register_endpoint(
+                        endpoint_name_for_task.clone(),
+                        handler.clone().unwrap(),
+                        connection_id,
+                        namespace_name_for_task.clone(),
+                        component_name_for_task.clone(),
+                        system_health.clone(),
+                    )
+                    .await?;
+            }
+            #[cfg(feature = "velo-transport")]
+            HandlerSelection::Bidi => {
+                server
+                    .register_bidi_endpoint(
+                        endpoint_name_for_task.clone(),
+                        bidi_handler.clone().unwrap(),
+                        connection_id,
+                        namespace_name_for_task.clone(),
+                        component_name_for_task.clone(),
+                        system_health.clone(),
+                    )
+                    .await?;
+            }
+        }
 
         // Create cleanup task that unregisters on cancellation
         let endpoint_name_for_cleanup = endpoint_name_for_task.clone();

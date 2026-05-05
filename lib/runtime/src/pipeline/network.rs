@@ -8,6 +8,8 @@
 //! - TCP with length-prefixed protocol for high-performance scenarios
 //! - NATS for legacy/messaging-based deployments
 
+#[cfg(feature = "velo-transport")]
+pub mod bidi;
 pub mod codec;
 pub mod egress;
 pub mod ingress;

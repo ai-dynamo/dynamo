@@ -566,6 +566,18 @@ where
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    /// The configured router mode. `pub(crate)` accessor used by the bidi
+    /// router (sibling module) which can't reach the private field directly.
+    pub(crate) fn router_mode_value(&self) -> RouterMode {
+        self.router_mode
+    }
+
+    /// Bump and return the round-robin counter (modulo applied by caller).
+    /// `pub(crate)` accessor for the bidi router.
+    pub(crate) fn bump_round_robin_value(&self) -> usize {
+        self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize
+    }
+
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();

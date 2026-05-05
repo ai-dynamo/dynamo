@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod addressed_router;
+#[cfg(feature = "velo-transport")]
+pub mod bidi_router;
 pub mod http_router;
 pub mod nats_client;
 pub mod push_router;

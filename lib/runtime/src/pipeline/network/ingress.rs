@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "velo-transport")]
+pub mod bidi_handler;
 pub mod http_endpoint;
 pub mod nats_server;
 pub mod push_endpoint;
