@@ -63,6 +63,10 @@ pub(crate) trait OpenAIStopConditionsProvider {
 
     fn get_stop(&self) -> Option<Vec<String>>;
 
+    fn get_stop_token_ids(&self) -> Result<Option<Vec<TokenIdType>>> {
+        Ok(None)
+    }
+
     fn nvext(&self) -> Option<&nvext::NvExt>;
 
     /// Get ignore_eos from CommonExt if the type supports it.
@@ -180,6 +184,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let stop_token_ids_hidden = self.get_stop_token_ids()?;
         let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
@@ -195,7 +200,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             max_tokens,
             min_tokens,
             stop,
-            stop_token_ids_hidden: None,
+            stop_token_ids_hidden,
             ignore_eos,
             max_thinking_tokens,
         })

@@ -8,6 +8,7 @@ use validator::Validate;
 
 use crate::engines::ValidateRequest;
 use crate::preprocessor::media::MediaDecoder;
+use crate::types::TokenIdType;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -305,6 +306,20 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
             dynamo_protocols::types::Stop::String(s) => vec![s.clone()],
             dynamo_protocols::types::Stop::StringArray(arr) => arr.clone(),
         })
+    }
+
+    fn get_stop_token_ids(&self) -> anyhow::Result<Option<Vec<TokenIdType>>> {
+        let Some(value) = self.unsupported_fields.get("stop_token_ids") else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|err| {
+                anyhow::anyhow!("stop_token_ids must be an array of unsigned token IDs: {err}")
+            })
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.

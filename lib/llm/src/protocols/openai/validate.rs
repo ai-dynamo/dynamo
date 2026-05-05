@@ -137,6 +137,9 @@ const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     // Opt-in for `nvext.prompt_logprobs` on the response. Aliased through
     // to vLLM's `sampling_params.prompt_logprobs` in a follow-up.
     "return_prompt_logprobs",
+    // Renderer-style token stops. The OpenAI schema has string stops only,
+    // but Prime-RL/verifiers renderers already produce token IDs.
+    "stop_token_ids",
 ];
 
 /// Validates that no unsupported fields are present in the request

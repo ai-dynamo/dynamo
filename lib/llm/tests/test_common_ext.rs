@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::{
-    common::StopConditionsProvider,
-    openai::{
-        chat_completions::NvCreateChatCompletionRequest,
-        common_ext::{CommonExt, CommonExtProvider},
-        completions::NvCreateCompletionRequest,
-        nvext::NvExt,
+use dynamo_llm::{
+    engines::ValidateRequest,
+    protocols::{
+        common::StopConditionsProvider,
+        openai::{
+            chat_completions::NvCreateChatCompletionRequest,
+            common_ext::{CommonExt, CommonExtProvider},
+            completions::NvCreateCompletionRequest,
+            nvext::NvExt,
+        },
     },
 };
 
@@ -211,6 +214,27 @@ fn test_max_thinking_tokens_extraction() {
     let request_none: NvCreateChatCompletionRequest = serde_json::from_str(json_str_none).unwrap();
     let stop_conditions_none = request_none.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions_none.max_thinking_tokens, None);
+}
+
+#[test]
+fn test_chat_completions_stop_token_ids_extraction() {
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "(token-in mode)"}],
+        "nvext": {
+            "token_data": [1, 2, 3]
+        },
+        "stop_token_ids": [151645, 151643]
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    request.validate().unwrap();
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(
+        stop_conditions.stop_token_ids_hidden,
+        Some(vec![151645, 151643])
+    );
 }
 
 #[test]
