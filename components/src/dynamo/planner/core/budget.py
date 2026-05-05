@@ -140,12 +140,21 @@ def proportional_clamp_pair(
     # _apply_global_budget logic for backward compatibility.
     if max_gpus >= 0 and total > max_gpus + tolerance:
         min_req = min_endpoint * p_gpu + min_endpoint * d_gpu
-        if max_gpus < min_req:
+        # Compare against the *band* upper edge (max + tolerance), not the
+        # strict ceiling: in fixed-budget configs the band is the contract,
+        # and (1, 1) at min_endpoint each can land above max but inside
+        # max + tolerance. Zeroing the deployment in that case is wrong.
+        # When tolerance is 0 (ceiling-only mode) this collapses to the
+        # historical strict check.
+        if max_gpus + tolerance < min_req:
             return 0, 0
-        scale = max_gpus / total
-        max_p = math.floor((max_gpus - min_endpoint * d_gpu) / p_gpu)
+        # Shrink target is the band upper edge so min_endpoint*per_pool can
+        # actually fit when max_gpus alone is a hair too small.
+        target = max(max_gpus, min_req)
+        scale = target / total
+        max_p = math.floor((target - min_endpoint * d_gpu) / p_gpu)
         new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
-        remaining = max_gpus - new_p * p_gpu
+        remaining = target - new_p * p_gpu
         new_d = max(min_endpoint, math.floor(remaining / d_gpu))
         return new_p, new_d
 
@@ -202,9 +211,16 @@ def proportional_clamp_single(
 
     if max_gpus >= 0 and total > max_gpus + tolerance:
         min_req = min_endpoint * engine_gpu
-        if max_gpus < min_req:
+        # Compare against band upper edge (max + tolerance), not strict
+        # ceiling — in fixed-budget configs the band is the contract.
+        # E.g. engine_gpu=4, min_endpoint=1, min=max=3 should let
+        # 1 replica (=4 GPUs) survive inside the [-1, 7] band rather than
+        # being torn down. tolerance=0 in ceiling-only mode preserves
+        # historical strict behavior.
+        if max_gpus + tolerance < min_req:
             return 0
-        return max(min_endpoint, math.floor(max_gpus / engine_gpu))
+        target = max(max_gpus, min_req)
+        return max(min_endpoint, math.floor(target / engine_gpu))
 
     # total < min_gpus - tolerance
     return max(min_endpoint, math.ceil(min_gpus / engine_gpu))

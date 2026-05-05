@@ -174,6 +174,23 @@ def test_clamp_pair_ceiling_below_min_endpoint_returns_zero():
     assert proportional_clamp_pair(5, 5, 1, 1, -1, 1, 1) == (0, 0)
 
 
+def test_clamp_pair_ceiling_below_min_endpoint_within_tolerance_keeps_alive():
+    # Reviewer's repro: p_gpu=2, d_gpu=2, min=max=3, min_endpoint=1.
+    # Tolerance=2 so band is [1, 5]. Strict ceiling (3) is below
+    # min_endpoint*p + min_endpoint*d = 4, but max + tolerance = 5 >= 4,
+    # so (1,1)=4 GPUs is feasible inside the band — must NOT zero out.
+    new_p, new_d = proportional_clamp_pair(1, 2, 2, 2, 3, 3, 1)
+    assert (new_p, new_d) != (0, 0)
+    total = new_p * 2 + new_d * 2
+    assert 1 <= total <= 5
+
+
+def test_clamp_pair_ceiling_below_min_endpoint_outside_tolerance_zeros():
+    # Same shape but band is too narrow to hold (1,1): max=1, tol=2,
+    # band [-1, 3]; min_req=4 > 3, so we still zero correctly.
+    assert proportional_clamp_pair(1, 2, 2, 2, 1, 1, 1) == (0, 0)
+
+
 def test_clamp_pair_zero_inputs_with_floor_distributes():
     new_p, new_d = proportional_clamp_pair(0, 0, 1, 1, 4, 4, 1)
     total = new_p * 1 + new_d * 1
@@ -220,3 +237,12 @@ def test_clamp_single_min_endpoint_clamp():
 def test_clamp_single_ceiling_below_min_endpoint():
     # ceiling=2 GPUs with min_endpoint=3 replicas of 1 GPU each → can't fit.
     assert proportional_clamp_single(5, 1, -1, 2, 3) == 0
+
+
+def test_clamp_single_ceiling_below_min_endpoint_within_tolerance_keeps_alive():
+    # Reviewer's repro: engine_gpu=4, min_endpoint=1, min=max=3.
+    # Tolerance=4, band [-1, 7]. Strict ceiling=3 is below min_endpoint*4=4
+    # but max + tolerance = 7 >= 4, so 1 replica (=4 GPUs) is feasible.
+    out = proportional_clamp_single(2, 4, 3, 3, 1)
+    assert out != 0
+    assert out * 4 <= 7  # within max + tolerance

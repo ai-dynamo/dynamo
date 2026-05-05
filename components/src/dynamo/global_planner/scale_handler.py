@@ -7,7 +7,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
@@ -63,6 +63,16 @@ class ScaleRequestHandler:
       [min, max] where tolerance = max per-replica GPU across the two pools
       actually being paired. This exists to handle asymmetric per-replica
       GPU counts where a single-worker step cannot exactly cancel across pools.
+
+    Intent cache semantics:
+    - Every scale request seeds the per-pool intent cache *before* the
+      budget decision, so a request that gets denied this tick still
+      leaves its desired count behind. A subsequent opposite-direction
+      request from another pool can pair against that cached intent and
+      execute the transfer.
+    - Bounded by TTL (``intent_cache_ttl_seconds``) and by the
+      satisfied-vs-pending check (``last_desired != current_replicas``):
+      stale or already-satisfied intents are not eligible partners.
     """
 
     def __init__(
@@ -253,9 +263,17 @@ class ScaleRequestHandler:
         Returns a map of dgd_key -> (sub_type -> PoolSpec). Each arbitration
         call reads fresh state once; cross-DGD partner search and budget math
         both consume this snapshot to avoid re-hitting the K8s API per lookup.
+
+        Snapshots ``self.connectors`` up-front via ``list(...)``: this method
+        runs on a worker thread (see ``asyncio.to_thread`` in scale_request),
+        and a concurrent first-time request for another DGD can insert into
+        the dict before it blocks on ``_scale_lock``. Without the snapshot,
+        that insertion races our iteration and either raises
+        ``RuntimeError: dictionary changed size during iteration`` or yields
+        a snapshot missing the new DGD.
         """
         all_pools: dict[str, dict[str, PoolSpec]] = {}
-        for key, connector in self.connectors.items():
+        for key, connector in list(self.connectors.items()):
             try:
                 all_pools[key] = self._read_dgd_pools(connector)
             except Exception as e:
@@ -298,19 +316,6 @@ class ScaleRequestHandler:
         """
         return self._total_gpus_from_snapshot(self._read_all_pools(), overrides)
 
-    def _calculate_total_gpus_after_request(self, request: ScaleRequest) -> int:
-        """Calculate total GPUs across all managed DGDs if this request is granted.
-
-        For the requesting DGD, uses the desired replica counts from the request.
-        For all other known DGDs, uses their current replica counts.
-        """
-        request_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
-        overrides = {
-            (request_key, target.sub_component_type.value): target.desired_replicas
-            for target in request.target_replicas
-        }
-        return self._total_gpus_with_overrides(overrides)
-
     # ------------------------------------------------------------------ #
     # Intent cache helpers                                               #
     # ------------------------------------------------------------------ #
@@ -335,8 +340,8 @@ class ScaleRequestHandler:
         for target in request.target_replicas:
             sub_type = target.sub_component_type.value
             if sub_type not in dgd_pools:
-                # Unknown pool (not yet in DGD spec); still cache, other math
-                # will ignore it because gpu_per_replica is unknown.
+                # Unknown pool (not yet in DGD spec); skip — without
+                # gpu_per_replica we can't compute deltas or pair against it.
                 continue
             key = self._pool_cache_key(dgd_key, sub_type)
             self._intent_cache[key] = PoolIntent(
@@ -367,36 +372,39 @@ class ScaleRequestHandler:
         """Tolerance for an internally-paired request (no external partner)."""
         return budget.compute_tolerance(p.gpu_per_replica for p in changing_pools)
 
-    def _find_pair_partner(
+    def _iter_pair_partners(
         self,
         request_dgd_key: str,
         request_pool_keys: set[tuple[str, str]],
         all_pools: dict[str, dict[str, PoolSpec]],
         request_net_delta_gpu: int,
-    ) -> Optional[tuple[str, str, int, PoolSpec]]:
-        """Find any pool (same or different DGD) with a fresh opposite-direction pending intent.
+    ) -> Iterator[tuple[str, str, int, PoolSpec]]:
+        """Yield qualifying pair-partner candidates, same-DGD first.
 
-        Same-DGD candidates are preferred over cross-DGD candidates so that
-        the resulting transfer can be applied as a single atomic K8s patch.
+        A candidate qualifies when it (a) is not in the requesting pool set,
+        (b) has a fresh cached intent (within TTL) whose desired differs
+        from current replicas, and (c) the partner delta points opposite
+        to the request's net delta.
+
+        Yields in two passes: same-DGD candidates first (atomic-patch
+        preference), then cross-DGD candidates. The caller picks the first
+        one whose pair total actually lands in the budget band — checking
+        feasibility per-candidate is the caller's job because tolerance and
+        total depend on which partner is chosen, not just which exist.
 
         Args:
             request_dgd_key: "k8s_ns/dgd_name" of the requesting DGD.
             request_pool_keys: (dgd_key, sub_type) tuples already in the
-                incoming request — these are excluded from partner search.
+                incoming request — excluded from partner search.
             all_pools: snapshot of all DGDs' pool state.
-            request_net_delta_gpu: Net GPU delta this request would apply if
-                executed standalone. Partner must push net back toward
-                [min, max], i.e., opposite sign.
-
-        Returns:
-            (partner_dgd_key, partner_sub_type, partner_desired_replicas,
-             partner_pool_spec) if a suitable pair is found; None otherwise.
+            request_net_delta_gpu: Net GPU delta of the request standalone.
+                Zero short-circuits (no pairing needed).
         """
         if request_net_delta_gpu == 0:
-            return None
+            return
         now = time.time()
-        same_dgd_match: Optional[tuple[str, str, int, PoolSpec]] = None
-        cross_dgd_match: Optional[tuple[str, str, int, PoolSpec]] = None
+        same_dgd: list[tuple[str, str, int, PoolSpec]] = []
+        cross_dgd: list[tuple[str, str, int, PoolSpec]] = []
         for dgd_key, pools in all_pools.items():
             for sub_type, spec in pools.items():
                 if (dgd_key, sub_type) in request_pool_keys:
@@ -421,15 +429,11 @@ class ScaleRequestHandler:
                     continue
                 candidate = (dgd_key, sub_type, intent.last_desired, spec)
                 if dgd_key == request_dgd_key:
-                    same_dgd_match = candidate
-                    # Same-DGD is the strongest preference; no need to keep
-                    # scanning this DGD for more options.
-                    break
-                elif cross_dgd_match is None:
-                    cross_dgd_match = candidate
-            if same_dgd_match is not None:
-                break
-        return same_dgd_match if same_dgd_match is not None else cross_dgd_match
+                    same_dgd.append(candidate)
+                else:
+                    cross_dgd.append(candidate)
+        yield from same_dgd
+        yield from cross_dgd
 
     # ------------------------------------------------------------------ #
     # Request handling                                                   #
@@ -599,33 +603,13 @@ class ScaleRequestHandler:
                         request, dgd_pools
                     )
 
-                    # Look for a pair partner across ALL DGDs (same-DGD
-                    # preferred over cross-DGD).
-                    partner = self._find_pair_partner(
-                        request_key,
-                        request_pool_keys,
-                        all_pools,
-                        net_delta,
-                    )
-
-                    paired_overrides = dict(standalone_overrides)
-                    if partner is not None:
-                        partner_dgd, partner_sub, partner_desired, _ = partner
-                        paired_overrides[(partner_dgd, partner_sub)] = partner_desired
-
                     total_standalone = self._total_gpus_from_snapshot(
                         all_pools, standalone_overrides
                     )
-                    total_paired = (
-                        self._total_gpus_from_snapshot(all_pools, paired_overrides)
-                        if partner is not None
-                        else total_standalone
-                    )
 
-                    # Tolerance depends on context:
-                    # - Standalone + internally_paired: max gpu_per_replica
-                    #   across the request's changing pools.
-                    # - Paired: max across request's changing pools + partner.
+                    # Tolerance depends on which pools are actually changing.
+                    # Standalone uses just the request's changing pools;
+                    # paired adds the candidate partner's gpu_per_replica.
                     changing_request_pools = [
                         dgd_pools[t.sub_component_type.value]
                         for t in request.target_replicas
@@ -636,38 +620,67 @@ class ScaleRequestHandler:
                     standalone_tolerance = self._internal_pair_tolerance(
                         changing_request_pools
                     )
-                    paired_tolerance = (
-                        self._pair_tolerance(changing_request_pools, partner[3])
-                        if partner is not None
-                        else 0
-                    )
 
                     # Internally-paired requests get tolerance even without an
                     # external partner.
-                    standalone_is_paired = internally_paired
                     standalone_ok, standalone_reason = self._bounds_for_total(
-                        total_standalone, standalone_is_paired, standalone_tolerance
+                        total_standalone, internally_paired, standalone_tolerance
                     )
 
-                    if partner is not None:
-                        paired_ok, paired_reason = self._bounds_for_total(
-                            total_paired, True, paired_tolerance
+                    # Try every feasible partner in preference order
+                    # (same-DGD first, then cross-DGD). An early candidate
+                    # whose delta is too small or too large must NOT be
+                    # allowed to short-circuit the search; a later candidate
+                    # may bring the totals back into bounds.
+                    paired_ok = False
+                    paired_reason: str = "no partner"
+                    total_paired = total_standalone
+                    paired_tolerance = 0
+                    partner_chosen: Optional[tuple[str, str, int, PoolSpec]] = None
+                    for candidate in self._iter_pair_partners(
+                        request_key, request_pool_keys, all_pools, net_delta
+                    ):
+                        (
+                            cand_dgd,
+                            cand_sub,
+                            cand_desired,
+                            cand_spec,
+                        ) = candidate
+                        cand_overrides = dict(standalone_overrides)
+                        cand_overrides[(cand_dgd, cand_sub)] = cand_desired
+                        cand_total = self._total_gpus_from_snapshot(
+                            all_pools, cand_overrides
                         )
-                    else:
-                        paired_ok, paired_reason = False, "no partner"
+                        cand_tolerance = self._pair_tolerance(
+                            changing_request_pools, cand_spec
+                        )
+                        ok, reason = self._bounds_for_total(
+                            cand_total, True, cand_tolerance
+                        )
+                        if ok:
+                            partner_chosen = candidate
+                            total_paired = cand_total
+                            paired_tolerance = cand_tolerance
+                            paired_ok = True
+                            paired_reason = ""
+                            break
+                        # Track the last failure reason for diagnostics on deny.
+                        paired_reason = (
+                            f"{cand_dgd}/{cand_sub}={cand_desired} -> {reason}"
+                        )
 
                     # Decide:
-                    # 1. If pair exists and is in bounds → apply pair.
+                    # 1. If a pair partner brings totals into bounds → apply pair.
                     # 2. Else if standalone is in bounds → apply standalone.
                     # 3. Else deny.
                     if paired_ok:
-                        partner_info = partner  # type: ignore[assignment]
+                        partner_info = partner_chosen  # type: ignore[assignment]
                         (
                             partner_dgd,
                             partner_sub,
                             partner_desired,
                             _,
-                        ) = partner  # type: ignore[misc]
+                        ) = partner_chosen  # type: ignore[misc]
                         pair_scope = (
                             "intra-DGD" if partner_dgd == request_key else "cross-DGD"
                         )
@@ -687,14 +700,13 @@ class ScaleRequestHandler:
                             f"(internally_paired={internally_paired})"
                         )
                     else:
-                        # Budget breach and no feasible pair. (Reachable only
-                        # when standalone is out-of-bounds and either no partner
-                        # was found or pairing would also be out-of-bounds.)
+                        # Budget breach: standalone out-of-bounds and no
+                        # partner brought totals back into bounds.
                         deny_reason = standalone_reason
-                        if partner is not None:
+                        if paired_reason and paired_reason != "no partner":
                             deny_reason = (
-                                f"{standalone_reason}; paired with "
-                                f"{partner[0]}/{partner[1]} would be: {paired_reason}"
+                                f"{standalone_reason}; no feasible partner "
+                                f"(last tried: {paired_reason})"
                             )
                         logger.warning(
                             f"Rejecting scale request from {request.caller_namespace}: "
@@ -776,7 +788,19 @@ class ScaleRequestHandler:
                             f"Cross-DGD pair failed before first patch: "
                             f"no connector for {first_label}; nothing applied."
                         )
-                        # Skip both — safer to self-correct from unchanged state.
+                        # Defensive: should be unreachable since partners come
+                        # from self.connectors. Surface as ERROR so the caller
+                        # doesn't see a false success and self-correction is
+                        # left to the next tick.
+                        yield {
+                            "status": ScaleStatus.ERROR.value,
+                            "message": (
+                                f"Cross-DGD pair: missing connector for "
+                                f"{first_label}; nothing applied"
+                            ),
+                            "current_replicas": {},
+                        }
+                        return
                     else:
                         # First patch: let exceptions propagate (outer handler
                         # reports the error; nothing has been applied yet).

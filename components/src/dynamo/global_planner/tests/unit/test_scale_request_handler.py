@@ -639,6 +639,50 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
 
 
 @pytest.mark.asyncio
+async def test_cross_dgd_pair_first_patch_failure_yields_error(mock_runtime):
+    """If the FIRST K8s patch in a cross-DGD pair fails, nothing has been
+    applied yet, the second patch must not be attempted, and the response
+    must surface the failure as ``error`` (not ``success``)."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+    )
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
+    )
+    connector_b = _install_connector(
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-b",
+    )
+    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+    # Request is DGD-A prefill 3 → 2 (net_delta < 0), so the scale-down
+    # side (DGD-A) is the FIRST patch by ordering rule. Make it raise.
+    connector_a.set_component_replicas.side_effect = Exception(
+        "simulated 409 conflict on first patch"
+    )
+
+    req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
+    results = await _run(handler, req)
+
+    # First patch attempted and raised; second patch never reached.
+    connector_a.set_component_replicas.assert_called_once()
+    connector_b.set_component_replicas.assert_not_called()
+    # Outer handler surfaces the exception as ``error`` rather than success.
+    assert results[0]["status"] == "error"
+    assert "simulated 409 conflict" in results[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_cross_dgd_asymmetric_gpu_tolerance(mock_runtime):
     """Cross-DGD pair with different per-replica GPU counts: tolerance is
     computed from the two paired pools only."""
@@ -821,9 +865,11 @@ async def test_asymmetric_pair_denied_if_below_tolerance(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_initial_below_floor_logs_warning_but_accepts_scale_ups(mock_runtime):
-    """At startup, when discovered total < min_total_gpus, a warning is logged
-    and scale-ups below ceiling still pass."""
+async def test_initial_below_floor_logs_warning(mock_runtime):
+    """At startup, when discovered total < min_total_gpus, a warning is
+    logged. The handler does not attempt any proactive fill — soft-floor
+    semantics — and the floor only blocks explicit scale-downs going forward
+    (covered by the standalone-deny tests above)."""
     with (
         patch("dynamo.global_planner.scale_handler.KubernetesAPI") as mock_kube_cls,
         patch(
@@ -856,6 +902,8 @@ async def test_initial_below_floor_logs_warning_but_accepts_scale_ups(mock_runti
                 if call.args and "below min_total_gpus" in str(call.args[0])
             ]
             assert warnings, "Expected a warning about being below the floor"
+            # No proactive fill was issued.
+            mock_connector.set_component_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -970,6 +1018,104 @@ async def test_satisfied_cached_intent_does_not_pair(mock_runtime):
     req = _scale_req(caller_ns="default-my-dgd", decode=2)
     results = await _run(handler, req)
     assert results[0]["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_partner_search_continues_past_infeasible_candidate(mock_runtime):
+    """When the first qualifying partner intent does not bring totals into
+    the band, the search must continue to a later partner that does.
+    Picking a too-small early candidate and rejecting the request would
+    make the outcome depend on connector insertion order rather than the
+    set of feasible partners."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+    )
+    # DGD-A: prefill=5, decode=3 (1 GPU each) → 8 GPUs.
+    # DGD-B: prefill=1, decode=3 (1 GPU each) → 4 GPUs. Cluster total = 12.
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=5, decode_replicas=3),
+        parent_dgd_name="dgd-a",
+    )
+    connector_b = _install_connector(
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=1, decode_replicas=3),
+        parent_dgd_name="dgd-b",
+    )
+    # Two cross-DGD candidates in DGD-B, in spec-iteration order:
+    #  1. prefill +1 → +1 GPU. Pair total 9 — below floor band [11, 13].
+    #  2. decode  +4 → +4 GPU. Pair total 12 — in band.
+    # Partner search must skip (1) and pick (2).
+    handler._intent_cache["default/dgd-b/prefill"] = PoolIntent(
+        last_desired=2, last_seen_at=time.time()
+    )
+    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+        last_desired=7, last_seen_at=time.time()
+    )
+
+    # DGD-A prefill scale-down 5 → 1 (-4 GPU). Standalone cluster total 8 < floor.
+    req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=1)
+    results = await _run(handler, req)
+    assert results[0]["status"] == "success"
+    connector_a.set_component_replicas.assert_called_once()
+    connector_b.set_component_replicas.assert_called_once()
+    a_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in connector_a.set_component_replicas.call_args[0][0]
+    }
+    b_targets = {
+        t.sub_component_type.value: t.desired_replicas
+        for t in connector_b.set_component_replicas.call_args[0][0]
+    }
+    assert a_targets == {"prefill": 1}
+    # decode (the feasible partner), not prefill (the early infeasible one).
+    assert b_targets == {"decode": 7}
+
+
+def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):
+    """Reproduces the worker-thread race: another coroutine may insert into
+    self.connectors while _read_all_pools iterates from a thread (the
+    handler offloads it via asyncio.to_thread). The snapshot must not
+    raise RuntimeError on concurrent insert."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    _install_connector(
+        handler, "default/my-dgd", _dgd_spec(prefill_replicas=1, decode_replicas=1)
+    )
+
+    # _read_dgd_pools is called per item; mutate self.connectors during
+    # the iteration to simulate a concurrent first-time request.
+    original = handler._read_dgd_pools
+
+    def _mutating_read(connector):
+        # Inject a new connector mid-iteration. Without the list() snapshot
+        # this raises RuntimeError: dictionary changed size during iteration.
+        new_conn = MagicMock()
+        new_conn.parent_dgd_name = "racy-dgd"
+        new_conn.kube_api = MagicMock()
+        new_conn.kube_api.get_graph_deployment = MagicMock(
+            return_value=_dgd_spec(prefill_replicas=1, decode_replicas=1)
+        )
+        handler.connectors.setdefault("default/racy-dgd", new_conn)
+        return original(connector)
+
+    handler._read_dgd_pools = _mutating_read  # type: ignore[method-assign]
+
+    # Should not raise.
+    snapshot = handler._read_all_pools()
+    # The pre-existing key is in the snapshot; the mid-iteration insert
+    # may or may not appear (depends on snapshot timing) but the call
+    # must complete cleanly.
+    assert "default/my-dgd" in snapshot
 
 
 @pytest.mark.asyncio
