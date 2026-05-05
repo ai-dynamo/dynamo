@@ -281,6 +281,18 @@ class DiffusionEngine:
             seed=seed if seed is not None else random.randint(0, 2**32 - 1),
         )
 
+        # The executor normally fills None fields with pipeline defaults via
+        # _merge_defaults; we call infer() directly so we replicate that here.
+        for name, default in self._pipeline.default_generation_params.items():
+            if hasattr(req, name) and getattr(req, name) is None:
+                setattr(req, name, default)
+        specs = self._pipeline.extra_param_specs
+        if specs:
+            if req.extra_params is None:
+                req.extra_params = {}
+            for key, spec in specs.items():
+                req.extra_params.setdefault(key, spec.default)
+
         # Run the pipeline — infer() wraps forward() with torch.no_grad()
         output = self._pipeline.infer(req)
 
