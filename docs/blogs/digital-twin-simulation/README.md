@@ -200,14 +200,22 @@ then estimates the duration of that chosen pass. The combination is the point:
 AIC informs the speed of the pass, while the mocker/replay scheduler models the
 serving behavior around the pass.
 
-[placeholder: insert HW vs Mocker vs AIC fidelity image and final caption]
+![Throughput (TPS per GPU) vs. Interactivity (TPS per User) for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K, concurrencies c=4 to c=64.](./images/hw_mocker_aic_pareto.png)
+
+![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/hw_mocker_aic_4panel.png)
+
+The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at concurrencies from 4 to 64. Here are the mean absolute percentage errors (MAPE) vs. real hardware:
+
+| Metric | Mocker MAPE | AIC MAPE |
+|---|---|---|
+| TPS/GPU | 6.6% | 5.8% |
+| TPS/User | 5.3% | 7.2% |
+| TPOT | 8.3% | 7.7% |
+| TTFT | 8.8% | 10.6% |
+
+Mocker achieved comparable or better accuracy across all metrics, notably with better TTFT estimation at high concurrency (64).
 
 [placeholder: validate image interpretation with AIC/mocker owners]
-
-Draft caption:
-
-> The single-engine mocker tracks hardware trends while exposing scheduler
-> effects that a pure model estimate cannot capture on its own.
 
 The claim should stay precise. This kind of plot is directional validation of
 the simulation loop for a specific model, hardware, backend, tensor-parallel
