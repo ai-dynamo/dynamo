@@ -194,8 +194,6 @@ navigation:
             path: mocker/mocker.md
           - page: Mocker Offline Trace Replay
             path: benchmarks/mocker-trace-replay.md
-      - page: Writing Python Workers
-        path: development/backend-guide.md
 
   # ==================== Backends ====================
   - section: Backends
@@ -333,6 +331,18 @@ navigation:
           - page: Planner Design
             path: design-docs/planner-design.md
 
+  # ==================== Developer ====================
+  - section: Developer
+    contents:
+      - page: Writing Python Workers
+        path: development/backend-guide.md
+      - page: Runtime Guide
+        path: development/runtime-guide.md
+      - page: Custom Image Builds
+        path: development/custom-image-build-guide.md
+      - page: JetStream (Jail Stream)
+        path: development/jail-stream.md
+
   # ==================== Documentation ====================
   - section: Documentation
     contents:
@@ -346,11 +356,6 @@ navigation:
   - section: Additional Resources
     hidden: true
     contents:
-      # -- Development --
-      - page: Runtime Guide
-        path: development/runtime-guide.md
-      - page: Jail Stream
-        path: development/jail-stream.md
       # -- API Reference --
       - section: NIXL Connect API
         path: api/nixl-connect/README.md
