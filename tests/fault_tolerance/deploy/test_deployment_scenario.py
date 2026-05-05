@@ -13,9 +13,9 @@ Uses the scenario framework to define and run tests with:
 import pytest
 
 from tests.fault_tolerance.deploy.checks import (
+    LoadCompleted,
     MaxErrors,
     MinRequests,
-    WasCancelled,
     ZeroErrors,
 )
 from tests.fault_tolerance.deploy.events import (
@@ -63,7 +63,7 @@ async def test_sanity_10_requests(
             WaitForLoadCompletion(),
         ],
         checks=[
-            WasCancelled(expected=False),
+            LoadCompleted(),
             MinRequests(min_count=10),
             ZeroErrors(),
         ],
@@ -130,7 +130,7 @@ async def test_smoke_50_requests(namespace, image, skip_service_restart, storage
             WaitForLoadCompletion(),
         ],
         checks=[
-            WasCancelled(expected=False),
+            LoadCompleted(),
             MinRequests(min_count=50),
             ZeroErrors(),
         ],

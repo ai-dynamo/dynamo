@@ -78,7 +78,8 @@ spec["VllmWorker"].replicas = 2     # Direct service access
 | `ZeroErrors` | Assert no errors in load results | `name` |
 | `MaxErrors` | Assert errors below threshold | `max_errors`, `name` |
 | `MinRequests` | Assert minimum successful requests | `min_count`, `name` |
-| `WasCancelled` | Assert cancellation status | `expected`, `name` |
+| `LoadStopped` | Assert load was stopped early | `name` |
+| `LoadCompleted` | Assert load completed naturally | `name` |
 | `ServiceLogContains` | Assert pattern present in logs | `service`, `pattern` |
 | `ServiceLogNotContains` | Assert pattern NOT in logs | `service`, `pattern` |
 

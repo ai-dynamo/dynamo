@@ -21,7 +21,8 @@ __all__ = [
     "ZeroErrors",
     "MaxErrors",
     "MinRequests",
-    "WasCancelled",
+    "LoadStopped",
+    "LoadCompleted",
     "ServiceLogContains",
     "ServiceLogNotContains",
 ]
@@ -144,28 +145,50 @@ class MinRequests(Check):
 
 
 @dataclass
-class WasCancelled(Check):
-    """Assert was_cancelled flag matches expected value."""
+class LoadStopped(Check):
+    """Assert the load was stopped early (e.g. by a ``StopLoad`` event).
 
-    expected: bool = True
+    Pairs with ``LoadCompleted`` for the inverse case. Both read aiperf's
+    ``was_cancelled`` flag — True when the load job was terminated mid-run,
+    False when it ran to its configured request count or duration.
+    """
+
     name: str = "default"
 
     def validate(self, ctx: "ScenarioContext") -> None:
         load = self.get_load(ctx, self.name)
         assert load and load.results, f"No results for load '{self.name}'"
-
-        was_cancelled = load.results.get("was_cancelled", False)
-
-        ctx.logger.info(
-            f"WasCancelled: was_cancelled = {was_cancelled}, expected = {self.expected}"
-        )
-        assert (
-            was_cancelled == self.expected
-        ), f"Expected was_cancelled={self.expected}, got {was_cancelled}"
+        stopped = load.results.get("was_cancelled", False)
+        ctx.logger.info(f"LoadStopped: stopped = {stopped}")
+        assert stopped, "Expected load to be stopped early, but it completed naturally"
 
     @property
     def description(self) -> str:
-        return f"was_cancelled={self.expected} ('{self.name}')"
+        return f"Load stopped early ('{self.name}')"
+
+
+@dataclass
+class LoadCompleted(Check):
+    """Assert the load ran to completion (was NOT stopped early).
+
+    Pairs with ``LoadStopped``. Use after a ``WaitForLoadCompletion`` event
+    or whenever the scenario expects aiperf to finish on its own.
+    """
+
+    name: str = "default"
+
+    def validate(self, ctx: "ScenarioContext") -> None:
+        load = self.get_load(ctx, self.name)
+        assert load and load.results, f"No results for load '{self.name}'"
+        stopped = load.results.get("was_cancelled", False)
+        ctx.logger.info(f"LoadCompleted: stopped = {stopped}")
+        assert (
+            not stopped
+        ), "Expected load to complete naturally, but it was stopped early"
+
+    @property
+    def description(self) -> str:
+        return f"Load completed naturally ('{self.name}')"
 
 
 @dataclass

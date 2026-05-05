@@ -24,6 +24,419 @@ unforseen failures. In order to test Dynamo we are developing a test
 suite to inject and measure the impact of different types of failure
 conditions.
 
+The suite has two layers, both pytest-driven and both running against a
+real `DynamoGraphDeployment` in a Kubernetes namespace:
+
+1. **Event-based harness** (current) — `tests/fault_tolerance/deploy/scenario.py`
+   plus `events.py`. Each test composes a deployment + a list of timed
+   events (`StartLoad`, `DeletePod`, `TerminateProcess`,
+   `NetworkPartition`, …) and emits per-test FT reports plus a
+   combined comparison table.
+2. **Legacy scenario-driven harness** — `test_deployment.py` parametrised
+   by the table in `scenarios.py`. Documented further down under
+   *Legacy scenario harness*.
+
+New tests should target the event-based harness; everything below up
+to *Legacy scenario harness* describes that path.
+
+## Event-based test harness
+
+### Component architecture
+
+```mermaid
+graph TD
+    subgraph Test["Test (pytest)"]
+        spec[DeploymentSpec.from_backend]
+        events[events: WaitForModelReady, StartLoad, fault, StopLoad, ...]
+        checks[checks: MinRequests, MaxErrors, ZeroErrors, ...]
+        reports[reports: FaultToleranceReport, ErrorBreakdownReport]
+    end
+    Test --> Scenario[run_scenario]
+    Scenario --> MD[ManagedDeployment]
+    Scenario --> Load[ManagedLoad]
+    Scenario --> EventLoop[event.timed_execute]
+    EventLoop --> MD
+    EventLoop --> Load
+    EventLoop --> NPClass[NetworkPartition]
+    NPClass --> NetPolicy[NetworkPolicy + conntrack flusher pod]
+    MD --> K8s[Kubernetes API]
+    MD --> PVC[(RWX log PVC)]
+    Load --> AIPerf[aiperf Job in-cluster]
+    AIPerf --> Frontend[Frontend pod]
+    AIPerf --> ServerMetrics[server_metrics_export.json &lt;-- aiperf scrapes /metrics ]
+    PVC --> LogExtract[end-of-run log extract Job]
+    LogExtract --> Outputs[test_outputs/test_name/...]
+    reports --> Outputs
+    Combined[scripts/aggregate-ft-reports.sh] --> Outputs
+```
+
+### Components
+
+| Module | Role |
+| --- | --- |
+| `tests/utils/managed_deployment.py` (`ManagedDeployment`) | Async context manager. Materialises the log-collection PVC, applies the `DynamoGraphDeployment`, waits for `Ready=True`, and tears everything down on exit. Captures per-pod manifests, container logs (via PVC tee), and `/metrics` snapshots. |
+| `tests/utils/managed_load.py` (`ManagedLoad`, `LoadConfig`) | Spawns an in-cluster aiperf load `Job` against the frontend service. aiperf's `--server-metrics` flag is **on by default** so the run also writes `server_metrics_export.json` (timestamped Prometheus scrape of the frontend) alongside `profile_export_aiperf.json`. |
+| `tests/fault_tolerance/deploy/events.py` | Timed events (load, faults, waits) implementing a common `Event.execute()` template with `started_at` / `ended_at` brackets that reports use to slice metrics around faults. |
+| `tests/fault_tolerance/deploy/checks.py` | Pluggable assertions (`MinRequests`, `MaxErrors`, `LoadStopped`, `LoadCompleted`, `ZeroErrors`). Run after reports so a failed assertion never blocks report generation. |
+| `tests/fault_tolerance/deploy/reports.py` | Markdown + JSON sidecar reports. `FaultToleranceReport` produces the per-fault Timing / Counts / Latency table; `ErrorBreakdownReport` summarises aiperf error types. |
+| `tests/fault_tolerance/deploy/scenario.py` (`run_scenario`) | Glue. Drives `ManagedDeployment` + events + reports + checks. |
+
+### Data flow during a run
+
+```mermaid
+graph LR
+    subgraph cluster["dynamo-test namespace"]
+        Aiperf[aiperf Job]
+        FE[Frontend pod]
+        W[Worker pod]
+        PVC[(RWX log PVC<br/>service_logs/)]
+    end
+    subgraph dyn-system["dynamo-system namespace"]
+        ETCD[(etcd)]
+        NATS[(NATS)]
+    end
+    subgraph hostnet["host network privileged pod"]
+        FlushPod[netshoot conntrack -D]
+    end
+
+    Aiperf -->|HTTP /v1/chat/completions| FE
+    FE <-->|TCP request plane| W
+    W -->|register / events| ETCD
+    W -->|publish / events| NATS
+    Aiperf -->|/metrics scrape every ~400ms| FE
+    Aiperf -->|profile_export_aiperf.json| Outputs[test_outputs/]
+    Aiperf -->|server_metrics_export.json| Outputs
+    FE -->|tee stdout/stderr| PVC
+    W -->|tee stdout/stderr| PVC
+    PVC -->|end-of-run extract Job| Outputs
+    FlushPod -.->|conntrack -D for source/target| Kernel[(node kernel<br/>conntrack table)]
+```
+
+The TCP request plane (`RequestPlaneMode::Tcp`, default) is direct
+pod-to-pod; NATS / etcd carry events and discovery, not per-request
+traffic. That distinction matters for partition design — the
+NetworkPolicy must target the request-plane edge, not the NATS edge.
+
+### Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Pytest
+    participant Scenario as run_scenario
+    participant MD as ManagedDeployment
+    participant K8s as Kubernetes API
+    participant Worker
+    participant Frontend
+    participant Load as ManagedLoad (aiperf)
+
+    Pytest->>Scenario: events, checks, reports, deployment_spec
+    Scenario->>MD: __aenter__
+    MD->>K8s: scrub namespace, create RWX log PVC
+    MD->>K8s: apply DynamoGraphDeployment
+    MD->>K8s: poll until Ready=True
+    Scenario->>Scenario: WaitForModelReady (port-forward to Frontend, poll /v1/models)
+    Scenario->>Load: StartLoad (aiperf Job, scrapes Frontend /metrics)
+    Load->>Frontend: HTTP requests
+    Frontend->>Worker: TCP request plane
+    Scenario->>K8s: fault event (DeletePod / TerminateProcess / NetworkPartition / ...)
+    Scenario->>Scenario: WaitForRecovery / Wait
+    Scenario->>Load: StopLoad
+    Scenario->>MD: __aexit__
+    MD->>K8s: extract logs from PVC, capture pod manifests + /metrics, delete deployment
+    Scenario->>Scenario: generate reports (Markdown + JSON sidecars)
+    Scenario->>Scenario: run checks (assertions)
+```
+
+Reports run **before** checks so an assertion failure never suppresses
+the run's data. Per-test artefacts land at
+`<DYN_TEST_OUTPUT_PATH>/<test_name>/`:
+
+```
+test_outputs/test_network_partition_vllm/
+├── frontend/
+│   ├── <pod>.yaml
+│   └── <pod>_<ts>.log              # tee'd from PVC
+├── vllmdecodeworker/
+│   ├── <pod>.yaml
+│   └── <pod>_<ts>.log
+├── load/
+│   ├── profile_export_aiperf.json  # request-level latencies, errors
+│   ├── server_metrics_export.json  # aiperf's Frontend /metrics scrape
+│   ├── server_metrics_export.csv
+│   ├── inputs.json
+│   └── aiperf.log
+├── fault_tolerance_report.md       # per-test Timing/Counts/Latency
+├── fault_tolerance_report.json     # machine-readable sidecar
+└── error_breakdown_report.md       # aiperf error types
+```
+
+### Supported fault events
+
+| Event | What it does | Notes |
+| --- | --- | --- |
+| `DeletePod(services=[...])` | `pod.delete(force=...)`. Worker / frontend / planner — anything with the right `nvidia.com/dynamo-component` label. | Snapshots the pod manifest + `/metrics` `before_delete` so post-mortem comparisons are possible. |
+| `TerminateProcess(services, process_name, signal)` | Exec into the pod and `kill -<signal> <pid>` of a matching process (`dynamo.vllm`, `VLLM::EngineCore`, `sglang::scheduler`, …). | The kubelet restart-in-place behaviour depends on the process being PID 1 vs. a child; subprocess kills are no-ops at the container level (documented in *Backend-Specific Validations* further below). |
+| `NetworkPartition(source, target, duration=None)` | Applies a `NetworkPolicy` selecting `target` pods and denying ingress from `source` pods, then schedules a privileged hostNetwork `conntrack -D` flusher Pod on the source pod's node so already-established TCP sockets are severed (k8s `NetworkPolicy` is connection-tracked; without the flush a pooled socket trivially survives). Heals on `stop()` or after `duration` seconds. | Requires a CNI that enforces NetworkPolicy (k3s kube-router, Calico, Cilium). The flusher uses `localhost:32000/netshoot:latest` by default; override with `DYN_CONNTRACK_IMAGE`. |
+| `RollingUpgrade(services, env_var=...)` | Stamps a unique env var on each named service then publishes the change so the operator rolls the underlying Deployments. | Drives the "redeploy under load" scenario. |
+| `RunCommand(services, command)` | Exec arbitrary command in matched pods. | Escape hatch for one-off injections (e.g., `pkill -STOP`, `nvidia-smi -i 0 -r`). |
+| `Wait(duration)`, `WaitForRecovery(timeout)`, `WaitForModelReady(timeout)`, `WaitForLogPattern(pattern, timeout)` | Time / state synchronisation between events. | `WaitForModelReady` port-forwards to the frontend and polls `/v1/models` until the deployed model is registered, so vllm/sglang model load (which can run tens of seconds beyond pod-Ready) doesn't bleed into the load window. |
+| `StartLoad(load_config)`, `StopLoad`, `WaitForLoadCompletion` | aiperf-driven load lifecycle. | aiperf's `--server-metrics` is on by default; aiperf scrapes the Frontend's `/metrics` for the duration of the run and writes timestamped stats per metric. |
+
+### Per-fault state transitions
+
+These diagrams show what the worker pod (or the worker→frontend
+connection) goes through during each fault mode. The "Healthy"
+state is "pod Ready, model registered, frontend can route requests."
+
+#### DeletePod
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> PodTerminating: DeletePod (force)
+    PodTerminating --> PodGone: grace period elapsed
+    PodGone --> PodPending: operator reschedules
+    PodPending --> ContainerCreating: pulling image
+    ContainerCreating --> Running: container start
+    Running --> ModelLoading: vllm engine init + KV warmup
+    ModelLoading --> Healthy: model re-registered with frontend
+```
+
+The frontend deregisters the worker on disconnect and re-discovers it
+when it reappears in etcd. Failed-after errors are dominated by
+`Model not found` 404s during the re-registration window.
+
+#### TerminateProcess (engine kill)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> ProcessKilled: kill -SIGKILL dynamo.vllm
+    ProcessKilled --> ContainerExited: PID 1 exits
+    ContainerExited --> ContainerRestarting: kubelet restartPolicy
+    ContainerRestarting --> Running: same pod, new container
+    Running --> ModelLoading: vllm reload
+    ModelLoading --> Healthy: model re-registered
+```
+
+Pod IP is **preserved** (kubelet restarts the container in place), so
+the frontend's TCP socket fails fast on the existing connection rather
+than waiting for re-discovery — but the model must still reload, so
+recovery time is comparable to `DeletePod`.
+
+#### NetworkPartition + conntrack flush
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Loading: StartLoad (aiperf concurrency=4)
+    Loading --> SteadyState: in-flight≈4, queue=0
+    SteadyState --> PolicyApplied: NetworkPolicy applied (source=Frontend, target=Worker)
+    PolicyApplied --> ConntrackFlushed: hostNetwork flusher Pod runs conntrack -D
+    ConntrackFlushed --> SocketsSevered: established TCP dies; new connect attempts denied
+    SocketsSevered --> QueueBuilds: HTTP queue grows; in-flight pinned at 4 retrying
+    QueueBuilds --> WorkerDeregistered: frontend marks model unavailable
+    WorkerDeregistered --> NotFoundErrors: 404 'Model not found' to clients
+    NotFoundErrors --> PolicyLifted: duration expires (event.stop)
+    PolicyLifted --> Reconnecting: new TCP handshake succeeds
+    Reconnecting --> SteadyState: queue drains; throughput burst (3-4× baseline)
+```
+
+Without the conntrack flush, the system stays in `SteadyState` for
+the full partition window — the connection-tracked TCP socket survives
+the new policy and requests keep flowing. The flush is what makes the
+partition observable as a fault.
+
+### Example test
+
+```python
+async def test_worker_kill_vllm(namespace, image, skip_service_restart, storage_class):
+    spec = DeploymentSpec.from_backend("vllm", "agg")
+    served_model = spec["VllmDecodeWorker"].model
+
+    await run_scenario(
+        deployment_spec=spec,
+        events=[
+            WaitForModelReady(timeout=600),
+            StartLoad(load_config=LoadConfig(
+                model_name=served_model,
+                tokenizer=served_model,
+                duration_minutes=2,
+                concurrency=4,
+                input_tokens_mean=128,
+                output_tokens_mean=32,
+            )),
+            Wait(duration=20),
+            DeletePod(services=["VllmDecodeWorker"]),
+            WaitForRecovery(timeout=300),
+            Wait(duration=20),
+            StopLoad(),
+        ],
+        checks=[MinRequests(min_count=20), MaxErrors(max_errors=1_000_000)],
+        reports=[FaultToleranceReport(), ErrorBreakdownReport()],
+        namespace=namespace,
+        image=image,
+        test_name="test_worker_kill_vllm",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
+    )
+```
+
+### Combined comparison report
+
+`scripts/aggregate-ft-reports.sh` (in the dev vault) walks the output
+tree and merges every `fault_tolerance_report.json` + `error_breakdown_report.md`
++ `server_metrics_export.json` into one Markdown comparison file. This
+is what gets shipped to slides.
+
+```text
+# Fault-tolerance comparison — 4 scenarios
+
+## Timing across scenarios
+
+| Scenario · Failure                                                          | Startup (s) | Recovery (s) |
+|:---------------------------------------------------------------------------|------------:|:-------------|
+| test_sanity_vllm · none                                                    |       81.59 | N/A          |
+| test_worker_kill_vllm · DeletePod(VllmDecodeWorker)                        |       81.03 | 81.53        |
+| test_engine_kill_vllm · TerminateProcess(VllmDecodeWorker)                 |       81.63 | 94.04        |
+| test_network_partition_vllm · NetworkPartition(Frontend->VllmDecodeWorker) |      191.64 | 20.00        |
+
+## Request counts (pre/post fault)
+
+| Scenario · Failure                                                          | Success Before | Failed Before | Success After | Failed After |
+|:---------------------------------------------------------------------------|---------------:|--------------:|--------------:|-------------:|
+| test_sanity_vllm · none                                                    |             10 |             0 |   N/A         |   N/A        |
+| test_worker_kill_vllm · DeletePod(VllmDecodeWorker)                        |            190 |             0 |   408         | 271457       |
+| test_engine_kill_vllm · TerminateProcess(VllmDecodeWorker)                 |            207 |             0 |   279         | 312521       |
+| test_network_partition_vllm · NetworkPartition(Frontend->VllmDecodeWorker) |            144 |             0 |   609         |   7070       |
+
+## Latency (avg ms)
+
+| Scenario · Failure                                                          | Before (ms) | After (ms) |
+|:---------------------------------------------------------------------------|------------:|:-----------|
+| test_sanity_vllm · none                                                    |      182.36 | N/A        |
+| test_worker_kill_vllm · DeletePod(VllmDecodeWorker)                        |      186.13 | 180.59     |
+| test_engine_kill_vllm · TerminateProcess(VllmDecodeWorker)                 |      185.10 | 184.13     |
+| test_network_partition_vllm · NetworkPartition(Frontend->VllmDecodeWorker) |      190.93 | 186.60     |
+
+## Frontend metrics during run (from aiperf /metrics scrape)
+
+| Scenario · Failure                                                          | Inflight max | Inflight avg | Queued max | Queued p95 | Disconnected (max) |
+|:---------------------------------------------------------------------------|-------------:|-------------:|-----------:|-----------:|-------------------:|
+| test_sanity_vllm · none                                                    |            2 |          0.8 |          0 |          0 |                  0 |
+| test_worker_kill_vllm · DeletePod(VllmDecodeWorker)                        |            4 |         0.96 |          4 |          0 |                  0 |
+| test_engine_kill_vllm · TerminateProcess(VllmDecodeWorker)                 |            4 |         0.73 |          1 |          0 |                  0 |
+| test_network_partition_vllm · NetworkPartition(Frontend->VllmDecodeWorker) |            4 |         3.60 |          4 |          3 |                  0 |
+```
+
+The Frontend-metrics section comes from aiperf's built-in
+`--server-metrics` collector, which scrapes the inference endpoint's
+`/metrics` for the full duration of the run; `LoadConfig` doesn't need
+to opt in. Each scenario's `error_breakdown_report.md` is also
+inlined verbatim in the combined output so the dominant error type per
+fault (404 "Model not found" during partition, "Connection refused"
+during conntrack flush, "TCP request timed out" during pod kill) is
+visible at a glance.
+
+### Current gaps
+
+What this harness covers today, and what it doesn't:
+
+#### Fault types
+- ✅ **Pod delete** (`DeletePod`) — worker, frontend, planner.
+- ✅ **Process kill** (`TerminateProcess`) — engine cores, schedulers, detokenizers, …
+- ✅ **Binary network partition** (`NetworkPartition` + conntrack flush)  — same-namespace, source pod ↛ target pod TCP cut. Mid-load partition is visible (queue grows, 404 storms, recovery on lift).
+- ❌ **Partial-network faults** — packet loss, latency, jitter, bandwidth caps. Requires Chaos Mesh; pending the fault-injection-service work below.
+- ❌ **Cross-namespace partitions** — partition `Worker → NATS` (in `dynamo-system`) or `Frontend → etcd`. The current `NetworkPartition` only matches by `nvidia.com/dynamo-component` within the test namespace.
+- ❌ **GPU faults** — XID errors, ECC errors, CUDA toggle, kernel-launch interception, NVSentinel-driven recovery. Coming via fault-injection-service `oviya/fault-injection-api/gpu`.
+- ❌ **Disk / IO faults** — disk pressure, slow IO, ENOSPC on log PVC, etcd disk full.
+- ❌ **Memory pressure / OOM** — no controlled OOM injection.
+- ❌ **Time-skew / clock drift** — no NTP-misbehaviour scenarios.
+
+#### Topology coverage
+- ✅ **Aggregated** (`agg`) — single Frontend + single Worker. All four fault modes proven.
+- ❌ **Disaggregated** (`disagg-prefill-... -decode-...`) — mocker tests exist in `scenarios.py` (legacy), but no event-based scratch tests for prefill+decode topologies.
+- ❌ **Multi-replica** — every test uses `replicas=1`. Tests like "kill 1 of 3 decode workers and assert no error spike" are not written.
+- ❌ **Multi-model / multi-deployment** — single `DynamoGraphDeployment` per test. No cross-deployment fault scenarios.
+- ❌ **Router / KV-aware-router faults** — KV router has metric publishing over NATS; no test asserts behaviour when those events drop.
+- ❌ **Planner faults** — planner is rarely deployed in fault tests.
+
+#### Load profile coverage
+- ✅ **Steady-state low-concurrency** (`concurrency=4`, ~5 min runs).
+- ❌ **Bursty / variable-rate load** — aiperf supports `--request-rate` shapes; not yet exercised.
+- ❌ **Long-running soak** — no overnight tests; today's runs are minutes, not hours.
+- ❌ **Realistic prompt distributions** — synthetic fixed-length prompts only; no traces, no Mooncake replay.
+- ❌ **Streaming-only / completion-only mix** — `streaming=True` is hardcoded; no test asserts non-streaming behaviour under faults.
+- ❌ **Per-request timeout sensitivity sweeps** — `request_timeout_seconds` is set per-test, not parametrised.
+
+#### Observability / assertions
+- ✅ **Frontend `/metrics` time-series** via aiperf `--server-metrics` (in-cluster scrape; ~400 ms cadence).
+- ✅ **Worker `/metrics` and stdout** captured to PVC + extracted at exit.
+- ✅ **Per-fault Markdown + JSON sidecars** (`fault_tolerance_report.{md,json}`), aiperf error breakdown (`error_breakdown_report.md`), and a multi-test combined comparison via `scripts/aggregate-ft-reports.sh`.
+- ❌ **Time-correlated single timeline** — frontend metrics, worker engine logs, partition events, and aiperf request timeline are in separate files; no overlay tool.
+- ❌ **SLA assertions** — `MaxErrors=1_000_000` is the practical default for vllm fault tests because aiperf retries 30 k+ on a closed socket. Real per-mode SLA bounds (e.g. "p99 latency ≤ 1.2× baseline within 60 s of recovery") need richer checks.
+- ❌ **Recovery quality assertions** — recovery time is captured but not bounded by mode (target: pod-kill ≤ 90 s, partition recovery ≤ 5 s post-lift).
+- ⚠️ **Misleading metric**: `dynamo_frontend_model_migration_total` increments on the *initial-attempt* migratable failure even when `migration_limit=0` (no retry actually performed). Reported during the May 5 partition validation; needs renaming or a guard upstream.
+- ⚠️ **Framework `_get_pod_metrics` snapshot has a sync/async dual-method bug** — the cleanup-time scrape lands in a capitalized `Frontend/` directory while everything else is lowercased, so the snapshot file is silently lost. aiperf's continuous scrape compensates but the framework's own snapshot is unreliable. Tracked as a follow-up.
+
+#### Infrastructure constraints
+- ⚠️ **Privileged + hostNetwork pod** required for `NetworkPartition` (the `conntrack -D` flusher). Won't run on clusters with cluster-wide PSA or OPA blocking those. Mitigations: namespace exception, vcluster, or move to the fault-injection-service (which centralises the privileged daemon).
+- ⚠️ **In-cluster image registry** — defaults assume `localhost:32000` (k3s + local docker registry). On other clusters, override `DYN_CONNTRACK_IMAGE` and the test image references.
+- ⚠️ **CNI requirement** — k3s kube-router, Calico, or Cilium needed for NetworkPolicy enforcement. Plain Flannel silently no-ops the policy.
+
+### Future direction — Fault Injection Service
+
+The current `NetworkPartition` event hits two structural limits:
+
+1. It only does binary cuts. Packet loss, latency injection, jitter,
+   bandwidth caps require Chaos Mesh.
+2. It needs cluster privileges to schedule the conntrack flush Pod.
+   On clusters with cluster-wide PSA / OPA policies that ban
+   `privileged` + `hostNetwork`, the framework can't run as-is — see
+   the *vcluster* and *namespace exception* notes in the deploy
+   playbook.
+
+The follow-on `Fault Injection Service` work (Oviya Seeniraj —
+`oviya/fault-injection/dev` and friends on
+[ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)) replaces both
+hops with a cluster-installed service:
+
+- **API service** (`tests/fault_tolerance/hardware/fault-injection-service/api-service`) —
+  HTTP API installed once into `fault-injection-system`. Tests POST
+  fault specs at it instead of creating raw NetworkPolicies.
+- **Network fault-injector DaemonSet** (`agents/network-fault-injector/`) —
+  per-node agent with the privileges the API does not. The API
+  delegates flush / partition / packet-loss work to the agent over a
+  signed channel.
+- **Chaos Mesh integration** for partial-loss and delay scenarios
+  (`NetworkChaos` CRs are issued by the API).
+- **GPU faults** (`oviya/fault-injection-api/gpu`,
+  `oviya/fault-injection/cuda-injection-tools`,
+  `oviya/fault-injection/xid79-nvsentinel-test`) — CUDA toggle, kernel
+  launch interception, NVSentinel-driven recovery from XID 79.
+- **Python client** (`oviya/fault-injection/client-library`) — drop-in
+  replacement for `NetworkPartition` and friends. Test code imports
+  the client; everything else moves into the API.
+- Pre-built example tests in `examples/`:
+  `test_partition_worker_to_nats.py`,
+  `test_partition_frontend_to_nats.py`,
+  `test_partition_worker_to_frontend.py`,
+  `test_specific_pod_to_pod_blocking.py`,
+  `test_nats_packet_loss_50_percent.py`.
+
+Once that work merges, the event-based harness should re-implement
+`NetworkPartition`, the conntrack flush, and any future GPU / packet-
+loss fault as thin wrappers around the client library — keeping the
+scenario / event abstraction here while moving the privileged
+machinery and Chaos Mesh dependency out of the test process.
+
+## Legacy scenario harness
+
+What follows is the original parametrised scenario design driving
+`test_deployment.py` via `scenarios.py`. New tests should prefer the
+event-based harness above; this section remains for callers that
+still depend on the legacy parameter sweep.
+
 ## Test Architecture
 
 The fault tolerance test suite is designed as a set of pytest

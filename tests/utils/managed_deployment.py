@@ -1029,17 +1029,35 @@ class ManagedDeployment:
             return []
 
     async def _get_pod_events(self) -> List[str]:
-        """Fetch warning events for pods in this deployment's namespace."""
+        """Fetch warning events for pods owned by THIS deployment only.
+
+        Filters by the current deployment's pod names so events from prior
+        runs (verify-jobs, killed pods, etc.) don't leak into the current
+        run's status output. K8s namespace events linger for ~1 hour and
+        without this filter the log fills up with unrelated stale entries.
+        """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+            current_pod_names = {p.metadata.name for p in pods.items}
+            if not current_pod_names:
+                return []
             events = await self._core_api.list_namespaced_event(self.namespace)
             warnings = []
             for event in events.items:
-                if event.type != "Normal" and event.involved_object.kind == "Pod":
-                    name = event.involved_object.name or "unknown"
-                    reason = event.reason or ""
-                    msg = event.message or ""
-                    warnings.append(f"{name}: {reason} - {msg}")
+                if event.type == "Normal":
+                    continue
+                if event.involved_object.kind != "Pod":
+                    continue
+                name = event.involved_object.name or "unknown"
+                if name not in current_pod_names:
+                    continue
+                reason = event.reason or ""
+                msg = event.message or ""
+                warnings.append(f"{name}: {reason} - {msg}")
             return warnings[-10:]
         except Exception as e:
             self._logger.debug(f"Failed to collect pod events: {e}")
@@ -1361,6 +1379,69 @@ class ManagedDeployment:
         # 4. Wait for prior pods labeled with this deployment to drain.
         await self._wait_for_pods_terminated()
 
+        # 5. Verify post-condition: no DGDs, no log-collection PVCs, no
+        # stale test jobs left in the namespace. Anything else (the GPU
+        # operator's pods, NATS, etcd, the user's other namespaced work)
+        # is intentionally left alone — we only assert we're not racing
+        # leftover state from previous test runs of THIS suite.
+        await self._verify_namespace_scrubbed()
+
+    async def _verify_namespace_scrubbed(self) -> None:
+        """Assert the namespace has no leftover test artifacts post-scrub.
+
+        Items with ``deletionTimestamp`` are skipped — they've been told
+        to delete and are draining (e.g. PVCs detaching from terminating
+        pods). The post-scrub waits should have caught most of those, but
+        kubelet finalization can still take a beat. We only raise when
+        a fresh, undeleted artifact remains.
+        """
+        if self._custom_api is None or self._core_api is None:
+            return
+        leftovers: list[str] = []
+
+        def _alive(meta: dict) -> bool:
+            return not meta.get("deletionTimestamp")
+
+        try:
+            cr_list = await self._custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="dynamographdeployments",
+            )
+            for item in cr_list.get("items", []):
+                meta = item.get("metadata", {})
+                if _alive(meta) and meta.get("name"):
+                    leftovers.append(f"DGD/{meta['name']}")
+        except exceptions.ApiException:
+            pass
+        try:
+            pvcs = await self._core_api.list_namespaced_persistent_volume_claim(
+                namespace=self.namespace, label_selector="purpose=log-collection"
+            )
+            for pvc in pvcs.items:
+                if pvc.metadata.deletion_timestamp is None:
+                    leftovers.append(f"PVC/{pvc.metadata.name}")
+        except exceptions.ApiException:
+            pass
+        try:
+            batch_api = client.BatchV1Api()
+            jobs = await batch_api.list_namespaced_job(namespace=self.namespace)
+            for job in jobs.items:
+                if job.metadata.deletion_timestamp is not None:
+                    continue
+                name = job.metadata.name
+                if name.startswith(("load-", "pvc-extract-")) or "-verify-" in name:
+                    leftovers.append(f"Job/{name}")
+        except exceptions.ApiException:
+            pass
+        if leftovers:
+            raise RuntimeError(
+                "scrub did not leave a clean namespace; leftover test "
+                f"artifacts: {leftovers}"
+            )
+        self._logger.info("scrub: namespace verified clean")
+
     async def _wait_for_cr_deleted(self, timeout: int = 120):
         """Poll the apiserver until the CR returns 404."""
         if not self._deployment_name or self._custom_api is None:
@@ -1532,6 +1613,15 @@ class ManagedDeployment:
                 await self._cleanup_log_collection_pvc()
             except Exception as e:
                 self._logger.warning(f"log PVC cleanup failed: {e}")
+            # Final scrub: catch anything orphan / waiting that the
+            # targeted cleanups above missed (verify-jobs that didn't
+            # complete, deployments that snuck in, etc.). Mirror of the
+            # entry-side scrub so we leave the namespace exactly as
+            # clean as we found it.
+            try:
+                await self._scrub_namespace()
+            except Exception as e:
+                self._logger.warning(f"final scrub failed: {e}")
 
     async def __aenter__(self):
         try:
@@ -1833,7 +1923,6 @@ class ManagedDeployment:
         storage_class = getattr(
             self.deployment_spec, "_log_collection_storage_class", "unknown"
         )
-        binding_issue_logged = False
         self._logger.info(
             f"Verifying PVC {pvc_name} can be bound (storage class: {storage_class})..."
         )
@@ -1925,23 +2014,25 @@ class ManagedDeployment:
                                 f"PVC {pvc_name} is binding (pod phase: {phase})"
                             )
                         elif phase == "Pending":
-                            # Check for PVC binding issues (only log once)
-                            if not binding_issue_logged:
-                                for condition in pod.status.conditions or []:
-                                    if (
-                                        condition.type == "PodScheduled"
-                                        and condition.status == "False"
-                                    ):
-                                        if (
-                                            "unbound"
-                                            in (condition.message or "").lower()
-                                        ):
-                                            self._logger.error(
-                                                f"PVC BINDING FAILED: {pvc_name} cannot be bound. "
-                                                f"Storage class '{storage_class}' likely does not support "
-                                                f"ReadWriteMany (RWX) access mode."
-                                            )
-                                            binding_issue_logged = True
+                            # The verify-job's pod legitimately sits in
+                            # Pending with an `unbound` PodScheduled
+                            # condition for a few seconds while the
+                            # provisioner attaches the PVC. Logging this
+                            # at error level fired a false alarm on every
+                            # run before the PVC actually bound. Keep it
+                            # at debug — the timeout branch below is the
+                            # only place that actually concludes failure.
+                            for condition in pod.status.conditions or []:
+                                if (
+                                    condition.type == "PodScheduled"
+                                    and condition.status == "False"
+                                    and "unbound" in (condition.message or "").lower()
+                                ):
+                                    self._logger.debug(
+                                        f"PVC {pvc_name} still binding "
+                                        f"(PodScheduled=False, message: "
+                                        f"{condition.message})"
+                                    )
 
                 except exceptions.ApiException as e:
                     if e.status != 404:

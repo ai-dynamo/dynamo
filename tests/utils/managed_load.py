@@ -60,6 +60,13 @@ class LoadConfig:
     request_rate: Optional[float] = None
     request_timeout_seconds: float = 30.0
     warmup_requests: Optional[int] = None
+    # aiperf transport connection reuse. 'pooled' (aiperf default) keeps a
+    # single long-lived socket per worker; 'never' opens a fresh socket
+    # per request and tears it down after. Fault-injection tests should
+    # use 'never' so a NetworkPolicy applied mid-load can actually deny
+    # new flows — connection-tracked pooled sockets survive policy
+    # creation and the partition becomes a no-op.
+    connection_reuse_strategy: Optional[str] = None
 
     # Inference parameters
     temperature: float = 0.0
@@ -192,6 +199,9 @@ class ManagedLoad:
 
         if cfg.request_rate:
             args.extend(["--request-rate", str(cfg.request_rate)])
+
+        if cfg.connection_reuse_strategy:
+            args.extend(["--connection-reuse-strategy", cfg.connection_reuse_strategy])
 
         # Build extra inputs
         extra_inputs = {
