@@ -7,6 +7,8 @@ set -euo pipefail
 
 
 NIXL_VERSION="1.0.1"
+# NIXL switched to v-prefixed tags at 1.x; archive still extracts to nixl-${NIXL_VERSION}.
+NIXL_TAG="v${NIXL_VERSION}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Function to check if a command exists
@@ -182,8 +184,8 @@ build_nixlbench() {
     cd "${NIXL_BUILD_DIR}"
 
     echo "Downloading NIXL source..."
-    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/${NIXL_VERSION}.zip
-    unzip "${NIXL_VERSION}.zip"
+    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/${NIXL_TAG}.zip
+    unzip "${NIXL_TAG}.zip"
     cd "nixl-${NIXL_VERSION}/benchmark/nixlbench/contrib"
     read -p "Press Enter to continue"
     echo "Building Docker image..."
