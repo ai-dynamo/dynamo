@@ -240,12 +240,12 @@ fi
 # Check status value
 case "$STATUS" in
   success)
-    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" 2>/dev/null | sed 's/^message: *//' | tr -d '"' | tr -d "'" || true)
     echo "Profiler succeeded: $MESSAGE"
     ;;
   failed)
-    ERROR=$(grep "^error:" "$STATUS_FILE" | sed 's/^error: *//' | tr -d '"' | tr -d "'")
-    MESSAGE=$(grep "^message:" "$STATUS_FILE" | sed 's/^message: *//' | tr -d '"' | tr -d "'")
+    ERROR=$(grep "^error:" "$STATUS_FILE" 2>/dev/null | sed 's/^error: *//' | tr -d '"' | tr -d "'" || true)
+    MESSAGE=$(grep "^message:" "$STATUS_FILE" 2>/dev/null | sed 's/^message: *//' | tr -d '"' | tr -d "'" || true)
     PHASE=$(grep "^phase:" "$STATUS_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
     echo "Profiler failed: ${ERROR:-$MESSAGE}"
     echo "Writing failure info to ConfigMap so the controller can read it..."
@@ -644,6 +644,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 		// then updated by updateProfilingSubPhase() above (reads output ConfigMap).
 		failureReason := profilingPhaseFailureReason(dgdr.Status.ProfilingPhase)
 		failureMessage := err.Error()
+
+		// The profiler container may exit non-zero even after writing
+		// profiler_status.yaml (e.g. validation errors, unhandled exceptions).
+		// The sidecar still runs after the profiler terminates and writes
+		// the structured failure info to the ConfigMap. Prefer those details
+		// over the generic Job failure message when available.
+		if profilerFailed, profilerError, cmErr := r.checkProfilerFailureInConfigMap(ctx, dgdr); cmErr == nil && profilerFailed {
+			failureMessage = fmt.Sprintf("profiling failed: %s", profilerError)
+		}
 
 		// Set phase and conditions directly so we can use sub-phase-specific failure
 		// reason on both Profiling and Succeeded conditions. (updatePhaseWithCondition
