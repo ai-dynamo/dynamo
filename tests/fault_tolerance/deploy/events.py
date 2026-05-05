@@ -121,6 +121,29 @@ class StartLoad(Event):
     async def execute(self, ctx: "ScenarioContext") -> None:
         ctx.logger.info(f"Creating load '{self.name}'...")
 
+        # Auto-populate per-worker /metrics URLs (system_port pass-through
+        # surfaces vllm:* counters and the dynamo_component_* counters
+        # that the frontend's /metrics doesn't see). User-supplied
+        # extra_server_metrics_urls overrides.
+        if self.load_config.extra_server_metrics_urls is None:
+            spec = ctx.deployment.deployment_spec
+            urls: list[str] = []
+            for service in spec.services:
+                if service.component_type == "frontend":
+                    continue
+                pods_by_service = await asyncio.to_thread(
+                    ctx.deployment.get_pods, [service.name]
+                )
+                for pod in pods_by_service.get(service.name) or []:
+                    pod_ip = pod.raw.get("status", {}).get("podIP")
+                    if pod_ip:
+                        urls.append(f"http://{pod_ip}:{spec.system_port}/metrics")
+            if urls:
+                ctx.logger.info(
+                    f"StartLoad: auto-discovered worker /metrics URLs: {urls}"
+                )
+                self.load_config.extra_server_metrics_urls = urls
+
         self._managed_load = ManagedLoad(
             namespace=ctx.namespace,
             load_config=self.load_config,

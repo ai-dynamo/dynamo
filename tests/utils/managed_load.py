@@ -67,6 +67,18 @@ class LoadConfig:
     # new flows — connection-tracked pooled sockets survive policy
     # creation and the partition becomes a no-op.
     connection_reuse_strategy: Optional[str] = None
+    # Additional /metrics endpoints for aiperf's --server-metrics. The
+    # base URL (Frontend) is scraped automatically; URLs here are
+    # appended so the run also collects per-worker Prometheus
+    # snapshots (e.g. the dynamo system_port pass-through, which
+    # surfaces vllm:* counters like vllm:nixl_num_kv_expired_reqs).
+    # StartLoad auto-populates this from worker pod IPs when None is
+    # passed; explicit list overrides. Note that pod IPs are valid
+    # for the duration of a pod's lifetime — tests that destroy and
+    # recreate a worker (DeletePod, etc.) will see scraping stop on
+    # recovery; the framework's per-pod _get_pod_metrics snapshot at
+    # fault-injection time still captures that point.
+    extra_server_metrics_urls: Optional[list[str]] = None
 
     # Inference parameters
     temperature: float = 0.0
@@ -202,6 +214,12 @@ class ManagedLoad:
 
         if cfg.connection_reuse_strategy:
             args.extend(["--connection-reuse-strategy", cfg.connection_reuse_strategy])
+
+        if cfg.extra_server_metrics_urls:
+            # aiperf accepts: --server-metrics <url1> <url2> ... — the
+            # base URL is scraped automatically by default, the URLs
+            # passed here are *additional* endpoints.
+            args.extend(["--server-metrics", *cfg.extra_server_metrics_urls])
 
         # Build extra inputs
         extra_inputs = {
