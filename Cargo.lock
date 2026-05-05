@@ -2331,7 +2331,6 @@ dependencies = [
  "hf-hub",
  "indicatif 0.18.4",
  "minstant",
- "plotters",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "rustc-hash 2.1.2",

@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[path = "common/mod.rs"]
-mod common;
-use common::*;
-
 #[path = "mooncake_shared.rs"]
 mod mooncake_shared;
 
 use clap::{Parser, Subcommand};
+use dynamo_bench::kv_router_common::args::CommonArgs;
+use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
+use dynamo_bench::kv_router_common::results::{
+    BenchmarkResults, print_benchmark_results_percentiles,
+};
+use dynamo_bench::kv_router_common::sweep::{compute_sweep_durations, print_sweep_summary};
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot};
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig,
@@ -131,9 +133,9 @@ struct Args {
     #[clap(flatten)]
     common: CommonArgs,
 
-    /// Output path for the sweep plot SVG.
-    #[clap(long, default_value = "sweep_plot.svg")]
-    sweep_output: String,
+    /// Output path for sweep results JSON.
+    #[clap(long, default_value = "sweep_results.json")]
+    sweep_json_output: String,
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
@@ -163,7 +165,6 @@ struct Args {
 
     /// Output path for the shard-size CSV produced when `shard-metrics` feature
     /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
-    /// An SVG plot is written alongside it (<path>.svg).
     /// Omit or leave empty to disable shard-size sampling.
     #[clap(long, default_value = "")]
     shard_metrics_csv: String,
@@ -281,130 +282,6 @@ fn write_shard_metrics_csv(rows: &[ShardSampleRow], path: &str) -> anyhow::Resul
         )?;
     }
     println!("Shard metrics CSV written to {path}");
-    Ok(())
-}
-
-/// Plot per-shard `worker_count` and `block_count` over time and write an SVG.
-///
-/// Draws two panels stacked vertically:
-/// - Top: workers per shard over time
-/// - Bottom: blocks per shard over time
-///
-/// Each shard gets a distinct colour; shards are identified by their `shard_idx`.
-fn plot_shard_metrics(rows: &[ShardSampleRow], svg_path: &str) -> anyhow::Result<()> {
-    use plotters::prelude::*;
-
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    // Collect the set of shard indices present.
-    let mut shard_indices: Vec<usize> = rows.iter().map(|r| r.snapshot.shard_idx).collect();
-    shard_indices.sort_unstable();
-    shard_indices.dedup();
-
-    let max_elapsed = rows.iter().map(|r| r.elapsed_ms).max().unwrap_or(1);
-    let max_workers = rows
-        .iter()
-        .map(|r| r.snapshot.worker_count)
-        .max()
-        .unwrap_or(1);
-    let max_blocks = rows
-        .iter()
-        .map(|r| r.snapshot.block_count)
-        .max()
-        .unwrap_or(1);
-
-    let colors: Vec<RGBColor> = vec![
-        RGBColor(31, 119, 180),
-        RGBColor(255, 127, 14),
-        RGBColor(44, 160, 44),
-        RGBColor(214, 39, 40),
-        RGBColor(148, 103, 189),
-        RGBColor(140, 86, 75),
-    ];
-
-    let root = SVGBackend::new(svg_path, (900, 700)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let (upper, lower) = root.split_vertically(350);
-
-    // --- Top panel: workers per shard ---
-    let mut chart = ChartBuilder::on(&upper)
-        .caption("Workers per shard over time", ("sans-serif", 18))
-        .margin(15)
-        .x_label_area_size(30)
-        .y_label_area_size(60)
-        .build_cartesian_2d(0u64..max_elapsed, 0usize..max_workers + 1)?;
-    chart
-        .configure_mesh()
-        .x_desc("Elapsed (ms)")
-        .y_desc("Workers")
-        .draw()?;
-
-    for (i, &shard_idx) in shard_indices.iter().enumerate() {
-        let color = colors[i % colors.len()];
-        let points: Vec<(u64, usize)> = rows
-            .iter()
-            .filter(|r| r.snapshot.shard_idx == shard_idx)
-            .map(|r| (r.elapsed_ms, r.snapshot.worker_count))
-            .collect();
-        let label = format!("shard {shard_idx}");
-        chart
-            .draw_series(LineSeries::new(points, &color))?
-            .label(label)
-            .legend(move |(x, y)| {
-                plotters::element::PathElement::new(
-                    vec![(x, y), (x + 20, y)],
-                    color.stroke_width(2),
-                )
-            });
-    }
-    chart
-        .configure_series_labels()
-        .background_style(WHITE.mix(0.8))
-        .border_style(BLACK)
-        .draw()?;
-
-    // --- Bottom panel: blocks per shard ---
-    let mut chart2 = ChartBuilder::on(&lower)
-        .caption("Blocks per shard over time", ("sans-serif", 18))
-        .margin(15)
-        .x_label_area_size(30)
-        .y_label_area_size(60)
-        .build_cartesian_2d(0u64..max_elapsed, 0usize..max_blocks + 1)?;
-    chart2
-        .configure_mesh()
-        .x_desc("Elapsed (ms)")
-        .y_desc("Cached blocks")
-        .draw()?;
-
-    for (i, &shard_idx) in shard_indices.iter().enumerate() {
-        let color = colors[i % colors.len()];
-        let points: Vec<(u64, usize)> = rows
-            .iter()
-            .filter(|r| r.snapshot.shard_idx == shard_idx)
-            .map(|r| (r.elapsed_ms, r.snapshot.block_count))
-            .collect();
-        let label = format!("shard {shard_idx}");
-        chart2
-            .draw_series(LineSeries::new(points, &color))?
-            .label(label)
-            .legend(move |(x, y)| {
-                plotters::element::PathElement::new(
-                    vec![(x, y), (x + 20, y)],
-                    color.stroke_width(2),
-                )
-            });
-    }
-    chart2
-        .configure_series_labels()
-        .background_style(WHITE.mix(0.8))
-        .border_style(BLACK)
-        .draw()?;
-
-    root.present()?;
-    println!("Shard metrics plot written to {svg_path}");
     Ok(())
 }
 
@@ -568,7 +445,6 @@ async fn run_sweep_mode(
         all_results.push((name, results));
     }
 
-    plot_sweep(&all_results, &args.sweep_output)?;
     write_sweep_json(args, &all_results)?;
     Ok(())
 }
@@ -577,10 +453,6 @@ fn write_sweep_json(
     args: &Args,
     all_results: &[(&str, Vec<(u64, BenchmarkResults)>)],
 ) -> anyhow::Result<()> {
-    let json_path = args
-        .sweep_output
-        .replace(".png", ".json")
-        .replace(".svg", ".json");
     let json_map: std::collections::BTreeMap<&str, Vec<SweepStepResult>> = all_results
         .iter()
         .map(|(name, results)| {
@@ -600,8 +472,11 @@ fn write_sweep_json(
             (*name, steps)
         })
         .collect();
-    std::fs::write(&json_path, serde_json::to_string_pretty(&json_map)?)?;
-    println!("Sweep results saved to {}", json_path);
+    std::fs::write(
+        &args.sweep_json_output,
+        serde_json::to_string_pretty(&json_map)?,
+    )?;
+    println!("Sweep results saved to {}", args.sweep_json_output);
     Ok(())
 }
 
@@ -679,8 +554,6 @@ async fn run_single_trial(
             args.benchmark_runs,
         );
         write_shard_metrics_csv(&rows, &csv_path)?;
-        let svg = format!("{}.svg", csv_path.trim_end_matches(".csv"));
-        plot_shard_metrics(&rows, &svg)?;
     }
 
     let run = run?;

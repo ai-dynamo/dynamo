@@ -70,7 +70,7 @@ impl TurnTrace {
         Ok(())
     }
 
-    pub(crate) fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
+    pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
         self.validate_block_size_and_capacity(trace_block_size)?;
 
         let mut tokens = Vec::with_capacity(self.input_length);
