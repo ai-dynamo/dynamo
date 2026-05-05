@@ -170,12 +170,44 @@ impl TreeSizeTestIndexer {
         }
     }
 
-    fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+    async fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         match self {
             Self::Single(index) => index.tree_size_for_worker(worker),
-            Self::Concurrent(index) => index.backend().tree_size_for_worker(worker),
-            Self::ConcurrentCompressed(index) => index.backend().tree_size_for_worker(worker),
+            Self::Concurrent(index) => Self::thread_pool_size_for_worker(index, worker).await,
+            Self::ConcurrentCompressed(index) => {
+                Self::thread_pool_size_for_worker(index, worker).await
+            }
         }
+    }
+
+    async fn thread_pool_size_for_worker<T: SyncIndexer>(
+        index: &ThreadPoolIndexer<T>,
+        worker: WorkerWithDpRank,
+    ) -> Option<usize> {
+        Some(
+            index
+                .worker_lookup_stats()
+                .await
+                .block_count_for_worker(worker)
+                .unwrap_or(0),
+        )
+    }
+
+    async fn live_thread_pool_worker_count(&self) -> Option<usize> {
+        match self {
+            Self::Single(_) => None,
+            Self::Concurrent(index) => Some(Self::thread_pool_worker_count(index).await),
+            Self::ConcurrentCompressed(index) => Some(Self::thread_pool_worker_count(index).await),
+        }
+    }
+
+    async fn thread_pool_worker_count<T: SyncIndexer>(index: &ThreadPoolIndexer<T>) -> usize {
+        index
+            .shard_sizes()
+            .await
+            .iter()
+            .map(|snapshot| snapshot.worker_count)
+            .sum()
     }
 
     fn scores(&self, query: &[u64]) -> OverlapScores {
@@ -187,7 +219,7 @@ impl TreeSizeTestIndexer {
         }
     }
 
-    fn assert_score_and_tree_size(
+    async fn assert_score_and_tree_size(
         &self,
         query: &[u64],
         worker: WorkerWithDpRank,
@@ -197,7 +229,7 @@ impl TreeSizeTestIndexer {
         let scores = self.scores(query);
         assert_eq!(scores.scores.get(&worker), Some(&expected_score));
         assert_eq!(
-            self.tree_size_for_worker(worker),
+            self.tree_size_for_worker(worker).await,
             Some(expected_tree_size),
             "internal tree-size accounting mismatch"
         );
@@ -382,7 +414,9 @@ mod interface_tests {
         index.apply_event(prefix_event.clone()).await;
         index.flush().await;
 
-        index.assert_score_and_tree_size(&[1, 2, 3], worker, 3, 3);
+        index
+            .assert_score_and_tree_size(&[1, 2, 3], worker, 3, 3)
+            .await;
         let prefix_snapshot = index.snapshot_tree().await;
 
         index.apply_event(prefix_event).await;
@@ -393,12 +427,16 @@ mod interface_tests {
             index.snapshot_tree().await,
             "replaying the same store event should not change the tree structure"
         );
-        index.assert_score_and_tree_size(&[1, 2, 3], worker, 3, 3);
+        index
+            .assert_score_and_tree_size(&[1, 2, 3], worker, 3, 3)
+            .await;
 
         index.apply_event(continuation_event.clone()).await;
         index.flush().await;
 
-        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 5, 5);
+        index
+            .assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 5, 5)
+            .await;
         let full_snapshot = index.snapshot_tree().await;
 
         index.apply_event(continuation_event).await;
@@ -409,12 +447,16 @@ mod interface_tests {
             index.snapshot_tree().await,
             "replaying the same continuation store should not change the tree structure"
         );
-        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 5, 5);
+        index
+            .assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 5, 5)
+            .await;
 
         index.apply_event(continuation_remove.clone()).await;
         index.flush().await;
 
-        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 3, 3);
+        index
+            .assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 3, 3)
+            .await;
         let trimmed_snapshot = index.snapshot_tree().await;
 
         index.apply_event(continuation_remove).await;
@@ -425,14 +467,19 @@ mod interface_tests {
             index.snapshot_tree().await,
             "replaying the same remove event should not change the tree structure"
         );
-        index.assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 3, 3);
+        index
+            .assert_score_and_tree_size(&[1, 2, 3, 4, 5], worker, 3, 3)
+            .await;
 
         index.apply_event(prefix_remove.clone()).await;
         index.flush().await;
 
         let empty_scores = index.scores(&[1, 2, 3, 4, 5]);
         assert!(empty_scores.scores.is_empty());
-        assert_eq!(index.tree_size_for_worker(worker), Some(0));
+        assert_eq!(index.tree_size_for_worker(worker).await, Some(0));
+        if let Some(worker_count) = index.live_thread_pool_worker_count().await {
+            assert_eq!(worker_count, 0);
+        }
         assert!(index.snapshot_tree().await.is_empty());
 
         index.apply_event(prefix_remove).await;
@@ -440,7 +487,7 @@ mod interface_tests {
 
         let duplicate_empty_scores = index.scores(&[1, 2, 3, 4, 5]);
         assert!(duplicate_empty_scores.scores.is_empty());
-        assert_eq!(index.tree_size_for_worker(worker), Some(0));
+        assert_eq!(index.tree_size_for_worker(worker).await, Some(0));
         assert!(index.snapshot_tree().await.is_empty());
     }
 

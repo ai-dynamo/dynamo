@@ -306,15 +306,14 @@ impl AggRuntime {
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
         }
-        let queued_request = request.clone();
-        self.requests
-            .insert(uuid, AggRequestState::new_queued(request));
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
-                .on_request_arrival(&queued_request, replay_hashes, self.now_ms)?
+                .on_request_arrival(&request, replay_hashes, self.now_ms)?
                 .admissions
         };
+        self.requests
+            .insert(uuid, AggRequestState::new_queued(request));
         self.record_router_pending();
         self.dispatch_router_admissions(admissions)?;
         self.record_in_flight_peak();
