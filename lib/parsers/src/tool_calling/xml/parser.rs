@@ -641,7 +641,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_xml so that the jail passes the
     /// entire group to extract_tool_calls rather than emitting the second (and later)
     /// calls as raw trailing text.
-    #[test] // PARSER.2, helper
+    #[test] // PARSER.batch.2, helper
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = XmlParserConfig::default();
 
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(html_unescape(input), expected);
     }
 
-    #[test] // PARSER.1
+    #[test] // PARSER.batch.1
     fn test_parse_simple_tool_call() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -728,7 +728,7 @@ pwd && ls
         assert_eq!(args["command"], "pwd && ls");
     }
 
-    #[test] // PARSER.1, PARSER.7
+    #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_multiple_parameters() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -754,7 +754,7 @@ fahrenheit
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test] // PARSER.13
+    #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"I'll help you with that. <tool_call>
 <function=get_weather>
@@ -774,7 +774,7 @@ Dallas
         );
     }
 
-    #[test] // PARSER.2
+    #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -802,7 +802,7 @@ Orlando
         assert_eq!(args1["city"], "Orlando");
     }
 
-    #[test] // PARSER.7
+    #[test] // PARSER.batch.7
     fn test_parse_json_parameter_value() {
         // With schema-aware parsing, we need to provide a schema to parse JSON objects
         let tools = vec![ToolDefinition {
@@ -833,7 +833,7 @@ Orlando
         assert_eq!(args["config"]["count"], 42);
     }
 
-    #[test] // PARSER.3
+    #[test] // PARSER.batch.3
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
         let (calls, normal) =
@@ -842,7 +842,7 @@ Orlando
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test] // PARSER.4
+    #[test] // PARSER.batch.4
     fn test_parse_malformed_tool_call() {
         let input = r#"<tool_call>
 <function=incomplete>
@@ -855,7 +855,7 @@ value
         assert!(result.is_ok());
     }
 
-    #[test] // PARSER.4
+    #[test] // PARSER.batch.4
     fn test_parse_missing_parameter_closing_tag() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -872,7 +872,7 @@ ls -la
         assert_eq!(args["command"], "ls -la");
     }
 
-    #[test] // PARSER.4
+    #[test] // PARSER.batch.4
     fn test_parse_missing_function_closing_tag() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -889,7 +889,7 @@ Boston
         assert_eq!(args["city"], "Boston");
     }
 
-    #[test] // PARSER.4
+    #[test] // PARSER.batch.4
     fn test_parse_missing_both_closing_tags() {
         let input = r#"<tool_call>
 <function=run_query>
@@ -906,7 +906,7 @@ SELECT * FROM users
         assert_eq!(args["sql"], "SELECT * FROM users\n</tool_call>");
     }
 
-    #[test] // PARSER.4
+    #[test] // PARSER.batch.4
     fn test_parse_multiple_parameters_missing_closing_tags() {
         let input = r#"<tool_call>
 <function=search>
@@ -931,7 +931,7 @@ rust programming
     // token and extract the call. Recovery is gated on a function-start
     // opener in the trailing slice so plain text that happens to start with
     // `<tool_call>` is preserved verbatim.
-    #[test] // PARSER.5 — qwen3_coder
+    #[test] // PARSER.batch.5 — qwen3_coder
     fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -971,7 +971,7 @@ NYC
         );
     }
 
-    #[test] // PARSER.5 — minimax_m2
+    #[test] // PARSER.batch.5 — minimax_m2
     fn test_parse_minimax_m2_no_outer_close_recovers() {
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -1173,8 +1173,8 @@ NYC
         assert_eq!(args["param3"], "hello");
     }
 
-    /// Helper for the new corner-case tests below (PARSER.6 / PARSER.12 / PARSER.14
-    /// / PARSER.15) — `allow_eof_recovery: false` because none of these tests
+    /// Helper for the new corner-case tests below (PARSER.batch.6 / PIPELINE.finish_reason / PARSER.batch.9
+    /// / PARSER.batch.10) — `allow_eof_recovery: false` because none of these tests
     /// rely on EOF recovery. The inline config in
     /// `test_parse_minimax_m2_no_outer_close_recovers` keeps that flag `true`
     /// because that test specifically exercises the recovery path.
@@ -1190,9 +1190,9 @@ NYC
         }
     }
 
-    /// PARSER.6 — empty args. A no-arg call (no `<parameter=...>` block)
+    /// PARSER.batch.6 — empty args. A no-arg call (no `<parameter=...>` block)
     /// must still surface the function name with empty arguments.
-    #[test] // PARSER.6 — qwen3_coder
+    #[test] // PARSER.batch.6 — qwen3_coder
     fn test_parse_qwen3_empty_args() {
         let input = r#"<tool_call>
 <function=current_time>
@@ -1205,8 +1205,8 @@ NYC
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// PARSER.6 — empty args, minimax_m2 format.
-    #[test] // PARSER.6 — minimax_m2
+    /// PARSER.batch.6 — empty args, minimax_m2 format.
+    #[test] // PARSER.batch.6 — minimax_m2
     fn test_parse_minimax_m2_empty_args() {
         let config = minimax_m2_config();
         let input =
@@ -1220,7 +1220,7 @@ NYC
 
     /// Parser-level invariant: the xml parser is byte-stable — it doesn't
     /// see `finish_reason` and produces the same output regardless of the
-    /// upstream stream-end reason. Real PARSER.12 coverage (stop / tool_calls
+    /// upstream stream-end reason. Real PIPELINE.finish_reason coverage (stop / tool_calls
     /// / length mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs`
     /// and belongs in the cross-parser finish_reason mapping work-item
     /// (tracked separately).
@@ -1247,11 +1247,11 @@ NYC
         assert_eq!(calls.len(), 1);
     }
 
-    /// PARSER.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string. Tested under both qwen3_coder and
     /// minimax_m2 configs.
-    #[test] // PARSER.14 — qwen3_coder
+    #[test] // PARSER.batch.9 — qwen3_coder
     fn test_parse_qwen3_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
             let (calls, normal) =
@@ -1270,7 +1270,7 @@ NYC
         }
     }
 
-    #[test] // PARSER.14 — minimax_m2
+    #[test] // PARSER.batch.9 — minimax_m2
     fn test_parse_minimax_m2_empty_and_whitespace_inputs() {
         let config = minimax_m2_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -1289,10 +1289,10 @@ NYC
         }
     }
 
-    /// PARSER.15 — duplicate calls (same function name twice). qwen3_coder
+    /// PARSER.batch.10 — duplicate calls (same function name twice). qwen3_coder
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
-    #[test] // PARSER.15 — qwen3_coder
+    #[test] // PARSER.batch.10 — qwen3_coder
     fn test_parse_qwen3_duplicate_calls_same_name() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -1320,10 +1320,10 @@ LA
         assert_eq!(args1["city"], "LA");
     }
 
-    /// PARSER.15 — duplicate calls (same function name twice). minimax_m2
+    /// PARSER.batch.10 — duplicate calls (same function name twice). minimax_m2
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
-    #[test] // PARSER.15 — minimax_m2
+    #[test] // PARSER.batch.10 — minimax_m2
     fn test_parse_minimax_m2_duplicate_calls_same_name() {
         let config = minimax_m2_config();
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke><invoke name="get_weather"><parameter name="city">LA</parameter></invoke></minimax:tool_call>"#;

@@ -10,8 +10,10 @@ two taxonomies cover different surfaces:
 
 | File | Scope | Prefix |
 |---|---|---|
-| `lib/parsers/PARSER_CASES.md` | Tool-call & reasoning parser behavior on **model output** | `PARSER.X` |
-| `components/src/dynamo/frontend/tests/FRONTEND_CASES.md` | Chat-processor layer: request preprocessing, output assembly, error surface, worker plumbing | `FRONTEND.X` |
+| `lib/parsers/PARSER_CASES.md` | Tool-call parser behavior on **model output** | `PARSER.batch.*`, `PARSER.stream.*`, `PARSER.fmt.*`, `PARSER.xml.*`, `PARSER.harmony.*` |
+| `lib/parsers/REASONING_CASES.md` | Reasoning parser behavior on **model output** | `REASONING.batch.*`, `REASONING.stream.*` |
+| `lib/parsers/PIPELINE_CASES.md` | Pipeline-boundary contracts (parser output independence from upstream metadata) | `PIPELINE.*` |
+| `components/src/dynamo/frontend/tests/FRONTEND_CASES.md` | Chat-processor layer: request preprocessing, output assembly, error surface, worker plumbing | `FRONTEND.*` |
 
 Backends covered by this taxonomy: **vllm** (`prepost.py` + `vllm_processor.py`)
 and **sglang** (`sglang_prepost.py` + `sglang_processor.py`). trtllm has its
@@ -23,11 +25,11 @@ own architecture under `components/src/dynamo/trtllm/` and is out of scope here.
 - **`FRONTEND.2`** Parser construction & dispatch — instantiate the right tool-call / reasoning parser from a request's `chat_template_kwargs`, model name, runtime config; handle "no parser" gracefully.
 - **`FRONTEND.3`** Request shaping & sampling-param projection — OpenAI fields → backend kwargs, tool stripping when `tool_choice="none"`, guided-decoding setup.
 - **`FRONTEND.4`** Tool-call output assembly — model output stream → OpenAI-shaped `tool_calls` deltas. Single, multiple, content-mixed, fallback paths.
-- **`FRONTEND.5`** Finish-reason mapping — frontend-layer remap (`stop`/`length`/`tool_calls`). Distinct from parser-layer `PARSER.12` which covers the parser's view of the raw signal.
+- **`FRONTEND.5`** Finish-reason mapping — frontend-layer remap (`stop`/`length`/`tool_calls`). Distinct from parser-layer `PIPELINE.finish_reason` which covers the parser's view of the raw signal.
 - **`FRONTEND.6`** Incremental detokenization — token-id stream → text, prompt-token-id normalization, fast plain-text path.
 - **`FRONTEND.7`** Worker subprocess boundary — preprocessing runs in a subprocess; result picklability, init, error propagation across the boundary.
 - **`FRONTEND.8`** Error surface — `BackendError` / `InternalError` / engine-error handling, malformed responses, stream errors, deprecation warnings.
-- **`FRONTEND.9`** Reasoning ↔ tool-call orchestration — both parsers active on the same response; distinct from parser-layer `PARSER.9` which is purely on output text.
+- **`FRONTEND.9`** Reasoning ↔ tool-call orchestration — both parsers active on the same response; distinct from `REASONING.batch.2` which is purely on output text.
 
 ## Annotation convention
 
@@ -100,8 +102,9 @@ Examples: `TestSingleToolCall`, `TestMultipleToolCalls`,
 
 Frontend layer maps the engine's raw finish_reason into OpenAI's enum,
 remapping `stop` → `tool_calls` once any tool call has been emitted on a
-choice (per-choice tracking). Distinct from `PARSER.12` in the parser
-taxonomy: that's about the parser's view; this is about the frontend's
+choice (per-choice tracking). Distinct from `PIPELINE.finish_reason`
+in the parser taxonomy: that's about the parser's view (output
+independence from upstream signal); this is about the frontend's
 post-parser remap.
 
 Example: `TestMapFinishReason`.
@@ -136,8 +139,9 @@ Examples: `TestMakeBackendError`, `TestMakeInternalError`,
 
 When both a reasoning parser and a tool-call parser fire on the same
 response, the frontend orchestrates routing (text → reasoning vs text →
-tool-call markup vs text → user-visible content). Distinct from parser
-`PARSER.9`: that's the parser-internal view; this is the frontend assembly
-view.
+tool-call markup vs text → user-visible content). Distinct from
+`REASONING.batch.2`: that's the parser-internal view (reasoning parser
+must leave tool-call markers intact for downstream); this is the
+frontend assembly view.
 
 Examples: `TestReasoningParsing`.

@@ -274,7 +274,7 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[test] // PARSER.2
+    #[test] // PARSER.batch.2
     fn test_parse_tool_calls_deepseek_v3_basic() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(args["location"], "Paris");
     }
 
-    #[test] // PARSER.13
+    #[test] // PARSER.batch.8
     fn test_parse_tool_calls_deepseek_v3_with_normal_text() {
         let text = r#"The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(args["location"], "New York");
     }
 
-    #[test] // PARSER.4 — recovery from missing start
+    #[test] // PARSER.batch.4 — recovery from missing start
     fn test_parse_tool_calls_deepseek_v3_without_tool_call_start_token() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
 ```json
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test] // PARSER.2, PARSER.7
+    #[test] // PARSER.batch.2, PARSER.batch.7
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_multiple_args() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(args["radius"], 50);
     }
 
-    #[test] // PARSER.4
+    #[test] // PARSER.batch.4
     fn test_parse_tool_calls_deepseek_v3_with_invalid_json() {
         // Everything is normal text in case of invalid json
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather}{location": "HongKong"}
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test] // PARSER.2, PARSER.13
+    #[test] // PARSER.batch.2, PARSER.batch.8
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_normal_text() {
         // Everything is normal text in case of invalid json
         let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test] // PARSER.7, PARSER.fmt2
+    #[test] // PARSER.batch.7, PARSER.fmt.2
     fn test_parse_tool_calls_deepseek_v3_with_multiline_json() {
         let text = r#"I'll help you understand this Xiaohongshu codebase. Let me start by exploring the structure
   and key files to provide you with a comprehensive
@@ -507,7 +507,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.8
+    #[test] // helper, PARSER.stream.3
     fn test_detect_tool_call_start_deepseek_v3_partial_tokens() {
         // Test partial token detection for streaming scenarios with unicode characters
         let config = match ToolCallConfig::deepseek_v3().parser_config {

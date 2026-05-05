@@ -545,7 +545,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.13
+    #[test] // helper, PARSER.batch.8
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token_with_normal_text() {
         let text = r#"Here it is {"name": "#;
         let config = JsonParserConfig {
@@ -632,7 +632,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_fun() {
         // Test the streaming scenario where "fun" arrives first
         let text = r#"fun"#;
@@ -648,7 +648,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // helper, PARSER.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_func() {
         let text = r#"func"#;
         let config = JsonParserConfig {
@@ -663,7 +663,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // helper, PARSER.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_f() {
         let text = r#"f"#;
         let config = JsonParserConfig {
@@ -678,7 +678,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // helper, PARSER.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_with_prefix() {
         // Test case where text ends with a partial token (more realistic streaming scenario)
         let text = r#"Hello fun"#;
