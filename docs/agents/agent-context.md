@@ -324,6 +324,33 @@ uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl 
 `kv_router` requires more than one mock worker. For a single aggregated-worker
 smoke test, use `--router-mode round_robin --num-workers 1`.
 
+### Replay Scope and Follow-ups
+
+What works today:
+
+- Per-`request_end` cumulative input-block hashes are emitted on agent traces by
+  default.
+- Single-turn agent traces convert to Mooncake JSONL with absolute timestamps
+  and compacted `hash_ids`.
+- Mocker replay reads these rows as wall-clock arrivals and simulates a cache
+  pattern from the configured engine, router, and capacity model.
+- Concurrent LLM fan-out from the same `program_id` is preserved as parallel
+  arrivals because converted rows do not share a `session_id`.
+
+On the roadmap:
+
+- Live KV cache movement is simulated by the mocker, not replayed byte-for-byte
+  from the original run. Higher-fidelity replay would need an explicit replay
+  event stream or sidecar rather than inferring writes in the converter.
+- Output token text/ids are not reconstructed. Replay only drives
+  `max_output_tokens`; the original response text is not regenerated.
+- Causal tool and turn dependencies are not modeled in single-row Mooncake
+  output. A request that depended on an earlier tool result is replayed by its
+  absolute arrival time, not as "wait for the tool to finish".
+- End-to-end re-run of an agent run is on the roadmap. Replay today is
+  request-level; reconstructing tool decisions, agent control flow, or external
+  tool effects is follow-up work.
+
 ## Harness Integration Patterns
 
 An existing harness does not need to import Dynamo packages or link against

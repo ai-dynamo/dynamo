@@ -49,24 +49,13 @@ The converter accepts `.jsonl`, `.jsonl.gz`, repeated `--input-path` flags, and
 recorder-envelope records of the form `{"timestamp": ..., "event": ...}`. It
 emits one independent Mooncake request row per Dynamo `request_end`, with an
 absolute `timestamp` from Dynamo's request-arrival time and no `session_id`.
-Stable trace
-`input_sequence_hashes` are compacted to Mooncake `hash_ids` during conversion.
-The `hash_ids` are request-level cache keys: they describe the cumulative input
-blocks for each LLM request, not cache movement or observed reuse.
+Stable trace `input_sequence_hashes` are compacted to Mooncake `hash_ids`
+during conversion.
 
-Agent-converted traces are request-level wall-clock traces. Because converted
-rows do not share `session_id`, replay/mocker uses the existing timestamped
-request path and can preserve concurrent LLM fanout, including multiple
-summarizer calls issued by the same program. Mooncake rows that do share a
-`session_id` keep closed-loop behavior: later turns wait for the previous turn
-to complete plus the explicit `delay` or timestamp delta.
-
-Replay/mocker uses these request rows as reads and simulates KV writes/events
-from the configured engine, router, capacity, admission, and timing model. This
-can reproduce the same broad cache pattern as the live run when those parameters
-match, but it is not a byte-for-byte recording of the live cache event stream.
-For higher-fidelity cache movement, add an explicit replay event stream or
-sidecar rather than inferring hidden writes in the converter.
+For what replay covers today and what remains on the roadmap (cache movement
+fidelity, output token reconstruction, causal tool/turn dependencies, end-to-end
+agent re-run), see
+[Replay Scope and Follow-ups](../../docs/agents/agent-context.md#replay-scope-and-follow-ups).
 
 Replay the output with the same trace block size used when the trace was
 captured. The converter prints this value after writing the Mooncake JSONL.
