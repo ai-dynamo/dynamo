@@ -6,6 +6,8 @@ use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
+use crate::component::Instance;
+use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use crate::error::{DynamoError, ErrorType};
@@ -113,15 +115,30 @@ impl<S> Drop for InflightDecStream<S> {
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
+    /// Carries endpoint name + instance_id so cancellation is scoped to the
+    /// exact (endpoint, instance) pair, not all endpoints on the same runtime.
+    instance: Option<Instance>,
 }
 
 impl<T> AddressedRequest<T> {
     pub fn new(request: T, address: String) -> Self {
-        Self { request, address }
+        Self {
+            request,
+            address,
+            instance: None,
+        }
     }
 
-    pub(crate) fn into_parts(self) -> (T, String) {
-        (self.request, self.address)
+    pub fn with_instance(request: T, address: String, instance: Instance) -> Self {
+        Self {
+            request,
+            address,
+            instance: Some(instance),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
+        (self.request, self.address, self.instance)
     }
 }
 
@@ -147,6 +164,20 @@ impl AddressedPushRouter {
             resp_transport,
         }))
     }
+
+    /// Cancel all pending response-stream registrations for an instance.
+    pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
+        self.resp_transport
+            .cancel_instance_streams(instance_id)
+            .await
+    }
+
+    /// Clear the tombstone after an instance reappears in discovery.
+    pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
+        self.resp_transport
+            .clear_instance_tombstone(instance_id)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -162,7 +193,7 @@ where
 
         let request_id = request.context().id().to_string();
         let (addressed_request, context) = request.transfer(());
-        let (request, address) = addressed_request.into_parts();
+        let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
 
@@ -189,6 +220,32 @@ where
         // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
 
+        // Snapshot subject before connection_info is moved; used for cleanup.
+        let recv_subject: Option<String> =
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
+                .ok()
+                .map(|ci| ci.subject);
+
+        // If the instance is already tombstoned, fail fast with a migratable
+        // error instead of writing to the request plane.
+        if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
+            let endpoint_instance_id = inst.endpoint_instance_id();
+            if !self
+                .resp_transport
+                .associate_instance(subject, &endpoint_instance_id)
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
+        }
+
         // package up the connection info as part of the "header" component of the two part message
         // used to issue the request on the
         // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
@@ -204,8 +261,24 @@ where
         // next build the two part message where we package the connection info and the request into
         // a single Vec<u8> that can be sent over the wire.
         // --- package this up in the WorkQueuePublisher ---
-        let ctrl = serde_json::to_vec(&control_message)?;
-        let data = serde_json::to_vec(&request)?;
+        let ctrl = match serde_json::to_vec(&control_message) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
+        };
+        let data = match serde_json::to_vec(&request) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
+        };
 
         tracing::trace!(
             request_id,
@@ -220,9 +293,14 @@ where
         // or it should take a two part message directly
         // todo - update this
         let codec = TwoPartCodec::default();
-        let buffer = {
-            let _nvtx = dynamo_nvtx_range!("codec.encode");
-            codec.encode_message(msg)?
+        let buffer = match codec.encode_message(msg) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
         };
 
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
@@ -253,19 +331,57 @@ where
 
         // Phase A: Frontend → Backend (network + queue + ack)
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        let _response = self
-            .req_client
-            .send_request(address, buffer, headers)
-            .await?;
+        let send_result = self.req_client.send_request(address, buffer, headers).await;
         drop(_nvtx_send);
+
+        if let Err(e) = send_result {
+            if let Some(subject) = &recv_subject {
+                self.resp_transport.cancel_recv_stream(subject).await;
+            }
+            return Err(e);
+        }
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
-        let response_stream = response_stream_provider
-            .await
-            .map_err(|_| PipelineError::DetachedStreamReceiver)?
-            .map_err(PipelineError::ConnectionFailed)?;
+
+        // RecvError → migratable Disconnected (watcher cancelled the subject
+        // or the worker died before establishing the response stream).
+        let response_stream = match response_stream_provider.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                // generate() failed before any response bytes; migrate via
+                // CannotConnect since the dominant cause is a worker-local
+                // setup/version issue. The wire prologue carries only an
+                // opaque string today, so app-level rejections also retry
+                // -- safe because no side effects are visible yet. Follow-up:
+                // structured prologue error type for finer routing.
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Worker generate() failed before response stream: {e}"
+                        ))
+                        .build()
+                ));
+            }
+            Err(_recv_err) => {
+                // oneshot dropped: either the discovery watcher cancelled
+                // this subject or the worker died mid-handshake.
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Worker disconnected before response stream was established")
+                        .build()
+                ));
+            }
+        };
         drop(_nvtx_wait);
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)

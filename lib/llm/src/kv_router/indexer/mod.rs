@@ -517,7 +517,7 @@ impl Indexer {
                 }
                 resp_rx.await.unwrap_or_default()
             }
-            Self::Concurrent { primary, .. } => primary.backend().get_workers(),
+            Self::Concurrent { primary, .. } => primary.get_workers().await,
             Self::Remote(_) | Self::None => Vec::new(),
         }
     }

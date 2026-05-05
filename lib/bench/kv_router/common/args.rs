@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use tracing_subscriber::EnvFilter;
-
 /// Shared CLI arguments for trace-based benchmarks.
 #[derive(clap::Args, Debug)]
 pub struct CommonArgs {
@@ -74,17 +72,4 @@ pub struct CommonArgs {
     /// Opt in to runtime warn/error logs from the mocker and sequence tracker.
     #[clap(long)]
     pub sequence_logs: bool,
-}
-
-pub fn init_sequence_logging(enabled: bool) {
-    if !enabled {
-        return;
-    }
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(
-            "error,dynamo_kv_router::sequences=warn,dynamo_mocker=warn",
-        ))
-        .with_writer(std::io::stderr)
-        .try_init();
 }
