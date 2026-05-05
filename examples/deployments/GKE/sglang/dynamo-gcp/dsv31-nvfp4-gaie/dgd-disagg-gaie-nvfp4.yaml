@@ -199,7 +199,7 @@ spec:
               --load-balance-method round_robin \
               --stream-interval 30 \
               --enable-flashinfer-allreduce-fusion \
-              --disable-radix-cache
+              --kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
           livenessProbe:
             httpGet:
               path: /live
