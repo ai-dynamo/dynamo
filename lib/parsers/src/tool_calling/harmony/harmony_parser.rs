@@ -473,6 +473,89 @@ mod tests {
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "celsius");
     }
+
+    /// Parser-level invariant: the harmony parser is byte-stable — it
+    /// doesn't see `finish_reason` and produces the same output regardless
+    /// of the upstream stream-end reason. Real CASE.12 coverage (stop /
+    /// tool_calls / length mapping) lives in
+    /// `lib/llm/tests/test_streaming_tool_parsers.rs` and belongs in the
+    /// cross-parser finish_reason mapping work-item (tracked separately).
+    #[tokio::test]
+    async fn test_harmony_parser_output_independent_of_upstream_finish() {
+        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
+        let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+    }
+
+    /// CASE.6 — empty args. A no-arg harmony call (`{}`) must still surface
+    /// the function name.
+    #[tokio::test] // CASE.6 — gpt-oss
+    async fn test_parse_harmony_empty_args() {
+        let text =
+            r#"<|channel|>commentary to=functions.current_time <|constrain|>json<|message|>{}"#;
+        let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "current_time");
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// and whitespace-only inputs must yield no tool calls. Unlike the
+    /// XML/JSON parsers (which trim whitespace down to `Some("")`), the
+    /// harmony parser passes the input verbatim through to normal_text —
+    /// pin that distinction here.
+    #[tokio::test] // CASE.14 — gpt-oss
+    async fn test_parse_harmony_empty_and_whitespace_inputs() {
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (tool_calls, normal) =
+                parse_tool_calls_harmony_complete(input, &Default::default(), None)
+                    .await
+                    .unwrap();
+            assert!(
+                tool_calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            assert_eq!(
+                normal.as_deref(),
+                Some(*input),
+                "harmony passes empty/whitespace input verbatim to normal_text (input={:?})",
+                input
+            );
+        }
+    }
+
+    /// CASE.15 — duplicate calls (same function name twice). Two
+    /// back-to-back commentary blocks for the same function. Pin
+    /// parser-level behavior — both calls returned with distinct ids
+    /// and distinct args.
+    #[tokio::test] // CASE.15 — gpt-oss
+    async fn test_parse_harmony_duplicate_calls_same_name() {
+        let text = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"NYC"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"LA"}<|call|>"#;
+        let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "Both duplicate-name calls must be returned"
+        );
+        assert_ne!(
+            tool_calls[0].id, tool_calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let (name0, args0) = extract_name_and_args(tool_calls[0].clone());
+        let (name1, args1) = extract_name_and_args(tool_calls[1].clone());
+        assert_eq!(name0, "get_weather");
+        assert_eq!(name1, "get_weather");
+        assert_eq!(args0["city"], "NYC");
+        assert_eq!(args1["city"], "LA");
+    }
 }
 
 #[cfg(test)]
