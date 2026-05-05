@@ -248,7 +248,7 @@ class MinioService:
                 raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
-        """Download LoRA from Hugging Face Hub, returns temp directory path.
+        """Resolve the LoRA snapshot path from the local HF cache.
 
         Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
         """
@@ -258,26 +258,19 @@ class MinioService:
                 "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
             )
 
-        self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
-        self._logger.info(
-            f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
-        )
-
         # The adapter is staged into the HF cache by predownload_models (via
-        # @pytest.mark.model) before HF_HUB_OFFLINE is enabled, so read from the
-        # cache here without going to the network.
-        snapshot_download(
+        # @pytest.mark.model) before HF_HUB_OFFLINE is enabled. Resolve the cache
+        # snapshot path directly — passing local_dir bypasses the cache-hit
+        # short-circuit in snapshot_download and forces a copy that fails under
+        # local_files_only=True with an empty target dir.
+        snapshot_path = snapshot_download(
             self.config.lora_repo,
-            local_dir=self._temp_download_dir,
             local_files_only=True,
         )
-
-        # Clean up cache directory
-        cache_dir = os.path.join(self._temp_download_dir, ".cache")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-
-        return self._temp_download_dir
+        self._logger.info(
+            f"Resolved LoRA {self.config.lora_repo} from HF cache at {snapshot_path}"
+        )
+        return snapshot_path
 
     def upload_lora(self, local_path: str) -> None:
         """Upload LoRA to MinIO using boto3."""
