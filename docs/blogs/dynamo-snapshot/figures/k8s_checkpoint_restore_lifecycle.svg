@@ -1,4 +1,5 @@
 <svg width="100%" viewBox="0 0 690 360" role="img" xmlns="http://www.w3.org/2000/svg" style="">
+<rect width="100%" height="100%" fill="#ffffff"/>
   <title style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">Kubernetes checkpoint and restore lifecycle</title>
   <desc style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">On the checkpoint node, the snapshot agent observes the workload pod from the host and writes the artifact plus overlay diff to a shared PVC. On the restore node, the agent enters a placeholder pod's namespaces and restores the workload inside.</desc>
   <defs>
