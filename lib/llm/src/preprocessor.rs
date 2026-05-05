@@ -1283,24 +1283,45 @@ impl OpenAIPreprocessor {
             || matches!(reasoning_parser, Some("gemma4") | Some("gemma-4"))
     }
 
-    /// Override chat_template_args based on reasoning_effort
+    /// Override chat_template_args based on reasoning_effort.
+    ///
+    /// Returns `InvalidArgument` when `reasoning_effort` is present and
+    /// `chat_template_args` already contains a key from the parser's
+    /// `DisableCondition` list, mixing both mechanisms is ambiguous.
     fn apply_reasoning_overrides_to_template_args(
         parser_name: Option<&str>,
         reasoning_effort: Option<&dynamo_protocols::types::ReasoningEffort>,
         chat_template_args: &mut Option<std::collections::HashMap<String, serde_json::Value>>,
-    ) {
+    ) -> Result<()> {
         let Some(parser_name) = parser_name else {
-            return;
+            return Ok(());
         };
 
         let enable_thinking: Option<bool> = match reasoning_effort {
-            None => None,
+            None => return Ok(()),
             Some(dynamo_protocols::types::ReasoningEffort::None) => Some(false),
             _ => Some(true),
         };
         let Some(enabled) = enable_thinking else {
-            return;
+            return Ok(());
         };
+
+        // Reject conflicting manual template args
+        if let Some(args) = chat_template_args.as_ref() {
+            let conditions = get_disable_conditions(parser_name);
+            for cond in &conditions {
+                let key = match cond {
+                    DisableCondition::Bool(k, _) | DisableCondition::Str(k, _) => k,
+                };
+                if args.contains_key(*key) {
+                    return Err(DynamoError::builder()
+                        .error_type(ErrorType::InvalidArgument)
+                        .message(format!("cannot combine reasoning_effort with explicit \"{key}\" in chat_template_args"))
+                        .build()
+                        .into());
+                }
+            }
+        }
 
         let thinking_template_key = get_reasoning_template_key(parser_name);
 
@@ -1309,6 +1330,7 @@ impl OpenAIPreprocessor {
             thinking_template_key.to_string(),
             serde_json::Value::Bool(enabled),
         );
+        Ok(())
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -1456,7 +1478,7 @@ impl
             self.runtime_config.reasoning_parser.as_deref(),
             request.inner.reasoning_effort.as_ref(),
             &mut request.chat_template_args,
-        );
+        )?;
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -2154,7 +2176,8 @@ mod tests {
                 *parser,
                 effort.as_ref(),
                 &mut args,
-            );
+            )
+            .unwrap();
             match (expected_key, expected_value) {
                 (None, _) => {
                     assert!(
@@ -2186,12 +2209,64 @@ mod tests {
                 Some("basic"),
                 Some(&ReasoningEffort::High),
                 &mut args,
-            );
+            )
+            .unwrap();
             let map = args.as_ref().unwrap();
             assert_eq!(
                 map.get("custom"),
                 Some(&serde_json::Value::String("keep_me".to_string())),
                 "pre-existing keys must survive",
+            );
+        }
+
+        // Conflict: reasoning_effort + explicit disable key → error
+        {
+            let mut args = Some(std::collections::HashMap::from([(
+                "thinking".to_string(),
+                serde_json::Value::Bool(true),
+            )]));
+            let result = OpenAIPreprocessor::apply_reasoning_overrides_to_template_args(
+                Some("deepseek_r1"),
+                Some(&ReasoningEffort::High),
+                &mut args,
+            );
+            assert!(
+                result.is_err(),
+                "reasoning_effort + explicit thinking key must be rejected",
+            );
+        }
+
+        // Conflict: reasoning_effort + thinking_mode string key → error
+        {
+            let mut args = Some(std::collections::HashMap::from([(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("chat".to_string()),
+            )]));
+            let result = OpenAIPreprocessor::apply_reasoning_overrides_to_template_args(
+                Some("deepseek_v4"),
+                Some(&ReasoningEffort::None),
+                &mut args,
+            );
+            assert!(
+                result.is_err(),
+                "reasoning_effort + explicit thinking_mode key must be rejected",
+            );
+        }
+
+        // No conflict: reasoning_effort without any disable keys → ok
+        {
+            let mut args = Some(std::collections::HashMap::from([(
+                "unrelated_key".to_string(),
+                serde_json::Value::Bool(true),
+            )]));
+            let result = OpenAIPreprocessor::apply_reasoning_overrides_to_template_args(
+                Some("deepseek_r1"),
+                Some(&ReasoningEffort::High),
+                &mut args,
+            );
+            assert!(
+                result.is_ok(),
+                "reasoning_effort + unrelated keys must be accepted",
             );
         }
     }
