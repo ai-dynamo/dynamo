@@ -209,7 +209,7 @@ impl ReplayStartGate {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{OrderedMerge, WorkerTimelines};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Entry {

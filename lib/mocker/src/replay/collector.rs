@@ -4,6 +4,7 @@
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,72 @@ impl TraceSimulationReport {
         self.throughput.wall_time_ms = wall_time_ms;
         self
     }
+
+    pub fn processed_tokens(&self) -> usize {
+        self.request_counts.total_input_tokens + self.request_counts.total_output_tokens
+    }
+
+    pub fn processed_tokens_per_s(&self) -> f64 {
+        if self.throughput.wall_time_ms <= 0.0 {
+            return 0.0;
+        }
+        self.processed_tokens() as f64 / self.throughput.wall_time_ms * 1000.0
+    }
+
+    pub fn processed_output_tokens_per_s(&self) -> f64 {
+        if self.throughput.wall_time_ms <= 0.0 {
+            return 0.0;
+        }
+        self.request_counts.total_output_tokens as f64 / self.throughput.wall_time_ms * 1000.0
+    }
+}
+
+impl Display for TraceSimulationReport {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        writeln!(
+            f,
+            "  completed_requests: {}",
+            self.request_counts.completed_requests
+        )?;
+        writeln!(
+            f,
+            "  request_throughput_rps: {:.6}",
+            self.throughput.request_throughput_rps
+        )?;
+        writeln!(
+            f,
+            "  output_throughput_tok_s: {:.6}",
+            self.throughput.output_throughput_tok_s
+        )?;
+        writeln!(
+            f,
+            "  total_input_tokens: {}",
+            self.request_counts.total_input_tokens
+        )?;
+        writeln!(
+            f,
+            "  total_output_tokens: {}",
+            self.request_counts.total_output_tokens
+        )?;
+        writeln!(
+            f,
+            "  processed_tokens_per_s: {:.6}",
+            self.processed_tokens_per_s()
+        )?;
+        writeln!(
+            f,
+            "  processed_output_tokens_per_s: {:.6}",
+            self.processed_output_tokens_per_s()
+        )?;
+        writeln!(f, "  mean_ttft_ms: {:.6}", self.latency.ttft.mean_ms)?;
+        writeln!(f, "  mean_e2e_latency_ms: {:.6}", self.latency.e2e.mean_ms)?;
+        writeln!(
+            f,
+            "  prefix_cache_reused_ratio: {:.6}",
+            self.prefix_cache_reused_ratio
+        )?;
+        write!(f, "  wall_time_ms: {:.6}", self.throughput.wall_time_ms)
+    }
 }
 
 impl Serialize for TraceSimulationReport {
@@ -73,7 +140,7 @@ impl Serialize for TraceSimulationReport {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(59))?;
+        let mut map = serializer.serialize_map(Some(61))?;
         map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
         map.serialize_entry(
             "completed_requests",
@@ -104,6 +171,12 @@ impl Serialize for TraceSimulationReport {
         map.serialize_entry(
             "total_throughput_tok_s",
             &self.throughput.total_throughput_tok_s,
+        )?;
+        map.serialize_entry("processed_tokens", &self.processed_tokens())?;
+        map.serialize_entry("processed_tokens_per_s", &self.processed_tokens_per_s())?;
+        map.serialize_entry(
+            "processed_output_tokens_per_s",
+            &self.processed_output_tokens_per_s(),
         )?;
         map.serialize_entry("prefix_cache_reused_ratio", &self.prefix_cache_reused_ratio)?;
         serialize_distribution(&mut map, "ttft", &self.latency.ttft)?;

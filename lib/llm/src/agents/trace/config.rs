@@ -3,7 +3,9 @@
 
 use std::sync::OnceLock;
 
-use dynamo_runtime::config::environment_names::llm::agent_trace as env_agent_trace;
+use dynamo_runtime::config::{
+    env_is_falsey, environment_names::llm::agent_trace as env_agent_trace,
+};
 
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
@@ -20,6 +22,7 @@ pub struct AgentTracePolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
+    pub replay_hashes_enabled: bool,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
 }
@@ -81,6 +84,7 @@ fn load_from_env() -> AgentTracePolicy {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0);
+    let replay_hashes_enabled = !env_is_falsey(env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES);
 
     AgentTracePolicy {
         enabled: !sinks.is_empty() || tool_events_zmq_endpoint.is_some(),
@@ -91,6 +95,7 @@ fn load_from_env() -> AgentTracePolicy {
         jsonl_flush_interval_ms,
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
+        replay_hashes_enabled,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
     }
@@ -106,7 +111,9 @@ pub fn is_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_sink_names;
+    use dynamo_runtime::config::environment_names::llm::agent_trace as env_agent_trace;
+
+    use super::{load_from_env, parse_sink_names};
 
     #[test]
     fn parse_sink_names_trims_and_normalizes() {
@@ -123,5 +130,37 @@ mod tests {
     #[test]
     fn parse_sink_names_defaults_empty_value_to_stderr() {
         assert_eq!(parse_sink_names(" , "), vec!["stderr".to_string()]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replay_hashes_default_on() {
+        temp_env::with_var_unset(env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES, || {
+            assert!(load_from_env().replay_hashes_enabled);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replay_hashes_disable_with_falsey_env() {
+        temp_env::with_var(
+            env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
+            Some("false"),
+            || {
+                assert!(!load_from_env().replay_hashes_enabled);
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replay_hashes_stay_enabled_with_truthy_env() {
+        temp_env::with_var(
+            env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
+            Some("1"),
+            || {
+                assert!(load_from_env().replay_hashes_enabled);
+            },
+        );
     }
 }
