@@ -38,9 +38,7 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 
 use super::{RouteDoc, service_v2};
 use crate::engines::EchoBidirectionalEngine;
-use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-};
+use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 /// Process-scoped registry for the bidirectional engine. Populated by tests and
 /// (in production) by whatever wires up the experimental endpoint. If unset when
@@ -84,17 +82,17 @@ async fn asr_ws_handler(
     upgrade.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
+async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
     // TODO (#9175): read a session-init frame first so we can route /
     // look up the model before forwarding inference frames to the engine.
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
         tracing::error!("/v1/asr connection rejected: bidirectional engine not installed");
-        let _ = close_with(
-            socket,
-            close_code::ERROR,
-            "bidirectional engine not installed",
-        )
-        .await;
+        let _ = socket
+            .send(close_message(
+                close_code::ERROR,
+                "bidirectional engine not installed",
+            ))
+            .await;
         return;
     };
 
@@ -104,22 +102,20 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
     let input = RequestStream::new(request_stream, Context::new(()).context());
 
-    // Inbound writes a non-NORMAL `CloseFrame` here on protocol errors before
-    // cancelling the engine; outbound takes it after the response stream ends.
-    // Empty slot ⇒ NORMAL completion.
-    let close_reason: Arc<Mutex<Option<CloseFrame>>> = Arc::new(Mutex::new(None));
+    // Inbound writes a non-NORMAL close message here on protocol errors
+    // before cancelling the engine; outbound takes it after the response
+    // stream ends. Empty slot ⇒ NORMAL completion.
+    let close_reason: Arc<Mutex<Option<Message>>> = Arc::new(Mutex::new(None));
 
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,
         Err(err) => {
             tracing::error!(%err, "/v1/asr engine.generate() failed");
-            let mut sink = ws_tx;
-            let _ = send_error(&mut sink, &err.to_string()).await;
-            let _ = sink
-                .send(Message::Close(Some(close_frame(
+            let _ = ws_tx
+                .send(close_message(
                     close_code::ERROR,
-                    "engine error",
-                ))))
+                    &format!("engine error: {err}"),
+                ))
                 .await;
             return;
         }
@@ -146,14 +142,15 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                 break;
             }
         }
-        // Pick the close frame inbound left behind on protocol errors; otherwise
-        // the engine ended naturally (or via client cancellation) → NORMAL.
-        let frame = outbound_close_reason
+        // Pick the close message inbound left behind on protocol errors;
+        // otherwise the engine ended naturally (or via client cancellation)
+        // → NORMAL.
+        let msg = outbound_close_reason
             .lock()
             .expect("close_reason mutex poisoned")
             .take()
-            .unwrap_or_else(|| close_frame(close_code::NORMAL, "stream complete"));
-        let _ = ws_tx.send(Message::Close(Some(frame))).await;
+            .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"));
+        let _ = ws_tx.send(msg).await;
         // Drive the sink to completion so the Close frame drains before the
         // transport is dropped — otherwise axum can tear down the TCP socket
         // mid-frame and the client sees EOF instead of an in-band Close. Bound
@@ -182,14 +179,14 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
                     Err(err) => {
                         tracing::warn!(%err, "/v1/asr malformed JSON frame; closing");
                         *close_reason.lock().expect("close_reason mutex poisoned") =
-                            Some(close_frame(close_code::INVALID, "malformed JSON frame"));
+                            Some(close_message(close_code::INVALID, "malformed JSON frame"));
                         break;
                     }
                 }
             }
             Message::Binary(_) => {
                 tracing::warn!("/v1/asr received binary frame; not supported in this slice");
-                *close_reason.lock().expect("close_reason mutex poisoned") = Some(close_frame(
+                *close_reason.lock().expect("close_reason mutex poisoned") = Some(close_message(
                     close_code::UNSUPPORTED,
                     "binary frames not supported",
                 ));
@@ -211,37 +208,9 @@ async fn handle_socket(socket: WebSocket, _state: Arc<service_v2::State>) {
     let _ = outbound.await;
 }
 
-fn close_frame(code: u16, reason: &str) -> CloseFrame {
-    CloseFrame {
+fn close_message(code: u16, reason: &str) -> Message {
+    Message::Close(Some(CloseFrame {
         code,
         reason: Utf8Bytes::from(reason.to_string()),
-    }
+    }))
 }
-
-async fn close_with(socket: WebSocket, code: u16, reason: &str) -> Result<(), axum::Error> {
-    let mut socket = socket;
-    socket
-        .send(Message::Close(Some(close_frame(code, reason))))
-        .await
-}
-
-async fn send_error<S>(sink: &mut S, message: &str) -> Result<(), axum::Error>
-where
-    S: SinkExt<Message, Error = axum::Error> + Unpin,
-{
-    let payload = serde_json::json!({
-        "error": { "message": message, "code": "internal_error" }
-    });
-    sink.send(Message::Text(Utf8Bytes::from(payload.to_string())))
-        .await
-}
-
-// `EchoBidirectionalEngine` must be `Send + Sync + 'static` to live in `OnceLock`.
-// Compile-time assertion:
-const _: fn() = || {
-    fn _assert_send_sync<T: Send + Sync + 'static>() {}
-    _assert_send_sync::<EchoBidirectionalEngine>();
-};
-
-#[allow(unused)]
-fn _ensure_response_unused(_: NvCreateChatCompletionStreamResponse) {}
