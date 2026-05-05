@@ -237,16 +237,14 @@ pub struct TransferContext {
     // Device abstraction context and streams (multi-backend)
     #[allow(dead_code)]
     device_context: Arc<DeviceContext>,
-    /// Copy-engine stream pools for whole-block DMA transfers (batch_copy).
-    copy_h2d_streams: Vec<Arc<DeviceStream>>,
-    copy_d2h_streams: Vec<Arc<DeviceStream>>,
-    current_copy_h2d_stream: Arc<AtomicUsize>,
-    current_copy_d2h_stream: Arc<AtomicUsize>,
-    /// Compute-engine stream pools for per-chunk kernel transfers (vectorized_copy).
-    compute_h2d_streams: Vec<Arc<DeviceStream>>,
-    compute_d2h_streams: Vec<Arc<DeviceStream>>,
-    current_compute_h2d_stream: Arc<AtomicUsize>,
-    current_compute_d2h_stream: Arc<AtomicUsize>,
+    /// Stream pools, round-robin per direction. Shared by whole-block
+    /// `batch_copy` and per-chunk `vectorized_copy` — neither backend
+    /// binds queues to distinct engines (CUDA: unified stream, SYCL:
+    /// engine ordinal is chosen by the runtime, not by the queue).
+    h2d_streams: Vec<Arc<DeviceStream>>,
+    d2h_streams: Vec<Arc<DeviceStream>>,
+    current_h2d_stream: Arc<AtomicUsize>,
+    current_d2h_stream: Arc<AtomicUsize>,
     // Device memory pool for kernel allocations (multi-backend)
     #[allow(dead_code)]
     device_pool: Arc<DeviceMemPool>,
@@ -284,22 +282,17 @@ impl TransferContext {
             device_ctx.create_memory_pool(pool_reserve_size, pool_release_threshold)?
         );
 
-        // Create device stream pools (num_streams per engine×direction, round-robin)
+        // Create device stream pools (num_streams per direction, round-robin).
+        // One pool per direction matches the upstream CUDA design; both
+        // whole-block `batch_copy` and kernel `vectorized_copy` share the
+        // same pool, because neither backend binds queues to separate
+        // engine classes today.
         let num_streams = num_streams.max(1); // Ensure at least 1 stream
 
-        // Copy-engine pools: whole-block batch_copy → BCS on ZE, regular on CUDA
-        let copy_h2d_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
+        let h2d_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
             .map(|_| device_ctx.create_stream().map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
-        let copy_d2h_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
-            .map(|_| device_ctx.create_stream().map(Arc::new))
-            .collect::<Result<Vec<_>>>()?;
-
-        // Compute-engine pools: vectorized_copy kernel streams
-        let compute_h2d_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
-            .map(|_| device_ctx.create_stream().map(Arc::new))
-            .collect::<Result<Vec<_>>>()?;
-        let compute_d2h_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
+        let d2h_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
             .map(|_| device_ctx.create_stream().map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
 
@@ -337,14 +330,10 @@ impl TransferContext {
             capabilities,
             event_system,
             device_context: Arc::new(device_ctx),
-            copy_h2d_streams,
-            copy_d2h_streams,
-            current_copy_h2d_stream: Arc::new(AtomicUsize::new(0)),
-            current_copy_d2h_stream: Arc::new(AtomicUsize::new(0)),
-            compute_h2d_streams,
-            compute_d2h_streams,
-            current_compute_h2d_stream: Arc::new(AtomicUsize::new(0)),
-            current_compute_d2h_stream: Arc::new(AtomicUsize::new(0)),
+            h2d_streams,
+            d2h_streams,
+            current_h2d_stream: Arc::new(AtomicUsize::new(0)),
+            current_d2h_stream: Arc::new(AtomicUsize::new(0)),
             device_pool,
             tx_nixl_status,
             tx_device_event,
@@ -385,40 +374,28 @@ impl TransferContext {
         &self.device_pool
     }
 
-    /// Get next copy-engine H2D stream (whole-block DMA).
-    pub(crate) fn next_copy_h2d_stream(&self) -> Arc<DeviceStream> {
-        let idx = self.current_copy_h2d_stream.fetch_add(1, Ordering::Relaxed);
-        self.copy_h2d_streams[idx % self.copy_h2d_streams.len()].clone()
+    /// Get next H2D stream (round-robin across the H2D pool).
+    pub(crate) fn next_h2d_stream(&self) -> Arc<DeviceStream> {
+        let idx = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
+        self.h2d_streams[idx % self.h2d_streams.len()].clone()
     }
 
-    /// Get next copy-engine D2H stream (whole-block DMA).
-    pub(crate) fn next_copy_d2h_stream(&self) -> Arc<DeviceStream> {
-        let idx = self.current_copy_d2h_stream.fetch_add(1, Ordering::Relaxed);
-        self.copy_d2h_streams[idx % self.copy_d2h_streams.len()].clone()
+    /// Get next D2H stream (round-robin across the D2H pool).
+    pub(crate) fn next_d2h_stream(&self) -> Arc<DeviceStream> {
+        let idx = self.current_d2h_stream.fetch_add(1, Ordering::Relaxed);
+        self.d2h_streams[idx % self.d2h_streams.len()].clone()
     }
 
-    /// Get next compute-engine H2D stream (fc_lw vectorized_copy).
-    pub(crate) fn next_compute_h2d_stream(&self) -> Arc<DeviceStream> {
-        let idx = self.current_compute_h2d_stream.fetch_add(1, Ordering::Relaxed);
-        self.compute_h2d_streams[idx % self.compute_h2d_streams.len()].clone()
-    }
-
-    /// Get next compute-engine D2H stream (fc_lw vectorized_copy).
-    pub(crate) fn next_compute_d2h_stream(&self) -> Arc<DeviceStream> {
-        let idx = self.current_compute_d2h_stream.fetch_add(1, Ordering::Relaxed);
-        self.compute_d2h_streams[idx % self.compute_d2h_streams.len()].clone()
-    }
-
-    /// Acquire an H2D stream (public API for external callers, defaults to copy engine).
+    /// Acquire an H2D stream (public API for external callers).
     #[doc(hidden)]
     pub fn acquire_h2d_stream(&self) -> Arc<DeviceStream> {
-        self.next_copy_h2d_stream()
+        self.next_h2d_stream()
     }
 
-    /// Acquire a D2H stream (public API for external callers, defaults to copy engine).
+    /// Acquire a D2H stream (public API for external callers).
     #[doc(hidden)]
     pub fn acquire_d2h_stream(&self) -> Arc<DeviceStream> {
-        self.next_copy_d2h_stream()
+        self.next_d2h_stream()
     }
 
     /// Register a NIXL transfer request for status polling completion.

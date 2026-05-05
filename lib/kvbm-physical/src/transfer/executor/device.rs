@@ -69,23 +69,22 @@ pub fn execute_device_transfer(
     // Track whether caller provided stream (affects event recording)
     let caller_manages_sync = device_stream.is_some();
 
-    // Check if whole-block optimization is applicable (needed for engine selection)
+    // Check if whole-block optimization is applicable (determines which
+    // executor we dispatch to; both variants share the same direction pool).
     let whole_block = can_use_whole_block_transfer(src, dst, Some(&layers));
 
     let is_d2h = matches!(strategy, TransferStrategy::AsyncD2H | TransferStrategy::BlockingD2H);
 
-    // Select stream: caller-provided takes precedence, otherwise pick by engine×direction.
-    // - Whole-block (batch_copy): Copy engine (BCS on ZE) — dedicated DMA.
-    // - FC↔LW (vectorized_copy): Compute engine (CCS on ZE) — kernel + small H2D.
-    // - D2D: is_d2h=false, so D2D shares the h2d pools. This is intentional —
-    //   the direction label only affects pool selection, not the actual copy
-    //   direction (which is determined by source/destination pointers).
+    // Select stream: caller-provided takes precedence, otherwise round-robin
+    // the direction pool. D2D maps to the H2D pool (is_d2h = false); the
+    // actual copy direction is determined by source/destination pointers,
+    // the label just picks which pool to draw from.
     let device_stream = if let Some(s) = device_stream {
         s
-    } else if whole_block {
-        if is_d2h { ctx.next_copy_d2h_stream() } else { ctx.next_copy_h2d_stream() }
+    } else if is_d2h {
+        ctx.next_d2h_stream()
     } else {
-        if is_d2h { ctx.next_compute_d2h_stream() } else { ctx.next_compute_h2d_stream() }
+        ctx.next_h2d_stream()
     };
 
     let strategy_name = match strategy {
