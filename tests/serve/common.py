@@ -17,7 +17,11 @@ from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
-from tests.utils.engine_process import EngineConfig, EngineProcess, EngineResponseError
+from tests.utils.engine_process import (
+    EngineConfig,
+    EngineProcess,
+    ResponseValidationError,
+)
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
@@ -190,7 +194,7 @@ def run_serve_deployment(
                     # "Flaky Tests" for when this is appropriate. Backoff
                     # factor 1.5 keeps the worst-case sleep budget bounded
                     # for retry counts up to ~6.
-                    last_err: Optional[EngineResponseError] = None
+                    last_err: Optional[ResponseValidationError] = None
                     for attempt in range(payload.retries + 1):
                         try:
                             response = send_request(
@@ -203,7 +207,7 @@ def run_serve_deployment(
                             server_process.check_response(payload, response)
                             last_err = None
                             break
-                        except EngineResponseError as e:
+                        except ResponseValidationError as e:
                             last_err = e
                             if attempt < payload.retries:
                                 wait = 1.0 * (1.5**attempt)
