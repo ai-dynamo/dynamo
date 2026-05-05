@@ -4,25 +4,25 @@
 //! Branch-based prefix sharding over `ThreadPoolIndexer<T>`.
 //!
 //! [`BranchShardedIndexer`] partitions the prefix space by building an explicit
-//! routing table that maps branch keys (FNV-1a hash of first `prefix_depth`
-//! block hashes) to shard indices.  Unlike [`PrefixShardedIndexer`] which uses
-//! `hash % N`, new branches are assigned to the **least-loaded shard** at first
-//! insertion time, so load is balanced regardless of hash distribution.
+//! routing table that maps FNV-1a prefix keys to shard indices. Unlike
+//! [`PrefixShardedIndexer`] which uses `hash % N`, new independent branches are
+//! assigned to the least-loaded shard at first insertion time; continuations and
+//! overlapping prefix aliases reuse the existing shard so one logical chain does
+//! not cross shards.
 //!
 //! ## Key properties
 //!
-//! - **Single-shard `find_matches`**: a query routes to exactly one shard — no
-//!   scatter-gather.  Read throughput scales linearly with shard count.
-//! - **Least-loaded branch assignment**: each new branch key is assigned to the
-//!   shard with the fewest branches, ensuring balanced distribution even when
-//!   the underlying hash values cluster.
+//! - **Single-shard `find_matches`**: a query routes to the shard for the
+//!   deepest registered prefix alias — no scatter-gather.
+//! - **Load-aware branch assignment**: independent new branches are assigned by
+//!   live shard block count, with branch count as a tiebreaker.
 //! - **Stable shard assignment**: once a branch is assigned, it never migrates.
 //!   CRTC-internal splits stay within the owning shard — no migration protocol
 //!   needed.  The shard assignment is keyed on the *sequence prefix* (first K
 //!   blocks), not on tree nodes, so splits are transparent to this layer.
-//! - **Unknown-branch fast path**: if a query's branch key is not in the routing
-//!   table, no worker has ever stored that prefix.  `find_matches` returns empty
-//!   scores immediately without dispatching to any shard.
+//! - **Unknown-branch fast path**: if none of a query's prefix keys are in the
+//!   routing table, no worker has ever stored that routed prefix. `find_matches`
+//!   returns empty scores immediately without dispatching to any shard.
 //!
 //! ## Remove routing
 //!
@@ -59,6 +59,7 @@ use crate::protocols::*;
 
 const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
+const INLINE_PREFIX_KEY_CAP: usize = 16;
 
 /// Fold one `u64` value into an FNV-1a accumulator.
 #[inline(always)]
@@ -85,12 +86,15 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     /// Number of leading blocks used to identify a branch.  Default: 2.
     prefix_depth: usize,
 
-    /// Routing table: FNV-1a(first `prefix_depth` `LocalBlockHash`) → shard index.
+    /// Routing table: FNV-1a prefix key → shard index.
     ///
-    /// Populated lazily at first `Stored` event for each distinct branch.
+    /// Populated lazily at first `Stored` event for each distinct branch.  A
+    /// branch can register multiple aliases, one for each prefix depth up to
+    /// `prefix_depth`, so shallow-overlap queries can route to a useful shard.
     branch_to_shard: DashMap<u64, usize, FxBuildHasher>,
 
-    /// Number of branches assigned to each shard (for observability).
+    /// Number of canonical branch assignments per shard (for observability and
+    /// load-selection tiebreaking).  Prefix aliases are not counted separately.
     branch_counts: Mutex<Vec<usize>>,
 
     /// Eagerly-updated block count per shard.
@@ -136,15 +140,15 @@ pub struct BranchShardedIndexer<T: SyncIndexer> {
     ///
     /// For workloads with a shared prefix shorter than `prefix_depth` (e.g. a
     /// 15-block system prompt with `prefix_depth = 17`), all root events produce
-    /// the **same** partial FNV hash, collapsing every conversation onto a single
-    /// shard.  By carrying the accumulated FNV forward into continuation events,
-    /// each conversation extends the hash with its own unique blocks (positions
-    /// 15 and 16) and thereby receives a distinct, balanced shard assignment.
+    /// the **same** partial FNV hash.  `block_to_fnv_state` carries both that
+    /// accumulated FNV and the root shard into continuation events, so routing is
+    /// sticky: the continuation finalizes prefix aliases on the root's shard
+    /// instead of crossing to a shard that lacks the parent chain.
     ///
-    /// `find_matches` hashes only the available prefix (`min(prefix_depth, len)`).
-    /// A query shorter than `prefix_depth` is handled by `register_prefix_keys`,
-    /// which records intermediate FNV values (depths 1 … prefix_depth) at store
-    /// time so short queries route to the correct shard instead of a false miss.
+    /// `find_matches` computes prefix keys up to `prefix_depth` and routes by
+    /// the deepest registered key.  `register_prefix_keys` records intermediate
+    /// FNV values (depths 1 … prefix_depth) at store time so queries that only
+    /// overlap a shallow prefix still probe the shard that can return that score.
     ///
     /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
     /// `Cleared` events; only `Removed` events prune them.
@@ -204,12 +208,13 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
 
     /// FNV-1a hash of the first `min(prefix_depth, len)` `LocalBlockHash` values.
     ///
-    /// Used by `find_matches` to compute the branch key for an incoming query.
+    /// Test helper for checking routing-table aliases.
+    #[cfg(test)]
     fn branch_key_for_local_hashes(&self, hashes: &[LocalBlockHash]) -> u64 {
-        let k = self.prefix_depth.min(hashes.len());
-        hashes[..k]
-            .iter()
-            .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.0))
+        Self::prefix_keys_for_local_hashes(hashes, self.prefix_depth)
+            .last()
+            .copied()
+            .unwrap_or(FNV_OFFSET_BASIS)
     }
 
     /// FNV-1a hash of the first `min(prefix_depth, len)` `tokens_hash` values
@@ -225,6 +230,41 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
 
     fn lookup_shard(&self, branch_key: u64) -> Option<usize> {
         self.branch_to_shard.get(&branch_key).map(|v| *v)
+    }
+
+    fn lookup_deepest_prefix_shard(&self, branch_keys: &[u64]) -> Option<(usize, bool)> {
+        let exact_depth = branch_keys.len();
+        branch_keys
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, branch_key)| {
+                self.lookup_shard(*branch_key)
+                    .map(|shard| (shard, idx + 1 < exact_depth))
+            })
+    }
+
+    fn lookup_deepest_prefix_shard_for_hashes(
+        &self,
+        hashes: &[LocalBlockHash],
+    ) -> Option<(usize, bool)> {
+        let limit = self.prefix_depth.min(hashes.len());
+        if limit == 0 {
+            return None;
+        }
+
+        if limit <= INLINE_PREFIX_KEY_CAP {
+            let mut branch_keys = [0; INLINE_PREFIX_KEY_CAP];
+            let mut state = FNV_OFFSET_BASIS;
+            for (idx, block) in hashes.iter().take(limit).enumerate() {
+                state = fnv_fold(state, block.0);
+                branch_keys[idx] = state;
+            }
+            return self.lookup_deepest_prefix_shard(&branch_keys[..limit]);
+        }
+
+        let branch_keys = Self::prefix_keys_for_local_hashes(hashes, limit);
+        self.lookup_deepest_prefix_shard(&branch_keys)
     }
 
     /// Get or create a shard assignment for a branch key.
@@ -263,8 +303,50 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         selected
     }
 
-    /// Register shorter prefix keys for the same shard without affecting
-    /// branch-count accounting.
+    /// Get or create one shard assignment for a complete set of prefix aliases.
+    ///
+    /// A root batch that already has a shorter prefix alias (for example `[A]`)
+    /// must reuse that shard when it also registers the full prefix (`[A, B]`).
+    /// Serializing the alias check and insertion with the same lock used by
+    /// `assign_shard` prevents the shallow-root and full-root batch shapes from
+    /// assigning the same logical prefix to different shards.
+    fn assign_shard_for_prefix_keys(&self, branch_keys: &[u64]) -> usize {
+        if branch_keys.is_empty() {
+            return self.assign_shard(FNV_OFFSET_BASIS);
+        }
+
+        let mut counts = self.branch_counts.lock().unwrap();
+        let selected = branch_keys
+            .iter()
+            .find_map(|key| self.branch_to_shard.get(key).map(|v| *v))
+            .unwrap_or_else(|| {
+                self.shard_block_counts
+                    .iter()
+                    .enumerate()
+                    .min_by(|(i, a), (j, b)| {
+                        a.load(Ordering::Relaxed)
+                            .cmp(&b.load(Ordering::Relaxed))
+                            .then(counts[*i].cmp(&counts[*j]))
+                    })
+                    .unwrap()
+                    .0
+            });
+
+        let canonical_key = *branch_keys.last().unwrap();
+        let canonical_was_known = self.branch_to_shard.contains_key(&canonical_key);
+        for &branch_key in branch_keys {
+            self.branch_to_shard.entry(branch_key).or_insert(selected);
+        }
+        if !canonical_was_known
+            && self.branch_to_shard.get(&canonical_key).map(|v| *v) == Some(selected)
+        {
+            counts[selected] += 1;
+        }
+
+        selected
+    }
+
+    /// Register prefix keys for an already-selected shard.
     ///
     /// This supports short queries (`len < prefix_depth`) that should still
     /// route to the shard containing a longer cached prefix and obtain a
@@ -273,8 +355,21 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     where
         I: IntoIterator<Item = u64>,
     {
+        let branch_keys: Vec<u64> = branch_keys.into_iter().collect();
+        if branch_keys.is_empty() {
+            return;
+        }
+
+        let mut counts = self.branch_counts.lock().unwrap();
+        let canonical_key = *branch_keys.last().unwrap();
+        let canonical_was_known = self.branch_to_shard.contains_key(&canonical_key);
         for branch_key in branch_keys {
             self.branch_to_shard.entry(branch_key).or_insert(shard_idx);
+        }
+        if !canonical_was_known
+            && self.branch_to_shard.get(&canonical_key).map(|v| *v) == Some(shard_idx)
+        {
+            counts[shard_idx] += 1;
         }
     }
 
@@ -289,6 +384,17 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         let mut state = initial_state;
         for block in blocks.iter().take(limit) {
             state = fnv_fold(state, block.tokens_hash.0);
+            keys.push(state);
+        }
+        keys
+    }
+
+    fn prefix_keys_for_local_hashes(hashes: &[LocalBlockHash], limit: usize) -> Vec<u64> {
+        let limit = limit.min(hashes.len());
+        let mut keys = Vec::with_capacity(limit);
+        let mut state = FNV_OFFSET_BASIS;
+        for block in hashes.iter().take(limit) {
+            state = fnv_fold(state, block.0);
             keys.push(state);
         }
         keys
@@ -323,21 +429,26 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     ///    shorter than `prefix_depth` this is a partial key; a future
     ///    continuation in case A will extend it to the full depth.
     ///
-    /// Returns `(shard_idx, Option<(fnv, depth, shard)>)`.  A `Some` state means
-    /// the chain has not yet reached `prefix_depth` blocks; the caller should
-    /// record it on the last block of the batch so the next continuation can
-    /// extend it.  The shard in the state tuple is the sticky shard so that
-    /// continuations never cross shards mid-chain.
-    /// Returns `(shard_idx, fnv_state, parent_found)`.
+    /// Returns `(shard_idx, fnv_state, parent_found, branch_keys)`.
+    ///
+    /// `fnv_state` is `Some` only while the chain has not yet reached
+    /// `prefix_depth`; the caller records it on the last block of the batch so
+    /// the next continuation can extend it.  The shard in the state tuple is the
+    /// sticky shard so continuations never cross shards mid-chain.
     ///
     /// `parent_found` is `false` only for Case C OOO (continuation whose parent
     /// is absent from both routing maps).  The caller uses this to strip the
     /// parent hash before dispatching so the CRTC stores the blocks as an orphan
     /// root rather than dropping them with a "parent not found" warning.
+    ///
+    /// `branch_keys` contains every key written (or updated) in `branch_to_shard`
+    /// during this call.  The caller uses this list to correct `branch_to_shard`
+    /// when the canonical shard (`actual_shard`, determined after inspecting
+    /// `block_to_shard`) differs from `shard_idx`.
     fn compute_stored_routing(
         &self,
         store_data: &KvCacheStoreData,
-    ) -> (usize, Option<(u64, usize, usize)>, bool) {
+    ) -> (usize, Option<(u64, usize, usize)>, bool, Vec<u64>) {
         if let Some(parent_hash) = &store_data.parent_hash {
             if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
                 // Case A: parent is shallow — extend FNV accumulator.
@@ -355,22 +466,21 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
                 let fnv = prefix_keys.last().copied().unwrap_or(parent_fnv);
                 let new_depth = parent_depth + to_process;
                 let shard = parent_shard;
-                if new_depth >= self.prefix_depth {
-                    self.register_prefix_keys(shard, prefix_keys);
-                    // Mirror the branch_counts increment that assign_shard would
-                    // have done in the pre-sticky-routing code path, so the
-                    // tiebreaker accounting stays accurate.
-                    self.branch_counts.lock().unwrap()[shard] += 1;
-                }
+                let branch_keys = if new_depth >= self.prefix_depth {
+                    self.register_prefix_keys(shard, prefix_keys.iter().copied());
+                    prefix_keys
+                } else {
+                    vec![]
+                };
                 let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth, shard));
-                (shard, state, true)
+                (shard, state, true, branch_keys)
             } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
                 // Case B: deep chain — inherit shard.
-                (shard, None, true)
+                (shard, None, true, vec![])
             } else {
                 // Case C (OOO): parent not in either map; best-effort key from this batch.
                 let key = self.branch_key_for_stored_blocks(&store_data.blocks);
-                (self.assign_shard(key), None, false)
+                (self.assign_shard(key), None, false, vec![key])
             }
         } else {
             // Case C (root): start FNV accumulation from scratch.
@@ -382,10 +492,9 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             );
             let fnv = prefix_keys.last().copied().unwrap_or(FNV_OFFSET_BASIS);
             let depth = to_process;
-            let shard = self.assign_shard(fnv);
-            self.register_prefix_keys(shard, prefix_keys);
+            let shard = self.assign_shard_for_prefix_keys(&prefix_keys);
             let state = (depth < self.prefix_depth).then_some((fnv, depth, shard));
-            (shard, state, true)
+            (shard, state, true, prefix_keys)
         }
     }
 
@@ -394,21 +503,77 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             return;
         };
 
-        let (shard_idx, new_fnv_state, parent_found) = self.compute_stored_routing(store_data);
+        let (shard_idx, new_fnv_state, parent_found, branch_keys) =
+            self.compute_stored_routing(store_data);
 
-        // Update eager block count before dispatching.
-        self.shard_block_counts[shard_idx].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
+        // Resolve the canonical shard for Case C (root or OOO) by atomically
+        // inserting the first block into `block_to_shard`.  Two concurrent
+        // workers whose root events share the same first
+        // `ExternalSequenceBlockHash` can race through `assign_shard` with
+        // different `shard_block_counts` snapshots and compute different
+        // `shard_idx` values.  Only one `or_insert` wins; the loser's
+        // `shard_idx` then diverges from what `block_to_shard` records, so
+        // continuations (Case B) land on the wrong shard.  Reading back the
+        // winning entry's shard as `actual_shard` and correcting
+        // `branch_to_shard` keeps root, continuations, and `find_matches` on
+        // the same shard.
+        //
+        // Scoped to Case C only: Case A/B already inherit a deterministic
+        // parent shard via sticky routing, and applying the reconciliation
+        // there corrupts sequential-mode overlap scoring.
+        let is_case_c = store_data.parent_hash.is_none() || !parent_found;
+        let actual_shard = if is_case_c {
+            if let Some(first_block) = store_data.blocks.first() {
+                let entry = self
+                    .block_to_shard
+                    .entry(first_block.block_hash.0)
+                    .and_modify(|e| e.1 += 1)
+                    .or_insert((shard_idx, 1));
+                let s = entry.0;
+                drop(entry);
+                s
+            } else {
+                shard_idx
+            }
+        } else {
+            shard_idx
+        };
 
-        // Record block → shard before dispatching so a fast continuation
-        // can find entries immediately.
-        for block in &store_data.blocks {
+        if is_case_c && actual_shard != shard_idx {
+            let canonical_key = branch_keys.last().copied();
+            let mut moved_canonical = false;
+            let mut counts = self.branch_counts.lock().unwrap();
+            for key in &branch_keys {
+                self.branch_to_shard.entry(*key).and_modify(|v| {
+                    if *v == shard_idx {
+                        *v = actual_shard;
+                        moved_canonical |= Some(*key) == canonical_key;
+                    }
+                });
+            }
+            if moved_canonical {
+                counts[shard_idx] = counts[shard_idx].saturating_sub(1);
+                counts[actual_shard] += 1;
+            }
+        }
+
+        // Update eager block count for the canonical shard.
+        self.shard_block_counts[actual_shard].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
+
+        // Register blocks in block_to_shard.
+        // Case C: the first block was already registered when computing
+        // actual_shard above; register the rest starting at index 1.
+        // Case A/B: register all blocks (shard_idx == actual_shard).
+        let block_skip = usize::from(is_case_c);
+        for block in store_data.blocks.iter().skip(block_skip) {
             self.block_to_shard
                 .entry(block.block_hash.0)
                 .and_modify(|e| e.1 += 1)
-                .or_insert((shard_idx, 1));
+                .or_insert((actual_shard, 1));
         }
 
-        // Propagate partial FNV state on the last block of this batch.
+        // Propagate partial FNV state with the canonical shard on the last block.
+        let new_fnv_state = new_fnv_state.map(|(fnv, depth, _)| (fnv, depth, actual_shard));
         if let (Some(fnv_state), Some(last_block)) = (new_fnv_state, store_data.blocks.last()) {
             self.block_to_fnv_state
                 .insert(last_block.block_hash.0, fnv_state);
@@ -424,7 +589,64 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             }
         }
 
-        self.shards[shard_idx].apply_event(event).await;
+        self.shards[actual_shard].apply_event(event).await;
+    }
+
+    async fn find_matches_for_sequence(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        #[cfg(feature = "bench")]
+        let t_routing = Instant::now();
+        let (shard_idx, used_shallow_fallback) =
+            match self.lookup_deepest_prefix_shard_for_hashes(&sequence) {
+                Some(route) => route,
+                None => {
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .find_match_early_returns
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(OverlapScores::new());
+                }
+            };
+        #[cfg(not(feature = "bench"))]
+        let _ = used_shallow_fallback;
+        #[cfg(feature = "bench")]
+        {
+            if used_shallow_fallback {
+                self.metrics
+                    .counters
+                    .shallow_fallback
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.metrics
+                .counters
+                .find_match_dispatches
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        #[cfg(feature = "bench")]
+        let routing_ns = t_routing.elapsed().as_nanos() as u64;
+
+        #[cfg(feature = "bench")]
+        let t_shard = Instant::now();
+        let result = self.shards[shard_idx].find_matches(sequence).await;
+        #[cfg(feature = "bench")]
+        {
+            let shard_ns = t_shard.elapsed().as_nanos() as u64;
+            self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .timing
+                .routing_ns
+                .fetch_add(routing_ns, Ordering::Relaxed);
+            self.metrics
+                .timing
+                .shard_ns
+                .fetch_add(shard_ns, Ordering::Relaxed);
+        }
+
+        result
     }
 
     async fn apply_removed(&self, event: RouterEvent) {
@@ -514,56 +736,17 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
 
 #[async_trait]
 impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
-    /// Route to a single shard determined by the first `prefix_depth` block hashes.
+    /// Route to a single shard determined by the deepest registered query prefix.
     ///
-    /// If the branch key is not in the routing table, no worker has ever stored
-    /// that prefix, so the result would be empty regardless of which shard is
-    /// queried.  We return `OverlapScores::new()` immediately without dispatching.
+    /// If none of the query's prefix keys are in the routing table, no worker
+    /// has ever stored an overlapping routed prefix, so the result would be
+    /// empty regardless of which shard is queried.  We return
+    /// `OverlapScores::new()` immediately without dispatching.
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
-        #[cfg(feature = "bench")]
-        let t_routing = Instant::now();
-        let branch_key = self.branch_key_for_local_hashes(&sequence);
-        let shard_idx = match self.lookup_shard(branch_key) {
-            Some(idx) => idx,
-            None => {
-                #[cfg(feature = "bench")]
-                self.metrics
-                    .counters
-                    .find_match_early_returns
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(OverlapScores::new());
-            }
-        };
-        #[cfg(feature = "bench")]
-        self.metrics
-            .counters
-            .find_match_dispatches
-            .fetch_add(1, Ordering::Relaxed);
-
-        #[cfg(feature = "bench")]
-        let routing_ns = t_routing.elapsed().as_nanos() as u64;
-
-        #[cfg(feature = "bench")]
-        let t_shard = Instant::now();
-        let result = self.shards[shard_idx].find_matches(sequence).await;
-        #[cfg(feature = "bench")]
-        {
-            let shard_ns = t_shard.elapsed().as_nanos() as u64;
-            self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
-            self.metrics
-                .timing
-                .routing_ns
-                .fetch_add(routing_ns, Ordering::Relaxed);
-            self.metrics
-                .timing
-                .shard_ns
-                .fetch_add(shard_ns, Ordering::Relaxed);
-        }
-
-        result
+        self.find_matches_for_sequence(sequence).await
     }
 
     async fn find_matches_for_request(
@@ -581,11 +764,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 block_mm_infos: None,
             },
         );
-        let branch_key = self.branch_key_for_local_hashes(&sequence);
-        match self.lookup_shard(branch_key) {
-            Some(idx) => self.shards[idx].find_matches(sequence).await,
-            None => Ok(OverlapScores::new()),
-        }
+        self.find_matches_for_sequence(sequence).await
     }
 
     async fn apply_event(&self, event: RouterEvent) {
@@ -681,11 +860,17 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 .counters
                 .find_match_dispatches
                 .load(Ordering::Relaxed);
+            let shallow_fallbacks = self
+                .metrics
+                .counters
+                .shallow_fallback
+                .load(Ordering::Relaxed);
             let misses = self
                 .metrics
                 .counters
                 .find_match_early_returns
                 .load(Ordering::Relaxed);
+            let exact_dispatches = dispatched.saturating_sub(shallow_fallbacks);
             let total_calls = dispatched + misses;
             let broadcasts = self
                 .metrics
@@ -696,6 +881,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 return String::new();
             }
             let miss_pct = 100.0 * misses as f64 / total_calls as f64;
+            let fallback_pct = 100.0 * shallow_fallbacks as f64 / total_calls as f64;
 
             let timing = {
                 let timing_calls = self.metrics.timing.calls.load(Ordering::Relaxed);
@@ -724,7 +910,8 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 .collect();
             drop(branch_counts);
             format!(
-                "BranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
+                "BranchShardedIndexer find_matches ({total_calls} total: {exact_dispatches} exact dispatch, \
+             {shallow_fallbacks} shallow-fallback / {fallback_pct:.1}%, \
              {misses} early-exit / {miss_pct:.1}% miss):{timing}\n  \
              branches known = {total_branches}  ({})\n  \
              remove broadcasts = {broadcasts}  (fallback for blocks absent from index)",
@@ -738,6 +925,8 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
 mod tests {
     use super::*;
     use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+    #[cfg(feature = "bench")]
+    use std::sync::atomic::Ordering;
 
     fn block(block_hash: u64, tokens_hash: u64) -> KvCacheStoredBlockData {
         KvCacheStoredBlockData {
@@ -776,6 +965,17 @@ mod tests {
         BranchShardedIndexer::new_with_options(shards, prefix_depth, 32)
     }
 
+    fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
+        values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn score(scores: &OverlapScores, worker_id: WorkerId) -> Option<u32> {
+        scores
+            .scores
+            .get(&WorkerWithDpRank::new(worker_id, 0))
+            .copied()
+    }
+
     #[tokio::test]
     async fn short_query_hits_after_full_root_batch_registers_intermediate_keys() {
         let indexer = make_indexer(2, 2);
@@ -797,6 +997,71 @@ mod tests {
             best, 1,
             "short query should get shallow overlap instead of miss"
         );
+    }
+
+    #[tokio::test]
+    async fn shallow_overlap_fallback_avoids_false_miss_for_diverging_query() {
+        let indexer = make_indexer(2, 2);
+        indexer
+            .apply_event(stored_event(
+                1,
+                None,
+                vec![block(101, 11), block(102, 22), block(103, 33)],
+            ))
+            .await;
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(99)])
+            .await
+            .expect("query should succeed");
+        assert_eq!(score(&overlap, 1), Some(1));
+        #[cfg(feature = "bench")]
+        assert_eq!(
+            indexer
+                .metrics
+                .counters
+                .shallow_fallback
+                .load(Ordering::Relaxed),
+            1
+        );
+        #[cfg(feature = "bench")]
+        assert_eq!(
+            indexer
+                .metrics
+                .counters
+                .find_match_early_returns
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn shallow_overlap_fallback_uses_deepest_matching_prefix() {
+        let indexer = make_indexer(2, 3);
+        indexer
+            .apply_event(stored_event(
+                1,
+                None,
+                vec![
+                    block(101, 11),
+                    block(102, 22),
+                    block(103, 33),
+                    block(104, 44),
+                ],
+            ))
+            .await;
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![
+                LocalBlockHash(11),
+                LocalBlockHash(22),
+                LocalBlockHash(99),
+            ])
+            .await
+            .expect("query should succeed");
+        assert_eq!(score(&overlap, 1), Some(2));
     }
 
     #[tokio::test]
@@ -827,6 +1092,37 @@ mod tests {
         assert_eq!(
             best, 2,
             "prefix keys added during depth crossing should route short queries correctly"
+        );
+    }
+
+    #[tokio::test]
+    async fn case_a_intermediate_query_routes_via_fallback_before_crossing_prefix_depth() {
+        let indexer = make_indexer(1, 4);
+        indexer
+            .apply_event(stored_event(1, None, vec![block(100, 10)]))
+            .await;
+        indexer
+            .apply_event(stored_event(
+                1,
+                Some(100),
+                vec![block(101, 11), block(102, 22)],
+            ))
+            .await;
+        indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(10), LocalBlockHash(11)])
+            .await
+            .expect("query should succeed");
+        assert_eq!(score(&overlap, 1), Some(2));
+        #[cfg(feature = "bench")]
+        assert_eq!(
+            indexer
+                .metrics
+                .counters
+                .shallow_fallback
+                .load(Ordering::Relaxed),
+            1
         );
     }
 
@@ -867,6 +1163,41 @@ mod tests {
             best, 2,
             "continuation must land on the same shard as its root so the CRTC has the full chain"
         );
+    }
+
+    #[tokio::test]
+    async fn full_root_batch_reuses_existing_shallow_prefix_assignment() {
+        // The same logical [A, B] prefix can arrive as a shallow root [A]
+        // followed by continuation [B], or as one full root batch [A, B].
+        // Once [A] has claimed a shard, the full root batch must reuse that
+        // prefix alias instead of assigning [A, B] to a different shard.
+        let indexer = make_indexer(2, 2);
+
+        indexer
+            .apply_event(stored_event(1, None, vec![block(501, 51)]))
+            .await;
+        indexer
+            .apply_event(stored_event(2, None, vec![block(501, 51), block(502, 52)]))
+            .await;
+        indexer
+            .apply_event(stored_event(1, Some(501), vec![block(502, 52)]))
+            .await;
+
+        indexer.flush().await;
+
+        let prefix_a = indexer.branch_key_for_local_hashes(&local_hashes(&[51]));
+        let prefix_ab = indexer.branch_key_for_local_hashes(&local_hashes(&[51, 52]));
+        assert_eq!(
+            indexer.lookup_shard(prefix_a),
+            indexer.lookup_shard(prefix_ab)
+        );
+
+        let overlap = indexer
+            .find_matches(local_hashes(&[51, 52]))
+            .await
+            .expect("query should succeed");
+        assert_eq!(score(&overlap, 1), Some(2));
+        assert_eq!(score(&overlap, 2), Some(2));
     }
 
     #[tokio::test]

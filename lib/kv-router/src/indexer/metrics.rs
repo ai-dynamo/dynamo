@@ -71,6 +71,7 @@ impl std::fmt::Display for EventWarningKind {
 pub(crate) struct ShardedIndexerCounters {
     pub(crate) find_match_dispatches: AtomicU64,
     pub(crate) find_match_early_returns: AtomicU64,
+    pub(crate) shallow_fallback: AtomicU64,
     pub(crate) anchor_installs: AtomicU64,
     pub(crate) anchor_reuses: AtomicU64,
     pub(crate) remove_broadcasts: AtomicU64,
@@ -82,6 +83,7 @@ impl ShardedIndexerCounters {
         Self {
             find_match_dispatches: AtomicU64::new(0),
             find_match_early_returns: AtomicU64::new(0),
+            shallow_fallback: AtomicU64::new(0),
             anchor_installs: AtomicU64::new(0),
             anchor_reuses: AtomicU64::new(0),
             remove_broadcasts: AtomicU64::new(0),
