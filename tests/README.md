@@ -506,21 +506,21 @@ Tests must be deterministic. A flaky test -- one that sometimes passes and somet
    - For tests parametrized via dataclasses, add the marker to the per-parametrization `marks=[...]` list so it only applies to the offending case.
    - Cost: `@pytest.mark.flaky` reruns the *whole* test. For e2e tests where startup costs 60-90s, three attempts can spend 5+ minutes before failing. Use 2b instead.
 
-   **2b. In-process query retry — `payload.retries`** (use for tests going through `run_serve_deployment` — e2e serving, multimodal smoke checks)
+   **2b. In-process query retry — `payload.max_attempts`** (use for tests going through `run_serve_deployment` — e2e serving, multimodal smoke checks)
 
-   The server is launched once and stays up across retries; only the request/response is re-issued. Set `retries` on the payload:
+   The server is launched once and stays up across attempts; only the request/response is re-issued. Set `max_attempts` on the payload:
    ```python
    # tests/serve/multimodal_profiles/vllm.py
    request_payloads=[
        make_image_payload(
            ["green", "white", "black", "purple", "red", ...],
-           retries=2,  # known-flaky model output; see comment above
+           max_attempts=3,  # known-flaky model output; see comment above
        )
    ],
    ```
-   - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `retries: int` kwarg that lands on `BasePayload.retries`.
-   - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `EngineResponseError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
-   - Cost: each retry is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all retries.
+   - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `max_attempts: int` kwarg that lands on `BasePayload.max_attempts`.
+   - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `ResponseValidationError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
+   - Cost: each attempt is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all attempts.
    - Trade-off: only re-issues the same request -- if the flake is in startup or model loading, this won't help; use 2a for those cases.
 
    **Other in-repo retry sites** (in case you need to roll your own for a different layer):

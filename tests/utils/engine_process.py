@@ -35,7 +35,7 @@ class ResponseValidationError(EngineResponseError):
     asserts on response content (the case the in-process retry was designed
     for). Status (non-200) and handler errors continue to raise the parent
     EngineResponseError so they surface immediately and aren't masked by
-    payload.retries.
+    payload.max_attempts.
     """
 
     pass

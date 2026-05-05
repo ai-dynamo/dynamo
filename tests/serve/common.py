@@ -190,12 +190,12 @@ def run_serve_deployment(
 
                 for _ in range(payload.repeat_count):
                     # Re-issue the request (server stays up) on validation
-                    # failure when payload.retries > 0. See tests/README.md
+                    # failure when payload.max_attempts > 1. See tests/README.md
                     # "Flaky Tests" for when this is appropriate. Backoff
                     # factor 1.5 keeps the worst-case sleep budget bounded
-                    # for retry counts up to ~6.
+                    # for max_attempts up to ~6.
                     last_err: Optional[ResponseValidationError] = None
-                    for attempt in range(payload.retries + 1):
+                    for attempt in range(payload.max_attempts):
                         try:
                             response = send_request(
                                 url=payload.url(),
@@ -209,13 +209,13 @@ def run_serve_deployment(
                             break
                         except ResponseValidationError as e:
                             last_err = e
-                            if attempt < payload.retries:
+                            if attempt < payload.max_attempts - 1:
                                 wait = 1.0 * (1.5**attempt)
                                 logger.warning(
                                     "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
                                     type(payload).__name__,
                                     attempt + 1,
-                                    payload.retries + 1,
+                                    payload.max_attempts,
                                     e,
                                     wait,
                                 )
