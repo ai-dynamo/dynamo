@@ -9,11 +9,17 @@ Shared reference Dockerfiles for the DeepSeek-V4 family — used by both [`deeps
 
 | Backend | Dockerfile | Base image | Build flow |
 |---------|-----------|-----------|------------|
-| SGLang | [`sglang/Dockerfile.dsv4.sglang.b200`](sglang/Dockerfile.dsv4.sglang.b200) | `lmsysorg/sglang:deepseek-v4-blackwell` (digest-pinned, B200) | Two-stage; Dynamo runtime image as donor |
+| SGLang (B200)  | [`sglang/Dockerfile.dsv4.sglang.b200`](sglang/Dockerfile.dsv4.sglang.b200)   | `lmsysorg/sglang:deepseek-v4-blackwell` (digest-pinned, amd64)       | Two-stage; Dynamo runtime image as donor |
+| SGLang (GB200) | [`sglang/Dockerfile.dsv4.sglang.gb200`](sglang/Dockerfile.dsv4.sglang.gb200) | `lmsysorg/sglang:deepseek-v4-grace-blackwell` (digest-pinned, arm64) | Two-stage; Dynamo runtime image as donor |
 
-For SGLang, NVIDIA also publishes the prebuilt image at `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1`, which both `sglang/agg/deploy.yaml` manifests pull directly. **Most users do not need to build from source.**
+NVIDIA also publishes the prebuilt images for vLLM and SGLang which manifests pull directly:
+- `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (multi-arch)
+- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (arm64 only)
+- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` (amd64 only)
 
-> **vLLM:** Use the standard Dynamo vLLM runtime image — build via `container/render.py`. See [`<repo_root>/container/README.md`](../../../container/README.md).
+The `cudaXY` suffix encodes the CUDA major version baked into the image, not the hardware target.
+
+> **Optional:** users may also build the standard Dynamo vLLM runtime image via `container/render.py`. See [`<repo_root>/container/README.md`](../../../container/README.md).
 
 ## SGLang (`sglang/Dockerfile.dsv4.sglang.b200`)
 

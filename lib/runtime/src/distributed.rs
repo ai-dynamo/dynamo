@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::component::{
-    self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
+    self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
+    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -36,7 +37,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
@@ -66,7 +67,7 @@ pub struct DistributedRuntime {
     // paths in etcd to a minimum.
     component_registry: component::Registry,
 
-    instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+    endpoint_discovery_sources: Arc<tokio::sync::Mutex<EndpointDiscoverySourceMap>>,
     routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
@@ -80,6 +81,9 @@ pub struct DistributedRuntime {
 
     // Registry for /engine/* route callbacks
     engine_routes: crate::engine_routes::EngineRouteRegistry,
+
+    // Backs `/v1/metadata/{model_slug}/{model_suffix}/{filename}`.
+    metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
 
     // Resolved event transport kind — set once at construction time from
     // DYN_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
@@ -198,13 +202,14 @@ impl DistributedRuntime {
             discovery_client,
             discovery_metadata,
             component_registry,
-            instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
+            metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
 
@@ -333,6 +338,10 @@ impl DistributedRuntime {
         &self.engine_routes
     }
 
+    pub fn metadata_artifacts(&self) -> &crate::metadata_registry::MetadataArtifactRegistry {
+        &self.metadata_artifacts
+    }
+
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -442,8 +451,8 @@ impl DistributedRuntime {
         self.runtime.graceful_shutdown_tracker()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
-        self.instance_sources.clone()
+    pub(crate) fn endpoint_discovery_sources(&self) -> Arc<Mutex<EndpointDiscoverySourceMap>> {
+        self.endpoint_discovery_sources.clone()
     }
 
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {

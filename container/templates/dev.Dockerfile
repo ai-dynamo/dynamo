@@ -303,7 +303,7 @@ RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
 COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
+    cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/. \
           /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
     chmod -R g+w /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
@@ -329,7 +329,7 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
 {% if device == "xpu" and framework == "sglang" %}
     uv pip install \

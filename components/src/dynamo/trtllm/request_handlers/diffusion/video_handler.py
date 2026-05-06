@@ -23,7 +23,7 @@ from dynamo.common.protocols.video_protocol import (
     VideoNvExt,
 )
 from dynamo.common.storage import get_fs, upload_to_fs
-from dynamo.common.utils.video_utils import encode_to_mp4_bytes
+from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
@@ -235,6 +235,15 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Determine output format
             response_format = req.response_format or "url"
+            if response_format not in ("url", "b64_json"):
+                raise ValueError(
+                    f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
+                )
+            output_format = req.output_format or "mp4"
+            if output_format != "mp4":
+                raise ValueError(
+                    f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
+                )
             fps = nvext.fps or self.config.default_fps
 
             # Encode media based on what the pipeline returned
@@ -251,7 +260,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                     f"(shape={frames_np.shape}) to MP4 at {fps} fps"
                 )
                 video_bytes = await asyncio.to_thread(
-                    encode_to_mp4_bytes, frames_np, fps=fps
+                    encode_to_video_bytes,
+                    frames_np,
+                    fps=fps,
+                    output_format=output_format,
                 )
 
             elif output.image is not None:
@@ -276,17 +288,17 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Return media via URL or base64
             if response_format == "url":
-                storage_path = f"videos/{request_id}.mp4"
+                storage_path = f"videos/{request_id}.{output_format}"
                 video_url = await upload_to_fs(
                     self.media_output_fs,
                     storage_path,
                     video_bytes,
                     self.media_output_http_url,
                 )
-                video_data = VideoData(url=video_url)
+                video_data = VideoData(output_format=output_format, url=video_url)
             else:
                 b64_video = base64.b64encode(video_bytes).decode("utf-8")
-                video_data = VideoData(b64_json=b64_video)
+                video_data = VideoData(output_format=output_format, b64_json=b64_video)
 
             inference_time = time.time() - start_time
 

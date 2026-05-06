@@ -1140,7 +1140,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.Ingress)
 
-	rollingUpdateCtx := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dynamoDeployment)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+	}
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
 	if err != nil {
@@ -1355,6 +1358,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for service", "service", serviceName)
 			return nil, nil, fmt.Errorf("failed to resolve checkpoint for service %s: %w", serviceName, err)
+		}
+		if dynamo.IsIntraPodFailoverEnabled(component) {
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
 
 		// Store checkpoint info for later use in pod spec generation

@@ -41,6 +41,13 @@ def _common_parser() -> argparse.ArgumentParser:
         default=None,
         help="Random seed for reproducible generation (default: time-based)",
     )
+    p.add_argument(
+        "--uuid",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit `image_uuids` parallel to `images` in each JSONL row (default: False). "
+        "Pass --uuid to enable for aiperf --mm-cache-mode {uuid-only,uuid-and-strip} runs.",
+    )
     return p
 
 

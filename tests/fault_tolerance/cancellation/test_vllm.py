@@ -395,7 +395,6 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="vLLM prefill cancellation is disabled due to reliability")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2

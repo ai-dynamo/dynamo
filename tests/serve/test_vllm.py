@@ -82,8 +82,8 @@ vllm_configs = {
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
+                480
+            ),  # vLLM 0.20.x startup can exceed 360s on contended CI runners
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -121,7 +121,7 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(360),
+            pytest.mark.timeout(480),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -596,7 +596,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            pytest.mark.timeout(180),  # vLLM 0.20.x needs more CI headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -730,6 +730,8 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(9.6)  # same Qwen3-VL-2B agg multimodal profile
+@pytest.mark.requested_vllm_kv_cache_bytes(922_354_000)
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,

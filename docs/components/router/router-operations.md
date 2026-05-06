@@ -134,7 +134,7 @@ State persistence depends on the event transport mode:
 
 Request-plane transport is independent of KV event transport. The request plane (`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run without etcd or NATS. When using a NATS-based event plane, NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`.
 
-When `--router-kv-overlap-score-weight` is set to 0, no KV indexer is created and prefix matching is disabled. When `--no-router-kv-events` is set, a KV indexer is still created but no event subscriber is launched; the router predicts cache state from its own routing decisions with TTL-based expiration and pruning.
+When `--router-kv-overlap-score-weight` is set to 0, no KV indexer is created and prefix matching is disabled. When `--no-router-kv-events` is set, a KV indexer is still created but no event subscriber is launched; the router predicts cache state from its own routing decisions with TTL-based expiration.
 
 Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag. The frontend flag controls whether the router consumes events; backend flags control whether workers publish them. If the router is not consuming events, workers that still publish will waste resources but cause no harm.
 
@@ -142,6 +142,6 @@ Backend KV event publishing is independent of the frontend's `--no-router-kv-eve
 - **SGLang**: Pass `--kv-events-config` with a JSON config to enable, or omit it to keep publishing disabled.
 - **TRT-LLM**: Pass `--publish-events-and-metrics` to enable, or omit it to keep publishing disabled.
 
-The CLI args `--router-ttl-secs`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When workers are configured to publish KV events, the router relies on worker-side eviction events and these parameters are ignored.
+The CLI arg `--router-ttl-secs` controls local cache prediction lifetime when the router operates without receiving events from workers. When workers are configured to publish KV events, the router relies on worker-side eviction events and this parameter is ignored.
 
 `--router-queue-threshold` and the busy thresholds (`--active-decode-blocks-threshold`, `--active-prefill-tokens-threshold`, `--active-prefill-tokens-threshold-frac`) serve different purposes. Busy thresholds reject a worker entirely from the candidate set when it exceeds a utilization limit. In contrast, `--router-queue-threshold` defers the entire routing decision until at least one worker has capacity, so the request is routed with the freshest load metrics. The busy thresholds can be updated at runtime without restarting the frontend via the `/busy_threshold` HTTP endpoint. For details, see [Request Rejection](../../fault-tolerance/request-rejection.md).
