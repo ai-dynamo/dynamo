@@ -27,10 +27,10 @@ def parse(
             return await parse_tool_call(parser_family, raw_text, tools_json)
 
         result_json: str = asyncio.run(_run())
+        raw = json.loads(result_json)
     except Exception as e:
         return ParseResult(error=f"{type(e).__name__}: {e}")
 
-    raw = json.loads(result_json)
     calls = [
         {
             "name": c["function"]["name"],

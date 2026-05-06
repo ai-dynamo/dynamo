@@ -48,14 +48,12 @@ def parse(
     if detector_cls is None:
         return ParseResult(error=f"SGLang has no detector for family={parser_family!r}")
 
-    detector = detector_cls()
-
-    # SGLang's BaseFormatDetector exposes detect_and_parse(text, tools) where
-    # tools is the OpenAI Tool[] shape. Build that wrapper if our fixture
-    # passed flat-shape definitions.
-    sg_tools = _build_tools(tools)
-
     try:
+        detector = detector_cls()
+        # SGLang's BaseFormatDetector exposes detect_and_parse(text, tools) where
+        # tools is the OpenAI Tool[] shape. Build that wrapper if our fixture
+        # passed flat-shape definitions.
+        sg_tools = _build_tools(tools)
         info = detector.detect_and_parse(raw_text, sg_tools)
     except Exception as e:
         return ParseResult(error=f"{type(e).__name__}: {e}")

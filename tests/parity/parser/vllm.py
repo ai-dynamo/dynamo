@@ -77,18 +77,15 @@ def parse(
     if key is None:
         return ParseResult(error=f"vLLM has no parser for family={parser_family!r}")
 
-    parser_cls = ToolParserManager.get_tool_parser(key)
-
-    # vLLM's ToolParser constructor checks `if not self.model_tokenizer:` and raises
-    # if falsy. None of the parsers we test actually call tokenizer methods inside
-    # extract_tool_calls(), so a truthy stub satisfies the check.
-    parser: ToolParser = parser_cls(tokenizer=_StubTokenizer())
-
-    # vLLM's extract_tool_calls signature: (model_output, request) → ExtractedToolCallInformation.
-    # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
-    request = _build_chat_request(tools)
-
     try:
+        parser_cls = ToolParserManager.get_tool_parser(key)
+        # vLLM's ToolParser constructor checks `if not self.model_tokenizer:` and raises
+        # if falsy. None of the parsers we test actually call tokenizer methods inside
+        # extract_tool_calls(), so a truthy stub satisfies the check.
+        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer())
+        # vLLM's extract_tool_calls signature: (model_output, request) → ExtractedToolCallInformation.
+        # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
+        request = _build_chat_request(tools)
         info = parser.extract_tool_calls(raw_text, request)
     except Exception as e:
         return ParseResult(error=f"{type(e).__name__}: {e}")

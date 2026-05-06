@@ -51,11 +51,6 @@ def canonical(d: dict[str, Any]) -> str:
     return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
 
-def diff(a: ParseResult, b: ParseResult) -> bool:
-    """Return True if the two results are equivalent under canonical compare."""
-    return canonical(a.to_dict()) == canonical(b.to_dict())
-
-
 def decode_arguments(args: Any) -> Any:
     """Decode a tool-call `arguments` field to a comparable Python value.
 
