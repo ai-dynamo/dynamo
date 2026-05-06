@@ -7,7 +7,7 @@
 ########## Runtime image ##############
 #######################################
 
-FROM dynamo_base AS runtime
+FROM dynamo_base AS runtime_pre
 
 ARG PYTHON_VERSION
 
@@ -157,5 +157,62 @@ COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+
+#######################################
+########## Compliance: licenses #######
+#######################################
+#
+# Generates /legal/<ecosystem>/NOTICES-*.txt + <ecosystem>-deps.csv from the
+# fully-installed runtime venv. Inherits the runtime_pre venv so it can read
+# CycloneDX SBOMs embedded inside *.dist-info/sboms/ of installed wheels
+# (cargo-cyclonedx output via maturin for ai_dynamo_runtime + kvbm; same path
+# for nixl once cargo cyclonedx is wired into the NIXL block in wheel_builder).
+#
+# Stub generators (python, dpkg, go, native) warn-but-don't-fail in this
+# rollout window; they get implemented and re-enabled in subsequent commits.
+
+FROM runtime_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+RUN python3 -m compliance.generators \
+    --ecosystem rust \
+    --venv ${VIRTUAL_ENV} \
+    --output-dir /legal \
+    -v
+# Move *-deps.csv files OUT of /legal/ so only NOTICES + license text ship in
+# the runtime image. CSVs go to /sboms/ for CI extraction (--target sboms).
+RUN find /legal -name '*-deps.csv' -print -exec sh -c \
+    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+
+
+#######################################
+########## Compliance: sboms ##########
+#######################################
+#
+# CI extracts this stage with `docker buildx build --target sboms --output
+# type=local,dest=/tmp/sboms` to archive per-ecosystem SBOMs and deps CSVs as
+# workflow artifacts and feed the SBOM-diff verifier. NEVER COPY'd into the
+# runtime image.
+#
+# Currently carries only the rust-deps.csv from the licenses stage; will grow
+# to include sbom-rust.cdx.json, sbom-go.cdx.json, sbom-python.cdx.json,
+# sbom-dpkg.cdx.json as the per-ecosystem SBOM emission lands.
+
+FROM scratch AS sboms
+COPY --from=licenses /sboms/ /
+
+
+#######################################
+########## Final runtime image ########
+#######################################
+
+FROM runtime_pre AS runtime
+COPY --from=licenses /legal /legal
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
