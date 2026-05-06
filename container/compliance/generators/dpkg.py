@@ -28,6 +28,7 @@ import subprocess
 from pathlib import Path
 
 from .common import UNKNOWN, Component
+from ..license_db import lookup as license_db_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -313,8 +314,27 @@ def _parse_free_form(text: str) -> str | None:
     return None
 
 
-def _resolve_license(pkg_name: str) -> str:
-    """Return the SPDX expression for a single dpkg package, or UNKNOWN."""
+def _resolve_license(pkg_name: str, version: str = "") -> str:
+    """Return the SPDX expression for a single dpkg package, or UNKNOWN.
+
+    Resolution order:
+      1. license_overrides.yaml (via license_db.lookup) — authoritative.
+         For dpkg, the override takes priority over the copyright-file
+         parser because the parser is heuristic and frequently wrong on
+         vendored packages (e.g., NVIDIA's CUDA dpkgs reference
+         /usr/share/common-licenses/GPL-3 because they bundle cuda-gdb,
+         but the packages themselves are NVIDIA-proprietary). When we've
+         explicitly verified a package's license and added it to overrides,
+         that's the source of truth.
+      2. DEP-5 copyright parse — structured Debian/Ubuntu format.
+      3. Free-form copyright parse — pattern match common-licenses refs,
+         "GPL Version 3" boilerplate, etc.
+      4. UNKNOWN — surfaces in the policy gate.
+    """
+    overridden = license_db_lookup.lookup(ECOSYSTEM, pkg_name, version)
+    if overridden:
+        return overridden
+
     copyright_path = _COPYRIGHT_DIR / pkg_name / "copyright"
     if not copyright_path.is_file():
         return UNKNOWN
@@ -365,7 +385,7 @@ def collect_components() -> list[Component]:
         version = version.strip()
         if not name or not version:
             continue
-        spdx = _resolve_license(name)
+        spdx = _resolve_license(name, version)
         if spdx == UNKNOWN:
             unresolved += 1
         components.append(
