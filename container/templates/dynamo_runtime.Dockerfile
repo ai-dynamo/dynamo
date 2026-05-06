@@ -180,8 +180,16 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
+# Invoked ecosystems (rust today; others are stubs that warn-but-don't-fail
+# until each implementation lands):
+#   - rust   : reads CycloneDX SBOMs from installed wheels' .dist-info/sboms/
+#   - python : reads runtime venv via pip-licenses (TODO)
+#   - dpkg   : reads dpkg-query + DEP-5 copyright files (TODO)
+# Excluded for dynamo-runtime:
+#   - go     : no Go binaries shipped (operator/snapshot/EPP only)
+#   - native : native_packages.yaml not yet on this branch
 RUN python3 -m compliance.generators \
-    --ecosystem rust \
+    --ecosystem python,rust,dpkg \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
     -v
