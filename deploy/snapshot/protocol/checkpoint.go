@@ -5,6 +5,7 @@ package protocol
 
 import (
 	"fmt"
+	"path/filepath"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -55,16 +56,55 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if opts.SeccompProfile != "" {
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
-	if opts.WrapLaunchJob {
-		if len(podTemplate.Spec.Containers) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires one worker container")
+	if len(podTemplate.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("checkpoint job requires at least one container")
+	}
+
+	// Checkpoint contract: exactly one target container per Job. The
+	// annotation is required — callers (the operator, snapshotctl) stamp
+	// nvidia.com/snapshot-target-containers before handing the template
+	// to us so there is no Containers[0]-vs-"main" ambiguity.
+	targets, err := TargetContainersFromAnnotations(podTemplate.Annotations, 1, 1)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	}
+	targetName := targets[0]
+	var targetContainer *corev1.Container
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == targetName {
+			targetContainer = &podTemplate.Spec.Containers[i]
+			break
 		}
-		if len(podTemplate.Spec.Containers[0].Command) == 0 {
+	}
+	if targetContainer == nil {
+		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from %s annotation)", targetName, TargetContainersAnnotation)
+	}
+
+	// Snapshot contract: control volume + ready-file readiness probe. The
+	// agent reads the pod's Ready condition before starting CRIU dump, so
+	// the workload signals "model loaded, safe to checkpoint" by writing
+	// $DYN_SNAPSHOT_CONTROL_DIR/ready-for-checkpoint. Any per-container
+	// liveness/startup probes are cleared — a checkpoint job runs to a
+	// quiesce-and-sit state, not a long-lived serving state.
+	EnsureControlVolume(&podTemplate.Spec, targetContainer)
+	targetContainer.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"cat", filepath.Join(SnapshotControlMountPath, ReadyForCheckpointFile)},
+			},
+		},
+		PeriodSeconds: 1,
+	}
+	targetContainer.LivenessProbe = nil
+	targetContainer.StartupProbe = nil
+
+	if opts.WrapLaunchJob {
+		if len(targetContainer.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
-		podTemplate.Spec.Containers[0].Command, podTemplate.Spec.Containers[0].Args = wrapWithCudaCheckpointLaunchJob(
-			podTemplate.Spec.Containers[0].Command,
-			podTemplate.Spec.Containers[0].Args,
+		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
+			targetContainer.Command,
+			targetContainer.Args,
 		)
 	}
 
@@ -145,7 +185,15 @@ func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) Checkpo
 	return CheckpointObservation{Phase: CheckpointObservationPhaseRunning}
 }
 
+// EnsureLocalhostSeccompProfile sets the pod-level localhost seccomp profile
+// to the given path, allocating PodSecurityContext if needed. An empty profile
+// is a no-op so callers can disable injection entirely without conditional
+// branching at the call site (e.g. on OpenShift, where custom localhost
+// profiles require privileged SCC, or with a CRIU build that allows io_uring).
 func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
+	if profile == "" {
+		return // no seccomp restriction requested (e.g. OCP or io_uring-capable CRIU)
+	}
 	if podSpec.SecurityContext == nil {
 		podSpec.SecurityContext = &corev1.PodSecurityContext{}
 	}
@@ -155,6 +203,12 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 	}
 }
 
+// wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
+// workload is launched under `cuda-checkpoint --launch-job`, required for
+// multi-GPU checkpoints. The original command and args are preserved as-is
+// (including shell-form entrypoints): workload-to-agent signaling now uses
+// file sentinels in the snapshot-control volume, so an intervening shell at
+// PID 1 is no longer an issue.
 func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
 	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
 	wrappedArgs = append(wrappedArgs, "--launch-job")

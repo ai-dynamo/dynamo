@@ -17,7 +17,11 @@ from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
-from tests.utils.engine_process import EngineConfig, EngineProcess
+from tests.utils.engine_process import (
+    EngineConfig,
+    EngineProcess,
+    ResponseValidationError,
+)
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
@@ -52,6 +56,16 @@ def run_serve_deployment(
     merged_env: dict[str, str] = {}
     if extra_env:
         merged_env.update(extra_env)
+
+    # In serial mode (no parallel scheduler), pass the marker's KV cache budget
+    # so the launch script's small default doesn't starve larger models.
+    # The parallel scheduler already sets this env var per-test.
+    if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in os.environ:
+        kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+        if kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(int(kv_mark.args[0]))
+            )
 
     # Stagger engine startup under xdist to avoid vLLM profiling race
     # (vLLM bug #10643: concurrent profilers miscount each other's memory).
@@ -175,14 +189,39 @@ def run_serve_deployment(
                     payload.system_ports = mapped_system_ports
 
                 for _ in range(payload.repeat_count):
-                    response = send_request(
-                        url=payload.url(),
-                        payload=payload.body,
-                        timeout=payload.timeout,
-                        method=payload.method,
-                        stream=payload.http_stream,
-                    )
-                    server_process.check_response(payload, response)
+                    # Re-issue the request (server stays up) on validation
+                    # failure when payload.max_attempts > 1. See tests/README.md
+                    # "Flaky Tests" for when this is appropriate. Backoff
+                    # factor 1.5 keeps the worst-case sleep budget bounded
+                    # for max_attempts up to ~6.
+                    last_err: Optional[ResponseValidationError] = None
+                    for attempt in range(payload.max_attempts):
+                        try:
+                            response = send_request(
+                                url=payload.url(),
+                                payload=payload.body,
+                                timeout=payload.timeout,
+                                method=payload.method,
+                                stream=payload.http_stream,
+                            )
+                            server_process.check_response(payload, response)
+                            last_err = None
+                            break
+                        except ResponseValidationError as e:
+                            last_err = e
+                            if attempt < payload.max_attempts - 1:
+                                wait = 1.0 * (1.5**attempt)
+                                logger.warning(
+                                    "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
+                                    type(payload).__name__,
+                                    attempt + 1,
+                                    payload.max_attempts,
+                                    e,
+                                    wait,
+                                )
+                                time.sleep(wait)
+                    if last_err is not None:
+                        raise last_err
 
                 # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
                 if hasattr(payload, "final_validation"):

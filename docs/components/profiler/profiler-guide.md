@@ -128,9 +128,12 @@ When the planner is enabled, the profiler generates engine interpolation data ne
 ```yaml
 features:
   planner:
+    optimization_target: sla              # required for throughput-based scaling and specific SLA targets
     pre_deployment_sweeping_mode: rapid   # rapid | thorough | none
     enable_throughput_scaling: true
 ```
+
+`optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft`/`itl` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft`/`itl` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
 - **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs)
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h)
@@ -138,7 +141,7 @@ features:
 
 The profiler saves two ConfigMaps into the generated DGD:
 - **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `profile_results_dir` pointing to the profiling data mount)
-- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON)
+- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `optimization_target: sla` is set alongside `enable_throughput_scaling: true` (or when mocker is enabled).
 
 See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.
 
@@ -155,9 +158,10 @@ The profiler enforces these rules at startup:
 | Condition | Behavior |
 |-----------|----------|
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
-| AIC unsupported + `enable_throughput_scaling: true` | Rejected. Throughput planner requires AIC support. |
-| AIC unsupported + `pre_deployment_sweeping_mode: rapid` | Falls back to `none` with a warning. |
-| `e2eLatency` provided without `ttft: null, itl: null` | Rejected by SLA validator. When using `e2eLatency`, explicitly null out `ttft` and `itl`. |
+| `enable_throughput_scaling: true` without `optimization_target: sla` | Silently coerced. `PlannerConfig` defaults `optimization_target` to `throughput`, which flips `enable_throughput_scaling` to `false` at validation time. Set `optimization_target: sla` explicitly to keep throughput-based scaling enabled. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Rejected. Throughput-based scaling requires pre-deployment sweeping. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Rejected. AIC does not support this model/hardware/backend combination; switch `pre_deployment_sweeping_mode` to `thorough`. |
+| `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
 | SLA unachievable | Warning logged, SLA updated to best achievable value. |
 | Load-match needs more GPUs than available | Warning logged. |
 
@@ -184,13 +188,7 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `components/src/dynamo/profiler/deploy/`:
-
-| Sample | Description |
-|--------|-------------|
-| `profile_sla_dgdr.yaml` | Standard online profiling with AIPerf |
-| `profile_sla_aic_dgdr.yaml` | Fast offline profiling with AI Configurator |
-| `profile_sla_moe_dgdr.yaml` | MoE model profiling (SGLang) |
+The recommended deployment method is through DGDRs. See [Profiler Examples](profiler-examples.md) for complete DGDR YAML examples covering rapid, thorough, MoE, custom SLA, and override use cases.
 
 #### Container Images
 
@@ -200,7 +198,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -217,7 +215,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
 ```
 
 **Step 2: Apply the DGDR**
@@ -308,7 +306,7 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **Duration**: 20-30 seconds
 - **Accuracy**: Estimated (may have errors for unusual configurations)
 - **GPU Requirements**: None
-- **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
+- **Backends**: All (vLLM, SGLang, TensorRT-LLM)
 
 AI Configurator is used by default with `searchStrategy: rapid`:
 
@@ -321,7 +319,7 @@ spec:
 > `aicBackendVersion` specifies the TensorRT-LLM version that AI Configurator simulates. See the [AI Configurator supported features](https://github.com/ai-dynamo/aiconfigurator#supported-features) for available versions.
 
 **Currently supports:**
-- **Backends**: TensorRT-LLM (versions 0.20.0, 1.0.0rc3, 1.0.0rc6)
+- **Backends**: vLLM, SGLang, TensorRT-LLM
 - **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
@@ -374,7 +372,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -519,6 +517,20 @@ When using DGDR, the Dynamo Operator:
 2. Stores profiling data in ConfigMaps (`planner-profile-data`)
 3. Generates optimized DGD configurations
 4. Deploys the DGD with SLA Planner integration
+
+#### Failure Handling
+
+Profiling failures are not retried at the Kubernetes Job level (`backoffLimit: 0`).
+Most profiler errors — validation failures, unsupported model/hardware combinations,
+missing configs — are deterministic and will never succeed on retry, so re-running
+the full profiling cycle would only waste GPU time.
+
+When the profiler reports failure, the output-copier sidecar writes the error
+details (phase, error message, profiler status) to the output ConfigMap and exits
+successfully. The DGDR controller reads the failure from the ConfigMap and
+transitions the DGDR directly to the `Failed` phase with the specific sub-phase
+failure reason (e.g., `SweepingDecodeFailed`, `GeneratingDGDFailed`). Use
+`kubectl describe dgdr <name>` to see the failure details in the conditions.
 
 The generated DGD is tracked via labels:
 ```yaml

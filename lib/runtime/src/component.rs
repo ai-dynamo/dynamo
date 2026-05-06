@@ -64,6 +64,7 @@ mod registry;
 pub mod service;
 
 pub use client::Client;
+pub(crate) use client::EndpointDiscoverySource;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use endpoint::build_transport_type;
@@ -109,11 +110,21 @@ impl Instance {
     pub fn id(&self) -> u64 {
         self.instance_id
     }
+
     pub fn endpoint_id(&self) -> EndpointId {
         EndpointId {
             namespace: self.namespace.clone(),
             component: self.component.clone(),
             name: self.endpoint.clone(),
+        }
+    }
+
+    pub fn endpoint_instance_id(&self) -> crate::discovery::EndpointInstanceId {
+        crate::discovery::EndpointInstanceId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            endpoint: self.endpoint.clone(),
+            instance_id: self.instance_id,
         }
     }
 }
@@ -226,6 +237,10 @@ impl MetricsHierarchy for Component {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        Some(self.drt.connection_id())
     }
 }
 
@@ -389,6 +404,10 @@ impl MetricsHierarchy for Endpoint {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        Some(self.component.drt().connection_id())
     }
 }
 

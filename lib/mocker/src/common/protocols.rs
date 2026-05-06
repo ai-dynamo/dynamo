@@ -11,14 +11,39 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::common::perf_model::PerfModel;
-use dynamo_kv_router::protocols::KvCacheEvent;
+use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, SequenceHash, Token};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
+
+/// Metadata marker type for kvbm-logical blocks in the mocker's G1 pool.
+#[derive(Clone, Debug)]
+pub struct G1;
+
+/// Eviction strategy for the kvbm-logical inactive pool.
+///
+/// `Lineage` is the default and matches kvbm-logical's own default — it evicts
+/// leaf blocks first, which subsumes the preemption-priority behaviour that the
+/// mocker's old `LRUEvictor::push_front` provided.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum MockerEvictionBackend {
+    Lru,
+    MultiLru,
+    #[default]
+    Lineage,
+}
 
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        _storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.publish(event)
+    }
 }
 
 /// Raw KV event payload used by transport-specific publishers such as the
@@ -27,6 +52,7 @@ pub trait KvCacheEventSink: Send + Sync {
 pub struct RawKvEvent {
     pub event: KvCacheEvent,
     pub block_token_ids: Option<Vec<Vec<u32>>>,
+    pub storage_tier: StorageTier,
 }
 
 /// Trait for publishing transport-specific raw KV event payloads.
@@ -65,17 +91,80 @@ impl KvEventPublishers {
         event: KvCacheEvent,
         block_token_ids: Option<&[Vec<u32>]>,
     ) -> anyhow::Result<()> {
+        self.publish_with_storage_tier(event, block_token_ids, StorageTier::Device)
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        block_token_ids: Option<&[Vec<u32>]>,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
         if let Some(sink) = self.event_sink.as_ref() {
-            sink.publish(event.clone())?;
+            sink.publish_with_storage_tier(event.clone(), storage_tier)?;
         }
 
         if let Some(sink) = self.raw_sink.as_ref() {
             sink.publish(RawKvEvent {
                 event,
                 block_token_ids: block_token_ids.map(|token_ids| token_ids.to_vec()),
+                storage_tier,
             })?;
         }
 
+        Ok(())
+    }
+}
+
+/// Per-iteration forward pass snapshot, mirroring the Python `ForwardPassMetrics`
+/// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
+///
+/// Produced by the scheduler core after each `execute_pass_internal()` call.
+/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
+/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardPassSnapshot {
+    // -- scheduled requests (executed this iteration) --
+    pub num_prefill_requests: u32,
+    pub sum_prefill_tokens: u64,
+    pub var_prefill_length: f64,
+    pub sum_prefill_kv_tokens: u64,
+    pub num_decode_requests: u32,
+    pub sum_decode_kv_tokens: u64,
+    pub var_decode_kv_tokens: f64,
+    // -- queued requests (waiting, not scheduled) --
+    pub num_queued_prefill: u32,
+    pub sum_queued_prefill_tokens: u64,
+    pub var_queued_prefill_length: f64,
+    pub num_queued_decode: u32,
+    pub sum_queued_decode_kv_tokens: u64,
+    pub var_queued_decode_kv_tokens: f64,
+    // -- timing --
+    pub wall_time_secs: f64,
+}
+
+/// Trait for publishing forward pass metrics snapshots.
+/// This abstracts the FPM publishing pipeline so mocker schedulers remain generic.
+pub trait FpmSink: Send + Sync {
+    fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()>;
+}
+
+/// Optional FPM sink used by schedulers.
+/// Wraps `Option<Arc<dyn FpmSink>>` for ergonomic passing and no-op default behavior.
+#[derive(Clone, Default)]
+pub struct FpmPublisher {
+    sink: Option<Arc<dyn FpmSink>>,
+}
+
+impl FpmPublisher {
+    pub fn new(sink: Option<Arc<dyn FpmSink>>) -> Self {
+        Self { sink }
+    }
+
+    pub fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
+        if let Some(sink) = &self.sink {
+            sink.publish(snapshot)?;
+        }
         Ok(())
     }
 }
@@ -89,12 +178,19 @@ pub enum MoveBlock {
     Use(
         Vec<UniqueBlock>,
         Vec<BlockHash>,
+        Vec<PositionalLineageHash>,
         Option<Vec<Vec<u32>>>,
         Option<UniqueBlock>,
     ),
-    Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>, BlockHash, Option<Vec<u32>>),
+    Promote(
+        Uuid,
+        SequenceHash,
+        Option<u64>,
+        BlockHash,
+        PositionalLineageHash,
+        Option<Vec<u32>>,
+    ),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,6 +463,36 @@ pub struct MockEngineArgs {
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
 
+    /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
+    /// feature is enabled, setting this explicitly opts the mocker into
+    /// G2 offload simulation. When unset, no G2 offload engine is attached.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub num_g2_blocks: Option<usize>,
+
+    /// Batch size for the G1→G2 offload pipeline. Offloads are grouped
+    /// into batches of this size before being handed to the worker.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub offload_batch_size: Option<usize>,
+
+    /// G1→G2 offload bandwidth in GB/s for the PS-queue simulation.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default (host DRAM PCIe
+    /// ballpark) when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g1_to_g2_gbps: Option<f64>,
+
+    /// G2→G1 onboard bandwidth in GB/s for the PS-queue simulation.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g2_to_g1_gbps: Option<f64>,
+
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
     #[builder(default = "None")]
@@ -519,6 +645,10 @@ impl MockEngineArgs {
             "bootstrap_port",
             "kv_bytes_per_token",
             "kv_transfer_bandwidth",
+            "num_g2_blocks",
+            "offload_batch_size",
+            "bandwidth_g1_to_g2_gbps",
+            "bandwidth_g2_to_g1_gbps",
             "reasoning",
             "zmq_kv_events_port",
             "zmq_replay_port",
@@ -649,6 +779,30 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.kv_transfer_bandwidth(Some(num));
+        }
+
+        if let Some(value) = extra_args.get("num_g2_blocks")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.num_g2_blocks(Some(num as usize));
+        }
+
+        if let Some(value) = extra_args.get("offload_batch_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.offload_batch_size(Some(num as usize));
+        }
+
+        if let Some(value) = extra_args.get("bandwidth_g1_to_g2_gbps")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.bandwidth_g1_to_g2_gbps(Some(num));
+        }
+
+        if let Some(value) = extra_args.get("bandwidth_g2_to_g1_gbps")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.bandwidth_g2_to_g1_gbps(Some(num));
         }
 
         if let Some(value) = extra_args.get("reasoning")

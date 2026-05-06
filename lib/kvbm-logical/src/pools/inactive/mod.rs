@@ -28,6 +28,11 @@ pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     /// Find blocks matching the given hashes in order, stopping on first miss.
     fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
 
+    /// Find a single block matching the given hash.
+    fn find_match(&mut self, hash: SequenceHash, touch: bool) -> Option<Block<T, Registered>> {
+        self.find_matches(&[hash], touch).into_iter().next()
+    }
+
     /// Scan for blocks matching any of the given hashes (full scan, doesn't stop on miss).
     /// Unlike find_matches, continues scanning even when a hash is not found.
     /// Acquires/removes found blocks from pool (caller owns until dropped).
@@ -134,8 +139,20 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         hashes: &[SequenceHash],
         touch: bool,
     ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
+        let Some((&first_hash, remaining_hashes)) = hashes.split_first() else {
+            return Vec::new();
+        };
+
         let mut inner = self.inner.write();
-        let matched_blocks = inner.backend.find_matches(hashes, touch);
+        let Some(first_block) = inner.backend.find_match(first_hash, touch) else {
+            return Vec::new();
+        };
+
+        let mut matched_blocks = Vec::with_capacity(hashes.len());
+        matched_blocks.push(first_block);
+        if !remaining_hashes.is_empty() {
+            matched_blocks.extend(inner.backend.find_matches(remaining_hashes, touch));
+        }
 
         let count = matched_blocks.len();
         if let Some(ref m) = self.metrics {
@@ -181,10 +198,18 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
             .collect()
     }
 
-    /// Allocate blocks from registered pool, converting them to MutableBlocks for ResetPool
-    pub(crate) fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
+    /// Allocate blocks from registered pool, converting them to
+    /// [`MutableBlock`]s for the [`ResetPool`]. Also reports the
+    /// [`SequenceHash`] of each evicted block so upstream layers can
+    /// propagate cache-invalidation events without a secondary presence scan.
+    ///
+    /// Returns `None` if fewer than `count` evictable blocks are available.
+    pub(crate) fn allocate_blocks(
+        &self,
+        count: usize,
+    ) -> Option<(Vec<MutableBlock<T>>, Vec<SequenceHash>)> {
         if count == 0 {
-            return Some(Vec::new());
+            return Some((Vec::new(), Vec::new()));
         }
 
         let mut inner = self.inner.write();
@@ -202,15 +227,19 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                 }
             }
             let mut mutable_blocks = Vec::with_capacity(count);
-            mutable_blocks.extend(allocated_blocks.into_iter().map(|registered_block| {
+            let mut evicted = Vec::with_capacity(count);
+            for registered_block in allocated_blocks {
+                // Capture the identity BEFORE `reset()` drops the
+                // registration handle and marks the block absent.
+                evicted.push(registered_block.sequence_hash());
                 let reset_block = registered_block.reset();
-                MutableBlock::new(
+                mutable_blocks.push(MutableBlock::new(
                     reset_block,
                     self.reset_return_fn.clone(),
                     self.metrics.clone(),
-                )
-            }));
-            Some(mutable_blocks)
+                ));
+            }
+            Some((mutable_blocks, evicted))
         } else {
             for block in allocated_blocks {
                 inner.backend.insert(block);
@@ -395,23 +424,62 @@ mod tests {
     fn test_allocate_blocks() {
         let (pool, reset_pool) = create_test_pool();
 
-        let (block1, _) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
-        let (block2, _) = create_registered_block::<TestMeta>(2, &tokens_for_id(2));
-        let (block3, _) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
+        let (block1, seq_hash1) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block2, seq_hash2) = create_registered_block::<TestMeta>(2, &tokens_for_id(2));
+        let (block3, seq_hash3) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
         pool.insert(block1);
         pool.insert(block2);
         pool.insert(block3);
 
         assert_eq!(pool.len(), 3);
 
-        let mutable_blocks = pool.allocate_blocks(1).expect("Should allocate 1 block");
+        let (mutable_blocks, evicted) = pool.allocate_blocks(1).expect("Should allocate 1 block");
         assert_eq!(mutable_blocks.len(), 1);
+        assert_eq!(
+            evicted.len(),
+            1,
+            "one sequence hash should be reported as evicted"
+        );
+        assert!(
+            [seq_hash1, seq_hash2, seq_hash3].contains(&evicted[0]),
+            "evicted hash must match one of the inserted blocks; got {:?}",
+            evicted[0]
+        );
         assert_eq!(pool.len(), 2);
 
         drop(mutable_blocks);
 
         assert_eq!(pool.len(), 2);
         assert_eq!(reset_pool.available_blocks(), 11);
+    }
+
+    /// Sanity: asking for multiple evictions returns that many distinct hashes,
+    /// each matching an inserted block.
+    #[test]
+    fn test_allocate_blocks_reports_all_evicted_hashes() {
+        let (pool, _reset_pool) = create_test_pool();
+
+        let (block1, seq_hash1) = create_registered_block::<TestMeta>(1, &tokens_for_id(1));
+        let (block2, seq_hash2) = create_registered_block::<TestMeta>(2, &tokens_for_id(2));
+        let (block3, seq_hash3) = create_registered_block::<TestMeta>(3, &tokens_for_id(3));
+        pool.insert(block1);
+        pool.insert(block2);
+        pool.insert(block3);
+        let inserted = [seq_hash1, seq_hash2, seq_hash3];
+
+        let (mutable_blocks, evicted) = pool
+            .allocate_blocks(3)
+            .expect("Should allocate all three blocks");
+        assert_eq!(mutable_blocks.len(), 3);
+        assert_eq!(evicted.len(), 3);
+        for h in &evicted {
+            assert!(
+                inserted.contains(h),
+                "evicted hash {h:?} not in inserted set"
+            );
+        }
+        let unique: std::collections::HashSet<_> = evicted.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "evicted hashes must all be distinct");
     }
 
     #[test]

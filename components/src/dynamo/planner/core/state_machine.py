@@ -63,34 +63,41 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     ) -> None:
         self._config = config
         self._capabilities = capabilities or WorkerCapabilities()
+
         self._is_agg = config.mode == "agg"
         self._has_prefill = config.mode in ("disagg", "prefill")
         self._has_decode = config.mode in ("disagg", "decode", "agg")
+        self._is_easy = config.optimization_target != "sla"
 
-        if self._is_agg:
-            self._agg_regression = AggRegressionModel(
-                max_num_fpm_samples=config.max_num_fpm_samples,
-                min_observations=config.load_min_observations,
-                bucket_count=config.fpm_sample_bucket_size,
-            )
-        else:
-            if self._has_prefill:
-                self._prefill_regression = PrefillRegressionModel(
+        # Easy mode uses static thresholds -- no regression or predictors needed
+        if not self._is_easy:
+            if self._is_agg:
+                self._agg_regression = AggRegressionModel(
                     max_num_fpm_samples=config.max_num_fpm_samples,
                     min_observations=config.load_min_observations,
                     bucket_count=config.fpm_sample_bucket_size,
                 )
-            if self._has_decode:
-                self._decode_regression = DecodeRegressionModel(
-                    max_num_fpm_samples=config.max_num_fpm_samples,
-                    min_observations=config.load_min_observations,
-                    bucket_count=config.fpm_sample_bucket_size,
-                )
+            else:
+                if self._has_prefill:
+                    self._prefill_regression = PrefillRegressionModel(
+                        max_num_fpm_samples=config.max_num_fpm_samples,
+                        min_observations=config.load_min_observations,
+                        bucket_count=config.fpm_sample_bucket_size,
+                    )
+                if self._has_decode:
+                    self._decode_regression = DecodeRegressionModel(
+                        max_num_fpm_samples=config.max_num_fpm_samples,
+                        min_observations=config.load_min_observations,
+                        bucket_count=config.fpm_sample_bucket_size,
+                    )
 
-        predictor_cls = LOAD_PREDICTORS[config.load_predictor]
-        self._num_req_predictor = predictor_cls(config)
-        self._isl_predictor = predictor_cls(config)
-        self._osl_predictor = predictor_cls(config)
+            predictor_cls = LOAD_PREDICTORS[config.load_predictor]
+            self._num_req_predictor = predictor_cls(config)
+            self._isl_predictor = predictor_cls(config)
+            self._osl_predictor = predictor_cls(config)
+            # KV hit rate has no good offline-trace proxy, so it is NOT warmed
+            # via ``warm_load_predictors``; it learns only from live observations.
+            self._kv_hit_rate_predictor = predictor_cls(config)
 
         self._num_p_workers: int = 0
         self._num_d_workers: int = 0
@@ -99,6 +106,12 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
+
+        # Most recent observed KV hit rate from the router. Used by load-scaling
+        # to discount queued/avg prefill tokens in ``estimate_next_ttft``. Sticky
+        # across ticks because load-scaling and throughput-scaling cadences
+        # may differ. ``None`` means "no observation yet" -> no discount.
+        self._last_kv_hit_rate: Optional[float] = None
 
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
@@ -109,14 +122,23 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_predicted_num_req: Optional[float] = None
         self._diag_predicted_isl: Optional[float] = None
         self._diag_predicted_osl: Optional[float] = None
+        self._diag_predicted_kv_hit_rate: Optional[float] = None
         self._diag_engine_rps_prefill: Optional[float] = None
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
         self._diag_throughput_reason: Optional[str] = None
+        self._diag_load_reason_prefill: Optional[str] = None
+        self._diag_load_reason_decode: Optional[str] = None
+        self._diag_throughput_reason_prefill: Optional[str] = None
+        self._diag_throughput_reason_decode: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace the current worker capabilities."""
+        self._capabilities = capabilities
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
         self._next_load_s = start_s + self._config.load_adjustment_interval
@@ -132,6 +154,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         decode_fpms: Optional[list[ForwardPassMetrics]] = None,
         agg_fpms: Optional[list[ForwardPassMetrics]] = None,
     ) -> None:
+        if self._is_easy:
+            logger.debug("Skipping benchmark FPM loading in easy mode")
+            return
         if agg_fpms and self._is_agg:
             self._agg_regression.load_benchmark_fpms(agg_fpms)
             logger.info(f"Bootstrapped agg regression with {len(agg_fpms)} FPMs")
@@ -145,6 +170,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"Bootstrapped decode regression with {len(decode_fpms)} FPMs")
 
     def warm_load_predictors(self, observations: list[TrafficObservation]) -> None:
+        if self._is_easy:
+            logger.debug("Skipping load predictor warmup in easy mode")
+            return
         for obs in observations:
             self._num_req_predictor.add_data_point(obs.num_req)
             self._isl_predictor.add_data_point(obs.isl)
@@ -161,24 +189,42 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         if tick_input.worker_counts is not None:
             self._update_inventory(tick_input.worker_counts)
 
+        # Run throughput scaling first so any updated lower bound is visible
+        # to the load scaling pass on a combined tick.  Otherwise load scaling
+        # reads the stale bound, potentially deciding to scale below the new
+        # floor set in this same tick.
+        #
+        # We always advance _next_throughput_s on a throughput tick, even if
+        # no traffic was available, so the planner keeps the throughput
+        # cadence stable rather than re-firing back-to-back ticks whenever
+        # traffic is temporarily absent.
+        throughput_decision = None
+        if tick.run_throughput_scaling:
+            if tick_input.traffic is not None:
+                self._observe_traffic(tick_input.traffic)
+                throughput_decision = self._advance_throughput(tick_input.traffic)
+            self._next_throughput_s = (
+                tick_input.now_s + self._config.throughput_adjustment_interval
+            )
+
         if tick.run_load_scaling:
+            # In load-only deployments the kv-hit-rate scrape rides on the
+            # load tick, so consume the traffic observation here.  In mixed
+            # mode the throughput branch above already handled it.
+            if not tick.run_throughput_scaling and tick_input.traffic is not None:
+                self._observe_traffic(tick_input.traffic)
             if tick_input.fpm_observations is not None:
-                self._observe_fpm(tick_input.fpm_observations)
+                if not self._is_easy:
+                    self._observe_fpm(tick_input.fpm_observations)
                 load_decision = self._advance_load(tick_input.fpm_observations)
                 if load_decision is not None:
                     effects.scale_to = load_decision
             self._next_load_s = tick_input.now_s + self._config.load_adjustment_interval
 
-        if tick.run_throughput_scaling:
-            if tick_input.traffic is not None:
-                self._observe_traffic(tick_input.traffic)
-                throughput_decision = self._advance_throughput(tick_input.traffic)
-                if throughput_decision is not None:
-                    if effects.scale_to is None:
-                        effects.scale_to = throughput_decision
-            self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
-            )
+        # Load scaling has precedence when it produced a decision; otherwise
+        # fall back to the throughput-scaling decision.
+        if effects.scale_to is None and throughput_decision is not None:
+            effects.scale_to = throughput_decision
 
         effects.diagnostics = self._build_diagnostics()
         effects.next_tick = self._next_scheduled_tick()
@@ -190,10 +236,15 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_predicted_num_req = None
         self._diag_predicted_isl = None
         self._diag_predicted_osl = None
+        self._diag_predicted_kv_hit_rate = None
         self._diag_engine_rps_prefill = None
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
         self._diag_throughput_reason = None
+        self._diag_load_reason_prefill = None
+        self._diag_load_reason_decode = None
+        self._diag_throughput_reason_prefill = None
+        self._diag_throughput_reason_decode = None
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -202,10 +253,17 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             predicted_num_req=self._diag_predicted_num_req,
             predicted_isl=self._diag_predicted_isl,
             predicted_osl=self._diag_predicted_osl,
+            predicted_kv_hit_rate=self._diag_predicted_kv_hit_rate,
             engine_rps_prefill=self._diag_engine_rps_prefill,
             engine_rps_decode=self._diag_engine_rps_decode,
+            throughput_lower_bound_prefill=self._throughput_lower_bound_p,
+            throughput_lower_bound_decode=self._throughput_lower_bound_d,
             load_decision_reason=self._diag_load_reason,
             throughput_decision_reason=self._diag_throughput_reason,
+            load_decision_reason_prefill=self._diag_load_reason_prefill,
+            load_decision_reason_decode=self._diag_load_reason_decode,
+            throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
+            throughput_decision_reason_decode=self._diag_throughput_reason_decode,
         )
 
     # ------------------------------------------------------------------
@@ -219,16 +277,27 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         at_s = min(self._next_load_s, self._next_throughput_s)
         is_load = self._next_load_s <= at_s + self._MERGE_TOLERANCE_S
         is_throughput = self._next_throughput_s <= at_s + self._MERGE_TOLERANCE_S
+        # Throughput ticks scrape full traffic over the throughput interval.
+        # In load-only deployments (no throughput tick ever fires) load ticks
+        # carry a kv-hit-rate-only scrape over the load interval so the
+        # planner can still discount prefill work by recent prefix reuse.
+        if is_throughput:
+            need_traffic = True
+            traffic_duration_s = float(self._config.throughput_adjustment_interval)
+        elif is_load and not self._config.enable_throughput_scaling:
+            need_traffic = True
+            traffic_duration_s = float(self._config.load_adjustment_interval)
+        else:
+            need_traffic = False
+            traffic_duration_s = 0.0
         return ScheduledTick(
             at_s=at_s,
             run_load_scaling=is_load,
             run_throughput_scaling=is_throughput,
             need_worker_states=True,
             need_worker_fpm=is_load,
-            need_traffic_metrics=is_throughput,
-            traffic_metrics_duration_s=(
-                self._config.throughput_adjustment_interval if is_throughput else 0.0
-            ),
+            need_traffic_metrics=need_traffic,
+            traffic_metrics_duration_s=traffic_duration_s,
         )
 
     # ------------------------------------------------------------------
@@ -276,9 +345,25 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
-        self._num_req_predictor.add_data_point(traffic.num_req)
-        self._isl_predictor.add_data_point(traffic.isl)
-        self._osl_predictor.add_data_point(traffic.osl)
+        # Throughput-scaling predictors only have a downstream consumer when
+        # throughput scaling is enabled. In load-only mode the traffic scrape
+        # is a kv-hit-rate-only path and num_req/isl/osl arrive as zero
+        # placeholders, so feeding the predictors would just pollute them.
+        if self._config.enable_throughput_scaling:
+            self._num_req_predictor.add_data_point(traffic.num_req)
+            self._isl_predictor.add_data_point(traffic.isl)
+            self._osl_predictor.add_data_point(traffic.osl)
+        if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
+            if self._config.enable_throughput_scaling:
+                # Mixed mode: feed the predictor; ``_last_kv_hit_rate`` will be
+                # overwritten with the predicted value inside
+                # ``_advance_throughput`` so load scaling consumes the smoothed
+                # forecast (not the raw per-window observation).
+                self._kv_hit_rate_predictor.add_data_point(traffic.kv_hit_rate)
+            else:
+                # Load-only mode: there is no predictor path, the load tick
+                # consumes the freshly observed average directly.
+                self._last_kv_hit_rate = traffic.kv_hit_rate
 
     # ------------------------------------------------------------------
     # Budget

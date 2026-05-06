@@ -21,7 +21,7 @@ if not torch.cuda.is_available():
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
 
 # Get path relative to this test file
@@ -170,6 +170,146 @@ def test_deep_update_adds_new_keys():
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
 
 
+# ---- Tests for trtllm_utils.warn_override_collisions ----
+
+
+def test_warn_override_collisions_logs_replaced_scalar(caplog):
+    """A scalar override that changes an existing value emits a warning."""
+    target = {"max_seq_len": 1024}
+    source = {"max_seq_len": 2048}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any(
+        "max_seq_len" in r.message and "1024" in r.message and "2048" in r.message
+        for r in caplog.records
+    )
+
+
+def test_warn_override_collisions_recurses_into_nested_dicts(caplog):
+    """Nested-dict overrides report the full dotted path."""
+    target = {"kv_cache_config": {"max_tokens": 1000, "free_gpu_memory_fraction": 0.85}}
+    source = {"kv_cache_config": {"max_tokens": 2592}}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+    # free_gpu_memory_fraction wasn't in source — should not warn.
+    assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
+
+
+def test_warn_override_collisions_skips_new_keys(caplog):
+    """Keys not present in target are additions, not collisions — no warning."""
+    target = {"max_seq_len": 1024}
+    source = {"max_batch_size": 32}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert caplog.records == []
+
+
+def test_warn_override_collisions_skips_identical_values(caplog):
+    """Override with the same value as target is a no-op — no warning."""
+    target = {"max_seq_len": 1024}
+    source = {"max_seq_len": 1024}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert caplog.records == []
+
+
+# ---- Tests for engine_args resolution with extra/override engine args ----
+
+
+class EngineArgsCaptured(Exception):
+    """Raised by mocked get_llm_engine to capture engine_args and stop execution."""
+
+    def __init__(self, engine_args):
+        self.engine_args = engine_args
+
+
+def _mock_get_llm_engine(engine_args, *args, **kwargs):
+    """Mock for get_llm_engine that captures engine_args and short-circuits."""
+    raise EngineArgsCaptured(engine_args)
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
+    """Without overrides, engine_args passed to get_llm_engine use CLI defaults."""
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+
+    config = parse_args(["--model", "fake-model"])
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert engine_args["max_num_tokens"] == config.max_num_tokens
+        assert engine_args["max_batch_size"] == config.max_batch_size
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_engine_args_with_extra_engine_args(
+    tmp_path, monkeypatch
+):
+    """--extra-engine-args YAML overrides are reflected in engine_args passed to get_llm_engine."""
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("max_num_tokens: 32768\nmax_batch_size: 512\n")
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--extra-engine-args",
+            str(yaml_file),
+        ]
+    )
+    # CLI config should NOT reflect the YAML values
+    assert config.max_num_tokens != 32768
+    assert config.max_batch_size != 512
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert engine_args["max_num_tokens"] == 32768, (
+            f"Expected max_num_tokens=32768 from YAML override, "
+            f"got {engine_args['max_num_tokens']}"
+        )
+        assert engine_args["max_batch_size"] == 512, (
+            f"Expected max_batch_size=512 from YAML override, "
+            f"got {engine_args['max_batch_size']}"
+        )
+
+
 class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
 
@@ -180,11 +320,15 @@ async def test_init_llm_worker_creates_multimodal_processor():
     assert config.modality == Modality.MULTIMODAL
 
     # Mock everything init_llm_worker touches before MultimodalRequestProcessor.
-    with mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"), mock.patch(
-        "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
-    ), mock.patch(
-        "dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor",
-        side_effect=MultimodalProcessorInstantiated,
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained",
+        ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor",
+            side_effect=MultimodalProcessorInstantiated,
+        ),
     ):
         with pytest.raises(MultimodalProcessorInstantiated):
             await init_llm_worker(

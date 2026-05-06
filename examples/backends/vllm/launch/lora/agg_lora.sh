@@ -63,12 +63,15 @@ python -m dynamo.frontend &
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
+# Default KV cache cap from profiling (2x safety over min=471 MiB); ~4.0 GiB peak VRAM
+# Profiler/test framework overrides via env
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=941712000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT} \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    $GPU_MEM_ARGS & \
+    $GPU_MEM_ARGS \
     --enable-lora \
     --max-lora-rank 64 &
 

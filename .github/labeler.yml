@@ -103,7 +103,6 @@ xpu:
 multimodal:
   - changed-files:
       - any-glob-to-any-file:
-          - examples/multimodal/**
           - components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py
           - components/src/dynamo/common/multimodal/**
           - components/src/dynamo/vllm/omni/**

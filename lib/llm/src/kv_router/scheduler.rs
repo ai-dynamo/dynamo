@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::protocols::SharedCacheHits;
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, PotentialLoad, SchedulingRequest, SchedulingResponse,
+    TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -18,7 +20,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
-    protocols::{OverlapScores, WorkerId},
+    protocols::{WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -69,8 +71,7 @@ where
             tracing::info!("skipping discovery-based worker monitoring");
         }
 
-        let policy =
-            RouterSchedulingPolicy::new(kv_router_config.router_queue_policy, block_size as usize);
+        let policy = RouterSchedulingPolicy::new(kv_router_config.router_queue_policy);
         tracing::info!(
             "Router queue policy: {}",
             kv_router_config.router_queue_policy
@@ -97,6 +98,8 @@ where
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
             ROUTER_QUEUE_METRICS.set_pending(worker_type, metrics_scheduler.pending_count());
+            ROUTER_QUEUE_METRICS
+                .set_pending_isl_tokens(worker_type, metrics_scheduler.pending_isl_tokens());
 
             loop {
                 tokio::select! {
@@ -109,8 +112,11 @@ where
                             .set_pending(worker_type, metrics_scheduler.pending_count());
                     }
                     _ = recheck_interval.tick() => {
-                        ROUTER_QUEUE_METRICS
-                            .set_pending(worker_type, metrics_scheduler.pending_count());
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, metrics_scheduler.pending_count());
+                        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(
+                            worker_type,
+                            metrics_scheduler.pending_isl_tokens(),
+                        );
                     }
                 }
             }
@@ -125,13 +131,17 @@ where
         maybe_request_id: Option<String>,
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
-        overlaps: OverlapScores,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
             .inner
@@ -139,16 +149,21 @@ where
                 maybe_request_id,
                 isl_tokens,
                 token_seq,
-                overlaps,
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
                 router_config_override,
                 update_states,
                 lora_name,
                 priority_jump,
                 expected_output_tokens,
+                pinned_worker,
                 allowed_worker_ids,
+                shared_cache_hits,
             )
             .await;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
+        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         response
     }
 
@@ -163,17 +178,23 @@ where
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.mark_prefill_completed(request_id).await?;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
+        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.free(request_id).await?;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
+        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
+    }
+
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.inner.pending_isl_tokens()
     }
 
     pub fn worker_type(&self) -> &'static str {
@@ -192,11 +213,15 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        overlaps: OverlapScores,
+        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
-        self.inner
-            .get_potential_loads(token_seq, isl_tokens, overlaps, track_prefill_tokens)
+        self.inner.get_potential_loads(
+            token_seq,
+            isl_tokens,
+            effective_cached_tokens,
+            track_prefill_tokens,
+        )
     }
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {

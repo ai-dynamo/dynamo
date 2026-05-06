@@ -75,9 +75,19 @@ wait_any_exit() {
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    wait -n
-    local _rc=$?
+    # Problem: a failing background child should propagate its non-zero
+    # exit code, but the script always exited 0. Two bash interactions
+    # colluded — `set -e` killed the script before `_rc` was captured,
+    # and the EXIT trap's `kill 0` looped SIGTERM back through the
+    # `trap 'exit 0' TERM INT` set above, zeroing the captured code.
+    #
+    # Fix: `wait -n || _rc=$?` quiets `set -e` for that one line, and
+    # re-arming the TERM/INT trap to `exit $_rc` after capture means the
+    # boomerang SIGTERM still ends with the right code.
+    local _rc=0
+    wait -n || _rc=$?
     echo "A background process exited with code $_rc"
+    trap "exit $_rc" TERM INT
     exit "$_rc"
 }
 
@@ -181,6 +191,34 @@ CURL_EOF
 
     echo ""
     echo "=========================================="
+}
+
+# wait_for_ready <url> [timeout_seconds]
+#
+# Polls an HTTP endpoint until it returns 200 or timeout is reached.
+# Useful for waiting for a worker to finish loading before starting the
+# next one (e.g. disaggregated same-GPU deployments where concurrent
+# model loading causes OOM).
+#
+# Args:
+#   url              HTTP URL to poll (e.g. http://localhost:8081/health)
+#   timeout_seconds  Max seconds to wait (default: 30)
+#
+# Returns 0 on success, 1 on timeout.
+wait_for_ready() {
+    local _url="$1"
+    local _timeout="${2:-30}"
+    local _start=$SECONDS
+    echo "Polling $_url (timeout: ${_timeout}s)..."
+    while (( SECONDS - _start < _timeout )); do
+        if curl -sf --max-time 2 "$_url" > /dev/null 2>&1; then
+            echo "Ready after $(( SECONDS - _start ))s"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: $_url not ready after ${_timeout}s" >&2
+    return 1
 }
 
 # print_curl_footer

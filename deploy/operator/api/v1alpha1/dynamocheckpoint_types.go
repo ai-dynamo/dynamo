@@ -119,10 +119,17 @@ type DynamoCheckpointJobConfig struct {
 }
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
+// +kubebuilder:validation:XValidation:rule="!has(self.gpuMemoryService) || !self.gpuMemoryService.enabled",message="checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues"
 type DynamoCheckpointSpec struct {
 	// Identity defines the inputs that determine checkpoint equivalence
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
+
+	// GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
+	// It is intentionally outside spec.identity, so it does not affect the
+	// checkpoint identity hash or deduplication.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
 	// Job defines the configuration for the checkpoint creation Job
 	// +kubebuilder:validation:Required

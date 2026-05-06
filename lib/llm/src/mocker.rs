@@ -18,7 +18,7 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use dynamo_mocker::common::bootstrap::{BootstrapServer, connect_to_prefill};
 use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal, RawKvEvent,
@@ -58,6 +58,16 @@ impl KvCacheEventSink for KvEventSinkAdapter {
             .publish(event)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
     }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.0
+            .publish_with_storage_tier(event, storage_tier)
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -72,9 +82,15 @@ enum ZmqRawKvEvent {
         parent_block_hash: Option<u64>,
         token_ids: Vec<u32>,
         block_size: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<&'static str>,
+        group_idx: u32,
     },
     BlockRemoved {
         block_hashes: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<&'static str>,
+        group_idx: u32,
     },
 }
 
@@ -194,6 +210,7 @@ impl ZmqKvEventSink {
                             &msg.event,
                             msg.block_token_ids.as_deref(),
                             block_size,
+                            msg.storage_tier,
                         );
                         if events.is_empty() {
                             continue;
@@ -254,7 +271,9 @@ fn convert_to_zmq_events(
     event: &KvCacheEvent,
     block_token_ids: Option<&[Vec<u32>]>,
     block_size: u32,
+    storage_tier: StorageTier,
 ) -> Vec<ZmqRawKvEvent> {
+    let medium = storage_tier.to_kv_medium();
     match &event.data {
         KvCacheEventData::Stored(store_data) => {
             let block_hashes: Vec<u64> = store_data.blocks.iter().map(|b| b.block_hash.0).collect();
@@ -277,11 +296,17 @@ fn convert_to_zmq_events(
                 parent_block_hash,
                 token_ids,
                 block_size,
+                medium,
+                group_idx: 0,
             }]
         }
         KvCacheEventData::Removed(remove_data) => {
             let block_hashes: Vec<u64> = remove_data.block_hashes.iter().map(|h| h.0).collect();
-            vec![ZmqRawKvEvent::BlockRemoved { block_hashes }]
+            vec![ZmqRawKvEvent::BlockRemoved {
+                block_hashes,
+                medium,
+                group_idx: 0,
+            }]
         }
         KvCacheEventData::Cleared => vec![],
     }
@@ -303,6 +328,8 @@ pub struct MockEngine {
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     /// Keep schedulers alive so their CancelGuards don't fire prematurely.
     _schedulers: OnceCell<Vec<Box<dyn SchedulerHandle>>>,
+    /// Forward pass metrics publisher (kept alive for the engine lifetime).
+    _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
 }
 
 impl MockEngine {
@@ -316,6 +343,7 @@ impl MockEngine {
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             _schedulers: OnceCell::new(),
+            _fpm_publisher: OnceCell::new(),
         }
     }
 
@@ -361,11 +389,33 @@ impl MockEngine {
             None
         };
 
+        // Create FPM publisher upfront and get per-dp-rank sink handles.
+        let worker_id = component.drt().connection_id().to_string();
+        let fpm_sinks = match crate::fpm_publisher::FpmDirectPublisher::new(
+            component.clone(),
+            worker_id,
+            self.engine_args.dp_size,
+        )
+        .await
+        {
+            Ok((publisher, sinks)) => {
+                let _ = self._fpm_publisher.set(publisher);
+                sinks
+            }
+            Err(e) => {
+                tracing::error!("Failed to start FPM publisher: {e}");
+                (0..self.engine_args.dp_size)
+                    .map(|_| dynamo_mocker::common::protocols::FpmPublisher::default())
+                    .collect()
+            }
+        };
+
         let schedulers = self
-            .start_schedulers(kv_component, cancel_token.clone())
+            .start_schedulers(kv_component, cancel_token.clone(), fpm_sinks)
             .await;
 
-        Self::start_metrics_publishing(&schedulers, component, cancel_token.clone()).await?;
+        Self::start_metrics_publishing(&schedulers, component.clone(), cancel_token.clone())
+            .await?;
 
         let _ = self._schedulers.set(schedulers);
 
@@ -395,17 +445,18 @@ impl MockEngine {
         let _ = senders[dp_rank].send(request);
     }
 
-    /// Create schedulers and spawn their background tasks for distributing token notifications
+    /// Create schedulers and spawn their background tasks for distributing token notifications.
     async fn start_schedulers(
         &self,
         component: Option<&Component>,
         cancel_token: CancellationToken,
+        fpm_sinks: Vec<dynamo_mocker::common::protocols::FpmPublisher>,
     ) -> Vec<Box<dyn SchedulerHandle>> {
         let args = &self.engine_args;
         let mut schedulers = Vec::<Box<dyn SchedulerHandle>>::new();
         let mut senders = Vec::with_capacity(args.dp_size as usize);
 
-        for dp_rank in 0..args.dp_size {
+        for (dp_rank, fpm_publisher) in (0..args.dp_size).zip(fpm_sinks) {
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
 
             let (kv_event_publishers, relay_publisher): (
@@ -493,6 +544,7 @@ impl MockEngine {
                 Some(output_tx),
                 kv_event_publishers,
                 Some(cancel_token.clone()),
+                fpm_publisher,
             );
 
             senders.push(scheduler.request_sender());
@@ -813,4 +865,59 @@ pub async fn make_mocker_engine(
         AnnotatedMockEngine::new(MockEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
+    };
+
+    use super::*;
+
+    fn stored_event() -> KvCacheEvent {
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(10),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }
+    }
+
+    #[test]
+    fn host_pinned_zmq_stored_event_carries_medium() {
+        let events = convert_to_zmq_events(
+            &stored_event(),
+            Some(&[vec![1, 2, 3, 4]]),
+            4,
+            StorageTier::HostPinned,
+        );
+
+        let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
+            panic!("expected one BlockStored event");
+        };
+        assert_eq!(*medium, Some("CPU_PINNED"));
+    }
+
+    #[test]
+    fn device_zmq_stored_event_omits_medium() {
+        let events = convert_to_zmq_events(
+            &stored_event(),
+            Some(&[vec![1, 2, 3, 4]]),
+            4,
+            StorageTier::Device,
+        );
+
+        let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
+            panic!("expected one BlockStored event");
+        };
+        assert_eq!(*medium, None);
+    }
 }

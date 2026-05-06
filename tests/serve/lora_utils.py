@@ -19,9 +19,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import boto3
+import pytest
 import requests
 from botocore.client import Config
 from botocore.exceptions import ClientError
+from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
@@ -29,6 +31,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # LoRA testing constants
+#
+# Port 9000 / container name / bucket are hardcoded singletons — only one MinIO
+# can exist per host at a time. NOT multi-tenant safe:
+#   - Two concurrent pytest runs (or CI jobs) on the same host race on the
+#     `dynamo-minio-test` container; whichever calls `docker rm -f` second
+#     kills the other's mid-test.
+#   - xdist workers within one pytest run only work because CI pre-starts MinIO
+#     externally (see action.yml "Start MinIO Service" step) so all workers
+#     skip the start path and just connect.
+#   - If a host already has MinIO on :9000 with different creds, the fixture
+#     connects, fails to auth on bucket create, and surfaces a confusing error.
+#
+# TODO: make these overridable per-worker / per-job (env vars or PYTEST_XDIST_WORKER-
+# derived suffixes) so concurrent runs don't collide. Pattern to mirror is
+# tests/utils/runtime_services_dynamic_ports for ETCD/NATS.
 MINIO_ENDPOINT = "http://localhost:9000"
 MINIO_ACCESS_KEY = "minioadmin"
 MINIO_SECRET_KEY = "minioadmin"
@@ -231,42 +248,29 @@ class MinioService:
                 raise RuntimeError(f"Failed to check bucket: {e}") from e
 
     def download_lora(self) -> str:
-        """Download LoRA from Hugging Face Hub, returns temp directory path."""
-        self._temp_download_dir = tempfile.mkdtemp(prefix="lora_download_")
+        """Resolve the LoRA snapshot path from the local HF cache.
+
+        Skips via pytest.skip() when DYNAMO_MODELS_DIR is set (--models-dir active).
+        """
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            pytest.skip(
+                "--models-dir is active (read-only cache mode): LoRA network download suppressed. "
+                "Pre-stage LoRA adapters into the cache or omit --models-dir to enable downloads."
+            )
+
+        # The adapter is staged into the HF cache by predownload_models (via
+        # @pytest.mark.model) before HF_HUB_OFFLINE is enabled. Resolve the cache
+        # snapshot path directly — passing local_dir bypasses the cache-hit
+        # short-circuit in snapshot_download and forces a copy that fails under
+        # local_files_only=True with an empty target dir.
+        snapshot_path = snapshot_download(
+            self.config.lora_repo,
+            local_files_only=True,
+        )
         self._logger.info(
-            f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
+            f"Resolved LoRA {self.config.lora_repo} from HF cache at {snapshot_path}"
         )
-
-        # Run with HF_HUB_OFFLINE unset so the download works even when
-        # the predownload_models fixture has already enabled offline mode.
-        # This only affects the subprocess env; the parent process is unchanged.
-        env = os.environ.copy()
-        env.pop("HF_HUB_OFFLINE", None)
-
-        result = subprocess.run(
-            [
-                "huggingface-cli",
-                "download",
-                self.config.lora_repo,
-                "--local-dir",
-                self._temp_download_dir,
-                "--local-dir-use-symlinks",
-                "False",
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to download LoRA: {result.stderr}")
-
-        # Clean up cache directory
-        cache_dir = os.path.join(self._temp_download_dir, ".cache")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-
-        return self._temp_download_dir
+        return snapshot_path
 
     def upload_lora(self, local_path: str) -> None:
         """Upload LoRA to MinIO using boto3."""

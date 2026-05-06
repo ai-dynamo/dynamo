@@ -93,12 +93,10 @@ def run_dynamo_headless(config: Config) -> None:
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             configure_gms_lock_mode(config.engine_args)
-            validate_cudagraph_mode(config.engine_args)
 
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
@@ -162,7 +160,6 @@ async def worker() -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=config.use_kv_events,
     )
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
@@ -473,17 +470,15 @@ def setup_vllm_engine(
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             logger.info(
-                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
             )
             # ENGINE_ID=0 writes weights, all others import (RO).
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
-            validate_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
@@ -657,6 +652,13 @@ async def register_vllm_model(
         config.exclude_tools_when_tool_choice_none
     )
 
+    # Propagate stream_interval so the frontend can respect --stream-interval.
+    # set_engine_specific requires a JSON-encoded string (the Rust binding
+    # parses it with serde_json::from_str); str(int) happens to be valid JSON.
+    stream_interval = getattr(config.engine_args, "stream_interval", None)
+    if stream_interval is not None:
+        runtime_config.set_engine_specific("stream_interval", str(stream_interval))
+
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
     runtime_config.data_parallel_start_rank = dp_range[0]
@@ -679,7 +681,9 @@ async def register_vllm_model(
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)
-        media_fetcher.allow_direct_port(True)
+        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        media_fetcher.allow_direct_ip(allow_internal)
+        media_fetcher.allow_direct_port(allow_internal)
 
     await register_model(
         model_input,

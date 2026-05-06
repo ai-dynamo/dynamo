@@ -1105,4 +1105,387 @@ mod tests {
             "finish_reason validation failed for non-tool call case"
         );
     }
+
+    // ---- DeepSeek V4 (DSML format) streaming parser tests ----
+    //
+    // V4 emits tool calls inside a DSML block:
+    //   <｜DSML｜tool_calls>
+    //   <｜DSML｜invoke name="fn">
+    //   <｜DSML｜parameter name="k" string="true|false">v</｜DSML｜parameter>
+    //   </｜DSML｜invoke>
+    //   </｜DSML｜tool_calls>
+    // Fixtures live under tests/data/vllm/deepseek-v4/.
+
+    /// Shared harness for DeepSeek V4 e2e fixtures that end in a tool call.
+    async fn run_deepseek_v4_tool_call_fixture(file_path: &str) {
+        let test_data = load_test_data(file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    /// Single tool call, thinking mode (direct V4 analog of the V3 tool fixture).
+    /// `PARSER.1` + `PARSER.8` + `PARSER.9` — single tool call, streaming assembly, paired with reasoning. Also validates `PARSER.12` finish_reason=tool_calls.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_with_tools_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// No tool call — thinking + plain body; finish_reason=stop.
+    /// `PARSER.3` + `PARSER.10` — no tool call + reasoning only. Also validates `PARSER.12` finish_reason=stop.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_with_no_tools_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
+    }
+
+    /// Two parallel tool calls inside one DSML block.
+    /// `PARSER.2` — parallel tool calls in one DSML block.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_multi_tool_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_multi_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// string="true" vs string="false" — numbers, booleans, arrays, objects must
+    /// round-trip as their proper JSON types inside arguments.
+    /// `PARSER.7` — complex args (mixed string="true|false" → strings / numbers / bools / arrays / objects round-trip).
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_mixed_param_types_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_mixed_param_types.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Body text emitted before the DSML block — parser must populate both
+    /// normal_content and tool_calls.
+    /// `PARSER.13` — normal text interleaved before the DSML block.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_content_before_tool_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_content_before_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Parameter value containing unicode, emoji, embedded quotes/newlines/tabs,
+    /// and fragments that look like sentinels but aren't — must not confuse the
+    /// parser, which anchors only on the exact </｜DSML｜parameter> token.
+    /// `PARSER.7` — Unicode / special characters inside argument values. (`PARSER.xml1` is N/A for DSML — no entity decoding.)
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_special_chars_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_special_chars.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Adversarial streaming: every DSML character is its own delta (~200 chunks).
+    /// Exercises buffer accumulation across chunk boundaries.
+    /// `PARSER.8` — streaming chunk-boundary splits (tokens straddle chunks).
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_fragmented_tokens_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_fragmented_tokens.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    // ---- Kimi K2 streaming jail reproduction tests ----
+    //
+    // These reproduce the customer-reported issue (DIS-1765): Kimi K2 agentic
+    // workflows hitting finish_reason=length repeatedly because the jail never
+    // exits when section_end is missing.
+
+    /// Helper: build a single streaming chunk with optional finish_reason
+    fn make_chunk(
+        content: &str,
+        finish_reason: Option<FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                role: Some(dynamo_protocols::types::Role::Assistant),
+                content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason,
+            stop_reason: None,
+            logprobs: None,
+        };
+        Annotated {
+            id: Some("test-kimi".to_string()),
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-kimi".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "kimi-k2".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
+            }),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// Repro: complete Kimi K2 tool call stream, section_end present → should work.
+    /// This is the baseline / control test.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_complete_section() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.get_weather:0", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(r#"{"location":"NYC"}"#, None),
+            make_chunk("<|tool_call_end|>", None),
+            make_chunk("<|tool_calls_section_end|>", Some(FinishReason::Stop)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Baseline: complete Kimi K2 section should produce tool calls"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+    }
+
+    /// Repro for DIS-1765: model hits max_tokens BEFORE emitting section_end.
+    /// Individual tool call is complete (call_begin + args + call_end), but
+    /// section_end is missing. The jail should still extract the tool call at
+    /// finalize time instead of emitting raw marker text.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_missing_section_end_max_tokens() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.get_weather:0", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(r#"{"location":"NYC"}"#, None),
+            make_chunk("<|tool_call_end|>", None),
+            // Stream ends here — model hit max_tokens, no section_end.
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // BUG: currently the jail stays open, finalize calls the parser which
+        // requires section_end, returns 0 tool calls, and the accumulated
+        // content (with raw markers) is emitted as plain text. The client sees
+        // garbage instead of a structured tool call.
+        assert!(
+            aggregated.has_tool_calls,
+            "Should extract tool calls even when section_end is missing (max_tokens truncation). \
+             Currently broken: jail emits raw marker text as content instead."
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+    }
+
+    /// Repro: multiple complete tool calls, no section_end (max_tokens).
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_multiple_calls_missing_section_end() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk(
+                "<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>",
+                None,
+            ),
+            make_chunk(r#"{"location":"NYC"}<|tool_call_end|>"#, None),
+            make_chunk(
+                "<|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>",
+                None,
+            ),
+            make_chunk(
+                r#"{"timezone":"EST"}<|tool_call_end|>"#,
+                Some(FinishReason::Length),
+            ),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Should extract both tool calls even without section_end"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 2);
+    }
+
+    /// `PARSER.5` + `PARSER.8` (PR #8208) — kimi-k2 truncated mid-argument
+    /// (no `<|tool_call_end|>`), streaming, customer regression. Also
+    /// validates `PARSER.12` finish_reason=stop passthrough.
+    ///
+    /// Repro for the production leak observed against kimi-k2-6: the
+    /// model stops mid-argument with
+    /// `finish_reason: stop` (not max_tokens), having emitted
+    /// `<|tool_calls_section_begin|>`, `<|tool_call_begin|>`, the function id,
+    /// `<|tool_call_argument_begin|>`, and the JSON value — but **never**
+    /// emitting `<|tool_call_end|>` or `<|tool_calls_section_end|>`. This is
+    /// the most common failure mode under heavy concurrent load (multi-worker
+    /// batching causes occasional EOS-token confusion at the close-of-arg
+    /// boundary).
+    ///
+    /// The parser correctly returns 0 tool calls (no complete call found,
+    /// since `<|tool_call_end|>` is required by the kimi_k2 regex) and an
+    /// empty `normal_text` (the section body is consumed). Before the fix,
+    /// the jail's `create_tool_call_choice` ignored `normal_text` and emitted
+    /// the raw `accumulated_content` (with all special-token markers) as
+    /// plain user-visible content — leaking internal protocol tokens to the
+    /// client and breaking downstream agents that expect either a clean
+    /// `tool_calls` array or clean text.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_truncated_mid_argument_no_call_end() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.Write:42", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(
+                r#"{"file_path":"/app/main.rs","content":"fn main() {}"}"#,
+                None,
+            ),
+            // Stream ends here — model self-terminated without emitting
+            // <|tool_call_end|> or <|tool_calls_section_end|>.
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // The parser cannot recover a structured tool call without
+        // <|tool_call_end|>, so tool_calls is expected to be empty.
+        assert!(
+            !aggregated.has_tool_calls,
+            "Truly truncated call (no call_end) should not produce structured tool_calls"
+        );
+
+        // The parser consumes the section body, so normal_text is expected
+        // to be empty. Asserting equality (not just marker-absence) locks the
+        // contract: any future regression that produced *other* garbage in
+        // normal_text would still fail this assertion.
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Truncated tool-call section should produce empty normal_content. \
+             Got: {:?}",
+            aggregated.normal_content
+        );
+
+        // finish_reason should pass through unchanged from the source chunk
+        // (Stop in this case). Locks the contract that the no-tool-calls
+        // branch doesn't remap the reason.
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason should pass through as Stop when no tool calls are emitted"
+        );
+    }
 }

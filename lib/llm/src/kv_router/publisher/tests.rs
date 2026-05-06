@@ -104,6 +104,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let out = convert_event(
@@ -112,7 +115,8 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+        )
+        .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
     }
 
@@ -130,6 +134,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -140,6 +147,9 @@ mod test_event_processing {
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -149,14 +159,16 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
         let lora_out = convert_event(
             lora_evt,
             2,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
 
         let base_hash = match &base_out.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
@@ -187,6 +199,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -197,6 +212,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let out1 = convert_event(
@@ -205,14 +223,16 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
         let out2 = convert_event(
             evt2,
             2,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+        )
+        .unwrap();
 
         let hash1 = match &out1.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
@@ -290,6 +310,9 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let out = convert_event(
             raw_evt,
@@ -297,7 +320,8 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+        )
+        .unwrap();
 
         assert!(matches!(out.event.data, KvCacheEventData::Removed(_)));
     }
@@ -312,7 +336,8 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+        )
+        .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
     }
 
@@ -606,6 +631,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
@@ -698,6 +724,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
@@ -780,6 +807,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
@@ -897,6 +925,18 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            group_idx: Option<u32>,
+            kv_cache_spec_kind: Option<&'static str>,
+        }
+
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
@@ -932,24 +972,30 @@ mod tests_startup_helpers {
         // Send synthetic 3-frame message: [topic, seq(8B), payload]
         let seq: u64 = 77;
 
-        let events = vec![RawKvEvent::BlockStored {
-            block_hashes: vec![BlockHashValue::Unsigned(42)],
-            parent_block_hash: None,
-            token_ids: vec![0, 1, 2, 3],
-            block_size: 4,
-            medium: None,
-            lora_name: None,
-            block_mm_infos: None,
-            is_eagle: None,
-        }];
+        let events = vec![
+            MapBlockStoredEvent {
+                event_type: "BlockStored",
+                block_hashes: vec![41],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                group_idx: Some(1),
+                kv_cache_spec_kind: Some("mamba"),
+            },
+            MapBlockStoredEvent {
+                event_type: "BlockStored",
+                block_hashes: vec![42],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+            },
+        ];
 
-        let batch = KvEventBatch {
-            ts: 0.0,
-            events,
-            data_parallel_rank: Some(1),
-        };
+        let batch = (0.0, events, Some(1_i32));
 
-        let payload = Bytes::from(rmps::to_vec(&batch).unwrap());
+        let payload = Bytes::from(rmps::to_vec_named(&batch).unwrap());
 
         let frames = vec![
             Bytes::from("").to_vec(),
@@ -965,9 +1011,11 @@ mod tests_startup_helpers {
 
         // Check that we received the message
         let event = rx.try_recv().expect("no message received").event;
+        assert_eq!(event.event_id, 0);
 
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
+            start_position,
             blocks,
         }) = event.data
         else {
@@ -975,6 +1023,7 @@ mod tests_startup_helpers {
         };
 
         assert!(parent_hash.is_none());
+        assert!(start_position.is_none());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash.0, 42);
 
@@ -1018,26 +1067,35 @@ mod tests_startup_helpers {
                 lora_name: None,
                 block_mm_infos: None,
                 is_eagle: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
             }],
             data_parallel_rank: Some(0),
         };
         let payload = rmps::to_vec(&batch).unwrap();
 
-        for _ in 0..5 {
-            send_multipart(
-                &pub_socket,
-                vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
-            )
-            .await
-            .unwrap();
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
-
-        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for listener event")
-            .expect("listener channel closed")
-            .event;
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed").event;
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(
+                            &pub_socket,
+                            vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
+                        )
+                        .await
+                        .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
 
         let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = event.data else {
             panic!("expected KvCacheStoreData");
@@ -1094,6 +1152,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
@@ -1166,6 +1225,7 @@ mod tests_startup_helpers {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100), // Shared prefix
@@ -1280,6 +1340,7 @@ mod test_event_dedup_filter {
     fn store_data(hashes: &[u64]) -> KvCacheStoreData {
         KvCacheStoreData {
             parent_hash: None,
+            start_position: None,
             blocks: hashes
                 .iter()
                 .map(|&h| KvCacheStoredBlockData {
@@ -1306,15 +1367,15 @@ mod test_event_dedup_filter {
         let data = store_data(&[1, 2, 3]);
 
         // Store same hashes twice — refcount should be 2
-        filter.track_store(0, &data);
-        filter.track_store(0, &data);
+        filter.track_store(0, StorageTier::Device, &data);
+        filter.track_store(0, StorageTier::Device, &data);
 
         // First remove — refcounts 2→1, all filtered out
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_none());
 
         // Second remove — refcounts 1→0, all pass through
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 3);
     }
@@ -1324,15 +1385,15 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store same hash twice
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // First remove — refcount 2→1, filtered out
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_none());
 
         // Second remove — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 1);
     }
@@ -1342,17 +1403,17 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store hash 1
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Remove hash 1 — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
         // Store hash 1 again — refcount starts fresh at 1
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Remove again — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 
@@ -1361,20 +1422,20 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store on rank 0 and rank 1
-        filter.track_store(0, &store_data(&[1, 2]));
-        filter.track_store(0, &store_data(&[1, 2]));
-        filter.track_store(1, &store_data(&[1, 2]));
-        filter.track_store(1, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
 
         // Clear wipes all ranks (matches indexer semantics where Cleared
         // from any rank removes all blocks for the entire worker).
         filter.clear();
 
         // Both ranks pass through defensively after clear
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
-        let result = filter.filter_remove(1, remove_data(&[1]));
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 
@@ -1383,18 +1444,18 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Hash 1: stored twice (refcount 2)
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Hash 2: stored once (refcount 1)
-        filter.track_store(0, &store_data(&[2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[2]));
 
         // Hash 3: stored twice (refcount 2)
-        filter.track_store(0, &store_data(&[3]));
-        filter.track_store(0, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
 
         // Remove all three — only hash 2 (refcount 1→0) passes through
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         let result = result.unwrap();
         assert_eq!(result.block_hashes.len(), 1);
@@ -1406,20 +1467,20 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store hash 1 on rank 0 (twice) and rank 1 (once)
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(1, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1]));
 
         // Remove hash 1 on rank 1 — refcount 1→0, passes through
-        let result = filter.filter_remove(1, remove_data(&[1]));
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
         // Remove hash 1 on rank 0 — refcount 2→1, filtered out
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_none());
 
         // Remove hash 1 on rank 0 again — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 }
@@ -1556,6 +1617,7 @@ mod batching_state_tests {
 
         state.pending_stored = Some(KvCacheStoreData {
             parent_hash: None,
+            start_position: None,
             blocks: vec![],
         });
         assert!(
@@ -1659,6 +1721,7 @@ mod batching_state_tests {
         };
         let first = KvCacheStoreData {
             parent_hash: Some(ExternalSequenceBlockHash(0)),
+            start_position: None,
             blocks: vec![block1],
         };
 
@@ -1712,6 +1775,13 @@ mod event_processor_tests {
 
     fn local_gpu_event(event: KvCacheEvent) -> PlacementEvent {
         PlacementEvent::local_gpu(1, event)
+    }
+
+    fn local_host_event(event: KvCacheEvent) -> PlacementEvent {
+        PlacementEvent::new(
+            Placement::local_worker(1, event.dp_rank, StorageTier::HostPinned),
+            event,
+        )
     }
 
     /// Test that pushing N removed events results in batched output
@@ -1865,6 +1935,7 @@ mod event_processor_tests {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash,
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
                         tokens_hash: LocalBlockHash(i as u64 * 100),
@@ -1957,6 +2028,7 @@ mod event_processor_tests {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: Some(ExternalSequenceBlockHash((i + 1) as u64 * 100)),
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
                         tokens_hash: LocalBlockHash(i as u64 * 100),
@@ -2023,6 +2095,7 @@ mod event_processor_tests {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2038,6 +2111,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: Some(11_111),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2053,6 +2127,7 @@ mod event_processor_tests {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: Some(20),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(3),
                     tokens_hash: LocalBlockHash(300),
@@ -2086,6 +2161,11 @@ mod event_processor_tests {
                 data.parent_hash, None,
                 "First batch should preserve the original root parent"
             );
+            assert_eq!(
+                data.start_position,
+                Some(10),
+                "First batch should preserve the original start position"
+            );
         } else {
             panic!("Expected first event to be Stored");
         }
@@ -2100,6 +2180,11 @@ mod event_processor_tests {
                 data.parent_hash,
                 Some(ExternalSequenceBlockHash(1)),
                 "Second batch should preserve the reused parent hash"
+            );
+            assert_eq!(
+                data.start_position,
+                Some(20),
+                "Second batch should keep the new root's start position"
             );
         } else {
             panic!("Expected second event to be Stored");
@@ -2235,6 +2320,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2259,6 +2345,106 @@ mod event_processor_tests {
             2,
             "Switching from Removed to Stored should cause immediate flush, resulting in 2 separate events"
         );
+    }
+
+    #[tokio::test]
+    async fn test_host_tier_events_are_published_and_preserved() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(100),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(42)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "Expected a single published host-tier event"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+
+        let KvCacheEventData::Removed(data) = &events[0].event.data else {
+            panic!("Expected Removed event");
+        };
+        assert_eq!(data.block_hashes, vec![ExternalSequenceBlockHash(42)]);
+    }
+
+    #[tokio::test]
+    async fn test_storage_tier_change_causes_flush() {
+        let timeout_ms = Some(100);
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(1)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(2)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "Changing storage tier should flush the current batch"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+        assert_eq!(events[1].storage_tier, StorageTier::Device);
     }
 
     /// Test that dp_rank change causes immediate flush
@@ -2537,6 +2723,7 @@ mod event_processor_tests {
             event_id: 100,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2552,6 +2739,7 @@ mod event_processor_tests {
             event_id: 101,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2569,6 +2757,7 @@ mod event_processor_tests {
             event_id: 200,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(1000),
@@ -2654,6 +2843,7 @@ mod event_processor_tests {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None, // Root block with no parent
+                start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2670,6 +2860,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
+                start_position: Some(999),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2686,6 +2877,7 @@ mod event_processor_tests {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(2)),
+                start_position: Some(1_234),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(3),
                     tokens_hash: LocalBlockHash(300),
@@ -2715,6 +2907,11 @@ mod event_processor_tests {
             assert_eq!(
                 data.parent_hash, None,
                 "Batch parent_hash should remain None (from first event), NOT overwritten by subsequent events"
+            );
+            assert_eq!(
+                data.start_position,
+                Some(10),
+                "Batch start_position should remain anchored to the first event"
             );
         } else {
             panic!("Expected Stored event");

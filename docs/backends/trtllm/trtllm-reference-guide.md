@@ -30,13 +30,27 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 
 For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
 
+## Multiple Choices (`n`)
+
+Dynamo forwards OpenAI-compatible multiple-choice requests to TensorRT-LLM using `n`. For an `n > 1` request on TensorRT-LLM's default deterministic decoding path, set `TLLM_ALLOW_N_GREEDY_DECODING=1` in the TensorRT-LLM worker environment. Without it, TensorRT-LLM rejects the request before generation.
+
+If a test or deployment intentionally validates `n > 1` for that path, set:
+
+```bash
+export TLLM_ALLOW_N_GREEDY_DECODING=1
+```
+
+Scope this environment variable to the specific TensorRT-LLM worker or test configuration that needs `n > 1`. For Dynamo E2E tests, set it on the relevant `EngineConfig.env` rather than globally, and keep the client request OpenAI-shaped with `n` instead of adding `best_of`.
+
+TensorRT-LLM documents `n`/`best_of` behavior and validates this guard as greedy decoding in [`tensorrt_llm/sampling_params.py`](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/sampling_params.py).
+
 ## Multimodal Support
 
 Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal-trtllm.md).
 
-## Video Diffusion Support (Experimental)
+## Diffusion Support (Experimental)
 
-Dynamo supports video generation using diffusion models through TensorRT-LLM. For requirements, supported models, API usage, and configuration options, see the [Video Diffusion Guide](./trtllm-video-diffusion.md).
+Dynamo supports video and image generation using diffusion models through TensorRT-LLM. For requirements, supported models, API usage, and configuration options, see the [Diffusion Guide](./trtllm-diffusion.md).
 
 ## Logits Processing
 
@@ -55,6 +69,17 @@ See the instructions here: [Running KVBM in TensorRT-LLM](../../components/kvbm/
 ## Observability
 
 TensorRT-LLM exposes Prometheus metrics for monitoring inference performance. For detailed metrics reference, collection setup, and Grafana integration, see the [Observability Guide](./trtllm-observability.md).
+
+## Disabling Python Cyclic GC for high concurrency benchmarks
+
+Dynamo with TensorRT-LLM exposes `DYN_TRTLLM_SERVER_DISABLE_GC` to match the behavior of `TRTLLM_SERVER_DISABLE_GC` in `trtllm-serve`. When set, the TensorRT-LLM worker disables Python's cyclic garbage collector at startup so that generational GC pauses do not land on the request hot path. Reference-counted deallocation still runs normally — only the cycle collector is turned off.
+
+```bash
+export DYN_TRTLLM_SERVER_DISABLE_GC=1
+```
+
+This is most useful for high-concurrency benchmarks, where it boosts throughput and stabilizes TTFT/ITL measurements by removing GC-induced tail-latency spikes.
+
 
 ## Known Issues and Mitigations
 

@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,7 +68,7 @@ func testScheme() *runtime.Scheme {
 }
 
 func testInfo() *CheckpointInfo {
-	return &CheckpointInfo{Enabled: true, Hash: testHash}
+	return &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 }
 
 func testSnapshotAgentDaemonSet() *appsv1.DaemonSet {
@@ -159,7 +160,7 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{})
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, friendly.Name, ckpt.Name)
 
@@ -174,7 +175,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{})
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
@@ -183,11 +184,32 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 // --- InjectCheckpointIntoPodSpec tests ---
 
 func TestInjectCheckpointIntoPodSpec(t *testing.T) {
+	t.Run("not ready checkpoint leaves pod spec untouched", func(t *testing.T) {
+		podSpec := testPodSpec()
+		originalCmd := append([]string(nil), podSpec.Containers[0].Command...)
+		originalArgs := append([]string(nil), podSpec.Containers[0].Args...)
+		info := &CheckpointInfo{Enabled: true, Ready: false, Hash: testHash}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+
+		assert.Equal(t, originalCmd, podSpec.Containers[0].Command)
+		assert.Equal(t, originalArgs, podSpec.Containers[0].Args)
+		for _, volume := range podSpec.Volumes {
+			assert.NotEqual(t, snapshotprotocol.SnapshotControlVolumeName, volume.Name)
+			assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, volume.Name)
+			assert.NotEqual(t, consts.PodInfoVolumeName, volume.Name)
+		}
+		for _, env := range podSpec.Containers[0].Env {
+			assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
+		}
+	})
+
 	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
@@ -221,18 +243,101 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
+				{Name: "main", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
-				{Name: consts.MainContainerName, Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 			},
 		}
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[0].Command)
-		assert.Equal(t, []string{"run"}, podSpec.Containers[0].Args)
-		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[1].Command)
-		assert.Nil(t, podSpec.Containers[1].Args)
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
+		assert.Nil(t, podSpec.Containers[0].Args)
+		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
+		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
+	})
+
+	t.Run("failover targets shape every engine container", func(t *testing.T) {
+		podSpec := &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "engine-0", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+				{Name: "engine-1", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
+			},
+		}
+		info := &CheckpointInfo{
+			Enabled:                 true,
+			Ready:                   true,
+			Hash:                    testHash,
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
+		}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		for _, name := range []string{"engine-0", "engine-1"} {
+			c := findContainer(podSpec, name)
+			require.NotNil(t, c, "container %q not found", name)
+			assert.Equal(t, []string{"sleep", "infinity"}, c.Command, "engine %s command", name)
+			assert.Nil(t, c.Args, "engine %s args", name)
+			gotSubPath := ""
+			for _, m := range c.VolumeMounts {
+				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
+					gotSubPath = m.SubPath
+				}
+			}
+			assert.Equal(t, name, gotSubPath, "engine %s control-volume subPath", name)
+		}
+		sidecar := findContainer(podSpec, "sidecar")
+		require.NotNil(t, sidecar)
+		assert.Equal(t, []string{"sidecar"}, sidecar.Command, "sidecar must not be rewritten")
+	})
+
+	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
+		podSpec := testPodSpec()
+		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		gmsServer := findContainer(podSpec, gms.ServerContainerName)
+		require.NotNil(t, gmsServer)
+		loader := findContainer(podSpec, GMSLoaderContainer)
+		require.NotNil(t, loader)
+		serverCount := 0
+		loaderCount := 0
+		for _, container := range podSpec.InitContainers {
+			switch container.Name {
+			case gms.ServerContainerName:
+				serverCount++
+			case GMSLoaderContainer:
+				loaderCount++
+			}
+		}
+		assert.Equal(t, 1, serverCount)
+		assert.Equal(t, 1, loaderCount)
+
+		// Restore: server and loader are init sidecars (restartPolicy=Always)
+		assert.NotNil(t, gmsServer.RestartPolicy, "restore gms-server should have RestartPolicy")
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
+		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
+		assert.NotNil(t, loader.RestartPolicy, "restore gms-loader should have RestartPolicy")
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *loader.RestartPolicy)
+
+		mounts := map[string]string{}
+		for _, mount := range loader.VolumeMounts {
+			mounts[mount.Name] = mount.MountPath
+		}
+		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
+		assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName])
+
+		env := map[string]string{}
+		for _, item := range loader.Env {
+			env[item.Name] = item.Value
+		}
+		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
+		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
 	})
 
 	t.Run("error cases", func(t *testing.T) {
@@ -243,13 +348,12 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			reader  client.Reader
 			errMsg  string
 		}{
-			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
-			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container found"},
-			{"main container missing", &corev1.PodSpec{Containers: []corev1.Container{{Name: "sidecar", Image: "img", Command: []string{"python3"}}}}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "main container not found"},
+			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true, Ready: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
+			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "do not all exist in pod spec"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info)
+				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info, snapshotprotocol.DefaultSeccompLocalhostProfile)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.errMsg)
 			})
@@ -277,7 +381,10 @@ func TestResolveCheckpointForService(t *testing.T) {
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
+			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+				Identity:         testIdentity(),
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
+			},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 				IdentityHash: hash,
@@ -294,6 +401,8 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.True(t, info.Ready)
 		assert.Equal(t, hash, info.Hash)
 		assert.Equal(t, hash, info.CheckpointName)
+		require.NotNil(t, info.GPUMemoryService)
+		assert.True(t, info.GPUMemoryService.Enabled)
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {
@@ -411,4 +520,51 @@ func TestResolveCheckpointForService(t *testing.T) {
 		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		assert.ErrorContains(t, err, "no checkpointRef or identity")
 	})
+}
+
+// --- ApplyRestorePodMetadata target-containers annotation ---
+
+func TestApplyRestorePodMetadata_DefaultsToMainContainer(t *testing.T) {
+	labels := map[string]string{}
+	annotations := map[string]string{}
+	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash})
+	assert.Equal(t, consts.MainContainerName, annotations[snapshotprotocol.TargetContainersAnnotation])
+}
+
+func TestApplyRestorePodMetadata_FailoverTargets(t *testing.T) {
+	labels := map[string]string{}
+	annotations := map[string]string{}
+	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{
+		Enabled:                 true,
+		Ready:                   true,
+		Hash:                    testHash,
+		RestoreTargetContainers: []string{"engine-0", "engine-1"},
+	})
+	assert.Equal(t, "engine-0,engine-1", annotations[snapshotprotocol.TargetContainersAnnotation])
+}
+
+func TestApplyRestorePodMetadata_DisabledClearsAnnotation(t *testing.T) {
+	labels := map[string]string{}
+	annotations := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: "stale",
+	}
+	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: false})
+	_, ok := annotations[snapshotprotocol.TargetContainersAnnotation]
+	assert.False(t, ok, "target-containers annotation must be cleared when checkpoint disabled")
+}
+
+// findContainer is a test helper that locates a container by name across both
+// regular containers and init containers.
+func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == name {
+			return &podSpec.Containers[i]
+		}
+	}
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == name {
+			return &podSpec.InitContainers[i]
+		}
+	}
+	return nil
 }
