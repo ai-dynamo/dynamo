@@ -13,7 +13,6 @@
 #   # 1. Dev image (keeps the Rust toolchain for in-pod rebuilds):
 #   docker build \
 #     -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
-#     --build-arg BASE_IMAGE=<your-tokenspeed-image>:<tag> \
 #     --target dev \
 #     -t <your-registry>/dynamo-tokenspeed:dev \
 #     .
@@ -21,13 +20,17 @@
 #   # 2. Slim runtime image (no compilers / no Rust toolchain):
 #   docker build \
 #     -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
-#     --build-arg BASE_IMAGE=<your-tokenspeed-image>:<tag> \
 #     --target runtime \
 #     -t <your-registry>/dynamo-tokenspeed:runtime \
 #     .
 #
-# Use --build-arg ARCH=arm64 for arm64 base images.
-ARG BASE_IMAGE=tokenspeed:local
+# The default BASE_IMAGE pins lightseekorg/tokenspeed-runner at a CUDA-13
+# tag (matches B200's CUDA 13.x driver, ~4.66 GB). To target a different
+# TokenSpeed runtime build, override it:
+#   --build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
+# or for arm64 base images:
+#   --build-arg ARCH=arm64
+ARG BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0
 ARG ARCH=amd64
 ARG CARGO_BUILD_JOBS=16
 

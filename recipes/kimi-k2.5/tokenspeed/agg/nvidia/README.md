@@ -18,8 +18,9 @@ Kimi K2.5 / K2.6.
 There is **no public `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image** at the time
 this recipe was written; TokenSpeed integration in Dynamo is still in flight. This
 directory ships a [`Dockerfile`](Dockerfile) that builds a Dynamo+TokenSpeed image
-on top of a public TokenSpeed runtime image. Run the build, push the result to a
-registry your cluster can pull from, then update the `image:` fields in
+on top of `docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0` (the upstream
+TokenSpeed runtime, pinned by tag for reproducibility). Run the build, push the result
+to a registry your cluster can pull from, then update the `image:` fields in
 [`deploy.yaml`](deploy.yaml).
 
 ### 1. Build the Dynamo+TokenSpeed image
@@ -31,10 +32,23 @@ tree in to build the Dynamo Python wheel via `maturin`).
 # From the repo root.
 docker build \
   -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
-  --build-arg BASE_IMAGE=<your-tokenspeed-image>:<tag> \
   --target dev \
   -t <your-registry>/dynamo-tokenspeed:dev \
   .
+```
+
+The Dockerfile defaults `BASE_IMAGE` to a pinned public TokenSpeed runtime tag:
+
+```
+docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0
+```
+
+This tag is CUDA-13-based (matches B200's CUDA 13.x driver) and ships PyTorch 2.11.0.
+Sibling tags on the same repo: `cu130`, `cu129-torch-2.11.0`, `cu129`, `latest`. To
+target a different runtime, override the build arg:
+
+```bash
+--build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
 ```
 
 The Dockerfile has two reachable targets:
