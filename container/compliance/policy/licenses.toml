@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# License-policy file for Python / Go / dpkg / native ecosystems.
+# Rust uses cargo-deny's deny.toml at the repo root (same allow list,
+# enforced via `cargo deny check licenses`). This file is consumed by
+# container/compliance/policy/validate.py.
+#
+# Policy semantics (mirrors cargo-deny):
+#   - allow: SPDX IDs that are always permitted.
+#   - deny:  SPDX IDs that are always rejected.
+#   - unknown: how to treat licenses we couldn't resolve to an SPDX ID.
+#               "deny" makes UNKNOWN a build failure (recommended).
+#   - copyleft: how to treat the copyleft category (LGPL / MPL / etc).
+#               "deny" by default; allow specific copyleft IDs via the allow list.
+#   - exceptions: per-package opt-ins for licenses that would otherwise be denied.
+#
+# SPDX expressions in the input data may be compound:
+#   "MIT OR Apache-2.0"           → allowed if EITHER token is allowed
+#   "MIT AND Apache-2.0"          → allowed only if BOTH are allowed
+#   "Apache-2.0 WITH LLVM-exception" → treated as Apache-2.0 plus the exception
+# validate.py handles these.
+
+[licenses]
+
+# Permissive licenses we ship with no special handling.
+# Mirrors the allow list in /deny.toml so Rust and the rest of the
+# stack share the same posture.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "LGPL-3.0",
+  "LGPL-3.0-only",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "NCSA",
+  "OpenSSL",
+  "PSF-2.0",
+  "Python-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "WTFPL",
+  "Zlib",
+]
+
+# Hard denies: never ship these regardless of any other consideration.
+# Strong copyleft (would force our Apache-2.0 work to relicense if linked).
+deny = [
+  "AGPL-1.0-only",
+  "AGPL-1.0-or-later",
+  "AGPL-3.0",
+  "AGPL-3.0-only",
+  "AGPL-3.0-or-later",
+  "CDDL-1.0",
+  "CDDL-1.1",
+  "EPL-1.0",
+  "EPL-2.0",
+  "EUPL-1.1",
+  "EUPL-1.2",
+  "GPL-2.0",
+  "GPL-2.0-only",
+  "GPL-2.0-or-later",
+  "GPL-3.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "LGPL-2.0-only",
+  "LGPL-2.0-or-later",
+  "LGPL-2.1-only",
+  "LGPL-2.1-or-later",
+  "SSPL-1.0",
+]
+
+# Build fails on any package whose license we couldn't resolve.
+# Forces the right action: add an entry to license_overrides.yaml,
+# or fix the upstream metadata, or take an exception below.
+unknown = "deny"
+
+# How aggressive to be about the broader copyleft category for
+# licenses that aren't in either allow or deny above.
+# Practical effect: if a future SPDX ID we haven't classified shows
+# up and looks copyleft-shaped, treat it as deny rather than UNKNOWN.
+copyleft = "deny"
+
+# Exceptions: per-package opt-ins for licenses that would otherwise
+# fail policy. Keep these rare and well-justified — every entry is
+# legal review surface area on every audit.
+#
+# Schema:
+#   type: ecosystem ("python" | "dpkg" | "go" | "native")
+#   name: package name
+#   version: optional; omit to apply to all versions
+#   allow: SPDX IDs that are additionally permitted FOR THIS PACKAGE
+#   reason: required, short prose explaining why
+#
+# [[exceptions]]
+# type = "python"
+# name = "example-pkg"
+# version = "1.2.3"
+# allow = ["GPL-2.0-only"]
+# reason = "Pure-Python library, isolated import surface; legal-approved 2026-XX-XX"

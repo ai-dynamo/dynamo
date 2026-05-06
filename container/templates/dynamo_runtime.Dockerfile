@@ -185,6 +185,13 @@ RUN python3 -m compliance.generators \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
     -v
+# Validate every *-deps.csv against licenses.toml. Non-zero exit fails the
+# build, which fails the workflow — uniform enforcement on PR / post-merge /
+# RC / release. UNKNOWN is treated as deny by the policy (configurable).
+RUN find /legal -name '*-deps.csv' -print0 | \
+    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input {}
 # Move *-deps.csv files OUT of /legal/ so only NOTICES + license text ship in
 # the runtime image. CSVs go to /sboms/ for CI extraction (--target sboms).
 RUN find /legal -name '*-deps.csv' -print -exec sh -c \
