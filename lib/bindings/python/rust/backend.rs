@@ -312,7 +312,8 @@ impl Worker {
         {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Worker.run() can only be called once per Worker instance; \
-                 construct a new Worker to run again",
+                 construct a fresh engine + Worker to run again (most LLM \
+                 engines do not tolerate re-initialization)",
             ));
         }
 

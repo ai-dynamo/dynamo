@@ -247,7 +247,35 @@ impl Worker {
             signal_token.cancel();
         });
 
-        let outcome = self.run_inner(runtime, &shutdown_token).await;
+        // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
+        // once a signal arrives, the orchestrator + cleanup must finish
+        // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds, otherwise
+        // we exit(911). Healthy long-running workers never hit this — the
+        // timer only starts after `shutdown_token` is cancelled.
+        let inner_fut = self.run_inner(runtime, &shutdown_token);
+        tokio::pin!(inner_fut);
+
+        let outcome = tokio::select! {
+            result = &mut inner_fut => result,
+            _ = shutdown_token.cancelled() => {
+                let timeout = graceful_shutdown_timeout();
+                tracing::debug!(
+                    "graceful shutdown started; deadline {}s",
+                    timeout.as_secs()
+                );
+                match tokio::time::timeout(timeout, &mut inner_fut).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::error!(
+                            "Graceful shutdown exceeded {}s; force-exiting with code 911. \
+                             Set DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to override.",
+                            timeout.as_secs()
+                        );
+                        std::process::exit(911);
+                    }
+                }
+            }
+        };
 
         signal_handle.abort();
         let _ = signal_handle.await;
@@ -329,9 +357,11 @@ impl Worker {
         self.run_engine_shutdown_steps().await;
     }
 
-    /// Mutex-guarded start. The lifecycle mutex is purely defensive here:
-    /// `start_engine` is called once from `run_inner`, and `cleanup_once`
-    /// is only invoked after `run_inner` returns. The lock provides
+    /// Mutex-guarded start. The lifecycle mutex is purely defensive:
+    /// `start_engine` is called once and every `cleanup_once` invocation
+    /// (whether from inside `run_inner` via the orchestrator paths or
+    /// from `Worker::run`'s post-`run_inner` safety net) is strictly
+    /// sequential within a single `Worker::run`. The lock provides
     /// memory ordering for state transitions but does not serialize
     /// concurrent callers (there are none).
     async fn start_engine(&self) -> Result<EngineConfig, DynamoError> {
@@ -479,6 +509,31 @@ impl Worker {
 
         self.cleanup_once().await;
     }
+}
+
+/// Read the post-signal shutdown deadline from
+/// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
+/// On expiry the worker hard-exits with code 911 — same contract as the
+/// upstream `worker.execute` flow we bypass.
+fn graceful_shutdown_timeout() -> Duration {
+    use dynamo_runtime::config::environment_names::worker as env_worker;
+
+    // `dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_*` are
+    // re-implemented here rather than imported so backend-common's
+    // contract is self-documenting.
+    const DEFAULT_DEBUG: u64 = 5;
+    const DEFAULT_RELEASE: u64 = 30;
+    let default = if cfg!(debug_assertions) {
+        DEFAULT_DEBUG
+    } else {
+        DEFAULT_RELEASE
+    };
+
+    let secs = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default);
+    Duration::from_secs(secs)
 }
 
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
