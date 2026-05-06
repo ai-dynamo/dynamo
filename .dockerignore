@@ -33,7 +33,11 @@ container/Dockerfile*
 container/**/*.Dockerfile
 container/render.py
 container/context.yaml
-container/compliance/
+# container/compliance/ is now COPY'd into each image's `licenses` Dockerfile
+# stage (NOTICES generation + license-policy validation), so it must remain
+# in the build context. Old comment from prior compliance design left for
+# context: was excluded when compliance ran via a separate Dockerfile.extract
+# bind-mount; the inline-compliance refactor inverted that intent.
 .venv
 .venv-docs
 
