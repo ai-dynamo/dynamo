@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration test for the experimental `/v1/realtime` WebSocket endpoint.
+//! Integration tests for the experimental `/v1/realtime` WebSocket endpoint.
 //!
 //! Verifies the slice's acceptance criteria: a WebSocket client can connect,
-//! send chat-completion JSON frames, and receive streamed echo response frames
-//! end-to-end through the new endpoint and the mock bidirectional engine.
+//! receive the spec-mandated `session.created` server frame, exchange OpenAI
+//! Realtime client/server events with the mock bidirectional engine, and
+//! cleanly terminate the session in both client- and server-initiated paths.
 
 use std::time::Duration;
 
@@ -19,22 +20,14 @@ use tokio_tungstenite::tungstenite::Message;
 mod ports;
 use ports::get_random_port;
 
-/// Engine slot is process-global; ensure we install it at most once across all
-/// tests in this binary, with `DYN_TOKEN_ECHO_DELAY_MS` pinned before the
-/// engine's `LazyLock` captures it. Wrapped in `Once::call_once` so concurrent
-/// `#[tokio::test]`s synchronize on the single env mutation rather than racing
-/// against `set_var`'s safety preconditions.
+/// Engine slot is process-global; ensure we install the echo mock at most once
+/// across all tests in this binary.
 ///
 /// #9174 (2/N) will replace `OnceLock`-based engine registration with proper
 /// `ModelManager`-keyed lookups; this helper goes away then.
 fn ensure_echo_engine_installed() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
-        // SAFETY: runs at most once, before any worker thread reads the env;
-        // the engine's `LazyLock` reads it at most once per process.
-        unsafe {
-            std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
-        }
         let _ = realtime::install_echo_engine();
     });
 }
@@ -54,8 +47,37 @@ async fn wait_for_health(port: u16) {
     panic!("frontend never became healthy on port {port}");
 }
 
+/// Read one Text frame off the socket and parse it as JSON, asserting the
+/// `type` field matches `expected_type`. Returns the parsed value so callers
+/// can drill into the payload.
+async fn expect_text_event(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected_type: &str,
+) -> Value {
+    let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("frame within 2s")
+        .expect("stream not closed")
+        .expect("no transport error");
+    let Message::Text(text) = frame else {
+        panic!("expected Text frame, got {frame:?}");
+    };
+    let v: Value = serde_json::from_str(&text).expect("response is valid JSON");
+    assert_eq!(
+        v.get("type").and_then(|t| t.as_str()),
+        Some(expected_type),
+        "unexpected event type in {v}"
+    );
+    v
+}
+
+/// On connect, the server emits `session.created` as the first wire frame —
+/// per the OpenAI Realtime spec, before any client event arrives. This is the
+/// merge-blocker the rest of the slice gates on.
 #[tokio::test]
-async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
+async fn realtime_websocket_emits_session_created_on_connect() {
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -69,73 +91,64 @@ async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
         .await
         .expect("ws connect");
 
-    // Send two requests back-to-back. The engine processes them sequentially
-    // (each one fully echoed and terminated with `FinishReason::Stop` before
-    // the next is dequeued), so the response stream is "hi" + Stop + "ok" + Stop.
-    let body1 = serde_json::json!({
-        "model": "echo",
-        "messages": [{ "role": "user", "content": "hi" }],
-    });
-    ws.send(Message::Text(body1.to_string().into()))
-        .await
-        .expect("send first request");
-    let body2 = serde_json::json!({
-        "model": "echo",
-        "messages": [{ "role": "user", "content": "ok" }],
-    });
-    ws.send(Message::Text(body2.to_string().into()))
-        .await
-        .expect("send second request");
-
-    // Read until we see two finish_reason="stop" or a normal close.
-    let mut text = String::new();
-    let mut stops = 0usize;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline {
-        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-        let Ok(Some(Ok(msg))) = frame else { break };
-        match msg {
-            Message::Text(t) => {
-                // Server frames are JSON-serialized `Annotated<NvCreateChatCompletionStreamResponse>`,
-                // so the response payload lives under `.data`.
-                let v: Value = serde_json::from_str(&t).expect("response is valid JSON");
-                let choices = v
-                    .pointer("/data/choices")
-                    .and_then(|c| c.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                for choice in choices {
-                    if let Some(content) = choice
-                        .get("delta")
-                        .and_then(|d| d.get("content"))
-                        .and_then(|c| c.as_str())
-                    {
-                        text.push_str(content);
-                    }
-                    if choice
-                        .get("finish_reason")
-                        .and_then(|f| f.as_str())
-                        .map(|s| s == "stop")
-                        .unwrap_or(false)
-                    {
-                        stops += 1;
-                    }
-                }
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
-        if stops >= 2 {
-            break;
-        }
-    }
+    let event = expect_text_event(&mut ws, "session.created").await;
+    let event_id = event
+        .get("event_id")
+        .and_then(|s| s.as_str())
+        .expect("event_id is a string");
+    assert!(!event_id.is_empty(), "event_id should not be empty");
+    assert!(
+        event.pointer("/session/type").is_some(),
+        "session payload should include the discriminator"
+    );
 
     let _ = ws.close(None).await;
     token.cancel();
     let _ = handle.await;
+}
 
-    assert_eq!(text, "hiok", "echoed text from both requests");
-    assert_eq!(stops, 2, "expected one finish_reason=stop per request");
+/// `session.update` round-trips through the engine: client sends the event,
+/// server replies with `session.updated` carrying the same `Session` payload.
+/// Demonstrates end-to-end realtime-event plumbing through the WebSocket.
+#[tokio::test]
+async fn realtime_websocket_session_update_echoes_session_updated() {
+    ensure_echo_engine_installed();
+
+    let port = get_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    let token = CancellationToken::new();
+    let handle = service.spawn(token.clone()).await;
+    wait_for_health(port).await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    // Drain the on-connect session.created frame.
+    expect_text_event(&mut ws, "session.created").await;
+
+    let body = serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "realtime", "model": "gpt-realtime" }
+    });
+    ws.send(Message::Text(body.to_string().into()))
+        .await
+        .expect("send session.update");
+
+    let event = expect_text_event(&mut ws, "session.updated").await;
+    assert_eq!(
+        event.pointer("/session/type").and_then(|s| s.as_str()),
+        Some("realtime")
+    );
+    assert_eq!(
+        event.pointer("/session/model").and_then(|s| s.as_str()),
+        Some("gpt-realtime")
+    );
+
+    let _ = ws.close(None).await;
+    token.cancel();
+    let _ = handle.await;
 }
 
 /// After a client-initiated close, the server should let the engine drain
@@ -143,7 +156,7 @@ async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
 /// and emit its own Close frame as part of the cleanup. Covers the
 /// "Send a normal close once the engine finishes" path in `realtime.rs`'s outbound
 /// task, where the trigger is client disconnect rather than natural completion
-/// (the other test) or server-side rejection (the binary-frame test).
+/// (the echo test) or server-side rejection (the binary-frame test).
 #[tokio::test]
 async fn realtime_websocket_emits_close_after_client_close() {
     ensure_echo_engine_installed();
@@ -159,23 +172,20 @@ async fn realtime_websocket_emits_close_after_client_close() {
         .await
         .expect("ws connect");
 
+    // Drain the on-connect session.created frame.
+    expect_text_event(&mut ws, "session.created").await;
+
     let body = serde_json::json!({
-        "model": "echo",
-        "messages": [{ "role": "user", "content": "hi" }],
+        "type": "session.update",
+        "session": { "type": "realtime" }
     });
     ws.send(Message::Text(body.to_string().into()))
         .await
         .expect("send");
 
-    // Read one Text frame to confirm the engine started emitting before we
-    // close. We don't need to time the close to the middle of an emission —
-    // the cleanup path under test triggers the same way regardless of whether
-    // the engine is mid-emission or already done.
-    let first = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-    assert!(
-        matches!(first, Ok(Some(Ok(Message::Text(_))))),
-        "expected at least one delta from the engine before closing, got {first:?}"
-    );
+    // Confirm the engine emitted at least one frame before we close, so we know
+    // the round-trip path is live (not just the on-connect synthesis).
+    expect_text_event(&mut ws, "session.updated").await;
 
     // Client-initiated close.
     ws.close(None).await.expect("client close");
@@ -184,8 +194,7 @@ async fn realtime_websocket_emits_close_after_client_close() {
     // outbound task drives the sink to completion (`ws_tx.close().await`)
     // after writing the Close frame, which ensures it fully drains before the
     // transport is dropped — so the client must observe `Message::Close`, not
-    // a bare EOF. Drain any residual delta frames already in flight along the
-    // way.
+    // a bare EOF. Drain any residual frames already in flight along the way.
     let mut got_close = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
@@ -197,7 +206,7 @@ async fn realtime_websocket_emits_close_after_client_close() {
                 break;
             }
             None => break, // EOF without an in-band Close — treated as a regression below
-            _ => {}        // residual Text frame from the in-flight response — drain
+            _ => {}        // residual frame from the in-flight response — drain
         }
     }
 
@@ -224,6 +233,9 @@ async fn realtime_websocket_rejects_binary_frame() {
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("ws connect");
+
+    // Drain the on-connect session.created frame so we don't false-pass on it.
+    expect_text_event(&mut ws, "session.created").await;
 
     ws.send(Message::Binary(vec![0u8, 1, 2, 3].into()))
         .await
