@@ -117,34 +117,34 @@ They're stacked diagnostics:
 
 ## Current parity status (M2, batch mode)
 
-`ok` = matches the YAML expected output. `X` = divergence recorded
+`✓` = matches the YAML expected output. `X` = divergence recorded
 in `KNOWN_DIVERGENCES` (xfailed, not silenced). `n/a` = the impl has
 no parser registered for that family. `dynamo` rows are always `ok`
 because Dynamo is the regenerator's oracle.
 
 | family#impl            |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  | 10  |
 |--------------------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| kimi_k2#dynamo         | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
-| kimi_k2#vllm           | ok  | ok  | ok  | ok  | ok  | ok  | ok  |  X  | ok  | ok  |
-| kimi_k2#sglang         | ok  | ok  | ok  |  X  | ok  | ok  | ok  |  X  | ok  | ok  |
-| qwen3_coder#dynamo     | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
-| qwen3_coder#vllm       | ok  | ok  | ok  |  X  |  X  | ok  | ok  |  X  | ok  | ok  |
-| qwen3_coder#sglang     | ok  | ok  | ok  |  X  |  X  | ok  | ok  |  X  | ok  | ok  |
-| glm47#dynamo           | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
-| glm47#vllm             | ok  | ok  | ok  | ok  | ok  | ok  | ok  |  X  | ok  | ok  |
-| glm47#sglang           | ok  | ok  | ok  | ok  | ok  | ok  | ok  |  X  | ok  | ok  |
-| deepseek_v3_1#dynamo   | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
-| deepseek_v3_1#vllm     | ok  | ok  | ok  |  X  |  X  | ok  | ok  | ok  | ok  | ok  |
-| deepseek_v3_1#sglang   | ok  | ok  | ok  | ok  |  X  | ok  | ok  |  X  | ok  | ok  |
-| harmony#dynamo         | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
+| kimi_k2#dynamo         | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+| kimi_k2#vllm           | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
+| kimi_k2#sglang         | ✓   | ✓   | ✓   |  X  | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
+| qwen3_coder#dynamo     | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+| qwen3_coder#vllm       | ✓   | ✓   | ✓   |  X  |  X  | ✓   | ✓   |  X  | ✓   | ✓   |
+| qwen3_coder#sglang     | ✓   | ✓   | ✓   |  X  |  X  | ✓   | ✓   |  X  | ✓   | ✓   |
+| glm47#dynamo           | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+| glm47#vllm             | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
+| glm47#sglang           | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
+| deepseek_v3_1#dynamo   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+| deepseek_v3_1#vllm     | ✓   | ✓   | ✓   |  X  |  X  | ✓   | ✓   | ✓   | ✓   | ✓   |
+| deepseek_v3_1#sglang   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |  X  | ✓   | ✓   |
+| harmony#dynamo         | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
 | harmony#vllm           | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| harmony#sglang         |  X  |  X  | ok  |  X  |  X  |  X  |  X  |  X  | ok  |  X  |
-| minimax_m2#dynamo      | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
-| minimax_m2#vllm        | ok  | ok  | ok  |  X  | ok  | ok  | ok  |  X  | ok  | ok  |
-| minimax_m2#sglang      | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
-| nemotron_deci#dynamo   | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
+| harmony#sglang         |  X  |  X  | ✓   |  X  |  X  |  X  |  X  |  X  | ✓   |  X  |
+| minimax_m2#dynamo      | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+| minimax_m2#vllm        | ✓   | ✓   | ✓   |  X  | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
+| minimax_m2#sglang      | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+| nemotron_deci#dynamo   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
 | nemotron_deci#vllm     | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| nemotron_deci#sglang   | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  | ok  |
+| nemotron_deci#sglang   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
 
 Tally (excluding `dynamo` since it's the oracle): 140 cells against
 the YAML expected — 95 parity, 25 divergence (xfailed), 20 n/a.
