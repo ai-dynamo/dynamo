@@ -141,17 +141,30 @@ redirects:
     destination: "/dynamo/dev/backends/sglang/hicache"
   - source: "/dynamo/integrations/sglang-hicache"
     destination: "/dynamo/dev/backends/sglang/hicache"
+  # Digest moved from /blog to /digest
+  - source: "/dynamo/dev/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/dev/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/latest/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/latest/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/blog"
+    destination: "/dynamo/dev/digest"
 # GitHub repository link in navbar
 navbar-links:
   - type: dropdown
-    text: Blog
+    text: Digest
     links:
       - text: All Posts
-        href: /dynamo/dev/blog
+        href: /dynamo/dev/digest
       - text: "Full-Stack Optimizations for Agentic Inference"
-        href: /dynamo/dev/blog/agentic-inference
+        href: /dynamo/dev/digest/agentic-inference
       - text: "Flash Indexer: Inter-Galactic KV Routing"
-        href: /dynamo/dev/blog/flash-indexer
+        href: /dynamo/dev/digest/flash-indexer
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 footer: ./components/CustomFooter.tsx

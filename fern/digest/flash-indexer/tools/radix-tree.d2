@@ -1,0 +1,24 @@
+# Flash Indexer: Radix Tree (with workers, depth gradient, edge labels added in post)
+# Layout: ELK (better for pure tree structures; TALA places nodes non-deterministically)
+...@theme.d2
+
+direction: down
+
+root: Root { class: neutral }
+
+b0: "Block 0\nW0, W1, W2" { class: depth_0 }
+b0p: "Block 0'\nW3" { class: depth_0 }
+
+b1: "Block 1\nW0, W1, W2" { class: depth_1 }
+
+b2: "Block 2\nW0, W1" { class: depth_2 }
+b2p: "Block 2'\nW2" { class: depth_2 }
+
+b3: "Block 3\nW0" { class: depth_3 }
+
+root -> b0 { class: traversal }
+root -> b0p { class: traversal }
+b0 -> b1 { class: traversal }
+b1 -> b2 { class: traversal }
+b1 -> b2p { class: traversal }
+b2 -> b3 { class: traversal }

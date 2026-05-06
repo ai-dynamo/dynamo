@@ -100,7 +100,7 @@ docs/                             # Documentation content
 ├── reference/
 ├── ...
 ├── assets/                       # Images, fonts, SVGs, logos
-├── blogs/                        # Blog posts
+├── digest/                       # Digest posts
 └── diagrams/                     # D2 diagram source files
 ```
 
@@ -123,7 +123,7 @@ fern/
 ├── components/                   # React components
 ├── main.css                      # Custom CSS
 ├── convert_callouts.py           # Callout converter
-├── blogs/                        # Blog posts (synced from main)
+├── digest/                       # Digest posts (synced from main)
 └── assets/                       # Images, fonts, SVGs
 ```
 
@@ -226,7 +226,7 @@ publishing. It runs three jobs depending on the trigger:
 2. Copies content from `main`'s `docs/` → `docs-website`'s `fern/pages/`
 3. Copies `docs/index.yml` → `fern/versions/dev.yml` and transforms paths
    for the docs-website layout using `yq`
-4. Syncs assets from `docs/assets/` and blogs from `docs/blogs/`
+4. Syncs assets from `docs/assets/` and Digest posts from `docs/digest/`
 5. Copies Fern config files from `fern/` → docs-website's `fern/`
    (`fern.config.json`, `components/`, `main.css`, `convert_callouts.py`)
 6. Runs `convert_callouts.py` to transform GitHub-style callouts to Fern format
