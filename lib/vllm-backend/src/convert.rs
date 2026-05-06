@@ -9,7 +9,6 @@ use dynamo_backend_common::{
     DynamoError, GuidedDecodingOptions, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
     StopReason as DynamoStopReason, TopLogprob, usage,
 };
-use tracing::warn;
 use vllm_engine_core_client::protocol::{
     EngineCoreSamplingParams, Logprobs as VllmLogprobs, StopReason as VllmStopReason,
     StructuredOutputsParams,
@@ -44,14 +43,11 @@ pub(crate) fn lower_request(
         request.eos_token_ids.first().copied()
     };
 
-    let mut stop_token_ids = request
+    let stop_token_ids = request
         .stop_conditions
         .stop_token_ids_hidden
         .clone()
         .unwrap_or_default();
-    if ignore_eos {
-        stop_token_ids.clear();
-    }
 
     let mut all_stop_token_ids: BTreeSet<u32> = stop_token_ids.iter().copied().collect();
     if !ignore_eos {
@@ -66,8 +62,16 @@ pub(crate) fn lower_request(
         seed: sampling.seed,
         max_tokens,
         min_tokens: request.stop_conditions.min_tokens.unwrap_or(0),
-        logprobs: request.output_options.logprobs.map(u32_to_i32),
-        prompt_logprobs: request.output_options.prompt_logprobs.map(u32_to_i32),
+        logprobs: request
+            .output_options
+            .logprobs
+            .map(u32_to_i32)
+            .transpose()?,
+        prompt_logprobs: request
+            .output_options
+            .prompt_logprobs
+            .map(u32_to_i32)
+            .transpose()?,
         min_p: sampling.min_p.unwrap_or(0.0),
         frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
         presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
@@ -210,8 +214,7 @@ pub(crate) fn map_output(
         )
         .with_usage(usage(prompt_tokens, completion_tokens)),
         Some(VllmFinishReason::Repetition) => {
-            LLMEngineOutput::error("vLLM backend generation stopped due to repetition".to_string())
-                .with_usage(usage(prompt_tokens, completion_tokens))
+            LLMEngineOutput::stop().with_usage(usage(prompt_tokens, completion_tokens))
         }
     };
 
@@ -266,17 +269,12 @@ fn map_logprobs(
     (Some(log_probs), Some(top_logprobs))
 }
 
-fn u32_to_i32(value: u32) -> i32 {
-    match i32::try_from(value) {
-        Ok(value) => value,
-        Err(_) => {
-            warn!(
-                value,
-                "clamping vLLM logprobs request to i32::MAX for engine-core"
-            );
-            i32::MAX
-        }
-    }
+fn u32_to_i32(value: u32) -> Result<i32, DynamoError> {
+    i32::try_from(value).map_err(|_| {
+        invalid_arg(format!(
+            "vLLM logprobs request must fit in i32; got {value}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -371,6 +369,20 @@ mod tests {
     }
 
     #[test]
+    fn lower_request_ignore_eos_keeps_explicit_stop_tokens() {
+        let mut request = sample_request();
+        request.stop_conditions.ignore_eos = Some(true);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![99]);
+        request.eos_token_ids = vec![2, 3];
+
+        let generate = lower_request("req-1".to_string(), request, Some(10)).unwrap();
+
+        assert_eq!(generate.sampling_params.stop_token_ids, vec![99]);
+        assert_eq!(generate.sampling_params.eos_token_id, None);
+        assert_eq!(generate.sampling_params.all_stop_token_ids, [99].into());
+    }
+
+    #[test]
     fn lower_request_rejects_currently_unsupported_payloads() {
         let mut request = sample_request();
         request.prompt_embeds = Some("base64".to_string());
@@ -401,6 +413,17 @@ mod tests {
 
         let mut request = sample_request();
         request.sampling_options.length_penalty = Some(0.7);
+        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+    }
+
+    #[test]
+    fn lower_request_rejects_oversized_logprobs() {
+        let mut request = sample_request();
+        request.output_options.logprobs = Some(i32::MAX as u32 + 1);
+        assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
+
+        let mut request = sample_request();
+        request.output_options.prompt_logprobs = Some(i32::MAX as u32 + 1);
         assert_invalid(lower_request("req-1".to_string(), request, Some(10)));
     }
 
@@ -459,6 +482,9 @@ mod tests {
 
         let error = map_output(finished(VllmFinishReason::Error), 3, 2);
         assert!(matches!(error.finish_reason, Some(FinishReason::Error(_))));
+
+        let repetition = map_output(finished(VllmFinishReason::Repetition), 3, 2);
+        assert_eq!(repetition.finish_reason, Some(FinishReason::Stop));
     }
 
     fn sample_request() -> PreprocessedRequest {

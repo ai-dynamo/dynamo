@@ -15,8 +15,8 @@ use dynamo_backend_common::{
     LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
 };
 use futures::{StreamExt, stream::BoxStream};
-use tokio::sync::Mutex;
-use tracing::info;
+use tokio::sync::RwLock;
+use tracing::{debug, info};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
 use vllm_managed_engine::ManagedEngineHandle;
@@ -75,7 +75,7 @@ pub struct VllmBackend {
     model: String,
     managed_engine: ManagedEngineArgs,
     extra: ExtraEngineArgs,
-    inner: Mutex<Option<Inner>>,
+    inner: RwLock<Option<Inner>>,
 }
 
 struct Inner {
@@ -89,7 +89,7 @@ impl VllmBackend {
             model,
             managed_engine,
             extra,
-            inner: Mutex::new(None),
+            inner: RwLock::new(None),
         }
     }
 
@@ -126,7 +126,7 @@ impl VllmBackend {
 #[async_trait]
 impl LLMEngine for VllmBackend {
     async fn start(&self) -> Result<EngineConfig, DynamoError> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         if inner.is_some() {
             return Err(engine_shutdown("vLLM backend has already been started"));
         }
@@ -197,6 +197,14 @@ impl LLMEngine for VllmBackend {
 
         *inner = Some(Inner { engine_handle, llm });
 
+        info!(
+            model = %self.model,
+            engine_count,
+            context_length = ?context_length,
+            total_kv_blocks = ?total_kv_blocks,
+            "vLLM backend started"
+        );
+
         Ok(EngineConfig {
             model: self.model.clone(),
             served_model_name: Some(self.model.clone()),
@@ -217,9 +225,9 @@ impl LLMEngine for VllmBackend {
         let prompt_tokens = request.token_ids.len() as u32;
 
         let mut output_stream = {
-            let mut inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             let inner = inner
-                .as_mut()
+                .as_ref()
                 .ok_or_else(|| engine_shutdown("vLLM backend has not been started"))?;
             let max_model_len = inner.llm.engine_core_client().max_model_len();
             let generate_request = lower_request(request_id, request, max_model_len)?;
@@ -236,6 +244,7 @@ impl LLMEngine for VllmBackend {
             loop {
                 tokio::select! {
                     _ = ctx.stopped() => {
+                        debug!(request_id = %ctx.id(), "vLLM backend request cancelled");
                         yield LLMEngineOutput::cancelled()
                             .with_usage(usage(prompt_tokens, completion_tokens));
                         break;
@@ -273,9 +282,11 @@ impl LLMEngine for VllmBackend {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        let Some(Inner { engine_handle, llm }) = self.inner.lock().await.take() else {
+        let Some(Inner { engine_handle, llm }) = self.inner.write().await.take() else {
             return Ok(());
         };
+
+        info!(model = %self.model, "shutting down vLLM backend");
 
         let llm_result = llm.shutdown().await;
         let engine_result = engine_handle.shutdown(Duration::from_secs(0)).await;
@@ -290,6 +301,7 @@ impl LLMEngine for VllmBackend {
                 "failed to shut down managed vLLM engine: {error:#}"
             )));
         }
+        info!(model = %self.model, "vLLM backend cleanup complete");
         Ok(())
     }
 }
@@ -381,5 +393,18 @@ mod tests {
                 "4096"
             ]
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured Python vLLM engine and model"]
+    async fn vllm_backend_passes_conformance() {
+        let model = std::env::var("DYNAMO_VLLM_BACKEND_CONFORMANCE_MODEL")
+            .expect("set DYNAMO_VLLM_BACKEND_CONFORMANCE_MODEL to run this test");
+        let (engine, _config) =
+            VllmBackend::from_args(Some(vec!["dynamo-vllm-backend".to_string(), model])).unwrap();
+
+        dynamo_backend_common::testing::run_conformance(engine)
+            .await
+            .expect("conformance");
     }
 }
