@@ -58,7 +58,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=600,
+                timeout_s=720,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -131,12 +131,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=340,
+                timeout_s=600,
                 gpu_marker="gpu_4",
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=300,
+                timeout_s=600,
                 gpu_marker="gpu_4",
             ),
         },

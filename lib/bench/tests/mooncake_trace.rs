@@ -7,9 +7,6 @@ mod support;
 #[path = "support/mooncake_g2_lower_tier.rs"]
 mod g2_lower_tier;
 
-#[path = "../kv_router/common/mod.rs"]
-mod common;
-
 #[path = "../kv_router/mooncake_shared.rs"]
 mod mooncake_shared;
 
@@ -20,8 +17,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 #[cfg(feature = "mocker-kvbm-offload")]
-use common::generate_g2_replay_artifacts_with_capacity;
-use common::{WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace};
+use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
+use dynamo_bench::kv_router_common::replay::{
+    WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
+};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
@@ -89,18 +88,6 @@ fn collect_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<ReplayEntr
     entries
 }
 
-fn synthesize_tokens(turn: &TurnTrace, trace_block_size: usize) -> Vec<u32> {
-    let mut tokens = Vec::with_capacity(turn.input_length);
-    for &hash_id in &turn.hash_ids {
-        tokens.extend((0..trace_block_size).map(|_| hash_id as u32));
-        if tokens.len() >= turn.input_length {
-            tokens.truncate(turn.input_length);
-            break;
-        }
-    }
-    tokens
-}
-
 fn collect_approx_replay_entries(traces: &[Trace]) -> anyhow::Result<Vec<ReplayEntry>> {
     let mut entries = Vec::new();
     for (worker_id, trace) in traces.iter().enumerate() {
@@ -123,7 +110,7 @@ fn collect_approx_replay_entries(traces: &[Trace]) -> anyhow::Result<Vec<ReplayE
                     timestamp_us,
                     worker_id: worker_id as u64,
                     kind_rank: 1,
-                    kind: ReplayEntryKind::ApproxWrite(synthesize_tokens(turn, trace_block_size)),
+                    kind: ReplayEntryKind::ApproxWrite(turn.synthesize_tokens(trace_block_size)?),
                 });
             }
         }

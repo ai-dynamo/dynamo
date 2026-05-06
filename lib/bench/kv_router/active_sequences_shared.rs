@@ -10,10 +10,9 @@ use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use tokio::time::{Duration, Instant};
 
-use crate::common::{
-    BenchmarkRun, NoopSequencePublisher, compute_benchmark_run, generate_replay_artifacts,
-    trace_gen::{ReplayStartGate, WorkerTimelines},
-};
+use dynamo_bench::kv_router_common::replay::{NoopSequencePublisher, generate_replay_artifacts};
+use dynamo_bench::kv_router_common::results::{BenchmarkRun, compute_benchmark_run};
+use dynamo_bench::kv_router_common::trace_gen::{ReplayStartGate, WorkerTimelines};
 
 /// A single timestamped entry in a worker's sequence trace.
 #[derive(Clone)]
