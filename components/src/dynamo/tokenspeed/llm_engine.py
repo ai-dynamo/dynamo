@@ -58,7 +58,9 @@ class TokenspeedLLMEngine(LLMEngine):
         scheduler_info = getattr(self.engine, "scheduler_info", {}) or {}
         self._model_max_len = _optional_int(
             scheduler_info.get("max_model_len")
-            or getattr(getattr(self.engine, "tokenizer_manager", None), "context_len", None)
+            or getattr(
+                getattr(self.engine, "tokenizer_manager", None), "context_len", None
+            )
             or getattr(self.server_args, "max_model_len", None)
         )
 
@@ -169,7 +171,9 @@ def build_sampling_params(
     if max_tokens is not None:
         params["max_new_tokens"] = max_tokens
     elif model_max_len is not None:
-        params["max_new_tokens"] = max(1, model_max_len - len(request.get("token_ids", [])))
+        params["max_new_tokens"] = max(
+            1, model_max_len - len(request.get("token_ids", []))
+        )
 
     min_tokens = stop_conditions.get("min_tokens")
     if min_tokens is not None:

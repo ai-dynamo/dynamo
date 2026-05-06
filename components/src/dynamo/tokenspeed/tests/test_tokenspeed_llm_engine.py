@@ -82,7 +82,7 @@ def test_build_sampling_params_maps_grammar_guided_decoding():
             "token_ids": [1],
             "sampling_options": {
                 "guided_decoding": {
-                    "grammar": "root ::= \"x\"",
+                    "grammar": 'root ::= "x"',
                 },
             },
         },

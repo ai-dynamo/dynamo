@@ -112,4 +112,3 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 def _server_args_cls():
     module = importlib.import_module("tokenspeed.runtime.utils.server_args")
     return module.ServerArgs
-
