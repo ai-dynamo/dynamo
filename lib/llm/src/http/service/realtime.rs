@@ -1,17 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Experimental WebSocket endpoint at `/v1/realtime` for bidirectional streaming input.
+//! Experimental WebSocket endpoint at `/v1/realtime` for the OpenAI Realtime API.
 //!
 //! Wire shape: client sends a sequence of `Message::Text` frames each containing a
-//! JSON-encoded `NvCreateChatCompletionRequest`; server forwards each frame onto an
-//! engine-bound stream and forwards engine response chunks back as `Message::Text`
-//! frames each containing a JSON-encoded `NvCreateChatCompletionStreamResponse`.
+//! JSON-encoded [`RealtimeClientEvent`]; server forwards each frame onto an
+//! engine-bound stream and forwards engine [`RealtimeServerEvent`] chunks back as
+//! `Message::Text` frames. Per the OpenAI Realtime spec, audio is base64-encoded
+//! inside the JSON envelope (`input_audio_buffer.append`); binary WebSocket frames
+//! are rejected.
 //!
-//! For now the engine is a process-scoped mock (`EchoBidirectionalEngine`) held in
-//! a `OnceLock` so tests can install one without going through the `ModelManager`,
-//! which has no bidirectional accessor yet. A future revision will replace the
-//! static with a `ModelManager` lookup keyed on `model_name`.
+//! On connect the handler synthesizes a `session.created` server event before any
+//! engine event flows — the spec requires it to be the first server event on the
+//! wire. The engine is then responsible for everything subsequent (including
+//! `session.updated` echoes, audio-buffer state, and response generation).
+//!
+//! For now the engine is a process-scoped mock ([`EchoBidirectionalEngine`]) held
+//! in a `OnceLock` so tests can install one without going through the
+//! `ModelManager`, which has no bidirectional accessor yet. A future revision
+//! will replace the static with a `ModelManager` lookup keyed on `model_name`.
 
 use std::sync::{Arc, OnceLock};
 
@@ -40,7 +47,11 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 
 use super::{RouteDoc, service_v2};
 use crate::engines::EchoBidirectionalEngine;
-use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_protocols::types::realtime::{
+    RealtimeClientEvent, RealtimeServerEvent, RealtimeServerEventSessionCreated, RealtimeSession,
+    Session,
+};
+use uuid::Uuid;
 
 /// Process-scoped registry for the bidirectional engine. Populated by tests and
 /// (in production) by whatever wires up the experimental endpoint. If unset when
@@ -88,8 +99,6 @@ async fn realtime_ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
-    // TODO (#9175): read a session-init frame first so we can route /
-    // look up the model before forwarding inference frames to the engine.
     let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
         tracing::error!("/v1/realtime connection rejected: bidirectional engine not installed");
         let _ = socket
@@ -101,8 +110,38 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
         return;
     };
 
+    // OpenAI Realtime spec requires `session.created` to be the first server
+    // frame on the wire, before any client event arrives. The handler synthesizes
+    // it here so the connection handshake works regardless of which engine is
+    // installed; per-session config negotiation is deferred to `session.update`
+    // exchanges (which the engine handles).
+    let session_created = RealtimeServerEvent::SessionCreated(RealtimeServerEventSessionCreated {
+        event_id: format!("event_{}", Uuid::new_v4()),
+        session: Session::RealtimeSession(Box::new(RealtimeSession::default())),
+    });
+    let session_created_payload = match serde_json::to_string(&session_created) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(%err, "/v1/realtime serializing session.created failed");
+            let _ = socket
+                .send(close_message(
+                    close_code::ERROR,
+                    "internal error preparing session.created",
+                ))
+                .await;
+            return;
+        }
+    };
+    if let Err(err) = socket
+        .send(Message::Text(Utf8Bytes::from(session_created_payload)))
+        .await
+    {
+        tracing::debug!(%err, "/v1/realtime client disconnected before session.created");
+        return;
+    }
+
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (req_tx, req_rx) = mpsc::channel::<NvCreateChatCompletionRequest>(REQUEST_CHANNEL_CAPACITY);
+    let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
 
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
     let input = RequestStream::new(request_stream, Context::new(()).context());
@@ -173,9 +212,9 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
         };
         match msg {
             Message::Text(text) => {
-                match serde_json::from_str::<NvCreateChatCompletionRequest>(text.as_str()) {
-                    Ok(req) => {
-                        if req_tx.send(req).await.is_err() {
+                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
+                    Ok(event) => {
+                        if req_tx.send(event).await.is_err() {
                             tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
                             break;
                         }
