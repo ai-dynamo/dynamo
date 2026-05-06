@@ -5,14 +5,19 @@ title: ATIF Alignment
 subtitle: Join Dynamo serving telemetry with agent trajectory traces
 ---
 
-The Agent Trajectory Interchange Format (ATIF) is a JSON format for complete
-agent trajectories: user inputs, agent steps, tool calls, observations,
-subagents, rewards, and evaluation metadata.
+The [Agent Trajectory Interchange Format (ATIF)][atif-rfc] is a JSON format for
+complete agent trajectories: user inputs, agent steps, tool calls, observations,
+subagents, rewards, and evaluation metadata. ATIF is maintained as the
+[Harbor framework][harbor] data format and is the canonical source of truth for
+the schema referenced below.
 
 Dynamo does not emit ATIF in the current trace path. Dynamo emits
 `dynamo.agent.trace.v1`, a serving-oriented trace that records request timing,
 token counts, cache metrics, queue depth, worker placement, and harness tool
 events. The two formats are complementary.
+
+[atif-rfc]: https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
+[harbor]: https://github.com/harbor-framework/harbor
 
 ## Identifier Alignment
 
@@ -61,5 +66,5 @@ trace records.
 - Dynamo trace records intentionally omit prompt and response content.
 - Full ATIF reconstruction requires harness trajectory data, audit payload data,
   or both.
-- Future exporters can store Dynamo-specific metrics in ATIF `extra` fields or
-  produce a separate sidecar joined by `session_id` and `trajectory_id`.
+- Future exporters can store Dynamo-specific metrics in [ATIF `extra` fields][atif-rfc]
+  or produce a separate sidecar joined by `session_id` and `trajectory_id`.
