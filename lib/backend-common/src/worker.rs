@@ -950,11 +950,24 @@ mod tests {
     // they are still serialized by `serial_test`-style discipline within
     // the test name space — keep them in this single mod and access the
     // env var only here.
+    //
+    // `ENV_LOCK` serializes all env-mutating tests in this module so cargo's
+    // parallel runner can't interleave a `with_env` setup on one thread with
+    // a read on another. Every helper that touches `std::env` acquires this
+    // lock for the duration of its critical section.
+
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env<F: FnOnce() -> R, R>(key: &str, value: Option<&str>, f: F) -> R {
+        // Hold the lock for the entire snapshot → set → run → restore
+        // window so concurrent tests can't observe our temporary value or
+        // race the restore.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(key).ok();
-        // SAFETY: tests serialize env access on this key by convention; no
-        // other test thread reads this var.
+        // SAFETY: ENV_LOCK serializes all env-mutating tests in this
+        // module; no other test thread reads or writes env state while
+        // this guard is held.
         unsafe {
             match value {
                 Some(v) => std::env::set_var(key, v),
@@ -1010,7 +1023,11 @@ mod tests {
     // graceful_shutdown_timeout env-var parsing
     // -------------------------------------------------------------------
 
-    const SHUTDOWN_TIMEOUT_ENV: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
+    // Reference the same upstream constant the production code reads, so
+    // a rename of the env var in `dynamo-runtime` doesn't silently leave
+    // these tests pointing at a no-longer-honored name.
+    const SHUTDOWN_TIMEOUT_ENV: &str =
+        dynamo_runtime::config::environment_names::worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT;
 
     fn expected_default_timeout_secs() -> u64 {
         if cfg!(debug_assertions) {
@@ -1047,12 +1064,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn shutdown_timeout_treats_empty_as_unset() {
+        with_env(SHUTDOWN_TIMEOUT_ENV, Some(""), || {
+            assert_eq!(
+                graceful_shutdown_timeout(),
+                Duration::from_secs(expected_default_timeout_secs())
+            );
+        });
+    }
+
     // -------------------------------------------------------------------
     // RuntimeConfig env application
+    //
+    // These tests touch DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE /
+    // DYN_EVENT_PLANE directly (without `with_env`), so they must
+    // acquire `ENV_LOCK` themselves to keep parallel runs from racing
+    // each other or the `with_env`-using tests above.
     // -------------------------------------------------------------------
 
     #[test]
     fn runtime_config_apply_to_env_writes_set_fields() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
@@ -1082,6 +1116,8 @@ mod tests {
 
     #[test]
     fn runtime_config_apply_to_env_leaves_unset_fields_untouched() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let key = "DYN_REQUEST_PLANE";
         let prev = std::env::var(key).ok();
         unsafe { std::env::set_var(key, "preexisting") };
