@@ -61,7 +61,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--venv",
         type=Path,
-        help="Runtime venv root (required for python/rust)",
+        help=(
+            "Runtime venv root for python/rust generators. The generators glob "
+            "<venv>/lib/python*/site-packages/. Use this when the runtime image "
+            "uses a uv/python venv (e.g. dynamo-runtime style)."
+        ),
+    )
+    parser.add_argument(
+        "--site-packages",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Path to a site-packages directory. Repeatable. Use instead of (or "
+            "in addition to) --venv when the runtime image uses pip "
+            "--break-system-packages into the system Python and there's no venv "
+            "(e.g. lmsysorg/sglang upstream base)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -93,22 +109,33 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s [%(name)s]: %(message)s",
     )
 
+    # Build the search-path list shared by python + rust. Both --venv and
+    # --site-packages can be supplied (additive); at least one is required.
+    search_paths: list[Path] = []
+    if args.venv is not None:
+        search_paths.append(args.venv)
+    search_paths.extend(args.site_packages)
+
     failures: list[str] = []
     for eco in args.ecosystem:
         eco_out = args.output_dir / eco
         try:
             if eco == "rust":
-                if args.venv is None:
-                    failures.append("rust: --venv is required")
+                if not search_paths:
+                    failures.append(
+                        "rust: at least one of --venv or --site-packages is required"
+                    )
                     continue
                 from . import rust as gen
-                gen.generate(args.venv, eco_out)
+                gen.generate(search_paths, eco_out)
             elif eco == "python":
-                if args.venv is None:
-                    failures.append("python: --venv is required")
+                if not search_paths:
+                    failures.append(
+                        "python: at least one of --venv or --site-packages is required"
+                    )
                     continue
                 from . import python as gen  # type: ignore[no-redef]
-                gen.generate(args.venv, eco_out)
+                gen.generate(search_paths, eco_out)
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
                 gen.generate(eco_out)

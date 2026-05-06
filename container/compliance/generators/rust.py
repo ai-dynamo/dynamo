@@ -92,28 +92,39 @@ def _component_from_sbom_entry(entry: dict) -> Component | None:
     )
 
 
-def _find_wheel_sboms(venv_dir: Path) -> list[Path]:
+def _find_wheel_sboms(search_paths: list[Path]) -> list[Path]:
     """Locate every CycloneDX SBOM embedded in installed wheels.
 
-    Walks ${VIRTUAL_ENV}/lib/python*/site-packages/*.dist-info/sboms/*.cyclonedx.json.
+    Each entry in `search_paths` is treated as either:
+      - a venv root (in which case `lib/python*/site-packages` is globbed), OR
+      - a site-packages directory (searched directly for `*.dist-info/sboms/*.cyclonedx.json`).
+
+    Both shapes are checked for every entry, so the caller doesn't have to know
+    which layout applies. Used to support both:
+      - dynamo-runtime style: pip install into a uv venv at /opt/dynamo/venv
+      - upstream-image style: pip install --break-system-packages into the system
+        Python (e.g. lmsysorg/sglang base image, where there is no venv)
     """
-    sboms: list[Path] = []
-    site_packages_glob = list(venv_dir.glob("lib/python*/site-packages"))
-    for sp in site_packages_glob:
-        sboms.extend(sp.glob("*.dist-info/sboms/*.cyclonedx.json"))
+    sboms: set[Path] = set()
+    for sp in search_paths:
+        # Venv layout
+        for site in sp.glob("lib/python*/site-packages"):
+            sboms.update(site.glob("*.dist-info/sboms/*.cyclonedx.json"))
+        # Direct site-packages layout
+        sboms.update(sp.glob("*.dist-info/sboms/*.cyclonedx.json"))
     return sorted(sboms)
 
 
-def collect_components(venv_dir: Path) -> list[Component]:
-    """Read every wheel SBOM under venv_dir and return deduped Components.
+def collect_components(search_paths: list[Path]) -> list[Component]:
+    """Read every wheel SBOM under each search path and return deduped Components.
 
     SBOMs that are not Rust-flavored (e.g. NIXL's auditwheel.cdx.json which
     enumerates RPM libs, not Rust crates) are skipped: we only consume
     components whose purl starts with `pkg:cargo/`.
     """
-    sboms = _find_wheel_sboms(venv_dir)
+    sboms = _find_wheel_sboms(search_paths)
     if not sboms:
-        logger.warning("No wheel SBOMs found under %s", venv_dir)
+        logger.warning("No wheel SBOMs found under %s", search_paths)
         return []
 
     components: list[Component] = []
@@ -151,11 +162,11 @@ def collect_components(venv_dir: Path) -> list[Component]:
     return deduped
 
 
-def generate(venv_dir: Path, output_dir: Path) -> list[Component]:
-    """Read SBOMs from the venv, write NOTICES-Rust.txt + rust-deps.csv."""
+def generate(search_paths: list[Path], output_dir: Path) -> list[Component]:
+    """Read SBOMs from each search path, write NOTICES-Rust.txt + rust-deps.csv."""
     from . import common
 
-    components = collect_components(venv_dir)
+    components = collect_components(search_paths)
     common.write_notices(ECOSYSTEM, components, output_dir)
     common.write_deps_csv(ECOSYSTEM, components, output_dir)
     return components

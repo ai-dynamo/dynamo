@@ -29,9 +29,9 @@ from .common import Component
 ECOSYSTEM = "python"
 
 
-def collect_components(venv_dir: Path) -> list[Component]:
+def collect_components(search_paths: list[Path]) -> list[Component]:
     raise NotImplementedError("Python generator not yet implemented")
 
 
-def generate(venv_dir: Path, output_dir: Path) -> list[Component]:
+def generate(search_paths: list[Path], output_dir: Path) -> list[Component]:
     raise NotImplementedError("Python generator not yet implemented")
