@@ -58,7 +58,7 @@ impl MessengerConfig {
         use std::sync::Arc;
 
         use velo::Messenger;
-        use velo::backend::tcp::TcpTransportBuilder;
+        use velo::transports::tcp::TcpTransportBuilder;
 
         // 1. Build TCP transport
         // Pre-bind listener to get OS-assigned port (if port is 0)
