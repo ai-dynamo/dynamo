@@ -24,11 +24,14 @@ First-party packages (`ai-dynamo`, `ai-dynamo-runtime`, `kvbm`, `nixl_*`,
 
 from __future__ import annotations
 
+import email
+import email.parser
 import logging
 import re
 from pathlib import Path
 
 from .common import UNKNOWN, Component, dedupe_by_name_version
+from ..license_db import lookup as license_db_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +149,34 @@ _PASSTHROUGH_SPDX = frozenset({
 })
 
 
+# An SPDX license ID is alphanumeric + dot + plus + hyphen (per the spec).
+# Used to gate the compound-expression passthrough so we don't mistake prose
+# containing words like "EXPRESS OR WARRANTIES" for an "<X> OR <Y>" expression.
+_SPDX_ID_TOKEN_RE = re.compile(r"^[A-Za-z0-9.+\-]+$")
+
+
+def _looks_like_spdx_expression(s: str) -> bool:
+    """Heuristic: every token (between AND/OR/WITH/parens) is SPDX-ID-shaped.
+
+    Not a full SPDX-expression parser — just a sanity check before we trust
+    a string with operators in it. The downstream validator runs the real
+    parser and will reject genuinely malformed expressions; this guard just
+    keeps free-form prose ('EXPRESS OR WARRANTIES') from being passed through
+    as if it were a compound license expression.
+    """
+    if not s:
+        return False
+    # Strip parens, split on the SPDX operators, validate each token.
+    cleaned = re.sub(r"[()]", " ", s)
+    for token in re.split(r"\s+(?:AND|OR|WITH)\s+", cleaned):
+        token = token.strip()
+        if not token:
+            continue
+        if not _SPDX_ID_TOKEN_RE.match(token):
+            return False
+    return True
+
+
 def _normalize(raw: str | None) -> str | None:
     """Map a free-form / classifier license string to an SPDX ID, or None."""
     if not raw:
@@ -154,9 +185,14 @@ def _normalize(raw: str | None) -> str | None:
     if not s:
         return None
 
-    # Compound-expression passthrough (already SPDX-shaped)
+    # Compound-expression passthrough (already SPDX-shaped). Gated by the
+    # SPDX-token-shape check so license-body prose can't false-match.
     if any(op in s for op in (" AND ", " OR ", " WITH ")):
-        return s
+        if _looks_like_spdx_expression(s):
+            return s
+        # Fall through — the operator was probably English ("OR WARRANTIES"),
+        # not SPDX. Don't try the substring maps below either; they'd false-match.
+        return None
 
     if s in _PASSTHROUGH_SPDX:
         return s
@@ -215,47 +251,83 @@ def _read_license_text(dist_info_dir: Path) -> str | None:
     return None
 
 
-_NAME_RE = re.compile(r"^Name:\s*(.+)$", re.MULTILINE)
-_VERSION_RE = re.compile(r"^Version:\s*(.+)$", re.MULTILINE)
-_LICENSE_EXPR_RE = re.compile(r"^License-Expression:\s*(.+)$", re.MULTILINE)
-_LICENSE_RE = re.compile(r"^License:\s*(.+?)(?=^[A-Z][a-zA-Z\-]*:|\Z)", re.MULTILINE | re.DOTALL)
-_CLASSIFIER_RE = re.compile(r"^Classifier:\s*(.+)$", re.MULTILINE)
-
-
 def _extract_metadata_field(metadata_text: str) -> tuple[str | None, str | None, str | None, list[str], list[str]]:
     """Return (name, version, license_expression, license_free_form_lines, classifiers).
 
-    `license_free_form_lines` may be multi-line if the License: header has
-    continuation lines. Returned as a list of stripped lines for caller flexibility.
-    """
-    name = m.group(1).strip() if (m := _NAME_RE.search(metadata_text)) else None
-    version = m.group(1).strip() if (m := _VERSION_RE.search(metadata_text)) else None
-    license_expr = m.group(1).strip() if (m := _LICENSE_EXPR_RE.search(metadata_text)) else None
+    Uses email.parser to walk the METADATA file as RFC 822 — handles
+    multi-line License: bodies (PEP 314 continuation lines, indented) without
+    accidentally matching headers-shaped strings inside the license body
+    text. The naive regex approach fails on packages like matplotlib whose
+    License body contains "License-Expression:"-shaped prose.
 
-    license_free = []
-    if (m := _LICENSE_RE.search(metadata_text)):
-        for line in m.group(1).splitlines():
+    `license_free_form_lines` may have multiple entries if the License: header
+    has continuation lines; we split on newlines and strip each.
+    """
+    parsed = email.parser.Parser().parsestr(metadata_text)
+    name = parsed.get("Name")
+    name = name.strip() if name else None
+    version = parsed.get("Version")
+    version = version.strip() if version else None
+    license_expr = parsed.get("License-Expression")
+    license_expr = license_expr.strip() if license_expr else None
+
+    license_free: list[str] = []
+    raw_license = parsed.get("License")
+    if raw_license:
+        for line in raw_license.splitlines():
             stripped = line.strip()
             if stripped:
                 license_free.append(stripped)
 
-    classifiers = [m.group(1).strip() for m in _CLASSIFIER_RE.finditer(metadata_text)]
+    classifiers = [c.strip() for c in (parsed.get_all("Classifier") or [])]
     return name, version, license_expr, license_free, classifiers
 
 
-def _resolve_spdx(license_expr: str | None, license_free: list[str], classifiers: list[str]) -> str:
-    """PEP-639-ordered: License-Expression > License free-form > Classifiers."""
+def _resolve_spdx(
+    name: str,
+    version: str,
+    license_expr: str | None,
+    license_free: list[str],
+    classifiers: list[str],
+) -> str:
+    """Resolve an SPDX ID for one Python package.
+
+    Order (refined after real-image testing):
+      1. License-Expression (PEP 639 — modern, single-line by spec)
+      2. Classifiers (PyPI's structured tags — well-defined values, more
+         reliable than the free-form License field for legacy packages
+         where License often contains body text)
+      3. License free-form — only when it's plausibly a license NAME, not
+         body. Rejected if multi-line (>3 lines) or any single line >80
+         chars; matplotlib's License field, for instance, is the entire
+         PSF-style license body and would false-match patterns deep inside.
+      4. license_db.lookup(ecosystem, name, version) — checks the committed
+         license-db.json snapshot AND license_overrides.yaml. Catches
+         packages whose upstream metadata is empty (e.g. NVIDIA's older
+         CUDA wheels: nvidia-cufft, nvidia-curand, etc.).
+      5. UNKNOWN
+    """
     if license_expr:
-        return license_expr  # treat as authoritative SPDX expression
-    for line in license_free:
-        spdx = _normalize(line)
-        if spdx:
-            return spdx
+        return license_expr  # PEP 639 — authoritative
+
     for cls in classifiers:
         if cls.startswith("License :: "):
             spdx = _normalize(cls)
             if spdx:
                 return spdx
+
+    if license_free and len(license_free) <= 3:
+        if all(len(line) <= 80 for line in license_free):
+            for line in license_free:
+                spdx = _normalize(line)
+                if spdx:
+                    return spdx
+
+    # Last resort: hand-curated overrides + committed license-db snapshot.
+    overridden = license_db_lookup.lookup(ECOSYSTEM, name, version)
+    if overridden:
+        return overridden
+
     return UNKNOWN
 
 
@@ -284,7 +356,7 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
                 logger.warning("dist-info %s missing Name/Version", dist_info)
                 continue
 
-            spdx = _resolve_spdx(license_expr, license_free, classifiers)
+            spdx = _resolve_spdx(name, version, license_expr, license_free, classifiers)
             components.append(
                 Component(
                     ecosystem=ECOSYSTEM,

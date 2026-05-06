@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hand-curated license overrides for packages whose upstream metadata is empty,
+# malformed, or otherwise unhelpful. Consulted by container/compliance/license_db/
+# lookup.py as a final fallback after license-db.json and before returning
+# UNKNOWN.
+#
+# Match is by (ecosystem, name) — version-agnostic. If a package needs
+# version-specific resolution, use license-db.json instead.
+#
+# Schema:
+#   ecosystem: rust | go | python | dpkg | native
+#   name:      package name (must match exactly what the SBOM/metadata reports)
+#   license:   SPDX expression OR LicenseRef-* identifier
+#   source:    REQUIRED audit trail — link to the upstream LICENSE/EULA URL
+#              that establishes this license, OR a justification for why we're
+#              overriding upstream (e.g. "PyPI metadata empty; verified at <URL>")
+#
+# Add a new entry: confirm the upstream license, paste the URL into source:,
+# pick the SPDX ID, and (if it's a LicenseRef-*) make sure it appears in
+# container/compliance/policy/licenses.toml's [licenses].allow list — otherwise
+# the policy gate will reject it.
+
+overrides:
+  # --- NVIDIA CUDA Python wheels ---
+  # Most ship via pypi.nvidia.com; the wheel METADATA's License field is empty
+  # or contains marketing prose. The actual EULA is bundled in the wheel
+  # under .dist-info/LICENSE.txt. SPDX has no NVIDIA-specific ID, so we use
+  # LicenseRef-NVIDIA-Proprietary (matches what the modern nvidia-*-cu13
+  # wheels publish in License-Expression).
+  - ecosystem: python
+    name: nvidia-cuda-cupti
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-nvrtc
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-runtime
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cublas
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufft
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufile
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-curand
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusolver
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparse
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparselt-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuSPARSELt License Agreement — https://docs.nvidia.com/cuda/cusparselt/license.html"
+
+  - ecosystem: python
+    name: nvidia-nccl-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA NCCL License — https://docs.nvidia.com/deeplearning/nccl/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-nvjitlink
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-nvshmem-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA NVSHMEM License — https://docs.nvidia.com/nvshmem/api/eula.html"
+
+  - ecosystem: python
+    name: nvidia-cudnn-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuDNN Software License Agreement — https://docs.nvidia.com/deeplearning/cudnn/sla/index.html"
+
+  - ecosystem: python
+    name: cuda-bindings
+    license: LicenseRef-NVIDIA-SOFTWARE-LICENSE
+    source: "NVIDIA Software License Agreement — https://docs.nvidia.com/cuda/cuda-bindings/eula.html"
+
+  - ecosystem: python
+    name: cuda-toolkit
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  # --- NVIDIA-internal Python tools ---
+  - ecosystem: python
+    name: perf-analyzer
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "Internal NVIDIA tool — distributed via NGC under the NVIDIA Software License Agreement"
