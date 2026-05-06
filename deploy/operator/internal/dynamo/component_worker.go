@@ -51,9 +51,22 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		FailureThreshold: 1, // Note this default FailureThreshold is 3, with 1 a single failure will restart Pod
 	}
 
-	// ReadinessProbe in Dynamo worker context doesn't determine that the worker is ready to receive traffic
-	// Since worker registration is done through external KvStore and Transport does not use Kubernetes Service
-	// Still important for external depencies that rely on Pod Readiness
+	// ReadinessProbe gates external (Kubernetes Service / EndpointSlice) routing,
+	// including the Frontend's KubeDiscoveryClient path in
+	// lib/runtime/src/discovery/kube/daemon.rs:246, which filters EndpointSlices
+	// by endpoint.conditions.ready==true before correlating with DynamoWorkerMetadata
+	// CRs. Without a passing ReadinessProbe on the worker, the Service endpoint
+	// stays not-ready and Frontend's KubeDiscoveryClient returns 0 instances for
+	// AllEndpoints / AllModels even though the worker has registered its CR and
+	// is serving traffic over the internal NATS/etcd KvStore transport.
+	//
+	// Prior wording ("doesn't determine that the worker is ready to receive traffic")
+	// was only correct for Dynamo's internal KvStore-based routing. The clarifying
+	// comment below ("Still important for external dependencies") was ambiguous
+	// and caused multiple downstream deployments to omit the probe and see
+	// KubeDiscoveryClient returning 0 instances.
+	//
+	// See: https://github.com/ai-dynamo/dynamo/issues/9200 for the reproducing case.
 	container.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
