@@ -133,7 +133,7 @@ pub(super) async fn start_zmq_listener(
                     if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
                         && let Some(metrics) = &metrics
                     {
-                        metrics.increment_zmq_conversion_issue(event_type, "empty_store_blocks");
+                        metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
                     }
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");

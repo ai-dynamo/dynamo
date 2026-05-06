@@ -688,8 +688,11 @@ pub mod kv_publisher {
     /// Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
     pub const ZMQ_FILTERED_EVENTS_TOTAL: &str = "kv_publisher_zmq_filtered_events_total";
 
-    /// Total number of ZMQ KV events with conversion issues, labeled by event type and reason
+    /// Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
     pub const ZMQ_CONVERSION_ISSUES_TOTAL: &str = "kv_publisher_zmq_conversion_issues_total";
+
+    /// Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.

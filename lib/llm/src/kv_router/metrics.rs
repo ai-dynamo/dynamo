@@ -85,8 +85,10 @@ pub(crate) struct KvPublisherMetrics {
     pub zmq_events_total: IntCounterVec,
     /// Total number of ZMQ KV events filtered before conversion.
     pub zmq_filtered_events_total: IntCounterVec,
-    /// Total number of ZMQ KV events that produced suspicious conversion output.
+    /// Total number of ZMQ KV events dropped due to conversion issues.
     pub zmq_conversion_issues_total: IntCounterVec,
+    /// Total number of suspicious-but-forwarded ZMQ KV events.
+    pub zmq_suspicious_events_total: IntCounterVec,
 }
 
 static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
@@ -100,59 +102,60 @@ impl KvPublisherMetrics {
         KV_PUBLISHER_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
-                match (
-                    metrics.create_intcounter(
+                let engines_dropped_events_total = metrics
+                    .create_intcounter(
                         kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
                         "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
                         &[],
-                    ),
-                    metrics.create_intcountervec(
+                    )
+                    .expect("failed to create kv_publisher_engines_dropped_events_total");
+                let zmq_events_total = metrics
+                    .create_intcountervec(
                         kv_publisher::ZMQ_EVENTS_TOTAL,
                         "Total number of ZMQ KV events seen by the relay",
                         &["stage", "event_type"],
                         &[],
-                    ),
-                    metrics.create_intcountervec(
+                    )
+                    .expect("failed to create kv_publisher_zmq_events_total");
+                let zmq_filtered_events_total = metrics
+                    .create_intcountervec(
                         kv_publisher::ZMQ_FILTERED_EVENTS_TOTAL,
                         "Total number of ZMQ KV events filtered before conversion",
                         &["event_type", "reason"],
                         &[],
-                    ),
-                    metrics.create_intcountervec(
+                    )
+                    .expect("failed to create kv_publisher_zmq_filtered_events_total");
+                let zmq_conversion_issues_total = metrics
+                    .create_intcountervec(
                         kv_publisher::ZMQ_CONVERSION_ISSUES_TOTAL,
-                        "Total number of ZMQ KV events with conversion issues",
+                        "Total number of ZMQ KV events dropped due to conversion issues",
                         &["event_type", "reason"],
                         &[],
-                    ),
-                ) {
-                    (
-                        Ok(engines_dropped_events_total),
-                        Ok(zmq_events_total),
-                        Ok(zmq_filtered_events_total),
-                        Ok(zmq_conversion_issues_total),
-                    ) => Arc::new(Self {
-                        engines_dropped_events_total,
-                        zmq_events_total,
-                        zmq_filtered_events_total,
-                        zmq_conversion_issues_total,
-                    }),
-                    (Err(e), _, _, _)
-                    | (_, Err(e), _, _)
-                    | (_, _, Err(e), _)
-                    | (_, _, _, Err(e)) => {
-                        tracing::warn!(
-                            "Failed to create kv_publisher metrics from component: {}. Using unregistered metrics as fallback.",
-                            e
-                        );
-                        Arc::new(Self::new_unregistered())
-                    }
-                }
+                    )
+                    .expect("failed to create kv_publisher_zmq_conversion_issues_total");
+                let zmq_suspicious_events_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::ZMQ_SUSPICIOUS_EVENTS_TOTAL,
+                        "Total number of suspicious-but-forwarded ZMQ KV events",
+                        &["event_type", "reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_zmq_suspicious_events_total");
+
+                Arc::new(Self {
+                    engines_dropped_events_total,
+                    zmq_events_total,
+                    zmq_filtered_events_total,
+                    zmq_conversion_issues_total,
+                    zmq_suspicious_events_total,
+                })
             })
             .clone()
     }
 
     /// Creates unregistered metrics for use when registration fails.
     /// Increments still work in-process but are not exposed on `/metrics`.
+    #[cfg(test)]
     pub fn new_unregistered() -> Self {
         Self {
             engines_dropped_events_total: IntCounter::with_opts(Opts::new(
@@ -179,11 +182,19 @@ impl KvPublisherMetrics {
             zmq_conversion_issues_total: IntCounterVec::new(
                 Opts::new(
                     kv_publisher::ZMQ_CONVERSION_ISSUES_TOTAL,
-                    "Total number of ZMQ KV events with conversion issues",
+                    "Total number of ZMQ KV events dropped due to conversion issues",
                 ),
                 &["event_type", "reason"],
             )
             .expect("failed to create zmq_conversion_issues_total counter"),
+            zmq_suspicious_events_total: IntCounterVec::new(
+                Opts::new(
+                    kv_publisher::ZMQ_SUSPICIOUS_EVENTS_TOTAL,
+                    "Total number of suspicious-but-forwarded ZMQ KV events",
+                ),
+                &["event_type", "reason"],
+            )
+            .expect("failed to create zmq_suspicious_events_total counter"),
         }
     }
 
@@ -206,6 +217,12 @@ impl KvPublisherMetrics {
 
     pub fn increment_zmq_conversion_issue(&self, event_type: &'static str, reason: &'static str) {
         self.zmq_conversion_issues_total
+            .with_label_values(&[event_type, reason])
+            .inc();
+    }
+
+    pub fn increment_zmq_suspicious_event(&self, event_type: &'static str, reason: &'static str) {
+        self.zmq_suspicious_events_total
             .with_label_values(&[event_type, reason])
             .inc();
     }

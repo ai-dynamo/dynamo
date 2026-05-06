@@ -165,8 +165,10 @@ class kv_publisher:
     ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
     # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
     ZMQ_FILTERED_EVENTS_TOTAL = "kv_publisher_zmq_filtered_events_total"
-    # Total number of ZMQ KV events with conversion issues, labeled by event type and reason
+    # Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
     ZMQ_CONVERSION_ISSUES_TOTAL = "kv_publisher_zmq_conversion_issues_total"
+    # Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
 class kvbm:
