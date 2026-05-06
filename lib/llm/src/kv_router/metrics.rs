@@ -153,51 +153,6 @@ impl KvPublisherMetrics {
             .clone()
     }
 
-    /// Creates unregistered metrics for use when registration fails.
-    /// Increments still work in-process but are not exposed on `/metrics`.
-    #[cfg(test)]
-    pub fn new_unregistered() -> Self {
-        Self {
-            engines_dropped_events_total: IntCounter::with_opts(Opts::new(
-                kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-            ))
-            .expect("failed to create engines_dropped_events_total counter"),
-            zmq_events_total: IntCounterVec::new(
-                Opts::new(
-                    kv_publisher::ZMQ_EVENTS_TOTAL,
-                    "Total number of ZMQ KV events seen by the relay",
-                ),
-                &["stage", "event_type"],
-            )
-            .expect("failed to create zmq_events_total counter"),
-            zmq_filtered_events_total: IntCounterVec::new(
-                Opts::new(
-                    kv_publisher::ZMQ_FILTERED_EVENTS_TOTAL,
-                    "Total number of ZMQ KV events filtered before conversion",
-                ),
-                &["event_type", "reason"],
-            )
-            .expect("failed to create zmq_filtered_events_total counter"),
-            zmq_conversion_issues_total: IntCounterVec::new(
-                Opts::new(
-                    kv_publisher::ZMQ_CONVERSION_ISSUES_TOTAL,
-                    "Total number of ZMQ KV events dropped due to conversion issues",
-                ),
-                &["event_type", "reason"],
-            )
-            .expect("failed to create zmq_conversion_issues_total counter"),
-            zmq_suspicious_events_total: IntCounterVec::new(
-                Opts::new(
-                    kv_publisher::ZMQ_SUSPICIOUS_EVENTS_TOTAL,
-                    "Total number of suspicious-but-forwarded ZMQ KV events",
-                ),
-                &["event_type", "reason"],
-            )
-            .expect("failed to create zmq_suspicious_events_total counter"),
-        }
-    }
-
     /// Increment the engines dropped events counter by the given amount.
     pub fn increment_engines_dropped_events(&self, count: u64) {
         self.engines_dropped_events_total.inc_by(count);
