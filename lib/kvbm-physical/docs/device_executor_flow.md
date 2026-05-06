@@ -13,8 +13,8 @@ The executor has three functions:
 | Function | Purpose |
 |---|---|
 | `execute_device_transfer` | Top-level dispatch: strategy + stream-pool selection + sync semantics |
-| `execute_whole_block_device` | FC→FC fast path: one `batch_copy` of `bytes_per_block` per block |
-| `execute_fc_lw_vectorized` | FC↔LW slow path: pool-backed pointer upload + kernel launch |
+| `execute_whole_block_device` | FC→FC path: one `batch_copy` of `bytes_per_block` per block |
+| `execute_fc_lw_vectorized` | FC↔LW path: pool-backed pointer upload + `vectorized_copy` kernel launch |
 
 ---
 
@@ -75,13 +75,11 @@ flowchart TD
 | H2D | `ctx.next_h2d_stream()` | Host→device (whole-block batch DMA *and* FC↔LW kernel launches) |
 | D2H | `ctx.next_d2h_stream()` | Device→host (whole-block *and* kernel) |
 
-This matches the upstream CUDA design. An earlier iteration maintained
-four pools (`copy_{h2d,d2h}` + `compute_{h2d,d2h}`) to target the
-Level-Zero BCS/CCS engine split, but that path is gone: both CUDA and
-SYCL queues today are engine-class agnostic, so whole-block `batch_copy`
-and kernel `vectorized_copy` share the direction pool without losing
-concurrency. D2D maps to the H2D pool (`is_d2h = false`); the actual
-copy direction is determined by pointer addresses, not the pool label.
+This matches the upstream CUDA design. Both CUDA and SYCL queues are
+engine-class agnostic, so whole-block `batch_copy` and kernel
+`vectorized_copy` share the direction pool without losing concurrency.
+D2D maps to the H2D pool (`is_d2h = false`); the actual copy direction
+is determined by pointer addresses, not the pool label.
 
 On SYCL the pool is backed by round-robin `sycl::queue` slots inside a
 single `sycl::context` so USM pointers remain valid across queues —
@@ -101,7 +99,7 @@ controls the width.
 
 ---
 
-## 2. `execute_whole_block_device` — FC→FC fast path
+## 2. `execute_whole_block_device` — FC→FC path
 
 One pointer pair per block, one DMA per pair, direction auto-detected by
 the runtime from the pointer addresses.

@@ -11,11 +11,10 @@
 //! - Sync: SyclQueue::synchronize
 //!
 //! Run with:
-//!   cargo test -p kvbm-kernels \
-//!       --features xpu-sycl-permute,testing-xpu \
+//!   cargo test -p kvbm-kernels --features testing-xpu-sycl \
 //!       --test sycl_kernel_roundtrip -- --nocapture
 
-#![cfg(all(feature = "testing-xpu", feature = "xpu-sycl-permute"))]
+#![cfg(all(feature = "testing-xpu-sycl", feature = "xpu-sycl-permute"))]
 
 use std::ffi::c_void;
 use std::fmt::Debug;
@@ -337,7 +336,7 @@ fn sycl_empty_batch_noop() {
 // ===========================================================================
 
 #[test]
-fn sycl_vectorized_copy() {
+fn sycl_vectorized_copy_roundtrip() {
     let queue = match sycl_setup() {
         Some(q) => q,
         None => {

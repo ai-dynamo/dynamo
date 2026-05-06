@@ -20,20 +20,22 @@ thread until the device event identified by `event_handle` fires.
 #[cfg(feature = "cuda")]
 pub fn event_sync_blocking(event_handle: u64) -> anyhow::Result<()> {
     unsafe {
-        let ev = event_handle as CUevent;
-        let r  = cuEventSynchronize(ev);
-        if r != CUresult::CUDA_SUCCESS {
-            return Err(anyhow::anyhow!("cuEventSynchronize failed: {:?}", r));
+        let raw_event = event_handle as CUevent;
+        let result = cuEventSynchronize(raw_event);
+        if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            return Err(anyhow::anyhow!(
+                "cuEventSynchronize failed with error: {:?}", result
+            ));
         }
     }
     Ok(())
 }
 
-#[cfg(feature = "xpu-sycl")]
+#[cfg(all(feature = "xpu-sycl", not(feature = "cuda")))]
 pub fn event_sync_blocking(event_handle: u64) -> anyhow::Result<()> {
     unsafe {
-        let ev = event_handle as *const oneapi_rs::sys::sycl_rs_event_t;
-        oneapi_rs::sys::sycl_rs_event_wait(ev)
+        let raw_event = event_handle as *const oneapi_rs::sys::sycl_rs_event_t;
+        oneapi_rs::sys::sycl_rs_event_wait(raw_event)
             .result()
             .map_err(|e| anyhow::anyhow!("sycl_rs_event_wait failed: {:?}", e))?;
     }
@@ -42,7 +44,7 @@ pub fn event_sync_blocking(event_handle: u64) -> anyhow::Result<()> {
 
 #[cfg(not(any(feature = "cuda", feature = "xpu-sycl")))]
 pub fn event_sync_blocking(_event_handle: u64) -> anyhow::Result<()> {
-    anyhow::bail!("event_sync_blocking: no backend enabled")
+    anyhow::bail!("event_sync_blocking: no backend enabled (need cuda or xpu-sycl feature)")
 }
 ```
 
@@ -159,17 +161,21 @@ oneccl   = ["xpu-sycl", "block-manager"]
 
 `cuda` and `xpu-sycl` are **not** marked mutually exclusive in
 `Cargo.toml`, but the source has three `pub fn event_sync_blocking`
-definitions gated on `cuda`, `xpu-sycl`, and `not(any(...))`. Enabling
-both at once produces a duplicate-definition error at build time.
-
-Recommended guard (not yet in the source):
+definitions gated on `cuda`, `xpu-sycl`, and `not(any(...))`. A
+`compile_error!` in
+[`src/block_manager/vllm/connector/worker.rs`](../src/block_manager/vllm/connector/worker.rs)
+rejects the `all(cuda, xpu-sycl)` combination at build time with a
+descriptive message:
 
 ```rust
 #[cfg(all(feature = "cuda", feature = "xpu-sycl"))]
-compile_error!("kvbm-py3: `cuda` and `xpu-sycl` are mutually exclusive");
+compile_error!(
+    "Features `cuda` and `xpu-sycl` are mutually exclusive in kvbm-py3 bindings. \
+     Enable exactly one device backend."
+);
 ```
 
-Today a `cargo build` with no device feature is possible — it picks
+A `cargo build` with *no* device feature is still possible — it picks
 the "no backend enabled" stub that returns `bail!(...)`. The call site
 in `save_kv_layer` will fail at the first layer onboard, which is
 loud but not the friendliest developer experience. Building `kvbm-py3`

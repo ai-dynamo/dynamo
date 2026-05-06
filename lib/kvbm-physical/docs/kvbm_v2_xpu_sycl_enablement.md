@@ -6,12 +6,22 @@ SYCL implementations that were added, and the crate-level wiring that keeps
 KVBM v2 engine-agnostic and framework-agnostic.
 
 This document covers the state of the branch, the evolution from the
-CUDA-only baseline, and the relationships between the eight crates under
+CUDA-only baseline, and the relationships between the crates under
 `lib/` that make up KVBM v2.
+
+## Related docs
+
+This doc is the overview. Per-crate details live alongside the code:
+
+- [`device_executor_flow.md`](./device_executor_flow.md) — device executor dispatch, `TransferStrategy` mapping, stream-pool walkthrough.
+- [`sycl_pool_and_numa.md`](../../memory/docs/sycl_pool_and_numa.md) — `SyclMemPool` free-list allocator and NUMA-aware pinned host pages.
+- [`sycl_kernels.md`](../../kvbm-kernels/docs/sycl_kernels.md) — SYCL kernel build pipeline, launcher ABI, `vectorized_copy` / permute kernel dispatch.
+- [`collectives.md`](../../kvbm-engine/docs/collectives.md) — NCCL / oneCCL multi-device sync, feature gating, test layout.
+- [`event_sync.md`](../../bindings/kvbm/docs/event_sync.md) — Python binding event-sync for layer-wise onboarding.
 
 ## KVBM v2 modules and scope
 
-KVBM v2 is a set of eight Rust crates under `lib/` that together form an
+KVBM v2 is a set of Rust crates under `lib/` that together form an
 **engine-agnostic, framework-agnostic KV-cache block manager**. The goal is
 for any inference framework (vLLM, SGLang, TensorRT-LLM, …) to plug KVBM v2
 in under its own runtime, with no dependency flowing from KVBM into a
@@ -107,8 +117,9 @@ graph TB
     Kernels -. optional .-> CUDA
     Kernels -. optional .-> SYCL
 
-    %% Memory layer
-    Memory -. optional (sycl feature) .-> SYCL
+    %% Memory layer — cudarc is unconditional (CudaMemPool + NUMA helpers),
+    %% oneapi-rs is optional behind the xpu-sycl feature (SyclMemPool).
+    Memory -. optional (xpu-sycl feature) .-> SYCL
     Memory --> CUDA
 
     %% Device backends
@@ -187,10 +198,27 @@ after XPU/SYCL enablement.
 | **Collectives (`kvbm-engine`)** | NCCL only (`feature = "nccl"`, `cudarc::nccl`). | `CollectiveOps` trait is now implemented by `NcclCollectives` **and** `OneCclCollectives` (`feature = "oneccl"`, `oneapi-rs::ccl`). oneCCL supports both a from-scratch bootstrap (`OneCclBootstrap` — 8 B world_size + 256 B KVS address rendezvous) and borrowed handles from PyTorch / vLLM. Broadcasts use `ccl_rs_group_start/end` with a single `event_wait` on the last submitted op. |
 | **vLLM connector event sync (`kvbm-py3`)** | `event_sync_blocking(u64)` called `cuEventSynchronize` and asserted on failure. | Three cfg-gated implementations of the same `pub fn event_sync_blocking(u64) -> anyhow::Result<()>`: CUDA (`cuEventSynchronize`), SYCL (`oneapi_rs::sys::sycl_rs_event_wait`), and a "no backend" stub that `bail!`s. The call site now `?`-propagates the error instead of swallowing it. |
 | **Test helpers (`kvbm-physical`)** | Direct `cudaMemcpy` with explicit D2H/H2D kinds in `fill.rs` / `checksum.rs`. | Backend-agnostic `sync_memcpy_dtoh` / `sync_memcpy_htod` helpers on `DeviceContext` that construct a throwaway stream and synchronize. Tests pick a backend via `test_device_backend()` which prefers SYCL when compiled in and available, falling back to CUDA. |
-| **Benchmark tooling** | `bench_engine` and `bench_transfer` hard-coded `cuda_device_id`. | Both accept `--backend {auto,cuda,sycl}` and plumb the selected backend through `TransferManager::builder().device_backend(..).device_id(..)`. `bench_engine` resolves NUMA affinity via PCI BDF for both backends using the shared `get_device_cpu_set(backend_kind, bdf)` API. |
+| **Benchmark tooling** | `bench_engine` and `bench_transfer` hard-coded `cuda_device_id`; no kernel-layer XPU baseline. | Three tools, one per layer of the stack (kernel → TransferManager → Leader/Worker). See [Benchmarks](#benchmarks) below for the comparison. |
 
 The rest of the document shows the resulting trait surface, the full
 cross-crate graph, and the memory layer in detail.
+
+## Benchmarks
+
+KVBM v2 ships three benchmarks, each targeting a different layer of the
+stack. Running the progression bottom-up (kernel → transfer-manager →
+leader/worker) is the intended way to localize a performance regression:
+if the lower layer is clean but the higher layer regresses, the overhead
+lives in the layer between them.
+
+| Tool | Path | Layer | What it measures |
+|---|---|---|---|
+| `kvbench` / `kvbench_xpu_sycl` | [`lib/kvbm-kernels/examples/kvbench.rs`](../../kvbm-kernels/examples/kvbench.rs), [`lib/kvbm-kernels/examples/kvbench_xpu_sycl.rs`](../../kvbm-kernels/examples/kvbench_xpu_sycl.rs) | **Kernel layer** | Raw kernel vs. bare `memcpy` baseline. No `TransferManager`, no NIXL, no leader/worker. Compares `sycl_vectorized_copy` (FFI) against `sycl::queue::memcpy` (or `kvbm_kernels_launch_vectorized_copy` against `cudaMemcpyAsync` on CUDA) across `fc_to_fc` / `lw_to_fc` / `fc_to_lw` patterns and `d2d` / `h2d` / `d2h` directions. Llama 3.1 70B KV-cache dimensions, CSV output. |
+| `bench_transfer` | [`lib/kvbm-physical/examples/bench_transfer.rs`](../examples/bench_transfer.rs) | **TransferManager layer** | Same transfer matrix, but routed through `kvbm-physical::TransferManager` — the API the real offload path uses. Adds: stream-pool scheduling, executor dispatch (whole-block batch copy vs. FC↔LW vectorized kernel), NIXL registration. Backend selected via `--backend {auto,cuda,sycl}`. Still single-process. The delta vs. `kvbench` is the `TransferManager` overhead. |
+| `bench_engine` | [`lib/kvbm-engine/bin/bench_engine.rs`](../../kvbm-engine/bin/bench_engine.rs) | **Leader/Worker layer** | Production-fidelity end-to-end: `InstanceLeader` + `VeloWorkerService`/`Client` + `SpmdParallelWorkers`, NUMA-pinned worker threads (each with its own tokio runtime and `NixlAgent`), multi-GPU, optional full offload pipeline. `--backend {auto,cuda,sycl}`. NUMA affinity resolved via PCI BDF for both backends through the shared `get_device_cpu_set(backend_kind, bdf)` API. The delta vs. `bench_transfer` is leader/worker / offload-pipeline overhead. |
+
+All three produce CSV output, so you can join runs and compare layers
+directly. See each tool's module-level docs for the exact flag matrix.
 
 ## System overview — all crates and their abstractions
 
@@ -765,10 +793,8 @@ Three primitives on `DeviceStreamOps`:
   and SYCL (`kvbm_kernels_sycl_launch_vectorized_copy` in
   `sycl/vectorized_copy_kernel.cpp`). Used for FC↔LW per-chunk transfers.
 
-**Engine selection is no longer explicit.** The executor picks `batch_copy`
-or `vectorized_copy` based purely on layout shape (whole-block vs. FC↔LW).
-The legacy `EngineHint` enum was removed along with the Level-Zero backend
-it served.
+The executor picks `batch_copy` or `vectorized_copy` based purely on
+layout shape (whole-block vs. FC↔LW); callers don't choose.
 
 ### Stream pools
 
@@ -872,7 +898,7 @@ A parallel trait `CollectiveOps` lives in `kvbm-engine`:
 
 | Crate | Feature | Effect |
 |---|---|---|
-| `dynamo-memory` | `sycl` | Enables `SyclMemPool`, SYCL NUMA enumerators. Requires `oneapi-rs`. |
+| `dynamo-memory` | `xpu-sycl` | Enables `SyclMemPool`, SYCL NUMA enumerators. Requires `oneapi-rs`. |
 | `kvbm-kernels` | `xpu-sycl` | Compiles SYCL `.cpp` sources via icpx and links `libkvbm_kernels_sycl.so`. |
 | `kvbm-kernels` | `xpu-sycl-permute` | Enables SYCL permute kernel re-exports (implies `xpu-sycl`). |
 | `kvbm-physical` | `cuda` (default) | Compiles `device/cuda`. Pulls in `kvbm-kernels`. |

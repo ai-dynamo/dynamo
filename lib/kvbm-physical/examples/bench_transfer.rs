@@ -26,8 +26,8 @@
 //!
 //! Model dimensions: Llama 3.1 70B (bf16) -- 80 layers, 8 KV heads, 128 head dim.
 //!
-//! The TransferManager selects the engine internally (FC-to-FC = BCS/copy memcpy,
-//! FC-to/from-LW = CCS/compute vectorized kernel), so the CSV `backend` column is
+//! The TransferManager selects the engine internally (FC-to-FC = batch memcpy,
+//! FC-to/from-LW = vectorized kernel), so the CSV `backend` column is
 //! always `transfer_mgr`.
 //!
 //! Usage:

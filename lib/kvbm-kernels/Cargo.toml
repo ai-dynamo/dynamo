@@ -37,11 +37,13 @@ permute_kernels = []
 xpu-sycl = []
 
 # Enable XPU permute kernels (block/universal layout transforms). Implies xpu-sycl.
-# Tests are gated with #[cfg(all(test, feature = "testing-xpu"))]
+# Tests are gated with #[cfg(all(test, feature = "testing-xpu-sycl"))]
 xpu-sycl-permute = ["xpu-sycl"]
 
-# Enable XPU tests - only works when SYCL kernels are built
-testing-xpu = []
+# Enable XPU tests. Implies xpu-sycl-permute (which implies xpu-sycl),
+# so a single `--features testing-xpu-sycl` compiles the SYCL kernels
+# the tests call into.
+testing-xpu-sycl = ["xpu-sycl-permute"]
 
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]

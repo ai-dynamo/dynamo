@@ -205,7 +205,7 @@ formatted by `check_ccl_result` in `kvbm-engine`.
 |---|---|
 | `xpu-sycl` | Builds `src/tensor_kernels_sycl.rs` and compiles SYCL kernels via icpx. Requires DPC++ compiler. |
 | `xpu-sycl-permute` | Enables SYCL permute kernel re-exports (implies `xpu-sycl`). |
-| `testing-xpu` | Enables `tests/xpu_kernel_roundtrip_sycl.rs` integration tests; requires a real XPU device |
+| `testing-xpu-sycl` | Enables `tests/sycl_kernel_roundtrip.rs` integration tests; requires a real XPU device |
 | `kvbench-xpu-sycl` | Enables the `kvbench_xpu_sycl.rs` example (pulls in `clap`, `oneapi-rs`, and `xpu-sycl-permute`) |
 
 Kernel dispatch from `kvbm-physical` crosses this FFI boundary only at
