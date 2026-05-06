@@ -97,6 +97,43 @@ pub fn execute_cuda_transfer(
         _ => "Unknown",
     };
 
+    // Diagnostic: bytes about to move + path selection. Cross-correlate
+    // with the connector's "Onboard transfer complete" xfer_us field to
+    // get effective bandwidth for the actual byte count this kernel
+    // moves (which is not necessarily what the caller assumes).
+    let log_num_blocks = src_block_ids.len();
+    let log_num_layers = layers.len();
+    let log_outer_dim = src_layout.outer_dim();
+    let log_page_size = src_layout.page_size();
+    let log_inner_dim = src_layout.inner_dim();
+    let log_dtype_width = src_layout.dtype_width_bytes();
+    let log_fc_lw_num_pairs = log_num_blocks * log_num_layers * log_outer_dim;
+    let log_fc_lw_chunk_bytes = log_page_size * log_inner_dim * log_dtype_width;
+    let log_fc_lw_bytes_from_pairs = log_fc_lw_num_pairs * log_fc_lw_chunk_bytes;
+    let log_expected_bytes = log_num_blocks
+        * log_num_layers
+        * log_outer_dim
+        * log_page_size
+        * log_inner_dim
+        * log_dtype_width;
+    tracing::info!(
+        strategy = strategy_name,
+        selected_path = if use_whole_block { "whole_block" } else { "fc_lw" },
+        num_blocks = log_num_blocks,
+        num_layers = log_num_layers,
+        outer_dim = log_outer_dim,
+        page_size = log_page_size,
+        inner_dim = log_inner_dim,
+        dtype_width = log_dtype_width,
+        fc_lw_num_pairs = log_fc_lw_num_pairs,
+        fc_lw_chunk_bytes = log_fc_lw_chunk_bytes,
+        fc_lw_bytes_from_pairs = log_fc_lw_bytes_from_pairs,
+        expected_bytes = log_expected_bytes,
+        src_is_fully_contiguous = src_layout.is_fully_contiguous(),
+        dst_is_fully_contiguous = dst_layout.is_fully_contiguous(),
+        "Transfer prepared"
+    );
+
     match strategy {
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H

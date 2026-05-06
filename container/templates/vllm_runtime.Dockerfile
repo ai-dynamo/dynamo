@@ -112,7 +112,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
+        libnuma1 libnuma-dev librdmacm1 ibverbs-providers \
+        # numactl CLI for NUMA binding at runtime
+        numactl \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
         g++ \
@@ -296,6 +298,9 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+        uv pip uninstall -y nixl-cu12 || true; \
+    fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -313,7 +318,10 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+        uv pip uninstall -y nixl-cu12 || true; \
+    fi
 {% endif %}
 
 {% if device == "cuda" %}

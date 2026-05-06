@@ -280,7 +280,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-doc \
         --disable-static \
         --disable-x86asm \
-        --disable-postproc \
         --disable-network \
         --disable-encoders \
         --disable-muxers \
