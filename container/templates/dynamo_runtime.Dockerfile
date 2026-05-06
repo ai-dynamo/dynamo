@@ -216,6 +216,24 @@ COPY --from=licenses /sboms/ /
 
 
 #######################################
+########## Compliance: legal ##########
+#######################################
+#
+# Same trick as the sboms stage: FROM scratch + COPY only /legal/ so CI can
+# extract just the NOTICES tree without exporting the multi-GB runtime_pre
+# filesystem. Use this target when you want a copy of NOTICES-*.txt for
+# external archival, NOT when you want to ship them inside the runtime image
+# (the runtime stage below already does that via COPY --from=licenses /legal).
+#
+# CI usage:
+#   docker buildx build --target legal --output type=local,dest=/tmp/legal-extract ...
+# Result: /tmp/legal-extract/rust/NOTICES-Rust.txt etc. (no /legal/ prefix)
+
+FROM scratch AS legal
+COPY --from=licenses /legal/ /
+
+
+#######################################
 ########## Final runtime image ########
 #######################################
 
