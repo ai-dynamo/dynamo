@@ -7,9 +7,9 @@
 //! using a local [`TransferManager`]. It serves as the foundation for both standalone
 //! worker scenarios and as a building block for parallel worker implementations.
 
-#[cfg(feature = "collectives")]
+#[cfg(any(feature = "nccl", feature = "oneccl"))]
 mod replicated;
-#[cfg(feature = "collectives")]
+#[cfg(any(feature = "nccl", feature = "oneccl"))]
 #[allow(unused_imports)]
 pub use replicated::ReplicatedDataWorker;
 
