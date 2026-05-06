@@ -9,8 +9,11 @@ registration, request routing, metrics, and disaggregated serving.
 SGLang is pre-1.0 and regularly moves/renames internal APIs between releases. We
 support the current version plus 1 version back (N and N-1). The pattern:
 
-1. **All SGLang imports that have broken (or may break) across versions go through
-   `_compat.py`**, never directly from `sglang.*` in component code.
+1. **Only SGLang imports that have actually broken across a version upgrade go through
+   `_compat.py`.** Do not preemptively route every `sglang.*` import through the shim --
+   import directly until a real breakage is observed. When an upgrade breaks an import,
+   move that specific symbol into `_compat.py` and replace direct imports in component
+   code with the shim.
 2. `_compat.py` uses try/except ImportError: new path first, old path fallback.
 3. When SGLang introduces a new class/function that doesn't exist in older versions
    (e.g., `NetworkAddress`), add a minimal polyfill in the except branch -- just

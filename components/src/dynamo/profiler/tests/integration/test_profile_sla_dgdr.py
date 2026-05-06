@@ -44,6 +44,12 @@ def logger(request):
     yield
 
 
+@pytest.fixture(autouse=True)
+def dgdr_name_env(monkeypatch):
+    """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
+    monkeypatch.setenv("DGDR_NAME", "test-dgdr")
+
+
 def _load_dgdr(yaml_path) -> DynamoGraphDeploymentRequestSpec:
     with open(yaml_path) as f:
         data = yaml.safe_load(f)

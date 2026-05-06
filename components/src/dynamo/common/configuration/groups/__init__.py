@@ -4,6 +4,7 @@
 """ArgGroup implementations for different configuration domains."""
 
 from .kv_router_args import KvRouterArgGroup, KvRouterConfigBase
+from .router_args import RouterArgGroup, RouterConfigBase
 from .runtime_args import DynamoRuntimeArgGroup, DynamoRuntimeConfig
 
 __all__ = [
@@ -11,4 +12,6 @@ __all__ = [
     "DynamoRuntimeConfig",
     "KvRouterArgGroup",
     "KvRouterConfigBase",
+    "RouterArgGroup",
+    "RouterConfigBase",
 ]

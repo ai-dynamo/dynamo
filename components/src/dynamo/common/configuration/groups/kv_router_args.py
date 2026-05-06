@@ -31,13 +31,13 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
-    "router_max_tree_size",
-    "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
+    "shared_cache_multiplier",
+    "shared_cache_type",
 )
 
 
@@ -57,13 +57,13 @@ class KvRouterConfigBase(ConfigBase):
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
-    router_max_tree_size: int
-    router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
+    shared_cache_multiplier: float = 0.0
+    shared_cache_type: str = "none"
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -230,28 +230,6 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-max-tree-size",
-            env_var="DYN_ROUTER_MAX_TREE_SIZE",
-            default=2**20,
-            help=(
-                "KV Router: Maximum tree size before pruning when KV events are disabled. "
-                "Only used when --no-router-kv-events is set."
-            ),
-            arg_type=int,
-        )
-        add_argument(
-            g,
-            flag_name="--router-prune-target-ratio",
-            env_var="DYN_ROUTER_PRUNE_TARGET_RATIO",
-            default=0.8,
-            help=(
-                "KV Router: Target size ratio after pruning when KV events are disabled. "
-                "Only used when --no-router-kv-events is set."
-            ),
-            arg_type=float,
-        )
-        add_argument(
-            g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
             default=4.0,
@@ -259,7 +237,12 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue as soon as any tokens are active)."
+                "queueing sensitivity (queue as soon as any tokens are active). "
+                "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
+                "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
+                "cache pool size), not the per-step prefill window, which inflates "
+                "the threshold's effective denominator. Set --max-prefill-tokens "
+                "explicitly for predictable semantics, or use a smaller threshold."
             ),
             arg_type=float,
         )
@@ -298,4 +281,31 @@ class KvRouterArgGroup(ArgGroup):
                 "component via the request plane instead of maintaining a local radix tree."
             ),
             dest="use_remote_indexer",
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-multiplier",
+            env_var="DYN_SHARED_CACHE_MULTIPLIER",
+            default=0.5,
+            help=(
+                "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
+                "Blocks in the shared cache are less valuable than device-local blocks. "
+                "E.g. 0.5 means each shared hit counts as half a device-local hit. "
+                "Default 0.5."
+            ),
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-type",
+            env_var="DYN_SHARED_CACHE_TYPE",
+            default="none",
+            help=(
+                "[EXPERIMENTAL] KV Router: Type of external shared KV cache to query. "
+                "'none' (default): disabled. "
+                "'hicache': query Mooncake master directly for SGLang L3 (HiCache) state "
+                "using SGLang-compatible Mooncake key derivation."
+            ),
+            arg_type=str,
+            choices=["none", "hicache"],
         )

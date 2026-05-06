@@ -5,8 +5,23 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use super::{KvIndexerMetrics, KvRouterError, WorkerTask};
+use super::{AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::protocols::*;
+
+/// Trait for querying an external shared KV cache pool.
+///
+/// Implementations check which blocks/pages from a request's token sequence
+/// exist in the shared cache. The returned `SharedCacheHits` describes which
+/// block positions are available externally (and thus cheaper to prefill).
+#[async_trait]
+pub trait SharedKvCache: Send + Sync {
+    /// Query which blocks exist in the shared cache for the given token sequence.
+    async fn check_blocks(
+        &self,
+        tokens: &[u32],
+        block_size: u32,
+    ) -> Result<SharedCacheHits, KvRouterError>;
+}
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
 ///
@@ -127,7 +142,7 @@ pub trait KvIndexerInterface {
     /// that don't override this) return an empty `Vec`.
     ///
     /// See [`ShardSizeSnapshot`] for the fields exposed per shard.
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         vec![]
     }
 
@@ -161,6 +176,30 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
+    /// Install a shared structural anchor for branch-sharded suffix routing.
+    ///
+    /// Backends that do not support anchor-aware routing keep the default
+    /// unsupported response. This is only called by the branch-sharded wrapper
+    /// when a routed subtree starts on a different shard than its parent prefix.
+    fn apply_anchor(
+        &self,
+        _worker: WorkerWithDpRank,
+        _anchor: AnchorTask,
+    ) -> Result<(), KvCacheEventError> {
+        Err(KvCacheEventError::InvalidBlockSequence)
+    }
+
+    /// Find matches under a previously installed shared structural anchor.
+    fn find_matches_from_anchor(
+        &self,
+        _anchor: AnchorRef,
+        _suffix: &[LocalBlockHash],
+    ) -> Result<OverlapScores, KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "backend does not support anchor-aware find_matches".to_string(),
+        ))
+    }
+
     /// Returns true when a maintenance task should be enqueued.
     fn try_schedule_cleanup(&self) -> bool {
         false
@@ -180,14 +219,9 @@ pub trait SyncIndexer: Send + Sync + 'static {
         None
     }
 
-    /// Number of distinct workers registered in this backend.
-    fn worker_count(&self) -> usize {
-        0
-    }
-
-    /// Total cached blocks across all workers.
-    fn block_count(&self) -> usize {
-        0
+    /// Return a human-readable backend-specific timing or instrumentation report.
+    fn timing_report(&self) -> String {
+        String::new()
     }
 
     /// Number of radix-tree nodes created since construction.

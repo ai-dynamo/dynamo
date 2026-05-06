@@ -31,7 +31,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.93.1
-ARG BUILDER_IMAGE=golang:1.24
+ARG BUILDER_IMAGE=golang:1.25
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
@@ -40,8 +40,16 @@ ARG BASE_IMAGE=ubuntu:24.04
 FROM ${RUST_IMAGE} AS rust-builder
 
 # TARGETARCH is provided automatically by buildx for multi-platform builds.
-# Used here only for per-platform cache isolation.
 ARG TARGETARCH
+
+# sccache configuration (content-addressed S3 cache keyed by source hash).
+# When USE_SCCACHE=true, the build authenticates to S3 via IRSA secrets
+# mounted on the cargo-build RUN step. If the sccache server fails to start
+# (e.g. missing creds), the build continues without cache -- never with a
+# stale one, unlike a persistent target/ mount.
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
 
 # etcd-client crate requires protoc to compile proto files
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -51,6 +59,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /dynamo
 
+# Install sccache using the shared helper so this build matches the rest
+# of the repo's Rust builds (see container/templates/wheel_builder.Dockerfile).
+COPY --from=dynamo container/use-sccache.sh /tmp/use-sccache.sh
+RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        /tmp/use-sccache.sh install; \
+    fi
+
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
+
 # Copy Cargo workspace manifests, lockfile, and README (some crates inherit
 # readme.workspace = true, so cargo needs README.md at the workspace root)
 COPY --from=dynamo .cargo/ .cargo/
@@ -59,18 +77,25 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 # Copy all workspace crates (libdynamo_llm depends transitively on many)
 COPY --from=dynamo lib/ lib/
 
-# Build the static library; use BuildKit cache mounts for cargo registry and
-# build artifacts so incremental Docker rebuilds are fast.
-# Cache IDs are keyed by TARGETARCH so multi-platform builds don't collide.
-# Artifacts are copied to /out/ because the target/ cache mount is ephemeral.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
-    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
-    --mount=type=cache,target=/dynamo/target,id=cargo-target-${TARGETARCH} \
+# Build libdynamo_llm with sccache for cross-run caching. The registry and
+# git caches are content-addressed (safe to persist); no target/ mount --
+# sccache caches compilations in S3 where stale artifacts can't be linked
+# against newer source.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=shared \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH},sharing=shared \
+    --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-epp-${TARGETARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env); \
+    fi && \
     cargo build --release -p libdynamo_llm && \
     mkdir -p /out && \
     cp target/release/libdynamo_llm_capi.a /out/ && \
     HEADER=$(find target/release/build -name llm_engine.h -path "*/out/*" | head -1) && \
-    [ -n "$HEADER" ] && cp "$HEADER" /out/ || { echo "ERROR: llm_engine.h not found in target/"; exit 1; }
+    [ -n "$HEADER" ] && cp "$HEADER" /out/ || { echo "ERROR: llm_engine.h not found in target/"; exit 1; } && \
+    if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh show-stats "libdynamo_llm" || true; fi
 
 # =============================================================================
 # Stage 2: Build Go EPP binary
@@ -95,7 +120,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy go mod files first for better caching (from default context = epp/)
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     go mod download
 
 # Copy Go source (from default context = epp/)
@@ -105,8 +130,8 @@ COPY . .
 COPY --from=rust-builder /out/libdynamo_llm_capi.a pkg/plugins/dynamo_kv_scorer/lib/
 COPY --from=rust-builder /out/llm_engine.h pkg/plugins/dynamo_kv_scorer/include/
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
     CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/version.GitVersion=${BUILD_REF} \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \

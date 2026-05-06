@@ -376,6 +376,7 @@ class TestVllmRendererApi:
             "resumable",
             "external_req_id",
             "reasoning_ended",
+            "reasoning_parser_kwargs",
         )
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
@@ -400,8 +401,7 @@ class TestVllmRendererApi:
             "events",
             "kv_transfer_params",
             "trace_headers",
-            "num_cached_tokens",
-            "num_external_computed_tokens",
+            "prefill_stats",
             "routed_experts",
             "num_nans_in_logits",
         )
