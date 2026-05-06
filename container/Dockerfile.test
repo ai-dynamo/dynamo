@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standalone test image — layers test deps on top of a pre-built runtime image.
-# Usage: docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
+# Usage: docker build -f container/Dockerfile.test --target test_image --build-arg BASE_IMAGE=<runtime-image> .
+# For adding specific unique tests software, like in planner, add a target: docker build -f container/Dockerfile.test --target test_planner --build-arg BASE_IMAGE=<runtime-image> .
 ARG BASE_IMAGE
 
 FROM ${BASE_IMAGE} AS test_image
@@ -38,5 +39,8 @@ FROM test_image AS test_planner
 USER root
 COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/tail
 COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/tar
+COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/cat
+COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/grep
+COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/env
 
 USER dynamo
