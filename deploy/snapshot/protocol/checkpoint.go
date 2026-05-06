@@ -185,7 +185,15 @@ func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) Checkpo
 	return CheckpointObservation{Phase: CheckpointObservationPhaseRunning}
 }
 
+// EnsureLocalhostSeccompProfile sets the pod-level localhost seccomp profile
+// to the given path, allocating PodSecurityContext if needed. An empty profile
+// is a no-op so callers can disable injection entirely without conditional
+// branching at the call site (e.g. on OpenShift, where custom localhost
+// profiles require privileged SCC, or with a CRIU build that allows io_uring).
 func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
+	if profile == "" {
+		return // no seccomp restriction requested (e.g. OCP or io_uring-capable CRIU)
+	}
 	if podSpec.SecurityContext == nil {
 		podSpec.SecurityContext = &corev1.PodSecurityContext{}
 	}

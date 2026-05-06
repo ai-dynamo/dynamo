@@ -149,7 +149,7 @@ func buildCheckpointJob(
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,

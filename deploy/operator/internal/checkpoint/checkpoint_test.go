@@ -191,7 +191,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: false, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 
 		assert.Equal(t, originalCmd, podSpec.Containers[0].Command)
 		assert.Equal(t, originalArgs, podSpec.Containers[0].Args)
@@ -209,7 +209,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
@@ -250,7 +250,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
@@ -273,7 +273,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		for _, name := range []string{"engine-0", "engine-1"} {
 			c := findContainer(podSpec, name)
 			require.NotNil(t, c, "container %q not found", name)
@@ -298,8 +298,8 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		gmsServer := findContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := findContainer(podSpec, GMSLoaderContainer)
@@ -353,7 +353,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info)
+				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info, snapshotprotocol.DefaultSeccompLocalhostProfile)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.errMsg)
 			})
