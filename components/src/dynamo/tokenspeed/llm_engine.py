@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import re
@@ -49,11 +50,9 @@ class TokenspeedLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self) -> EngineConfig:
-        from tokenspeed.runtime.entrypoints.engine import Engine
-
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
-        self.engine = Engine(server_args=self.server_args)
+        self.engine = _tokenspeed_engine_cls()(server_args=self.server_args)
 
         scheduler_info = getattr(self.engine, "scheduler_info", {}) or {}
         self._model_max_len = _optional_int(
@@ -97,14 +96,12 @@ class TokenspeedLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        from tokenspeed.runtime.engine.io_struct import GenerateReqInput
-
         assert self.engine is not None, "Engine not initialized"
 
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
         token_ids = request.get("token_ids", [])
-        obj = GenerateReqInput(
+        obj = _generate_req_input_cls()(
             input_ids=token_ids,
             sampling_params=sampling_params,
             stream=True,
@@ -301,3 +298,13 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _tokenspeed_engine_cls() -> Any:
+    module = importlib.import_module("tokenspeed.runtime.entrypoints.engine")
+    return module.Engine
+
+
+def _generate_req_input_cls() -> Any:
+    module = importlib.import_module("tokenspeed.runtime.engine.io_struct")
+    return module.GenerateReqInput

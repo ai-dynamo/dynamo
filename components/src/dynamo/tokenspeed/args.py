@@ -40,7 +40,7 @@ class Config(DynamoRuntimeConfig):
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     data = dict(config.__dict__)
     server_args = data.get("server_args")
-    if dataclasses.is_dataclass(server_args):
+    if dataclasses.is_dataclass(server_args) and not isinstance(server_args, type):
         data["server_args"] = dataclasses.asdict(server_args)
     return data
 
