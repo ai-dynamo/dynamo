@@ -38,6 +38,10 @@ container/context.yaml
 # in the build context. Old comment from prior compliance design left for
 # context: was excluded when compliance ran via a separate Dockerfile.extract
 # bind-mount; the inline-compliance refactor inverted that intent.
+# Local extraction destinations for `docker buildx build --target {legal,sboms}`.
+# Excluded from build context so they don't bloat it or leak prior outputs back in.
+legal-extract/
+sboms-extract/
 .venv
 .venv-docs
 

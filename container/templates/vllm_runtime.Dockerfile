@@ -280,7 +280,7 @@ ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:${VIRTUAL_ENV
 {% endif %}
 
 # TODO: skip /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 {% if target not in ("dev", "local-dev") %}
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

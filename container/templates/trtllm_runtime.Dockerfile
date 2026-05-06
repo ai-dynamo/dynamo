@@ -221,7 +221,7 @@ ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # TODO: skip /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 {% if target not in ("dev", "local-dev") %}
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 {% endif %}

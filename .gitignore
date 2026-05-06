@@ -10,6 +10,9 @@ ATTRIBUTIONS-*.md
 ATTRIBUTIONS.md
 NOTICES-*.txt
 NOTICES.txt
+# Local extraction destinations for `docker buildx build --target {legal,sboms}`.
+legal-extract/
+sboms-extract/
 plans/
 *rendered.Dockerfile
 [Bb]inlog/
