@@ -771,6 +771,35 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn build_local_model_carries_runtime_parser_settings() {
+        let config = WorkerConfig {
+            tool_call_parser: Some("kimi_k2".to_string()),
+            reasoning_parser: Some("kimi_k25".to_string()),
+            exclude_tools_when_tool_choice_none: false,
+            enable_local_indexer: false,
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "nvidia/Kimi-K2.5-NVFP4".to_string(),
+            total_kv_blocks: Some(100),
+            max_num_seqs: Some(16),
+            max_num_batched_tokens: Some(8192),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let runtime_config = local_model.runtime_config();
+
+        assert_eq!(runtime_config.total_kv_blocks, Some(100));
+        assert_eq!(runtime_config.max_num_seqs, Some(16));
+        assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
+        assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
+        assert!(!runtime_config.exclude_tools_when_tool_choice_none);
+        assert!(!runtime_config.enable_local_indexer);
+    }
+
     // -------------------------------------------------------------------
     // Lifecycle state machine tests
     // -------------------------------------------------------------------

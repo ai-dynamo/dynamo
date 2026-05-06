@@ -2311,7 +2311,11 @@ class backend:
             model_input: ModelInput = ...,
             endpoint_types: str = ...,
             custom_jinja_template: Optional[str] = None,
-            metrics_labels: Optional[List[Tuple[str, str]]] = None,
+            tool_call_parser: Optional[str] = None,
+            reasoning_parser: Optional[str] = None,
+            exclude_tools_when_tool_choice_none: bool = ...,
+            enable_local_indexer: bool = ...,
+            metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
         ) -> None: ...
 

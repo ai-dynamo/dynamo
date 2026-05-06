@@ -17,6 +17,8 @@ If the compiled extension hasn't been built (e.g. fresh checkout without
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -92,6 +94,44 @@ def test_worker_config_accepts_metrics_labels_and_runtime():
         metrics_labels=[("model", "m1"), ("zone", "us-east-1")],
         runtime=rt,
     )
+
+
+def test_worker_config_accepts_parser_runtime_settings():
+    """Parser and local-indexer settings from the Python shim must remain
+    accepted by the Rust WorkerConfig binding."""
+    backend.WorkerConfig(
+        namespace="dynamo",
+        tool_call_parser="kimi_k2",
+        reasoning_parser="kimi_k25",
+        exclude_tools_when_tool_choice_none=False,
+        enable_local_indexer=False,
+    )
+
+
+def test_python_worker_config_from_runtime_config_copies_parser_settings():
+    from dynamo.common.backend.worker import WorkerConfig
+
+    runtime_cfg = MagicMock()
+    runtime_cfg.namespace = "test"
+    runtime_cfg.component = None
+    runtime_cfg.endpoint = None
+    runtime_cfg.endpoint_types = "chat,completions"
+    runtime_cfg.discovery_backend = "etcd"
+    runtime_cfg.request_plane = "tcp"
+    runtime_cfg.event_plane = "nats"
+    runtime_cfg.use_kv_events = False
+    runtime_cfg.custom_jinja_template = None
+    runtime_cfg.dyn_tool_call_parser = "kimi_k2"
+    runtime_cfg.dyn_reasoning_parser = "kimi_k25"
+    runtime_cfg.exclude_tools_when_tool_choice_none = False
+    runtime_cfg.enable_local_indexer = False
+
+    config = WorkerConfig.from_runtime_config(runtime_cfg, "nvidia/Kimi-K2.5-NVFP4")
+
+    assert config.tool_call_parser == "kimi_k2"
+    assert config.reasoning_parser == "kimi_k25"
+    assert config.exclude_tools_when_tool_choice_none is False
+    assert config.enable_local_indexer is False
 
 
 def test_worker_constructor_requires_engine_config_loop():
