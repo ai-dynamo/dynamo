@@ -24,8 +24,8 @@ use crate::protocols::openai::{
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
 use dynamo_protocols::types::realtime::{
-    RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent, RealtimeServerEventError,
-    RealtimeServerEventSessionUpdated,
+    EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent,
+    RealtimeServerEventError, RealtimeServerEventSessionUpdated,
 };
 
 //
@@ -183,7 +183,7 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                             code: Some("echo_engine_unsupported".to_string()),
                             message: format!(
                                 "echo engine does not support client event {}",
-                                client_event_variant_name(&other)
+                                other.event_type()
                             ),
                             param: None,
                             event_id: None,
@@ -202,31 +202,6 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
-    }
-}
-
-/// Wire-tag name for a [`RealtimeClientEvent`] variant — used in echo-engine
-/// error messages so a client sees which event was rejected.
-///
-/// `async-openai` exposes the same mapping via `crate::traits::EventType`, but
-/// the trait and its impls are gated on the `_api` feature, which pulls in
-/// reqwest / tokio / secrecy / etc. `dynamo-protocols` is types-only by design,
-/// so we hand-roll the match here. `RealtimeClientEvent` is not
-/// `#[non_exhaustive]`, so future upstream variants break this match at compile
-/// time rather than silently falling through.
-fn client_event_variant_name(event: &RealtimeClientEvent) -> &'static str {
-    match event {
-        RealtimeClientEvent::SessionUpdate(_) => "session.update",
-        RealtimeClientEvent::InputAudioBufferAppend(_) => "input_audio_buffer.append",
-        RealtimeClientEvent::InputAudioBufferCommit(_) => "input_audio_buffer.commit",
-        RealtimeClientEvent::InputAudioBufferClear(_) => "input_audio_buffer.clear",
-        RealtimeClientEvent::ConversationItemCreate(_) => "conversation.item.create",
-        RealtimeClientEvent::ConversationItemRetrieve(_) => "conversation.item.retrieve",
-        RealtimeClientEvent::ConversationItemTruncate(_) => "conversation.item.truncate",
-        RealtimeClientEvent::ConversationItemDelete(_) => "conversation.item.delete",
-        RealtimeClientEvent::ResponseCreate(_) => "response.create",
-        RealtimeClientEvent::ResponseCancel(_) => "response.cancel",
-        RealtimeClientEvent::OutputAudioBufferClear(_) => "output_audio_buffer.clear",
     }
 }
 
