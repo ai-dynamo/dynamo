@@ -80,6 +80,7 @@ pub(crate) fn request_metrics(
             .as_ref()
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
         worker,
+        replay: None,
     }
 }
 

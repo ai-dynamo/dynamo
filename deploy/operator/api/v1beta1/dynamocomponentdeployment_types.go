@@ -86,7 +86,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// RBAC, EPP filters) depend on.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`
 	ComponentName string `json:"name"`
 
 	// type indicates the role of this component within a Dynamo graph. Drives

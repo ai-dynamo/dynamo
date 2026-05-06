@@ -102,6 +102,19 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
         matches
     }
 
+    fn find_match(&mut self, hash: SequenceHash, touch: bool) -> Option<Block<T, Registered>> {
+        for pool in &mut self.priority_pools {
+            if let Some(block) = pool.pop(&hash) {
+                if touch {
+                    self.frequency_tracker.touch(hash.as_u128());
+                }
+                return Some(block);
+            }
+        }
+
+        None
+    }
+
     fn scan_matches(
         &mut self,
         hashes: &[SequenceHash],
