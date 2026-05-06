@@ -47,6 +47,27 @@ struct KvCacheGroupMetadata {
     sliding_window: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZmqEventFilterReason {
+    IgnoredEvent,
+    NonMainAttentionKind,
+    UnknownKind,
+    NonMainAttentionGroup,
+    UnlearnedGroupIdx,
+}
+
+impl ZmqEventFilterReason {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::IgnoredEvent => "ignored_event",
+            Self::NonMainAttentionKind => "non_main_attention_kind",
+            Self::UnknownKind => "unknown_kind",
+            Self::NonMainAttentionGroup => "non_main_attention_group",
+            Self::UnlearnedGroupIdx => "unlearned_group_idx",
+        }
+    }
+}
+
 impl ZmqEventNormalizer {
     pub fn new(kv_block_size: u32) -> Self {
         Self {
@@ -65,15 +86,26 @@ impl ZmqEventNormalizer {
     }
 
     pub fn preprocess(&mut self, raw: RawKvEvent, worker: WorkerWithDpRank) -> Option<RawKvEvent> {
+        self.preprocess_with_reason(raw, worker).ok()
+    }
+
+    pub fn preprocess_with_reason(
+        &mut self,
+        raw: RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
-            return None;
+            return Err(ZmqEventFilterReason::IgnoredEvent);
         }
 
         let metadata = raw.metadata();
         if matches!(raw, RawKvEvent::BlockStored { .. }) {
             self.learn_metadata(metadata, worker.dp_rank);
         }
-        self.should_accept(metadata, worker.dp_rank).then_some(raw)
+        if let Some(reason) = self.filter_reason(metadata, worker.dp_rank) {
+            return Err(reason);
+        }
+        Ok(raw)
     }
 
     pub fn normalize_preprocessed(
@@ -116,20 +148,38 @@ impl ZmqEventNormalizer {
         );
     }
 
-    fn should_accept(&self, metadata: KvCacheEventMetadata, dp_rank: DpRank) -> bool {
+    fn filter_reason(
+        &self,
+        metadata: KvCacheEventMetadata,
+        dp_rank: DpRank,
+    ) -> Option<ZmqEventFilterReason> {
         if let Some(kind) = metadata.kv_cache_spec_kind {
-            return kind.is_main_attention();
+            if kind.is_main_attention() {
+                return None;
+            }
+            if kind == KvCacheSpecKind::Unknown {
+                return Some(ZmqEventFilterReason::UnknownKind);
+            }
+            return Some(ZmqEventFilterReason::NonMainAttentionKind);
         }
 
-        let Some(group_idx) = metadata.group_idx else {
-            return true;
-        };
+        let group_idx = metadata.group_idx?;
 
         if let Some(metadata) = self.group_metadata.get(&(dp_rank, group_idx)) {
             let _sliding_window = metadata.sliding_window;
-            return metadata.kind.is_main_attention();
+            if metadata.kind.is_main_attention() {
+                return None;
+            }
+            if metadata.kind == KvCacheSpecKind::Unknown {
+                return Some(ZmqEventFilterReason::UnknownKind);
+            }
+            return Some(ZmqEventFilterReason::NonMainAttentionGroup);
         }
 
-        group_idx == 0
+        if group_idx == 0 {
+            None
+        } else {
+            Some(ZmqEventFilterReason::UnlearnedGroupIdx)
+        }
     }
 }

@@ -97,6 +97,15 @@ pub enum RawKvEvent {
 }
 
 impl RawKvEvent {
+    pub fn event_type_label(&self) -> &'static str {
+        match self {
+            Self::BlockStored { .. } => "stored",
+            Self::BlockRemoved { .. } => "removed",
+            Self::AllBlocksCleared => "cleared",
+            Self::Ignored => "ignored",
+        }
+    }
+
     pub fn is_ignored(&self) -> bool {
         matches!(self, Self::Ignored)
     }

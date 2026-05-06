@@ -337,10 +337,11 @@ fn test_normalizer_ignores_non_main_group_idx_without_metadata() {
         from_slice(&block_removed_sequence(Some(1), None)).expect("valid raw event");
     let mut normalizer = ZmqEventNormalizer::new(2);
 
-    assert!(
+    assert_eq!(
         normalizer
-            .preprocess(raw_event, WorkerWithDpRank::new(3, 0))
-            .is_none()
+            .preprocess_with_reason(raw_event, WorkerWithDpRank::new(3, 0))
+            .unwrap_err(),
+        ZmqEventFilterReason::UnlearnedGroupIdx
     );
 }
 
@@ -374,10 +375,11 @@ fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
     let mut normalizer = ZmqEventNormalizer::new(2);
 
     assert_event_metadata(&decoded, Some(1), Some(KvCacheSpecKind::Mamba), None);
-    assert!(
+    assert_eq!(
         normalizer
-            .preprocess(decoded, WorkerWithDpRank::new(3, 0))
-            .is_none()
+            .preprocess_with_reason(decoded, WorkerWithDpRank::new(3, 0))
+            .unwrap_err(),
+        ZmqEventFilterReason::NonMainAttentionKind
     );
 }
 
