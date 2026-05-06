@@ -23,8 +23,10 @@ title: Snapshot
 
 - x86_64 (`amd64`) GPU nodes
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
-- vLLM backend today, with limited preview support
-- `ReadWriteMany` storage for cross-node restore
+- vLLM or SGLang backend today
+- Checkpoint storage. `ReadWriteMany` is the safest default for cross-node or
+  concurrent multi-node access, but `podMount` mode can also use suitable
+  `ReadWriteOnce` storage for sequential checkpoint/restore workflows.
 - **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
 ## Quick Start via `DynamoCheckpoint` CR
@@ -94,7 +96,10 @@ kubectl get configmap "${OPERATOR_CONFIG}" -n "${PLATFORM_NAMESPACE}" \
 
 Verify that the rendered config includes `enabled: true`.
 
-### 3. Install the snapshot chart in the workload namespace
+### 3. Install the snapshot chart
+
+For the default namespace-local mode, install the snapshot chart in each
+workload namespace. The chart creates the PVC and the agent in that namespace:
 
 ```bash
 helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
@@ -103,18 +108,80 @@ helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
   --set storage.pvc.create=true
 ```
 
-Cross-node restore requires shared `ReadWriteMany` storage. The chart defaults to that mode. If your cluster does not have a default storage class, also set `storage.pvc.storageClass`.
+In the default `agentMount` mode, the snapshot-agent DaemonSet mounts the
+checkpoint PVC directly. On a multi-node GPU cluster that means agent pods on
+multiple nodes may mount the same PVC, so the PVC generally needs
+`ReadWriteMany`. The chart defaults to that mode. If your cluster does not have
+a default storage class, also set `storage.pvc.storageClass`.
 
 If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=true`; install the chart with `storage.pvc.create=false` and set `storage.pvc.name` instead.
 
 CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`).
 
-Verify that the PVC and DaemonSet are ready:
+For clusters that prefer one privileged snapshot agent instead of one DaemonSet
+per workload namespace, install the chart once in an infrastructure namespace.
+In this mode the chart does not create workload PVCs; the Dynamo operator either
+creates each namespace-local PVC or verifies that it already exists:
 
 ```bash
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace dynamo-system \
+  --create-namespace \
+  --set storage.accessMode=podMount \
+  --set storage.pvc.create=false \
+  --set rbac.namespaceRestricted=false
+```
+
+To let the operator create the workload PVC in each namespace that uses
+checkpoint/restore, configure the operator with `create: true`:
+
+```yaml
+dynamo-operator:
+  checkpoint:
+    enabled: true
+    storage:
+      type: pvc
+      pvc:
+        pvcName: snapshot-pvc
+        basePath: /checkpoints
+        create: true
+        size: 1Ti
+        storageClassName: ""
+        accessMode: ReadWriteMany
+```
+
+The chart and operator use separate configuration surfaces here: the snapshot
+chart PVC name is `storage.pvc.name`, while the operator config field is
+`checkpoint.storage.pvc.pvcName`.
+
+This is a key difference from `agentMount`: `podMount` removes the requirement
+that the snapshot-agent DaemonSet mount the checkpoint PVC on every GPU node.
+Only the active checkpoint/restore workload pod mounts the PVC, and the agent
+reaches it through that pod's mount namespace. `ReadWriteMany` remains the
+safest operator-managed default, especially when multiple checkpoint/restore
+pods may access the same PVC concurrently or when restore scheduling can span
+nodes. Suitable `ReadWriteOnce` storage classes can still be used for
+sequential `podMount` checkpoint/restore flows when the backend can attach the
+volume to the node running the active workload pod.
+
+`podMount` depends on the target container remaining alive while the agent
+resolves `/host/proc/<pid>/root/<basePath>`. If the container exits or restarts
+during checkpoint/restore setup, if the runtime cannot expose a stable host PID,
+or if node security settings prevent host proc traversal, the agent fails or
+skips that attempt and Kubernetes/operator reconciliation must try again after a
+fresh container is available.
+
+To use an already-present PVC instead, omit `create` or set it to `false`. The
+operator will fail reconciliation with a clear error if the named PVC does not
+exist in the workload namespace.
+
+Verify that the DaemonSet is ready. After a checkpoint or restore workload is
+reconciled, verify the workload namespace PVC:
+
+```bash
+kubectl rollout status daemonset/snapshot-agent -n dynamo-system
+kubectl get pods -n dynamo-system -l app.kubernetes.io/component=snapshot-agent -o wide
 kubectl get pvc snapshot-pvc -n ${NAMESPACE}
-kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
-kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-agent -o wide
 ```
 
 ### 4. Create a `DynamoCheckpoint`
@@ -430,7 +497,9 @@ If the worker template is wrong, the most common causes are using the raw runtim
 
 ### Restore cannot find or mount checkpoint storage
 
-Restore discovers checkpoint storage from the `snapshot-agent` DaemonSet in the same namespace. That DaemonSet must be ready and must mount the checkpoint PVC.
+For the default `agentMount` install, restore discovers checkpoint storage from
+the `snapshot-agent` DaemonSet in the workload namespace. That DaemonSet must be
+ready and must mount the checkpoint PVC.
 
 ```bash
 kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
@@ -438,7 +507,23 @@ kubectl get daemonset -n ${NAMESPACE} -l app.kubernetes.io/component=snapshot-ag
 kubectl get pvc -n ${NAMESPACE}
 ```
 
-This is also the path that `snapshotctl` uses when it resolves checkpoint storage.
+For a shared-agent `podMount` install, the `snapshot-agent` DaemonSet can run in
+the infrastructure namespace instead. Verify the shared-agent pods there, then
+verify that the workload namespace has the checkpoint PVC that the operator
+created or validated:
+
+```bash
+kubectl rollout status daemonset/snapshot-agent -n dynamo-system
+kubectl get pods -n dynamo-system -l app.kubernetes.io/component=snapshot-agent -o wide
+kubectl get pvc snapshot-pvc -n ${NAMESPACE}
+```
+
+In `podMount` mode the agent reaches the checkpoint through the workload pod's
+mount namespace rather than by mounting the PVC itself. Check the workload pod's
+checkpoint storage annotations and the `snapshot-agent` logs to see the actual
+resolved checkpoint path. `snapshotctl` uses the chart's storage resolution
+path, so for lower-level `snapshotctl` debugging make sure the snapshot chart
+configuration matches the access mode you are testing.
 
 ### `snapshotctl` manifest is rejected or the restore target is wrong
 
