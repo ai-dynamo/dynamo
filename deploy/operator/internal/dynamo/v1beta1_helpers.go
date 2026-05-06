@@ -55,29 +55,6 @@ func GetPodTemplateLabels(component *v1beta1.DynamoComponentDeploymentSharedSpec
 	return component.PodTemplate.Labels
 }
 
-func ensurePodTemplate(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
-	if component.PodTemplate == nil {
-		component.PodTemplate = &corev1.PodTemplateSpec{}
-	}
-	if component.PodTemplate.Labels == nil {
-		component.PodTemplate.Labels = map[string]string{}
-	}
-	if component.PodTemplate.Annotations == nil {
-		component.PodTemplate.Annotations = map[string]string{}
-	}
-	return component.PodTemplate
-}
-
-func ensureMainContainer(podTemplate *corev1.PodTemplateSpec) *corev1.Container {
-	for i := range podTemplate.Spec.Containers {
-		if podTemplate.Spec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podTemplate.Spec.Containers[i]
-		}
-	}
-	podTemplate.Spec.Containers = append([]corev1.Container{{Name: commonconsts.MainContainerName}}, podTemplate.Spec.Containers...)
-	return &podTemplate.Spec.Containers[0]
-}
-
 func GetMainContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
 	if component == nil || component.PodTemplate == nil {
 		return nil

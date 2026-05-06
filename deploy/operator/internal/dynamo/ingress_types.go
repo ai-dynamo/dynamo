@@ -5,10 +5,16 @@
 
 package dynamo
 
+// IngressTLSSpec is the internal TLS subset used when preserving v1alpha1
+// ingress behavior while the controllers reconcile v1beta1 objects.
 type IngressTLSSpec struct {
 	SecretName string `json:"secretName,omitempty"`
 }
 
+// IngressSpec is an internal controller compatibility shape for ingress config.
+// It is intentionally not part of the v1beta1 API; it lets the migrated
+// controllers keep reconciling ingress and virtual service resources from
+// preserved v1alpha1 payloads and operator-level defaults.
 type IngressSpec struct {
 	Enabled                    bool              `json:"enabled,omitempty"`
 	Host                       string            `json:"host,omitempty"`
@@ -22,6 +28,8 @@ type IngressSpec struct {
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
 }
 
+// IsVirtualServiceEnabled reports whether this ingress config should reconcile
+// an Istio VirtualService in addition to, or instead of, a Kubernetes Ingress.
 func (i *IngressSpec) IsVirtualServiceEnabled() bool {
 	if i == nil {
 		return false
