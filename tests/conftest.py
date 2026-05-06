@@ -217,8 +217,13 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
         return None  # serial execution: let normal pytest handle it
 
     # Imports related to parallel execution must be delayed. See vram_utils pynvml note in pytest_configure for the full reasons
-    from tests.utils.pytest_parallel_gpu import run_parallel
+    from tests.utils.pytest_parallel_gpu import _JUNIT_DIR, run_parallel
     from tests.utils.vram_utils import load_test_meta
+
+    # Wipe any per-test XMLs and combined.xml left over in the shared /tmp dir
+    # by an earlier session; otherwise _aggregate_junit_xml would merge stale
+    # results, and pytest_sessionfinish (below) would publish them.
+    shutil.rmtree(_JUNIT_DIR, ignore_errors=True)
 
     # Collect test IDs from the already-filtered session items
     test_ids = [item.nodeid for item in session.items]
@@ -328,7 +333,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if not os.path.exists(_JUNIT_COMBINED):
         return
 
-    shutil.copyfile(_JUNIT_COMBINED, parent_junit)
+    try:
+        shutil.copyfile(_JUNIT_COMBINED, parent_junit)
+    except OSError as exc:
+        _logger.warning(
+            f"Failed to copy GPU-parallel JUnit XML {_JUNIT_COMBINED} -> {parent_junit}: {exc}"
+        )
 
 
 @pytest.fixture()
