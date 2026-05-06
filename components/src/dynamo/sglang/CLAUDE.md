@@ -20,7 +20,7 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+   `# Fallback for sglang <= 0.5.10. Remove when min supported version is 0.5.12+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -341,7 +341,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ```
 sglang/
-  _compat.py               # SGLang version compat shim (network imports + NetworkAddress polyfill)
+  _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)
