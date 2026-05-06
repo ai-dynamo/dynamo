@@ -1467,31 +1467,31 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             let unique_transfer_ids: std::collections::HashSet<_> =
                 resolved.iter().map(|b| b.transfer_id).collect();
 
-            let policy_ms = batch
+            let policy_us = batch
                 .timing
                 .policy_duration()
-                .map(|d| d.as_millis() as u64)
+                .map(|d| d.as_micros() as u64)
                 .unwrap_or(0);
-            let precondition_ms = batch
+            let precondition_us = batch
                 .timing
                 .precondition_duration()
-                .map(|d| d.as_millis() as u64)
+                .map(|d| d.as_micros() as u64)
                 .unwrap_or(0);
-            let total_ms = batch
+            let total_us = batch
                 .timing
                 .total_duration()
-                .map(|d| d.as_millis() as u64)
+                .map(|d| d.as_micros() as u64)
                 .unwrap_or(0);
 
             tracing::info!(
                 blocks = resolved.len(),
                 containers = unique_transfer_ids.len(),
-                policy_ms,
-                precondition_ms,
-                xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
-                registration_ms =
-                    registration_timepoint.duration_since(end_xfer).as_millis() as u64,
-                total_ms,
+                policy_us,
+                precondition_us,
+                xfer_us = end_xfer.duration_since(start_xfer).as_micros() as u64,
+                registration_us =
+                    registration_timepoint.duration_since(end_xfer).as_micros() as u64,
+                total_us,
                 src = std::any::type_name::<Src>(),
                 dst = std::any::type_name::<Dst>(),
                 "Batch transfer complete"
@@ -1829,34 +1829,34 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
         let unique_transfer_ids: std::collections::HashSet<_> =
             resolved.iter().map(|b| b.transfer_id).collect();
 
-        let policy_ms = batch
+        let policy_us = batch
             .timing
             .policy_duration()
-            .map(|d| d.as_millis() as u64)
+            .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        let precondition_ms = batch
+        let precondition_us = batch
             .timing
             .precondition_duration()
-            .map(|d| d.as_millis() as u64)
+            .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        let transfer_ms = batch
+        let transfer_us = batch
             .timing
             .transfer_duration()
-            .map(|d| d.as_millis() as u64)
+            .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        let total_ms = batch
+        let total_us = batch
             .timing
             .total_duration()
-            .map(|d| d.as_millis() as u64)
+            .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
 
         tracing::info!(
             blocks = resolved.len(),
             containers = unique_transfer_ids.len(),
-            policy_ms,
-            precondition_ms,
-            transfer_ms,
-            total_ms,
+            policy_us,
+            precondition_us,
+            transfer_us,
+            total_us,
             src = std::any::type_name::<Src>(),
             dst = "G4-object",
             "Object batch transfer complete"

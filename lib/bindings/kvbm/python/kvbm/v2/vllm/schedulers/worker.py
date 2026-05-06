@@ -23,6 +23,7 @@ bind happens later, when the leader's `initialize_workers()` RPC drives
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import TYPE_CHECKING, Optional
 
 import kvbm
@@ -39,32 +40,86 @@ class KvTensorLayout:
     """Semantic description of the KV cache tensor layout.
 
     Python derives this from VllmConfig (which has the model architecture)
-    so that Rust doesn't have to guess from raw tensor shapes.
+    so that Rust does not need to guess from raw tensor shapes.
 
-    For MLA models, outer_dim and inner_dim are set explicitly because Rust's
-    shape-based inference cannot distinguish the fused KV latent axis from the
-    block/page axis. For standard attention the fields are None, which tells
-    Rust to fall back to its own contiguity-based inference (already correct).
+    For both MLA and standard attention, dimensions are computed explicitly
+    from vLLM config and passed down to Rust. Tensor shape is only used for
+    sanity validation (e.g., block-axis presence / packed-tail checks).
 
     Mirrors the v1 helper in
     lib/bindings/kvbm/python/kvbm/vllm_integration/connector_worker.py.
     """
 
-    outer_dim: Optional[int]  # None = let Rust infer; 1 for MLA
-    inner_dim: Optional[int]  # None = let Rust infer; head_size for MLA
+    outer_dim: Optional[int]
+    inner_dim: Optional[int]
 
     @classmethod
     def from_vllm_config(
-        cls, shape: "torch.Size", use_mla: bool = False
+        cls,
+        vllm_config: "VllmConfig",
+        shape: "torch.Size",
+        num_device_blocks: int,
+        use_mla: bool = False,
     ) -> "KvTensorLayout":
         if use_mla:
             # MLA tensors are 3D: [num_blocks, page_size, head_size].
             # No outer_dim axis — K and V are fused into a single latent.
             return cls(outer_dim=1, inner_dim=int(shape[-1]))
-        # Standard attention: Rust already infers outer_dim/inner_dim correctly
-        # from tensor shape. Don't guess here — the block dimension can be at
-        # position 0 or 1 depending on the attention backend.
-        return cls(outer_dim=None, inner_dim=None)
+        # Standard attention:
+        # - outer_dim is K/V axis = 2
+        # - inner_dim is per-rank kv feature width
+        #
+        # vLLM API surfaces can differ by version/model family:
+        # `get_total_num_kv_heads()` may be global or already per-rank.
+        # Resolve this robustly by checking which config interpretation matches
+        # the observed packed tail in tensor shape.
+        total_kv_heads = int(vllm_config.model_config.get_total_num_kv_heads())
+        head_size = int(vllm_config.model_config.get_head_size())
+        tp_size = int(vllm_config.parallel_config.tensor_parallel_size)
+        if tp_size <= 0:
+            raise ValueError(f"Invalid tensor_parallel_size={tp_size}")
+        outer_dim = 2
+        if head_size <= 0 or total_kv_heads <= 0:
+            raise ValueError(
+                "Invalid standard attention inner_dim derived from config: "
+                f"total_num_kv_heads={total_kv_heads}, head_size={head_size}"
+            )
+
+        # Sanity checks against actual tensor shape so we fail loudly if vLLM
+        # changes layout semantics.
+        if len(shape) < 4:
+            raise ValueError(
+                "Standard attention KV tensor must have >=4 dims; "
+                f"got shape={tuple(shape)}"
+            )
+        if int(shape[0]) < num_device_blocks and int(shape[1]) < num_device_blocks:
+            raise ValueError(
+                "Cannot locate num_device_blocks in standard KV tensor shape; "
+                f"shape[:2]={tuple(shape[:2])}, num_device_blocks={num_device_blocks}"
+            )
+
+        inferred_inner_from_shape = int(math.prod(shape[3:]))
+        config_inner_candidates = [total_kv_heads * head_size]
+        if total_kv_heads % tp_size == 0:
+            config_inner_candidates.append((total_kv_heads // tp_size) * head_size)
+
+        matched_inner = None
+        for candidate in config_inner_candidates:
+            if candidate == inferred_inner_from_shape:
+                matched_inner = candidate
+                break
+
+        if matched_inner is None:
+            raise ValueError(
+                "KV layout mismatch between vLLM config and tensor shape: "
+                f"config_inner_candidates={config_inner_candidates}, "
+                f"shape_inner_dim={inferred_inner_from_shape}, "
+                f"shape={tuple(shape)}, total_num_kv_heads={total_kv_heads}, "
+                f"head_size={head_size}, tp_size={tp_size}"
+            )
+        inner_dim = matched_inner
+
+        return cls(outer_dim=outer_dim, inner_dim=inner_dim)
 
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
@@ -212,26 +267,64 @@ class SchedulerConnectorWorker:
                 "Hybrid models with different KV cache shapes are not supported yet."
             )
 
-        # Derive layout semantics from the vLLM model config so Rust doesn't
-        # have to guess the outer_dim/inner_dim from potentially-ambiguous
-        # tensor shapes (MLA caches are 3D without a K/V axis).
-        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
-        layout = KvTensorLayout.from_vllm_config(shape, use_mla)
-
         # Extract parameters.
-        # Standard attention: [2 (K/V), num_blocks, ...] or [num_blocks, 2, ...]
-        #   — block dim is whichever of shape[0]/shape[1] is larger.
-        # MLA: [num_blocks, page_size, head_size] — block dim is always axis 0.
-        num_device_blocks = shape[0] if use_mla else max(shape[0], shape[1])
+        # Prefer vLLM config's GPU block count; fall back to tensor-derived only
+        # when config is unavailable (older bring-up edge cases).
+        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
+        config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
+        if config_gpu_blocks is None or config_gpu_blocks <= 0:
+            num_device_blocks = int(shape[0] if use_mla else max(shape[0], shape[1]))
+            print(
+                "Warning: cache_config.num_gpu_blocks unavailable; "
+                f"falling back to tensor-derived num_device_blocks={num_device_blocks}"
+            )
+        else:
+            num_device_blocks = int(config_gpu_blocks)
+
+        # Derive explicit layout semantics from vLLM model config + tensor shape.
+        layout = KvTensorLayout.from_vllm_config(
+            self.vllm_config, shape, num_device_blocks, use_mla
+        )
+
         page_size = self.vllm_config.cache_config.block_size
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
+        if num_device_blocks <= 0:
+            raise ValueError(f"Invalid num_device_blocks={num_device_blocks}")
+        if page_size <= 0:
+            raise ValueError(f"Invalid page_size={page_size}")
+        if dtype_width_bytes <= 0:
+            raise ValueError(f"Invalid dtype_width_bytes={dtype_width_bytes}")
 
-        config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
-        if num_device_blocks != config_gpu_blocks:
-            print(
-                f"Warning: num_device_blocks from tensor ({num_device_blocks}) "
-                f"!= config.num_gpu_blocks ({config_gpu_blocks}). "
-                f"Using tensor-derived value."
+        if shape[0] < num_device_blocks and shape[1] < num_device_blocks:
+            raise ValueError(
+                "Cannot locate num_device_blocks in KV tensor shape; "
+                f"shape[:2]={tuple(shape[:2])}, num_gpu_blocks={num_device_blocks}"
+            )
+
+        # Strong startup contract:
+        # bytes_per_block from layout math must equal bytes_per_block implied by the
+        # concrete tensor storage. This catches subtle TP/layout drift early.
+        layer_total_bytes_from_shape = int(math.prod(shape)) * dtype_width_bytes
+        if layer_total_bytes_from_shape % num_device_blocks != 0:
+            raise ValueError(
+                "KV tensor total bytes is not divisible by num_device_blocks: "
+                f"shape={tuple(shape)}, dtype_width_bytes={dtype_width_bytes}, "
+                f"layer_total_bytes={layer_total_bytes_from_shape}, "
+                f"num_device_blocks={num_device_blocks}"
+            )
+        bytes_per_block_from_shape = layer_total_bytes_from_shape // num_device_blocks
+        bytes_per_block_from_layout = (
+            int(layout.outer_dim) * page_size * int(layout.inner_dim) * dtype_width_bytes
+        )
+        if bytes_per_block_from_shape != bytes_per_block_from_layout:
+            raise ValueError(
+                "KV bytes_per_block mismatch between tensor shape and derived layout: "
+                f"shape={tuple(shape)}, "
+                f"bytes_per_block_from_shape={bytes_per_block_from_shape}, "
+                f"bytes_per_block_from_layout={bytes_per_block_from_layout}, "
+                f"outer_dim={layout.outer_dim}, inner_dim={layout.inner_dim}, "
+                f"page_size={page_size}, dtype_width_bytes={dtype_width_bytes}, "
+                f"num_device_blocks={num_device_blocks}"
             )
 
         # Phase 2A: Register KV caches with NIXL via Rust binding
