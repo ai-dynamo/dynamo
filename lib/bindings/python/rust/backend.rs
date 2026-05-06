@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -257,11 +257,7 @@ pub struct Worker {
 #[pymethods]
 impl Worker {
     #[new]
-    fn new(
-        engine: PyObject,
-        config: WorkerConfig,
-        event_loop: PyObject,
-    ) -> PyResult<Self> {
+    fn new(engine: PyObject, config: WorkerConfig, event_loop: PyObject) -> PyResult<Self> {
         // Determine whether this is the first runtime in the process. If
         // `runtime_from_existing` succeeds, someone else (typically a
         // `DistributedRuntime`) already constructed it and owns shutdown.
