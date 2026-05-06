@@ -66,6 +66,7 @@ jobs:
       rc_number: ${{ steps.rc_tag.outputs.rc_number }}
       ngc_version_tag: ${{ steps.rc_tag.outputs.ngc_version_tag }}
       helm_chart_version: ${{ steps.rc_tag.outputs.helm_chart_version }}
+      wheel_version: ${{ steps.rc_tag.outputs.wheel_version }}
     steps:
       - name: Extract version and validate inputs
         id: extract
@@ -82,7 +83,10 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            if [[ "${BRANCH_NAME}" != "main" ]]; then
+            # REVERT THIS — dev-branch allowlist for nightly→release.yml→GitLab
+            # integration testing; restore the strict `!= "main"` check below
+            # once the integration lands on main.
+            if [[ "${BRANCH_NAME}" != "main" && "${BRANCH_NAME}" != "pvijayakrish/nightly-release-automate" ]]; then
               echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
               exit 1
             fi
@@ -125,14 +129,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Base version pinned in pyproject.toml at the source SHA. Same value
+          # cargo and maturin stamp into the wheel filename / METADATA.
+          BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
+          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
+            exit 1
+          fi
+
           if [[ "${NIGHTLY}" == "true" ]]; then
             DATE_UTC=$(date -u +%Y%m%d)
             SHORT_SHA="${COMMIT_SHA:0:7}"
             NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
+            WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
             echo "helm_chart_version=" >> $GITHUB_OUTPUT
+            echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
+            echo "Nightly wheel version: ${WHEEL_VERSION}"
             exit 0
           fi
 
@@ -165,11 +180,15 @@ jobs:
           SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
           HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
 
+          WHEEL_VERSION="${BASE_VERSION}"
+
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
+          echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
           echo "RC number: ${NEXT_RC}"
           echo "Helm chart version: ${HELM_CHART_VERSION}"
+          echo "RC wheel version: ${WHEEL_VERSION}"
 
   # ============================================================================
   # NGC PUBLISH: crane copy to NGC, Helm chart push
@@ -607,23 +626,10 @@ jobs:
 
   # ============================================================================
   # GITLAB RELEASE AUTOMATION TRIGGER
-  # Fires the GitLab release-automation pipeline (project 191080) once images
-  # and wheels are staged. Variable shape mirrors aiperf's nightly trigger and
-  # is consumed by GITLAB/release-automation/projects/dynamo.yml:
-  #   PIPELINE_TYPE  — `security` for nightly/ondemand, `rc` for RC.
-  #   RELEASE_TYPE   — `nightly` or `rc`. Drives nspect version-name and
-  #                    Artifactory wheel path resolution in dynamo.yml.
-  #   ARTIFACTS      — comma-separated artifact types; matched on word
-  #                    boundary by every scan/promote rule.
-  #   GITHUB_RUN_ID  — required for nightly Artifactory wheel path
-  #                    (<NIGHTLY_BASE>/nightly/<run_id>/<wheel>).
-  #   NIGHTLY_TAG    — human label surfaced in the GitLab summary; nspect
-  #                    version-name is hardcoded to "Dynamo Nightlies" inside
-  #                    dynamo.yml's register-nspect rule.
-  #   WHEEL_VERSION / CONTAINER_TAG — both set to ngc_version_tag because
-  #                    dynamo.yml interpolates WHEEL_VERSION into NGC image
-  #                    tags (e.g. vllm-runtime:${WHEEL_VERSION}-amd64).
-  # Skipped only when `skip_gitlab_pipeline` is set (emergency bypass).
+  # Fires the GitLab release-automation pipeline once images and wheels are
+  # staged. Variable shape consumed by
+  # GITLAB/release-automation/projects/dynamo.yml. Skipped when
+  # `skip_gitlab_pipeline` is set (emergency bypass).
   # ============================================================================
 
   trigger-gitlab-release-pipeline:
@@ -633,16 +639,17 @@ jobs:
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
-    env:
-      # Project ID 191080 = ai-dynamo/dynamo on gitlab-master. Public, hardcoded.
-      GITLAB_TRIGGER_URL: 'https://gitlab-master.nvidia.com/api/v4/projects/191080/trigger/pipeline'
     steps:
       - name: Trigger GitLab pipeline
         env:
+          # Both come from the automated-release environment. Storing the URL
+          # as a secret (not hardcoded) keeps it masked in logs and lets it be
+          # rotated without a code change.
+          GITLAB_TRIGGER_URL:   ${{ secrets.GITLAB_PIPELINE_URL }}
           GITLAB_TRIGGER_TOKEN: ${{ secrets.GITLAB_TRIGGER_TOKEN }}
           VERSION:              ${{ needs.prepare-release.outputs.version }}
           NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
-          HELM_CHART_VERSION:   ${{ needs.prepare-release.outputs.helm_chart_version }}
+          WHEEL_VERSION:        ${{ needs.prepare-release.outputs.wheel_version }}
           COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
           NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
@@ -651,14 +658,14 @@ jobs:
 
           # PIPELINE_TYPE / RELEASE_TYPE drive every rule in dynamo.yml.
           # ARTIFACTS gates per-artifact scans and promotions.
-          # Nightly omits `helm` because release-publish skips the Helm push
-          # for nightlies (see env.NIGHTLY guard on the chart-push step). RC
-          # includes it — dynamo.yml's promote:helm consumes it.
+          # NIGHTLY_TAG carries the resolved nightly tag (date+shortsha) for
+          # the GitLab pipeline summary; the nspect version-name is hardcoded
+          # to "Dynamo Nightlies" inside dynamo.yml, so we don't pass it.
           if [ "${NIGHTLY}" = "true" ]; then
             PIPELINE_TYPE="security"
             RELEASE_TYPE="nightly"
             ARTIFACTS="wheel,container"
-            NIGHTLY_TAG="Dynamo Nightlies"
+            NIGHTLY_TAG="${NGC_VERSION_TAG}"
             RC_TAG=""
           else
             PIPELINE_TYPE="rc"
@@ -670,9 +677,12 @@ jobs:
 
           # Pipe the trigger token via @file rather than inline form value so
           # it never appears in process listings or `set -x` output.
+          # `trap` is registered BEFORE the write so an error between mktemp
+          # and the write (or any later line) still cleans up the file.
           TOKEN_FILE=$(mktemp)
-          echo -n "${GITLAB_TRIGGER_TOKEN}" > "${TOKEN_FILE}"
           trap 'rm -f "${TOKEN_FILE}"' EXIT
+          chmod 600 "${TOKEN_FILE}"
+          printf '%s' "${GITLAB_TRIGGER_TOKEN}" > "${TOKEN_FILE}"
 
           RESPONSE=$(curl -fsSL \
             --request POST \
@@ -682,20 +692,18 @@ jobs:
             --form "variables[RELEASE_TYPE]=${RELEASE_TYPE}" \
             --form "variables[DRY_RUN]=false" \
             --form "variables[PROJECT]=dynamo" \
-            --form "variables[SOURCE_BRANCH]=${GITHUB_REF_NAME}" \
             --form "variables[NIGHTLY_TAG]=${NIGHTLY_TAG}" \
             --form "variables[RC_TAG]=${RC_TAG}" \
-            --form "variables[WHEEL_VERSION]=${NGC_VERSION_TAG}" \
+            --form "variables[WHEEL_VERSION]=${WHEEL_VERSION}" \
             --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
-            --form "variables[HELM_CHART_VERSION]=${HELM_CHART_VERSION}" \
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
             --form "variables[ARTIFACTS]=${ARTIFACTS}" \
             --form "variables[ENABLE_PULSE_SCAN]=true" \
             --form "variables[ENABLE_WHEEL_SCAN]=true" \
             --form "variables[ENABLE_SONARQUBE]=true" \
-            --form "variables[SONAR_REPO]=dynamo" \
             --form "variables[SONAR_BRANCH]=main" \
+            --form "variables[NSPECT_REGISTERED]=false" \
             "${GITLAB_TRIGGER_URL}")
 
           PIPELINE_ID=$(echo "${RESPONSE}" | jq -r '.id // empty')

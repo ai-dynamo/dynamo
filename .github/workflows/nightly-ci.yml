@@ -13,11 +13,21 @@ on:
         required: false
         type: boolean
         default: true
+      run_tests:
+        description: 'Run vllm/sglang/trtllm tests + dynamo-pipeline checks. Schedule always runs them. Push events always skip them.'
+        required: false
+        type: boolean
+        default: true
       skip_gitlab_pipeline:
         description: 'Skip the GitLab release automation pipeline trigger. Emergency use only.'
         required: false
         type: boolean
         default: false
+  # REVERT THIS — dev-branch trigger for end-to-end integration testing.
+  # Remove the entire `push:` block before merging to main.
+  push:
+    branches:
+      - pvijayakrish/nightly-release-automate
 
 permissions:
   contents: read
@@ -53,6 +63,51 @@ jobs:
           suppress_fallback_warning: 'true'
 
   # ============================================================================
+  # RESOLVE SOURCE SHA
+  # ============================================================================
+  # On schedule / workflow_dispatch (from main): use github.sha — already main HEAD.
+  # On push (dev-branch testing): pick the latest *successful* post-merge run on
+  # main, so the SHA we build/release is one whose post-merge ECR images already
+  # exist. This keeps every downstream job (shared-build-image, dynamo-pipeline,
+  # shared-test, release.yml) coherent on a single SHA.
+  resolve-source-sha:
+    name: Resolve source SHA
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # REVERT THIS — the `push` branch resolves a main SHA for dev-branch
+          # testing; once the push trigger is removed this whole if/else
+          # collapses to `SHA="${GITHUB_SHA}"`.
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            SHA=$(gh run list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --workflow=post-merge-ci.yml \
+              --branch=main \
+              --status=success \
+              --limit=1 \
+              --json headSha --jq '.[0].headSha // empty')
+            if [ -z "${SHA}" ]; then
+              echo "::error::No successful post-merge run on main; cannot resolve source SHA for push-driven nightly."
+              exit 1
+            fi
+            echo "Resolved push event source SHA from latest successful post-merge: ${SHA}"
+          else
+            SHA="${GITHUB_SHA}"
+            echo "Using caller SHA: ${SHA}"
+          fi
+          echo "source_sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
   # COMPUTE NIGHTLY DEV VERSION
   # ============================================================================
   # Emits a PEP 440 dev suffix (e.g. .dev20260423) forwarded to every
@@ -86,15 +141,26 @@ jobs:
       contents: read
     outputs:
       release: ${{ steps.compute.outputs.release }}
+      run_tests: ${{ steps.compute.outputs.run_tests }}
     steps:
       - id: compute
         shell: bash
         env:
           DISPATCH_RELEASE: ${{ inputs.release }}
+          DISPATCH_RUN_TESTS: ${{ inputs.run_tests }}
         run: |
           case "${GITHUB_EVENT_NAME}" in
             schedule)
+              # cron must keep tests on so a failing nightly blocks the release.
               echo "release=true" >> "$GITHUB_OUTPUT"
+              echo "run_tests=true" >> "$GITHUB_OUTPUT"
+              ;;
+            # REVERT THIS — dev-branch integration test path: run release,
+            # skip tests. Remove this whole `push)` case once the push
+            # trigger is removed.
+            push)
+              echo "release=true" >> "$GITHUB_OUTPUT"
+              echo "run_tests=false" >> "$GITHUB_OUTPUT"
               ;;
             workflow_dispatch)
               if [ "${DISPATCH_RELEASE}" = "false" ]; then
@@ -102,9 +168,15 @@ jobs:
               else
                 echo "release=true" >> "$GITHUB_OUTPUT"
               fi
+              if [ "${DISPATCH_RUN_TESTS}" = "false" ]; then
+                echo "run_tests=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "run_tests=true" >> "$GITHUB_OUTPUT"
+              fi
               ;;
             *)
               echo "release=false" >> "$GITHUB_OUTPUT"
+              echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
@@ -114,7 +186,7 @@ jobs:
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, resolve-source-sha]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -123,11 +195,12 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, resolve-source-sha]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -136,11 +209,12 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [create-fresh-builder]
+    needs: [create-fresh-builder, resolve-source-sha]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -149,6 +223,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   # ============================================================================
@@ -157,7 +232,8 @@ jobs:
 
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -175,11 +251,13 @@ jobs:
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -192,11 +270,13 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
+    needs: [sglang-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -210,11 +290,13 @@ jobs:
       cpu_only_test_markers: sglang and gpu_0
       gpu_test_markers: sglang and gpu_1
       gpu_test_timeout_minutes: 240
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
+    needs: [sglang-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -227,11 +309,13 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: sglang and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
+    needs: [trtllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -245,11 +329,13 @@ jobs:
       cpu_only_test_markers: trtllm and gpu_0
       gpu_test_markers: trtllm and gpu_1
       gpu_test_timeout_minutes: 240
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
+    needs: [trtllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -262,6 +348,7 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   # ============================================================================
@@ -269,12 +356,14 @@ jobs:
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
-    needs: [create-fresh-builder, compute-dev-version]
+    needs: [create-fresh-builder, compute-dev-version, resolve-source-sha]
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       fresh_builder: true
-      no_cache: true
+      # REVERT THIS — push override hits cache for fast dev-branch iteration;
+      # restore `no_cache: true` once the push trigger is removed.
+      no_cache: ${{ github.event_name != 'push' }}
       build_timeout_minutes: 120
       # TODO: widen beyond `pre_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
@@ -284,6 +373,7 @@ jobs:
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   # ============================================================================
@@ -291,6 +381,8 @@ jobs:
   # ============================================================================
   rust-tests:
     name: rust-${{ matrix.dir == '.' && 'root' || matrix.dir }}-coverage
+    needs: [compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     runs-on:
       group: Fastchecker
     strategy:
@@ -358,19 +450,15 @@ jobs:
   # ============================================================================
   # RELEASE (workflow_call into release.yml)
   # ============================================================================
-  # Gated on the green-test set below + `compute-release-mode.outputs.release`.
-  # release.yml stages images (ECR → NGC), wheels (ECR → Artifactory), and
-  # triggers the GitLab release-automation pipeline. nightly always passes
-  # `nightly: true` so release.yml emits nightly-dated NGC tags and skips the
-  # RC/Helm push paths.
-  #
-  # commit_sha = github.sha — the HEAD of main at workflow trigger time.
+  # commit_sha is the SHA `resolve-source-sha` picked: github.sha on schedule
+  # and workflow_dispatch, or the latest successful post-merge SHA on push.
   # release.yml requires post-merge CI to have already pushed images to ECR
-  # for that SHA; this is ordinarily true since post-merge runs on every merge
-  # and nightly fires hours later.
+  # for that SHA; resolve-source-sha guarantees this on push, and on schedule
+  # it's true because post-merge runs on every merge and nightly fires later.
   release:
     name: Release Nightly
     needs:
+      - resolve-source-sha
       - compute-release-mode
       - vllm-test
       - vllm-multi-gpu-test
@@ -380,10 +468,14 @@ jobs:
       - trtllm-multi-gpu-test
       - dynamo-pipeline
       - rust-tests
-    if: ${{ needs.compute-release-mode.outputs.release == 'true' }}
+    # `!cancelled() && !failure()` lets test jobs be `skipped` (when
+    # run_tests=false) without blocking the release, while still gating on
+    # `success` when tests do run. dynamo-pipeline is unconditional so its
+    # status remains a real gate either way.
+    if: ${{ !cancelled() && !failure() && needs.compute-release-mode.outputs.release == 'true' }}
     uses: ./.github/workflows/release.yml
     with:
-      commit_sha: ${{ github.sha }}
+      commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
     secrets: inherit
