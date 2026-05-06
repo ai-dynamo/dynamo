@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
+use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
@@ -193,6 +194,22 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
+    }
+}
+
+fn pf_checked_file_mut(p: &mut PromptFormatterArtifact) -> &mut CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -233,8 +250,8 @@ pub struct ModelDeploymentCard {
     /// Max context (in number of tokens) this model can handle
     pub context_length: u32,
 
-    /// Size of a KV cache block - vllm only currently
-    /// Passed to the engine and the KV router.
+    /// Size of a KV cache block.
+    /// Passed to the engine, KV router, and trace replay hash path.
     pub kv_cache_block_size: u32,
 
     /// How many times a request can be migrated to another worker if the HTTP server lost
@@ -267,6 +284,12 @@ pub struct ModelDeploymentCard {
     /// Media fetching configuration
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
+
+    /// Per-worker-set router configuration override.
+    /// When set, the frontend watcher uses this instead of the global frontend router config.
+    /// Falls back to the frontend-level config when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_config: Option<RouterConfig>,
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
@@ -377,7 +400,16 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
-                // TODO: Do we want any of user_data or runtime_config?
+                if let Some(router_config) = self.router_config.as_ref()
+                    && let Ok(bytes) = serde_json::to_vec(router_config)
+                {
+                    // Hash router_config separately so we extend bytes_to_hash with a
+                    // fixed-size digest (32 bytes) rather than the full JSON payload.
+                    // [gluo TODO] take checksum() approach that is the same as above,
+                    // along with this effort, we should reorganize where RouterConfig
+                    // should be defined.
+                    bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
+                }
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -504,6 +536,66 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    /// Walk populated metadata `CheckedFile` slots in deterministic
+    /// order: model_info, tokenizer, prompt_formatter,
+    /// chat_template_file, gen_config.
+    pub fn iter_metadata_files(&self) -> Vec<&CheckedFile> {
+        let mut out: Vec<&CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_ref() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_ref() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_ref() {
+            out.push(pf_checked_file(p));
+        }
+        if let Some(c) = self.chat_template_file.as_ref() {
+            out.push(pf_checked_file(c));
+        }
+        if let Some(g) = self.gen_config.as_ref() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
+    }
+
+    /// Mutable variant of [`Self::iter_metadata_files`].
+    pub fn iter_metadata_files_mut(&mut self) -> Vec<&mut CheckedFile> {
+        let mut out: Vec<&mut CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_mut() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_mut() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_mut() {
+            out.push(pf_checked_file_mut(p));
+        }
+        if let Some(c) = self.chat_template_file.as_mut() {
+            out.push(pf_checked_file_mut(c));
+        }
+        if let Some(g) = self.gen_config.as_mut() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
     }
 
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.
@@ -759,6 +851,7 @@ impl ModelDeploymentCard {
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,
             media_fetcher: None,
+            router_config: None,
             checksum: OnceLock::new(),
         })
     }

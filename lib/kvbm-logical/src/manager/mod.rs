@@ -115,7 +115,6 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
                 .map(ImmutableBlock::from_inner),
         );
 
-        let active_matched = matched.len();
         tracing::debug!(active_matched, "Matched from active pool");
 
         let remaining_hashes = &seq_hash[matched.len()..];

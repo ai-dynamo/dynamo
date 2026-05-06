@@ -23,7 +23,9 @@
 
 use std::sync::{Arc, Weak};
 
+use crate::ManagerId;
 use crate::blocks::{BlockId, BlockMetadata, BlockRegistrationHandle, SequenceHash};
+use crate::blocks::pin::{LifecyclePin, LifecyclePinRef};
 use crate::pools::{BlockStore, store::upgrade_or_resurrect};
 
 /// Internal owner of a registered slot. Every clone of an
@@ -77,6 +79,21 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
 
     pub(crate) fn block_id(&self) -> BlockId {
         self.block_id
+    }
+}
+
+impl<T: BlockMetadata + Sync> LifecyclePin for ImmutableBlockInner<T> {
+    fn block_id(&self) -> BlockId {
+        self.block_id
+    }
+    fn sequence_hash(&self) -> SequenceHash {
+        self.seq_hash
+    }
+    fn manager_id(&self) -> ManagerId {
+        self.store.id()
+    }
+    fn registration_handle(&self) -> BlockRegistrationHandle {
+        self.handle.clone()
     }
 }
 
@@ -141,6 +158,24 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
     /// inner.
     pub fn use_count(&self) -> usize {
         Arc::strong_count(&self.inner)
+    }
+
+    /// Type-erased lifecycle pin for cross-policy use.
+    ///
+    /// Returns an [`LifecyclePinRef`] that:
+    /// - Bumps the underlying `Arc<ImmutableBlockInner<T>>` once (the
+    ///   only allocation cost is one `Arc::clone` — no `Box` and no new
+    ///   heap node).
+    /// - Keeps the slot alive (preventing the `Active → Inactive`
+    ///   transition) while the pin is live, identical to holding an
+    ///   `ImmutableBlock` clone.
+    /// - Exposes `(manager_id, block_id, sequence_hash)` so callers that
+    ///   stash a heterogeneous list of pins (different `T`s) can still
+    ///   address each slot unambiguously at runtime.
+    ///
+    /// See [`crate::blocks::pin`] for the rationale.
+    pub fn pin(&self) -> LifecyclePinRef {
+        LifecyclePinRef::new(self.inner.clone() as Arc<dyn LifecyclePin>)
     }
 }
 

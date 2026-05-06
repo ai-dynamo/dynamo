@@ -16,12 +16,27 @@ Install the chart in each namespace where you want checkpoint and restore.
 
 - Kubernetes cluster with x86_64 GPU nodes
 - NVIDIA driver 580.xx or newer
-- containerd runtime
+- **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - Dynamo Platform already installed with `dynamo-operator.checkpoint.enabled=true`
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
 Cross-node restore requires shared `ReadWriteMany` storage. The chart defaults to
 that mode.
+
+## CRI-O and OpenShift
+
+For CRI-O nodes set `runtime.type=crio`. Only set `runtime.socketPath` if the CRI
+socket is not the default for that type (see `values.yaml`). On OpenShift, set
+`openshift.enabled=true` so the chart emits the extra RBAC and pod annotations
+the agent needs. Example:
+
+```bash
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace "${NAMESPACE}" --create-namespace \
+  --set storage.pvc.create=true \
+  --set runtime.type=crio \
+  --set openshift.enabled=true
+```
 
 ## Minimal install
 
@@ -69,6 +84,9 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
+| `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
+| `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
+| `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.

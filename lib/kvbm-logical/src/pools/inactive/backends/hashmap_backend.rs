@@ -47,6 +47,12 @@ impl InactiveIndex for HashMapBackend {
         matches
     }
 
+    fn find_match(&mut self, hash: SequenceHash, _touch: bool) -> Option<Block<T, Registered>> {
+        let block = self.blocks.remove(&hash)?;
+        let _ = self.reuse_policy.remove(block.block_id());
+        Some(block)
+    }
+
     fn scan_matches(
         &mut self,
         hashes: &[SequenceHash],

@@ -40,6 +40,10 @@ impl InactiveIndex for LruBackend {
         matches
     }
 
+    fn find_match(&mut self, hash: SequenceHash, _touch: bool) -> Option<Block<T, Registered>> {
+        self.cache.pop(&hash)
+    }
+
     fn scan_matches(
         &mut self,
         hashes: &[SequenceHash],

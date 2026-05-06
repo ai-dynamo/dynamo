@@ -1081,7 +1081,7 @@ mod matching_tests {
             .expect("Should complete block");
         let _immutable_blocks = manager.register_blocks(vec![complete_block]);
 
-        // Try to match it
+        // One-element prefix matches use the first-hash fast path.
         let matched_blocks = manager.match_blocks(&[seq_hash]);
         assert_eq!(matched_blocks.len(), 1);
         assert_eq!(matched_blocks[0].sequence_hash(), seq_hash);
@@ -1089,6 +1089,19 @@ mod matching_tests {
         let snap = m.snapshot();
         assert_eq!(snap.match_hashes_requested, 1);
         assert_eq!(snap.match_blocks_returned, 1);
+
+        drop(matched_blocks);
+        drop(_immutable_blocks);
+
+        // The same API must also reactivate an inactive block.
+        let reactivated = manager.match_blocks(&[seq_hash]);
+        assert_eq!(reactivated.len(), 1);
+        assert_eq!(reactivated[0].sequence_hash(), seq_hash);
+
+        let snap = m.snapshot();
+        assert_eq!(snap.match_hashes_requested, 2);
+        assert_eq!(snap.match_blocks_returned, 2);
+        assert_eq!(snap.inactive_pool_size, 0);
     }
 
     #[test]

@@ -35,10 +35,12 @@
 mod complete;
 mod immutable;
 mod mutable;
+mod pin;
 
 pub use complete::CompleteBlock;
 pub use immutable::{ImmutableBlock, WeakBlock};
 pub use mutable::MutableBlock;
+pub use pin::{LifecyclePin, LifecyclePinRef};
 
 pub(crate) use immutable::ImmutableBlockInner;
 

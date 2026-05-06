@@ -56,6 +56,13 @@ pub(crate) trait InactiveIndex: Send + Sync {
         touch: bool,
     ) -> Vec<(SequenceHash, BlockId)>;
 
+    /// Find a single block matching `hash`. Default impl delegates to
+    /// `find_matches`; backends override for an O(1) variant that
+    /// avoids slice iteration on the single-block fast-path.
+    fn find_match(&mut self, hash: SequenceHash, touch: bool) -> Option<(SequenceHash, BlockId)> {
+        self.find_matches(&[hash], touch).into_iter().next()
+    }
+
     /// Like `find_matches` but does not stop on miss.
     fn scan_matches(
         &mut self,
@@ -171,6 +178,10 @@ pub(crate) struct BlockStoreInner<T: BlockMetadata> {
 /// Single-mutex bookkeeping store for the reset, active, and inactive
 /// pools.
 pub(crate) struct BlockStore<T: BlockMetadata> {
+    /// Stable, process-unique store identifier. Surfaced through
+    /// `LifecyclePin::manager_id` so type-erased pins remain
+    /// runtime-addressable to a unique physical pool.
+    id: crate::ManagerId,
     inner: Mutex<BlockStoreInner<T>>,
     block_size: usize,
     total_blocks: usize,
@@ -213,6 +224,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             free.push_back(i);
         }
         Arc::new(Self {
+            id: crate::ManagerId::next(),
             inner: Mutex::new(BlockStoreInner {
                 slots,
                 free,
@@ -227,6 +239,12 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             #[cfg(test)]
             release_primary_arrivals: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Stable, process-unique identifier of this store. See
+    /// [`crate::ManagerId`].
+    pub(crate) fn id(&self) -> crate::ManagerId {
+        self.id
     }
 
     /// Test-only: acquire a guard that pauses every subsequent
@@ -474,11 +492,10 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             // Fall through to inactive path.
         }
 
-        // (3) Inactive path.
-        let block_id = {
-            let mut matched = inner.inactive.find_matches(&[seq_hash], touch);
-            matched.pop()?.1
-        };
+        // (3) Inactive path. Single-hash fast-path through the
+        // backend-specific `find_match` override (O(1) for hashmap/lru
+        // backends) instead of allocating a one-element slice + Vec.
+        let block_id = inner.inactive.find_match(seq_hash, touch)?.1;
         self.metrics.dec_inactive_pool_size();
         let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
         let inner_arc =
@@ -631,10 +648,25 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         scan: bool,
     ) -> Vec<(SequenceHash, Arc<ImmutableBlockInner<T>>)> {
         let mut inner = self.inner.lock();
-        let matched = if scan {
+        let matched: Vec<(SequenceHash, BlockId)> = if scan {
             inner.inactive.scan_matches(hashes, touch)
         } else {
-            inner.inactive.find_matches(hashes, touch)
+            // First-hash fast-path: probe the head via the
+            // backend-specific `find_match` override before allocating
+            // the result Vec. Empty input or a head miss exits without
+            // any allocation.
+            let Some((&first_hash, rest)) = hashes.split_first() else {
+                return Vec::new();
+            };
+            let Some(first_pair) = inner.inactive.find_match(first_hash, touch) else {
+                return Vec::new();
+            };
+            let mut matched = Vec::with_capacity(hashes.len());
+            matched.push(first_pair);
+            if !rest.is_empty() {
+                matched.extend(inner.inactive.find_matches(rest, touch));
+            }
+            matched
         };
         self.metrics.dec_inactive_pool_size_by(matched.len() as i64);
         matched

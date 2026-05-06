@@ -29,6 +29,9 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+  - '.coveragerc'
+  - '.claude/**'
+  - '.agents/**'
 
 examples:
   - 'recipes/**'
