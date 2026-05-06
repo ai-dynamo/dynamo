@@ -51,10 +51,11 @@ async def configure_kv_event_block_size(
         group_metadata = await engine.engine_core.call_utility_async(
             "get_kv_cache_group_metadata"
         )
-    except Exception:
-        logger.exception(
-            "Failed to fetch KV cache group metadata; "
-            "falling back to vLLM cache_config.block_size"
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch KV cache group metadata; falling back to "
+            "vLLM cache_config.block_size: %s",
+            e,
         )
         kv_event_block_size = fallback_block_size
     else:
