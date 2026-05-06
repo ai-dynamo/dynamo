@@ -180,17 +180,6 @@ We are still in the process of developing the integration with MX, among other t
 
 ![Snapshot restore time with GMS, weights reside on NFS PVC](./figures/gms_pvc_restore_bench.svg)
 
-### Full Overlap with External Weight Restoration
-
-To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore with a faster channel for restoring the weights, we implemented a proof-of-concept backend for `gms-loader` where the weights for each model are sharded across 8 SSDs on a node, and ensured the restored workload was on the same node as the checkpoint.
-
-This setup isolates the parallel-restore claim from network storage variability and shows what the rest of the system can do when the weight source isn't the bottleneck. The loader pipelines reads with GPU copies (a pool of threads issuing `cudaMemcpyAsync` over multiple CUDA streams) so storage→host and host→GPU run continuously rather than fully materializing the weights in host memory.
-
-<!-- TODO(itay-feedback): before showing the optimized sharded-SSD result, add an intermediate benchmark of Snapshot+GMS with the PVC backing the weights (same NFS channel as the CRIU baseline) so the comparison stays apples-to-apples. Reference: Qwen2.5-72B with PVC-backed GMS restores in ~20s vs ~40s for CRIU-only on PVC. Then frame the sharded-SSD case as the "now upgrade the channel" follow-up that hits 5–6s. -->
-We saw that parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve under 6s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is well under 5 seconds.
-
-![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 6 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
-
 The CRIU checkpoint now only contains the host-side state of the container's process tree and a few miscellaneous buffers that are still double-buffered. The GMS weight artifact now holds the majority of process memory.
 
 | Model | CRIU checkpoint size (baseline) | CRIU checkpoint size (with GMS) | GMS weight artifact |
@@ -202,6 +191,14 @@ The CRIU checkpoint now only contains the host-side state of the container's pro
 | Llama 3.3 70B FP8 | 86 GiB | 6.1 GiB | 68 GiB |
 | GPT-OSS 120B | 129 GiB | 6.7 GiB | 74 GiB |
 | Qwen2.5 72B | 164 GiB | 5.8 GiB | 135 GiB |
+
+### Full Overlap with External Weight Restoration
+
+To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore with a faster channel for restoring the weights, we implemented a proof-of-concept backend for `gms-loader` where the weights for each model are sharded across 8 SSDs on a node. However, we had to ensure the restored workload was on the same node it was checkpointed on. This setup demonstrates what restore times we can expect when *weight restoration isn't the bottleneck*, and come from a very fast channel that is independent from NFS that we are using for the CRIU checkpoint artifact (e.g. P2P transfer over RDMA, GPUDirect Storage, etc). 
+
+For this setup, parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve under 6s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is well under 5 seconds.
+
+![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 6 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
 
 ## Looking Forward
 <!-- TODO: need @athreesh's input on phrasing of these roadmap bullets, especially the unreleased CUDA driver patch one. -->
