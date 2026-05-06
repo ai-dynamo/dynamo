@@ -595,8 +595,14 @@ fn _get_current_context() -> CUcontext {
     ctx
 }
 
+// ── Mutual exclusivity guard ─────────────────────────────────────────
+#[cfg(all(feature = "cuda", feature = "xpu-sycl"))]
+compile_error!(
+    "Features `cuda` and `xpu-sycl` are mutually exclusive in kvbm-py3 bindings.      Enable exactly one device backend."
+);
+
 // ── SYCL event sync ─────────────────────────────────────────────────
-#[cfg(feature = "xpu-sycl")]
+#[cfg(all(feature = "xpu-sycl", not(feature = "cuda")))]
 pub fn event_sync_blocking(event_handle: u64) -> anyhow::Result<()> {
     unsafe {
         let raw_event = event_handle as *const oneapi_rs::sys::sycl_rs_event_t;
