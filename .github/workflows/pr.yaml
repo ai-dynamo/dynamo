@@ -9,10 +9,10 @@ on:
       - "pull-request/[0-9]+"
       - "tester-v2"
 
-concurrency:
-  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
-  group: docker-build-test-${{ github.ref_name }}
-  cancel-in-progress: true
+# concurrency:
+#   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
+#   group: docker-build-test-${{ github.ref_name }}
+#   cancel-in-progress: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -331,22 +331,22 @@ jobs:
 #       gpu_test_markers: pre_merge and sglang and gpu_1
 #     secrets: inherit
 
-#   sglang-multi-gpu-test:
-#     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-#     needs: [changed-files, sglang-build]
-#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-#     uses: ./.github/workflows/shared-test.yml
-#     with:
-#       test_suite_name: sglang
-#       test_type: Multi-GPU Test
-#       amd_runner: prod-tester-amd-gpu-4-v1
-#       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-#       cuda_version: '["12.9", "13.0"]'
-#       platform: '["amd64"]' # No ARM GPUs available
-#       run_sanity_check: false
-#       gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
-#       gpu_test_timeout_minutes: 60
-#     secrets: inherit
+  sglang-multi-gpu-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
 
 #   trtllm-test:
 #     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
@@ -390,7 +390,7 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-v1
+      amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
