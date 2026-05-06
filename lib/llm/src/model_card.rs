@@ -363,8 +363,14 @@ async fn resolve_uri(
 
     let _blob_guard = BlobLock::acquire(dest).await?;
 
-    // A peer that held the lock before us may have populated `dest`
-    // already.
+    // Cache hit: trust the content-addressed blob. We verify on write
+    // (below, via `from_disk` against `expected.checksum()` before the
+    // atomic rename), so a blob at `blobs/<expected_hash>` was either
+    // written by us under that lock or doesn't exist. We don't
+    // re-verify on read for the same reason HF / Git / Nix / Docker
+    // / OCI don't: the cache root is owned by the frontend process
+    // (`$HOME` is in the trust boundary) and verifying every cache
+    // hit costs blake3 on the hot path of every MDC discovery.
     if dest.exists() {
         return Ok(());
     }
@@ -936,29 +942,20 @@ impl ModelDeploymentCard {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .context("building http client for metadata fetch")?;
-        let mut fetched = 0usize;
         for (uri, expected) in &entries {
             let filename = uri_basename(uri)?;
+            // Hash is validated at MDC deserialize; safe as a path component.
             let blake3_hex = expected.checksum().hash();
             let blob = blobs.join(blake3_hex);
-            let cache_hit = blob.exists();
-            tracing::debug!(
-                filename = %filename,
-                uri = %uri,
-                cache_hit,
-                blake3 = %blake3_hex,
-                "resolving metadata file",
-            );
-            if !cache_hit {
-                resolve_uri(&client, uri, expected, &blob).await?;
-                fetched += 1;
-            }
+            tracing::debug!(filename = %filename, uri = %uri, blake3 = %blake3_hex, "resolving");
+            // Always go through resolve_uri — it verifies existing
+            // blobs under the lock (peer race + poisoned cache).
+            resolve_uri(&client, uri, expected, &blob).await?;
             symlink_force(&blob, &slug_dir.join(&filename))?;
         }
         tracing::debug!(
             display_name = %self.display_name,
             artifact_count = entries.len(),
-            fetched,
             cache_root = %mdc_cache_root().display(),
             "resolved model metadata files",
         );
