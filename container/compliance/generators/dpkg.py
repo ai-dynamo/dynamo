@@ -207,26 +207,90 @@ def _parse_dep5(text: str) -> str | None:
     return " AND ".join(sorted(licenses))
 
 
+# Map Debian common-licenses filenames to SPDX IDs. Most legacy Debian/Ubuntu
+# copyright files reference these instead of inlining the full license text:
+#   "see /usr/share/common-licenses/GPL-3 for the full license"
+# Detecting these references is the highest-leverage lever for cutting UNKNOWNs.
+_COMMON_LICENSES_MAP: dict[str, str] = {
+    "GPL": "GPL-2.0-or-later",        # default ambiguous; older convention
+    "GPL-1": "GPL-1.0-only",
+    "GPL-2": "GPL-2.0-only",
+    "GPL-3": "GPL-3.0-only",
+    "LGPL": "LGPL-2.1-or-later",      # default ambiguous; older convention
+    "LGPL-2": "LGPL-2.0-only",
+    "LGPL-2.1": "LGPL-2.1-only",
+    "LGPL-3": "LGPL-3.0-only",
+    "Apache-2.0": "Apache-2.0",
+    "Artistic": "Artistic-2.0",
+    "BSD": "BSD-3-Clause",
+    "MPL-1.1": "MPL-1.1",
+    "MPL-2.0": "MPL-2.0",
+}
+
+_COMMON_LICENSES_RE = re.compile(
+    r"/usr/share/common-licenses/(GPL-[123](?:\.\d+)?|LGPL-[23](?:\.\d+)?|GPL|LGPL|Apache-2\.0|Artistic|BSD|MPL-[12]\.[01])\b"
+)
+
+
 # Free-form scan for SPDX-shaped tags or known license names anywhere in
 # the copyright file body. Keep this conservative — we'd rather return None
 # (UNKNOWN) than mis-classify.
 _FREE_FORM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # SPDX-License-Identifier tag (highest-trust signal)
     (re.compile(r"\bSPDX-License-Identifier:\s*([A-Za-z0-9.+\- ]+(?:WITH [A-Za-z0-9.+\- ]+)?)"), "_match_spdx_tag"),
-    (re.compile(r"\bApache License,?\s+Version 2\.0\b", re.IGNORECASE), "Apache-2.0"),
+
+    # Versioned GPL/LGPL patterns. Specific versions first.
     (re.compile(r"\bGNU GENERAL PUBLIC LICENSE\s+Version 3\b", re.IGNORECASE), "GPL-3.0-only"),
     (re.compile(r"\bGNU GENERAL PUBLIC LICENSE\s+Version 2\b", re.IGNORECASE), "GPL-2.0-only"),
+    (re.compile(r"\bGNU GENERAL PUBLIC LICENSE,? VERSION 3\b", re.IGNORECASE), "GPL-3.0-only"),
+    (re.compile(r"\bGNU GENERAL PUBLIC LICENSE,? VERSION 2\b", re.IGNORECASE), "GPL-2.0-only"),
     (re.compile(r"\bGNU LESSER GENERAL PUBLIC LICENSE\s+Version 3\b", re.IGNORECASE), "LGPL-3.0-only"),
     (re.compile(r"\bGNU LESSER GENERAL PUBLIC LICENSE\s+Version 2\.1\b", re.IGNORECASE), "LGPL-2.1-only"),
+    (re.compile(r"\bGNU LIBRARY GENERAL PUBLIC LICENSE\s+Version 2\b", re.IGNORECASE), "LGPL-2.0-only"),
+
+    # Common phrases that don't include the version number — only match if
+    # we couldn't find a versioned variant above.
+    (re.compile(r"\bGNU GPL\s+v?(\d)\b", re.IGNORECASE), "_match_gpl_version"),
+    (re.compile(r"\bGNU LGPL\s+v?(\d(?:\.\d)?)\b", re.IGNORECASE), "_match_lgpl_version"),
+    (re.compile(r"\bGPL\s+(?:version\s+)?v?(\d(?:\.\d)?)\b", re.IGNORECASE), "_match_gpl_version"),
+    (re.compile(r"\bLGPL\s+(?:version\s+)?v?(\d(?:\.\d)?)\b", re.IGNORECASE), "_match_lgpl_version"),
+
+    # Apache
+    (re.compile(r"\bApache License,?\s+Version 2\.0\b", re.IGNORECASE), "Apache-2.0"),
+    (re.compile(r"\bApache License,?\s+Version 2\b", re.IGNORECASE), "Apache-2.0"),
+
+    # MIT, BSD, MPL, ISC family
     (re.compile(r"\bThe MIT License\b", re.IGNORECASE), "MIT"),
+    (re.compile(r"\b(?:Expat|MIT) license\b", re.IGNORECASE), "MIT"),
     (re.compile(r"\bBSD 3-Clause\b", re.IGNORECASE), "BSD-3-Clause"),
     (re.compile(r"\bBSD 2-Clause\b", re.IGNORECASE), "BSD-2-Clause"),
     (re.compile(r"\bMozilla Public License,?\s+v\.?\s*2\.0\b", re.IGNORECASE), "MPL-2.0"),
     (re.compile(r"\bISC License\b", re.IGNORECASE), "ISC"),
+    (re.compile(r"\bzlib license\b", re.IGNORECASE), "Zlib"),
+    (re.compile(r"\bcreative commons attribution[\s\-]+(?:share[\-\s]?alike\s+)?(\d(?:\.\d)?)\b", re.IGNORECASE), "_match_cc_version"),
+
+    # Public domain
+    (re.compile(r"\bpublic domain\b", re.IGNORECASE), "CC0-1.0"),
 ]
 
 
 def _parse_free_form(text: str) -> str | None:
-    """Best-effort scan for license markers in non-DEP-5 copyright files."""
+    """Best-effort scan for license markers in non-DEP-5 copyright files.
+
+    Order of preference:
+      1. SPDX-License-Identifier tag (highest trust)
+      2. /usr/share/common-licenses/<NAME> reference (Debian-specific, very common)
+      3. Versioned GPL/LGPL/Apache phrases
+      4. Other well-known license-name strings
+    """
+    # /usr/share/common-licenses/ references — covers the bulk of Debian's
+    # legacy copyright files which use this pattern instead of inline text.
+    cl_match = _COMMON_LICENSES_RE.search(text)
+    if cl_match:
+        cl_name = cl_match.group(1)
+        if cl_name in _COMMON_LICENSES_MAP:
+            return _COMMON_LICENSES_MAP[cl_name]
+
     for pattern, marker in _FREE_FORM_PATTERNS:
         m = pattern.search(text)
         if not m:
@@ -234,6 +298,17 @@ def _parse_free_form(text: str) -> str | None:
         if marker == "_match_spdx_tag":
             spdx = m.group(1).strip()
             return _normalize_debian_license(spdx) or spdx
+        if marker == "_match_gpl_version":
+            v = m.group(1)
+            return f"GPL-{v}.0-only" if "." not in v else f"GPL-{v}-only"
+        if marker == "_match_lgpl_version":
+            v = m.group(1)
+            return f"LGPL-{v}-only" if "." in v else f"LGPL-{v}.0-only"
+        if marker == "_match_cc_version":
+            v = m.group(1)
+            v_full = v if "." in v else f"{v}.0"
+            sa = "SA-" if "share" in m.group(0).lower() and "alike" in m.group(0).lower() else ""
+            return f"CC-BY-{sa}{v_full}"
         return marker
     return None
 
