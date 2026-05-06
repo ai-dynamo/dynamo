@@ -4,7 +4,7 @@
 use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers::tool_calling::parsers::{
-    detect_and_parse_tool_call, get_available_tool_parsers,
+    detect_and_parse_tool_call_with_recovery, get_available_tool_parsers,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -23,6 +23,13 @@ pub fn get_reasoning_parser_names() -> Vec<&'static str> {
 }
 
 /// Parse tool calls from a model output string using the specified parser.
+///
+/// Uses the finalize / non-streaming aggregate path
+/// (`detect_and_parse_tool_call_with_recovery`) so this binding mirrors what
+/// Dynamo emits at end-of-response, including EOF-recovery for missing
+/// end-token / truncated-JSON inputs. The streaming-safe variant (recovery
+/// disabled) is intentionally NOT exposed here — it would compare the wrong
+/// Dynamo behavior for batch-shaped fixtures (e.g. PARSER.batch.5).
 ///
 /// Args:
 ///     parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
@@ -54,10 +61,13 @@ pub fn parse_tool_call<'py>(
     };
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let (calls, normal_text) =
-            detect_and_parse_tool_call(&message, parser_str.as_deref(), tools.as_deref())
-                .await
-                .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let (calls, normal_text) = detect_and_parse_tool_call_with_recovery(
+            &message,
+            parser_str.as_deref(),
+            tools.as_deref(),
+        )
+        .await
+        .map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
         let result = serde_json::json!({
             "calls": calls,

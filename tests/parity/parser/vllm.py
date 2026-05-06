@@ -79,15 +79,25 @@ def parse(
             error=f"UNAVAILABLE: vLLM has no parser for family={parser_family!r}"
         )
 
+    # Wrap flat tool defs to the OpenAI `{"type":"function","function":{...}}`
+    # shape vLLM expects, then pass through to BOTH the constructor and the
+    # request. Some parsers (e.g. hermes-style schema-aware ones) coerce or
+    # cache the schemas at __init__ from the `tools=` kwarg; passing only
+    # `request.tools` skips that path.
+    wrapped_tools = (
+        [t if "function" in t else {"type": "function", "function": t} for t in tools]
+        if tools
+        else None
+    )
     try:
         parser_cls = ToolParserManager.get_tool_parser(key)
         # vLLM's ToolParser constructor checks `if not self.model_tokenizer:` and raises
         # if falsy. None of the parsers we test actually call tokenizer methods inside
         # extract_tool_calls(), so a truthy stub satisfies the check.
-        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer())
+        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer(), tools=wrapped_tools)
         # vLLM's extract_tool_calls signature: (model_output, request) → ExtractedToolCallInformation.
         # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
-        request = _build_chat_request(tools)
+        request = SimpleNamespace(tools=wrapped_tools)
         info = parser.extract_tool_calls(raw_text, request)
     except NotImplementedError as e:
         # Known unsupported combinations (e.g., vLLM's harmony parser requires
@@ -102,13 +112,3 @@ def parse(
         for tc in info.tool_calls or []
     ]
     return ParseResult(calls=calls, normal_text=info.content)
-
-
-def _build_chat_request(tools: list[dict[str, Any]] | None) -> Any:
-    """Minimal duck-typed request shape — vLLM's parsers only read `.tools`."""
-    if not tools:
-        return SimpleNamespace(tools=None)
-    wrapped = [
-        t if "function" in t else {"type": "function", "function": t} for t in tools
-    ]
-    return SimpleNamespace(tools=wrapped)

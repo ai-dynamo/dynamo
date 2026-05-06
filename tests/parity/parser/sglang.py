@@ -20,6 +20,9 @@ from sglang.srt.function_call.gpt_oss_detector import (
 from sglang.srt.function_call.kimik2_detector import (
     KimiK2Detector,  # type: ignore[import-untyped]
 )
+from sglang.srt.function_call.minimax_m2 import (
+    MinimaxM2Detector,  # type: ignore[import-untyped]
+)
 from sglang.srt.function_call.qwen3_coder_detector import (  # type: ignore[import-untyped]
     Qwen3CoderDetector,
 )
@@ -34,9 +37,10 @@ _FAMILY_TO_SGLANG_DETECTOR = {
     "glm47": Glm47MoeDetector,
     "deepseek_v3_1": DeepSeekV31Detector,
     "harmony": GptOssDetector,
+    "minimax_m2": MinimaxM2Detector,
 }
 
-# Families with no SGLang detector today: minimax_m2, nemotron_deci.
+# Families with no SGLang detector today: nemotron_deci.
 
 
 def parse(

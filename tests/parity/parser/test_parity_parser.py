@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import yaml
@@ -27,21 +27,16 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 
 
-def _maybe_import(impl_name: str) -> Callable | None:
-    """Import an impl wrapper lazily; return None if its dependency package
-    (vllm / sglang / dynamo._core) isn't installed in this container."""
-    try:
-        mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
-        return mod.parse
-    except ImportError as e:
-        print(f"[parity] skipping impl {impl_name!r}: {e}")
-        return None
-
-
-IMPLS: dict[str, Callable | None] = {
-    "dynamo": _maybe_import("dynamo"),
-    "vllm": _maybe_import("vllm"),
-    "sglang": _maybe_import("sglang"),
+# Impl name → optional package whose absence is a legitimate skip. Anything
+# else that fails inside the wrapper module (e.g. a stale `from vllm.X import
+# Y` after vLLM renamed Y) is a real bug and must surface as a test ERROR,
+# not a green skip — so we use `pytest.importorskip` inline rather than a
+# blanket `try: import X except ImportError`.
+IMPL_NAMES: tuple[str, ...] = ("dynamo", "vllm", "sglang")
+_PACKAGE: dict[str, str] = {
+    "dynamo": "dynamo._core",
+    "vllm": "vllm",
+    "sglang": "sglang",
 }
 
 
@@ -115,6 +110,11 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "minimax_m2",
         "PARSER.batch.8",
     ): "preserves trailing space; Dynamo trims it",
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8",
+    ): "preserves trailing space; Dynamo trims it",
     # PARSER.batch.4 (malformed) — impl-defined recovery contract.
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
@@ -149,21 +149,18 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 FIXTURES = _load_fixtures()
 
 
-def _marks_for(family: str, case_id: str, impl: str) -> list:
-    """Per-param marks for a parametrized case. Includes the impl marker
-    (so CI marker filters `pre_merge and vllm and gpu_0` / `... sglang ...`
-    pick up the right subset per container; `dynamo` gets no impl marker).
+def _marks_for(impl: str) -> list:
+    """Per-param marks. Only the impl marker (`vllm`/`sglang`) — used by CI
+    shards to filter via `-m vllm` / `-m sglang`. `dynamo` gets no marker so
+    it runs in every shard (it's the reference we compare against).
 
-    Adds `pytest.mark.xfail(strict=True, reason=...)` for known divergences
-    so the assertion still runs — `XPASS` (strict) flags a fix the registry
-    hasn't been updated for, instead of silently masking the new pass."""
-    marks = []
+    Known-divergence xfail handling is intentionally NOT a parametrize-time
+    mark — it lives inline in the test body (see `XPASS-strict` block) so a
+    parser/runtime crash on a known-divergence case still hits `pytest.fail`
+    hard instead of being swallowed by an outer `xfail` wrapper."""
     if impl in ("vllm", "sglang"):
-        marks.append(getattr(pytest.mark, impl))
-    div = KNOWN_DIVERGENCES.get((impl, family, case_id))
-    if div is not None:
-        marks.append(pytest.mark.xfail(strict=True, reason=f"known divergence: {div}"))
-    return marks
+        return [getattr(pytest.mark, impl)]
+    return []
 
 
 @pytest.mark.parametrize(
@@ -174,11 +171,11 @@ def _marks_for(family: str, case_id: str, impl: str) -> list:
             c,
             fx,
             impl,
-            marks=_marks_for(f, c, impl),
+            marks=_marks_for(impl),
             id=f"{f}/{c}#{impl}",
         )
         for (f, c, fx) in FIXTURES
-        for impl in IMPLS
+        for impl in IMPL_NAMES
     ],
 )
 def test_parity(
@@ -187,15 +184,18 @@ def test_parity(
     fixture: dict[str, Any],
     impl_name: str,
 ) -> None:
-    impl_fn = IMPLS[impl_name]
-    if impl_fn is None:
-        pytest.skip(f"{impl_name} not installed in this container")
+    # Skip ONLY when the optional package itself is missing — wrapper-internal
+    # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
+    # propagates as a real test ERROR rather than a silent green skip.
+    pytest.importorskip(_PACKAGE[impl_name])
+    parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
+    got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
 
-    got = impl_fn(family, fixture["model_text"], fixture.get("tools"))
-
-    # Distinguish "impl has no parser registered for this family" (env-shaped:
-    # skip) from "parser raised on input" (runtime: a regression we want to
-    # see). Wrappers prefix the env case with `UNAVAILABLE:`.
+    # Runtime / parser errors fail HARD. Wrappers prefix the env-shaped case
+    # ("impl has no parser registered for this family") with `UNAVAILABLE:`
+    # so we can still skip those cleanly. This check runs *before* the
+    # known-divergence xfail block below, so a crash on a known-divergence
+    # case is not masked.
     if got.error:
         if got.error.startswith("UNAVAILABLE:"):
             pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
@@ -205,11 +205,26 @@ def test_parity(
         calls=fixture["expected"]["calls"],
         normal_text=fixture["expected"].get("normal_text"),
     )
+    got_canonical = common.canonical(got.to_dict())
+    expected_canonical = common.canonical(expected.to_dict())
 
-    assert common.canonical(got.to_dict()) == common.canonical(expected.to_dict()), (
+    # Known divergences: xfail the value-diff assertion only. If the values
+    # now match, surface that as a registry-staleness failure (XPASS-strict
+    # equivalent) instead of silently passing.
+    div = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
+    if div is not None:
+        if got_canonical == expected_canonical:
+            pytest.fail(
+                f"XPASS-strict: known divergence ({impl_name},{family},{case_id}) "
+                f"now matches expected — remove from KNOWN_DIVERGENCES. "
+                f"Reason was: {div}"
+            )
+        pytest.xfail(f"known divergence: {div}")
+
+    assert got_canonical == expected_canonical, (
         f"\nimpl:     {impl_name}\n"
         f"family:   {family}\n"
         f"case:     {case_id}\n"
-        f"expected: {common.canonical(expected.to_dict())}\n"
-        f"got:      {common.canonical(got.to_dict())}\n"
+        f"expected: {expected_canonical}\n"
+        f"got:      {got_canonical}\n"
     )
