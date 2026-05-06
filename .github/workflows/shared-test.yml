@@ -105,39 +105,33 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1' }}
-    # container:
-    #   image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test
-    #   env:
-    #     # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
-    #     # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
-    #     # USER here sidesteps two symptoms of that mismatch:
-    #     #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
-    #     #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
-    #     HOME: /__w/dynamo/dynamo
-    #     USER: dynamo
-    # permissions:
-    #   contents: read
-    # services:
-    #   minio:
-    #     image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
-    #     env:
-    #       MINIO_ROOT_USER: minioadmin
-    #       MINIO_ROOT_PASSWORD: minioadmin
-    #       MINIO_VOLUMES: /tmp/minio-data
-    #       MINIO_CONSOLE_ADDRESS: ':9001'
-    #     ports:
-    #       - 9000:9000
-    #       - 9001:9001
+    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test
+      env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    permissions:
+      contents: read
+    services:
+      minio:
+        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+          MINIO_CONSOLE_ADDRESS: ':9001'
+        ports:
+          - 9000:9000
+          - 9001:9001
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          echo "test_image=${{ github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test"
-          echo "******** ${{ inputs.target_tag_plain }}"
           
       # - name: Docker Login
       #   uses: ./.github/actions/docker-login
