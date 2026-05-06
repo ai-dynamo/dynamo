@@ -17,7 +17,6 @@ use node_state::NodeState;
 
 type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
 pub(super) struct RemoveOutcome {
-    pub(super) removed: usize,
     pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
 }
 

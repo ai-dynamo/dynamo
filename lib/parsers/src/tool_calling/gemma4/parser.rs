@@ -413,7 +413,7 @@ mod tests {
         (calls[0].function.name.clone(), args)
     }
 
-    #[test] // CASE.20 — detection helper
+    #[test] // detection helper
     fn detect_full_and_partial_start() {
         assert!(detect_tool_call_start_gemma4("<|tool_call>"));
         assert!(detect_tool_call_start_gemma4("blah <|tool_call>"));
@@ -423,7 +423,7 @@ mod tests {
         assert!(!detect_tool_call_start_gemma4("toolcall"));
     }
 
-    #[test] // CASE.20 — end-position helper
+    #[test] // end-position helper
     fn find_end_returns_position_after_last_marker() {
         let text = "<|tool_call>call:f{}<tool_call|>more";
         let pos = find_tool_call_end_position_gemma4(text).unwrap();
@@ -434,7 +434,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.1 — single string argument
+    #[test] // PARSER.batch.1 — single string argument
     fn parse_single_string_argument() {
         let input = r#"<|tool_call>call:get_weather{location:<|"|>Tokyo<|"|>}<tool_call|>"#;
         let (name, args) = extract_first(input);
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(args["location"], "Tokyo");
     }
 
-    #[test] // CASE.1, CASE.7 — multiple typed arguments
+    #[test] // PARSER.batch.1, PARSER.batch.7 — multiple typed arguments
     fn parse_multiple_typed_arguments() {
         let input = r#"<|tool_call>call:f{loc:<|"|>San Francisco, CA<|"|>,unit:<|"|>celsius<|"|>,count:42,flag:true,nope:null}<tool_call|>"#;
         let (name, args) = extract_first(input);
@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(args["nope"], Value::Null);
     }
 
-    #[test] // CASE.6 — empty argument object
+    #[test] // PARSER.batch.6 — empty argument object
     fn parse_no_arg_call() {
         let input = "<|tool_call>call:get_time{}<tool_call|>";
         let (name, args) = extract_first(input);
@@ -462,7 +462,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test] // CASE.7 — nested object value
+    #[test] // PARSER.batch.7 — nested object value
     fn parse_nested_object_value() {
         let input = r#"<|tool_call>call:f{cfg:{ssl:true,pool:{min:5,max:20}}}<tool_call|>"#;
         let (_name, args) = extract_first(input);
@@ -471,14 +471,14 @@ mod tests {
         assert_eq!(args["cfg"]["pool"]["max"], 20);
     }
 
-    #[test] // CASE.7 — array of strings
+    #[test] // PARSER.batch.7 — array of strings
     fn parse_array_of_strings() {
         let input = r#"<|tool_call>call:f{tags:[<|"|>a<|"|>,<|"|>b<|"|>,<|"|>c<|"|>]}<tool_call|>"#;
         let (_name, args) = extract_first(input);
         assert_eq!(args["tags"], serde_json::json!(["a", "b", "c"]));
     }
 
-    #[test] // CASE.7 — array of mixed primitives
+    #[test] // PARSER.batch.7 — array of mixed primitives
     fn parse_array_of_mixed_primitives() {
         let input = "<|tool_call>call:f{xs:[1,2,3.5,true,false,null]}<tool_call|>";
         let (_name, args) = extract_first(input);
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(args["xs"][5], Value::Null);
     }
 
-    #[test] // CASE.2 — multiple parallel calls, zero spacing
+    #[test] // PARSER.batch.2 — multiple parallel calls, zero spacing
     fn parse_multiple_parallel_calls() {
         let input = concat!(
             "<|tool_call>call:a{x:1}<tool_call|>",
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // CASE.13 — surrounding normal text preserved
+    #[test] // PARSER.batch.8 — surrounding normal text preserved
     fn parse_with_surrounding_text() {
         let input = r#"Sure thing. <|tool_call>call:f{x:1}<tool_call|> All set."#;
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -513,14 +513,14 @@ mod tests {
         assert_eq!(normal, Some("Sure thing.  All set.".to_string()));
     }
 
-    #[test] // CASE.3 — no tool calls at all
+    #[test] // PARSER.batch.3 — no tool calls at all
     fn parse_no_tool_calls() {
         let (calls, normal) = try_tool_call_parse_gemma4("just plain prose here", None).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some("just plain prose here".to_string()));
     }
 
-    #[test] // CASE.5, CASE.16 — complete prior calls survive; truncated tail is echoed
+    #[test] // PARSER.batch.5 — complete prior calls survive; truncated tail is echoed
     fn truncated_tail_echoed_complete_prior_survives() {
         let input = concat!(
             "<|tool_call>call:complete{x:1}<tool_call|>",
@@ -539,7 +539,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.4 — malformed args body falls back to empty object, call still emitted
+    #[test] // PARSER.batch.4 — malformed args body falls back to empty object, call still emitted
     fn malformed_args_falls_back_to_empty_object() {
         let input = "<|tool_call>call:f{garbage no colons here}<tool_call|>";
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -549,7 +549,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test] // CASE.21 — function names with hyphens, dots, underscores
+    #[test] // PARSER.fmt.1 — function names with hyphens, dots, underscores
     fn parse_function_names_with_special_chars() {
         for (input, expected_name) in [
             (
@@ -571,21 +571,21 @@ mod tests {
         }
     }
 
-    #[test] // CASE.7 — angle brackets / HTML inside string values
+    #[test] // PARSER.batch.7 — angle brackets / HTML inside string values
     fn parse_html_in_string_value() {
         let input = r#"<|tool_call>call:render{html:<|"|><div class="x"><h1>Hi</h1></div><|"|>}<tool_call|>"#;
         let (_name, args) = extract_first(input);
         assert_eq!(args["html"], "<div class=\"x\"><h1>Hi</h1></div>");
     }
 
-    #[test] // CASE.7 — newlines inside string values
+    #[test] // PARSER.batch.7 — newlines inside string values
     fn parse_newlines_in_string_value() {
         let input = "<|tool_call>call:f{body:<|\"|>line1\nline2\nline3<|\"|>}<tool_call|>";
         let (_name, args) = extract_first(input);
         assert_eq!(args["body"], "line1\nline2\nline3");
     }
 
-    #[test] // CASE.22 — whitespace tolerance inside args
+    #[test] // PARSER.fmt.2 — whitespace tolerance inside args
     fn parse_with_internal_whitespace() {
         let input = r#"<|tool_call>call:f{ x : 1 , y : <|"|>z<|"|> }<tool_call|>"#;
         let (_name, args) = extract_first(input);
@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(args["y"], "z");
     }
 
-    #[test] // CASE.7 — negative numbers and floats
+    #[test] // PARSER.batch.7 — negative numbers and floats
     fn parse_signed_numbers_and_floats() {
         let input = "<|tool_call>call:f{a:-1,b:-2.5,c:0,d:0.0}<tool_call|>";
         let (_name, args) = extract_first(input);
@@ -603,7 +603,7 @@ mod tests {
         assert!((args["d"].as_f64().unwrap()).abs() < 1e-9);
     }
 
-    #[test] // CASE.21 — tool validation warns but doesn't drop
+    #[test] // PARSER.fmt.1 — tool validation warns but doesn't drop
     fn parse_with_tool_validation() {
         let input = r#"<|tool_call>call:get_weather{x:1}<tool_call|>"#;
         let tools = vec![ToolDefinition {
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test] // CASE.24 — empty wrapper between calls
+    #[test] // PARSER.fmt.4 — empty wrapper between calls
     fn parse_empty_text_between_calls() {
         let input = concat!(
             "<|tool_call>call:a{}<tool_call|>",
@@ -628,32 +628,32 @@ mod tests {
 
     // Argument-grammar unit tests (parse_args_object directly)
 
-    #[test] // CASE.6 — empty args at the grammar entry point
+    #[test] // PARSER.batch.6 — empty args at the grammar entry point
     fn args_grammar_empty() {
         let v = parse_args_object("").unwrap();
         assert_eq!(v, serde_json::json!({}));
     }
 
-    #[test] // CASE.7 — string with comma/colon/brace literals
+    #[test] // PARSER.batch.7 — string with comma/colon/brace literals
     fn args_grammar_string_with_special_chars() {
         let v = parse_args_object(r#"x:<|"|>has,comma:and{brace}<|"|>"#).unwrap();
         assert_eq!(v["x"], "has,comma:and{brace}");
     }
 
-    #[test] // CASE.7 — deeply nested object value
+    #[test] // PARSER.batch.7 — deeply nested object value
     fn args_grammar_deeply_nested() {
         let v = parse_args_object("a:{b:{c:{d:{e:1}}}}").unwrap();
         assert_eq!(v["a"]["b"]["c"]["d"]["e"], 1);
     }
 
-    #[test] // CASE.7 — array of objects
+    #[test] // PARSER.batch.7 — array of objects
     fn args_grammar_array_of_objects() {
         let v = parse_args_object(r#"items:[{n:<|"|>x<|"|>},{n:<|"|>y<|"|>}]"#).unwrap();
         assert_eq!(v["items"][0]["n"], "x");
         assert_eq!(v["items"][1]["n"], "y");
     }
 
-    #[test] // CASE.4, CASE.5 — truncated string-arg recovery (mirrors upstream)
+    #[test] // PARSER.batch.4, PARSER.batch.5 — truncated string-arg recovery (mirrors upstream)
     fn args_grammar_unterminated_string_takes_remainder() {
         // Upstream Gemma 4 parser: when the closing <|"|> is missing,
         // everything after the opening delimiter becomes the value. We mirror
@@ -663,21 +663,21 @@ mod tests {
         assert_eq!(v["x"], "oops");
     }
 
-    #[test] // CASE.4 — empty value mid-args (upstream test_empty_value)
+    #[test] // PARSER.batch.4 — empty value mid-args (upstream test_empty_value)
     fn args_grammar_empty_value_yields_empty_string() {
         let v = parse_args_object("x:,y:1").unwrap();
         assert_eq!(v["x"], "");
         assert_eq!(v["y"], 1);
     }
 
-    #[test] // CASE.4 — empty value at end-of-args (upstream test_empty_value)
+    #[test] // PARSER.batch.4 — empty value at end-of-args (upstream test_empty_value)
     fn args_grammar_trailing_empty_value() {
         let v = parse_args_object("x:1,y:").unwrap();
         assert_eq!(v["x"], 1);
         assert_eq!(v["y"], "");
     }
 
-    #[test] // CASE.7 — typed-value null variants, case-insensitive (upstream `value_str.lower() in (...)`)
+    #[test] // PARSER.batch.7 — typed-value null variants, case-insensitive (upstream `value_str.lower() in (...)`)
     fn args_grammar_null_aliases_case_insensitive() {
         for variant in [
             "null", "NULL", "Null", "none", "NONE", "None", "nil", "NIL", "Nil",
@@ -688,13 +688,13 @@ mod tests {
         }
     }
 
-    #[test] // CASE.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
+    #[test] // PARSER.batch.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
     fn args_grammar_keyword_prefix_not_consumed() {
         // `nullable` must not be parsed as `null` + leftover `able`.
         let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
-    #[test] // CASE.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
+    #[test] // PARSER.batch.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
     fn incomplete_tool_call_echoes_raw_bytes() {
         let input = "<|tool_call>call:foo{x:1";
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -706,7 +706,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.7 — `<tool_call|>` literal inside a string-typed argument
+    #[test] // PARSER.batch.7 — `<tool_call|>` literal inside a string-typed argument
     // must not truncate the call. The extraction regex requires
     // `}<tool_call|>` adjacency, so a bare embedded marker is safe.
     fn embedded_tool_call_marker_in_string_value() {
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(args["html"], "<tool_call|> example");
     }
 
-    #[test] // CASE.20 — find_tool_call_end_position must respect the regex's
+    #[test] // find_tool_call_end_position must respect the regex's
     // `}<tool_call|>` adjacency, not just bare `<tool_call|>` occurrences.
     fn find_end_position_skips_embedded_marker() {
         let input = r#"<|tool_call>call:render{html:<|"|><tool_call|>x<|"|>}<tool_call|> trailing"#;
@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(&input[pos..], " trailing");
     }
 
-    #[test] // CASE.9 — paired reasoning span + tool call in the same emission
+    #[test] // PARSER.batch.8 — paired reasoning span + tool call in the same emission
     // (in production the reasoning parser runs first and strips `<|channel>`,
     // but the tool-call parser must remain correct if it sees the full
     // emission, e.g. when reasoning parsing is disabled).
@@ -745,14 +745,14 @@ mod tests {
         assert!(normal.unwrap().contains("<|channel>thought"));
     }
 
-    #[test] // CASE.14 — empty input, no tool calls
+    #[test] // PARSER.batch.9 — empty input, no tool calls
     fn empty_input_yields_zero_calls_empty_content() {
         let (calls, normal) = try_tool_call_parse_gemma4("", None).unwrap();
         assert_eq!(calls.len(), 0);
         assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // CASE.14 — `null` argument values round-trip as JSON null
+    #[test] // PARSER.batch.9 — `null` argument values round-trip as JSON null
     fn null_argument_values_preserved() {
         let input = "<|tool_call>call:f{x:null,y:none,z:nil}<tool_call|>";
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(args["z"], Value::Null);
     }
 
-    #[test] // CASE.15 — duplicate calls to the same function name. Both must
+    #[test] // PARSER.batch.10 — duplicate calls to the same function name. Both must
     // appear with distinct IDs; client decides whether duplicate invocation
     // is intended.
     fn duplicate_tool_call_same_name() {
@@ -785,23 +785,23 @@ mod tests {
         assert_eq!(args1["location"], "NYC");
     }
 
-    // ----- Explicit N/A coverage notes (per lib/parsers/TEST_CASES.md) -----
+    // ----- Explicit N/A coverage notes (per lib/parsers/PARSER_CASES.md) -----
     //
-    // CASE.8  — Streaming token-by-token assembly: indirect. The Gemma 4
+    // PARSER.stream.3  — Streaming token-by-token assembly: indirect. The Gemma 4
     //           parser exposes only the synchronous extraction path; the
     //           streaming jail (`tools.rs::try_tool_call_parse_stream`) drives
     //           it via `detect_tool_call_start_gemma4` and
-    //           `find_tool_call_end_position_gemma4`, both covered by CASE.20
+    //           `find_tool_call_end_position_gemma4`, both covered by helper
     //           tests above. Same pattern as kimi_k2.
-    // CASE.11 — `tool_choice` (auto / required / named / none): universal gap
+    // FRONTEND.tool_choice — `tool_choice` (auto / required / named / none): universal gap
     //           in the repo as of 2026-04 — the cross-parser suites at
     //           `lib/llm/tests/{tool_choice.rs,parallel_tool_call_integration.rs,
     //           tool_choice_finish_reasons.rs}` run `hermes` only. Adding
     //           Gemma 4 to those suites is a separate parametrization PR.
-    // CASE.12 — `finish_reason` semantics: same universal gap; lives in
+    // PIPELINE.finish_reason — `finish_reason` semantics: same universal gap; lives in
     //           `lib/llm/tests/tool_choice_finish_reasons.rs`, hermes-only
     //           today.
-    // CASE.xml1 / CASE.xml2 — XML-family only. N/A — Gemma 4 uses a custom
+    // PARSER.xml.1 / PARSER.xml.2 — XML-family only. N/A — Gemma 4 uses a custom
     //           non-JSON, non-XML grammar.
-    // CASE.harmony1 — Harmony only. N/A.
+    // PARSER.harmony.1 / PARSER.harmony.2 — Harmony only. N/A.
 }
