@@ -486,8 +486,12 @@ def _write_family_fixtures(
     family_dir.mkdir(parents=True, exist_ok=True)
     ordered = {f"PARSER.{mode}.{n}": cases[n] for n in sorted(cases, key=int)}
     out = {"family": family, "mode": mode, "cases": ordered}
+    header = (
+        "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
+        "# SPDX-License-Identifier: Apache-2.0\n\n"
+    )
     (family_dir / f"PARSER.{mode}.yaml").write_text(
-        yaml.dump(out, sort_keys=False, allow_unicode=True, width=120),
+        header + yaml.dump(out, sort_keys=False, allow_unicode=True, width=120),
         encoding="utf-8",
     )
 
