@@ -75,7 +75,9 @@ def parse(
 ) -> ParseResult:
     key = _FAMILY_TO_VLLM_KEY.get(parser_family)
     if key is None:
-        return ParseResult(error=f"vLLM has no parser for family={parser_family!r}")
+        return ParseResult(
+            error=f"UNAVAILABLE: vLLM has no parser for family={parser_family!r}"
+        )
 
     try:
         parser_cls = ToolParserManager.get_tool_parser(key)
@@ -87,6 +89,11 @@ def parse(
         # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
         request = _build_chat_request(tools)
         info = parser.extract_tool_calls(raw_text, request)
+    except NotImplementedError as e:
+        # Known unsupported combinations (e.g., vLLM's harmony parser requires
+        # token IDs, not text). Treat as env-unavailable so the harness skips
+        # rather than failing as a regression.
+        return ParseResult(error=f"UNAVAILABLE: {type(e).__name__}: {e}")
     except Exception as e:
         return ParseResult(error=f"{type(e).__name__}: {e}")
 

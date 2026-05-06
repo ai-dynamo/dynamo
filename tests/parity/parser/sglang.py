@@ -46,7 +46,9 @@ def parse(
 ) -> ParseResult:
     detector_cls = _FAMILY_TO_SGLANG_DETECTOR.get(parser_family)
     if detector_cls is None:
-        return ParseResult(error=f"SGLang has no detector for family={parser_family!r}")
+        return ParseResult(
+            error=f"UNAVAILABLE: SGLang has no detector for family={parser_family!r}"
+        )
 
     try:
         detector = detector_cls()

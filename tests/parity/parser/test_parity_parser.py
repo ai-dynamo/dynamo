@@ -117,7 +117,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.8",
     ): "preserves trailing space; Dynamo trims it",
     # PARSER.batch.4 (malformed) — impl-defined recovery contract.
-    ("vllm", "qwen3_coder", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("sglang", "kimi_k2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
@@ -152,10 +151,23 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 FIXTURES = _load_fixtures()
 
 
-# Per-param impl markers so CI marker filters (`pre_merge and vllm and gpu_0`,
-# `pre_merge and sglang and gpu_0`) pick up the right subset in each container.
-# `dynamo` params get no impl marker — they only run when the harness is
-# explicitly selected, since Dynamo doesn't have a per-container CI job here.
+def _marks_for(family: str, case_id: str, impl: str) -> list:
+    """Per-param marks for a parametrized case. Includes the impl marker
+    (so CI marker filters `pre_merge and vllm and gpu_0` / `... sglang ...`
+    pick up the right subset per container; `dynamo` gets no impl marker).
+
+    Adds `pytest.mark.xfail(strict=True, reason=...)` for known divergences
+    so the assertion still runs — `XPASS` (strict) flags a fix the registry
+    hasn't been updated for, instead of silently masking the new pass."""
+    marks = []
+    if impl in ("vllm", "sglang"):
+        marks.append(getattr(pytest.mark, impl))
+    div = KNOWN_DIVERGENCES.get((impl, family, case_id))
+    if div is not None:
+        marks.append(pytest.mark.xfail(strict=True, reason=f"known divergence: {div}"))
+    return marks
+
+
 @pytest.mark.parametrize(
     "family,case_id,fixture,impl_name",
     [
@@ -164,7 +176,7 @@ FIXTURES = _load_fixtures()
             c,
             fx,
             impl,
-            marks=[getattr(pytest.mark, impl)] if impl in ("vllm", "sglang") else [],
+            marks=_marks_for(f, c, impl),
             id=f"{f}/{c}#{impl}",
         )
         for (f, c, fx) in FIXTURES
@@ -181,14 +193,15 @@ def test_parity(
     if impl_fn is None:
         pytest.skip(f"{impl_name} not installed in this container")
 
-    divergence = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
-    if divergence is not None:
-        pytest.xfail(f"known divergence: {divergence}")
-
     got = impl_fn(family, fixture["model_text"], fixture.get("tools"))
 
+    # Distinguish "impl has no parser registered for this family" (env-shaped:
+    # skip) from "parser raised on input" (runtime: a regression we want to
+    # see). Wrappers prefix the env case with `UNAVAILABLE:`.
     if got.error:
-        pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
+        if got.error.startswith("UNAVAILABLE:"):
+            pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
+        pytest.fail(f"{impl_name} crashed on {family}/{case_id}: {got.error}")
 
     expected = common.ParseResult(
         calls=fixture["expected"]["calls"],
