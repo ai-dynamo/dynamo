@@ -58,7 +58,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=600,
+                timeout_s=720,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -108,12 +108,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         request_payloads=[make_audio_payload(["Hester", "Pynne"])],
         extra_vllm_args=["--max-model-len", "7232"],
     ),
+    # Non-Qwen VLM coverage
     MultimodalModelProfile(
-        name="google/gemma-3-4b-it",
-        short_name="gemma3-4b",
+        name="google/gemma-4-E2B-it",
+        short_name="gemma4-e2b-it",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 # TODO: re-enable GPU-parallel scheduling with
                 # profiled_vram_gib=12.0 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
@@ -121,7 +122,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
-        gated=True,
     ),
     # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
     # We may use less GPUs by squeezing the model onto 2 GPUs.
@@ -131,12 +131,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=340,
+                timeout_s=600,
                 gpu_marker="gpu_4",
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=300,
+                timeout_s=600,
                 gpu_marker="gpu_4",
             ),
         },

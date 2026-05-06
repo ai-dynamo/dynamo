@@ -107,7 +107,7 @@ When you create a DGDR, it progresses through these phases:
 | `Ready` | Profiling complete; optimal config stored in `.status.profilingResults.selectedConfig`. Terminal state when `autoApply: false`. |
 | `Deploying` | Creating the `DynamoGraphDeployment` (only when `autoApply: true`) |
 | `Deployed` | DGD is running and healthy |
-| `Failed` | Unrecoverable error — check events and conditions for details |
+| `Failed` | Unrecoverable error — profiling failures are not retried (`backoffLimit: 0`); check events and conditions for details |
 
 ### Conditions
 
