@@ -118,6 +118,20 @@ def assemble_final_config(
     else:
         base = dgd_config
 
+    # ----------------------------
+    # NEW: inject global envs into all containers
+    # ----------------------------
+    if dgdr.envs:
+        for svc_name, svc_spec in base.get("spec", {}).get("services", {}).items():
+            containers = svc_spec.get("containers", [])
+            for container in containers:
+                container_env = container.setdefault("env", [])
+                # Append/merge envs from dgdr.envs
+                for k, v in dgdr.envs.items():
+                    # Only append if not already present
+                    if not any(e.get("name") == k for e in container_env):
+                        container_env.append({"name": k, "value": str(v)})
+                        
     # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
     # the get_perf_metrics endpoint is available to the planner. Mocker
     # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.

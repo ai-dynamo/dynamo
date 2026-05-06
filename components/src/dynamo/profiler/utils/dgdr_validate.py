@@ -64,6 +64,8 @@ def valid_dgdr_spec(
     _validate_workload(dgdr.workload)
     _validate_sla(dgdr.sla)
     _validate_parallelization_sweeping_mode(dgdr)
+    _validate_envs(dgdr.envs)
+    _validate_envs(dgdr.workerEnvs)
     return dgdr
 
 
@@ -71,6 +73,13 @@ def valid_dgdr_spec(
 # Internal validators
 # ---------------------------------------------------------------------------
 
+def _validate_envs(envs: List[EnvVar]) -> None:
+    """Ensure all env vars have non-empty names."""
+    for env in envs:
+        if not env.name or not isinstance(env.name, str):
+            raise ValueError(f"Environment variable must have a non-empty name (got {env})")
+        if not isinstance(env.value, str):
+            raise ValueError(f"Environment variable '{env.name}' value must be a string")
 
 def _validate_required_fields(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
     """Check fields the profiler treats as required."""
@@ -90,6 +99,11 @@ def _validate_required_fields(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
     if dgdr.sla is None:
         dgdr.sla = SLASpec()
 
+    # Populate defaults for envs
+    if getattr(dgdr, "envs", None) is None:
+        dgdr.envs = []
+    if getattr(dgdr, "workerEnvs", None) is None:
+        dgdr.workerEnvs = []
 
 def _validate_workload(workload: WorkloadSpec) -> None:
     """Concurrency and requestRate are mutually exclusive."""

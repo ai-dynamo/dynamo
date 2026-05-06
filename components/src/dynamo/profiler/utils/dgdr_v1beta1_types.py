@@ -240,54 +240,72 @@ class HardwareSpec(BaseModel):
     )
 
 
+class EnvVar(BaseModel):
+    """Represents a single environment variable."""
+    name: str = Field(..., description="The name of the environment variable.")
+    value: str = Field(..., description="The value of the environment variable.")
+
 class DynamoGraphDeploymentRequestSpec(BaseModel):
-    """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Only the Model field is required; all other fields are optional and have sensible defaults."""
+    """
+    Defines the desired state of a DynamoGraphDeploymentRequest.
+    Only the model field is required; all other fields are optional and have sensible defaults.
+    """
 
     model: str = Field(
-        description='Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.'
+        description='Specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). '
+                    'Can be a HuggingFace ID or a private model name.'
     )
-    backend: BackendType = Field(
+    backend: str = Field(
         default="auto",
-        description="Backend specifies the inference backend to use for profiling and deployment.",
+        description="Backend specifies the inference backend to use for profiling and deployment."
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2".',
+        description='Container image reference for the profiling job (frontend image). Example: '
+                    '"nvcr.io/nvidia/dynamo-runtime:latest".'
     )
-    modelCache: Optional[ModelCacheSpec] = Field(
+    modelCache: Optional[dict] = Field(
         default=None,
-        description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
+        description="Optional PVC configuration for pre-downloaded model weights."
     )
-    hardware: Optional[HardwareSpec] = Field(
+    hardware: Optional[dict] = Field(
         default=None,
-        description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.",
+        description="Hardware resources available for profiling and deployment."
     )
-    workload: Optional[WorkloadSpec] = Field(
+    workload: Optional[dict] = Field(
         default=None,
-        description="Workload defines the expected workload characteristics for SLA-based profiling.",
+        description="Defines expected workload characteristics for SLA-based profiling."
     )
-    sla: Optional[SLASpec] = Field(
+    sla: Optional[dict] = Field(
         default=None,
-        description="SLA defines service-level agreement targets that drive profiling optimization.",
+        description="Service-level agreement targets that drive profiling optimization."
     )
-    overrides: Optional[OverridesSpec] = Field(
+    overrides: Optional[dict] = Field(
         default=None,
-        description="Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.",
+        description="Overrides allow customizing the profiling job and the generated DynamoGraphDeployment."
     )
-    features: Optional[FeaturesSpec] = Field(
+    features: Optional[dict] = Field(
         default=None,
-        description="Features controls optional Dynamo platform features in the generated deployment.",
+        description="Controls optional Dynamo platform features in the generated deployment."
     )
-    searchStrategy: SearchStrategy = Field(
+    searchStrategy: str = Field(
         default="rapid",
-        description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
+        description='Controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.'
     )
-    autoApply: Optional[bool] = Field(
+    autoApply: bool = Field(
         default=True,
-        description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
+        description="Indicates whether to automatically create a DynamoGraphDeployment after profiling completes."
     )
 
-
+    # --- NEW FIELDS FOR ENVIRONMENT VARIABLES ---
+    envs: Optional[List[EnvVar]] = Field(
+        default=None,
+        description="Global environment variables to propagate to the generated DynamoGraphDeployment's spec.envs."
+    )
+    workerEnvs: Optional[List[EnvVar]] = Field(
+        default=None,
+        description="Worker-specific environment variables to propagate to each service in the generated DynamoGraphDeployment."
+    )
 class ParetoConfig(BaseModel):
     """ParetoConfig represents a single Pareto-optimal deployment configuration discovered during profiling."""
 
