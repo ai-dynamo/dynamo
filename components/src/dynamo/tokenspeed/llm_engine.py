@@ -23,24 +23,30 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
-from dynamo.tokenspeed.args import parse_args
+from dynamo.tokenspeed.args import (
+    kv_events_config_dict,
+    kv_events_enabled,
+    parse_args,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class TokenspeedLLMEngine(LLMEngine):
-    def __init__(self, server_args: Any):
+    def __init__(self, server_args: Any, dynamo_config: Any | None = None):
         self.server_args = server_args
+        self.dynamo_config = dynamo_config
         self.engine = None
         self._model_max_len: int | None = None
         self._active_rids_by_context: dict[str, list[str]] = {}
+        self._kv_publishers: list[Any] = []
 
     @classmethod
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[TokenspeedLLMEngine, WorkerConfig]:
         config = parse_args(argv)
-        engine = cls(config.server_args)
+        engine = cls(config.server_args, config)
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -93,6 +99,50 @@ class TokenspeedLLMEngine(LLMEngine):
             max_num_batched_tokens=max_num_batched_tokens,
         )
 
+    async def start_kv_events(self, endpoint: Any, engine_config: EngineConfig) -> None:
+        if not kv_events_enabled(getattr(self.server_args, "kv_events_config", None)):
+            return
+
+        if not getattr(self.server_args, "enable_prefix_caching", True):
+            logger.info(
+                "TokenSpeed KV event publishing skipped: prefix caching disabled"
+            )
+            return
+
+        _assert_tokenspeed_kv_events_supported()
+
+        kv_block_size = engine_config.kv_cache_block_size or _optional_int(
+            getattr(self.server_args, "block_size", None)
+        )
+        if not kv_block_size:
+            raise RuntimeError("TokenSpeed KV events require a non-zero block size")
+
+        config = kv_events_config_dict(self.server_args.kv_events_config)
+        base_zmq_endpoint = config.get("endpoint") or "tcp://*:5557"
+        publisher_cls = _kv_event_publisher_cls()
+
+        for dp_rank in _local_dp_rank_range(self.server_args):
+            zmq_endpoint = _format_zmq_connect_endpoint(
+                _offset_zmq_endpoint_port(base_zmq_endpoint, dp_rank)
+            )
+            logger.info(
+                "TokenSpeed KV event publisher for dp_rank=%s subscribing to %s",
+                dp_rank,
+                zmq_endpoint,
+            )
+            self._kv_publishers.append(
+                publisher_cls(
+                    endpoint=endpoint,
+                    kv_block_size=kv_block_size,
+                    zmq_endpoint=zmq_endpoint,
+                    zmq_topic="",
+                    enable_local_indexer=getattr(
+                        self.dynamo_config, "enable_local_indexer", False
+                    ),
+                    dp_rank=dp_rank,
+                )
+            )
+
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
@@ -134,6 +184,14 @@ class TokenspeedLLMEngine(LLMEngine):
             logger.debug("Aborted TokenSpeed request %s", rid)
 
     async def cleanup(self) -> None:
+        for publisher in self._kv_publishers:
+            try:
+                publisher.shutdown()
+            except Exception:
+                logger.warning(
+                    "Failed to shut down TokenSpeed KV publisher", exc_info=True
+                )
+        self._kv_publishers.clear()
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("TokenSpeed engine shutdown")
@@ -344,3 +402,73 @@ def _tokenspeed_engine_cls() -> Any:
 def _generate_req_input_cls() -> Any:
     module = importlib.import_module("tokenspeed.runtime.engine.io_struct")
     return module.GenerateReqInput
+
+
+def _kv_event_publisher_cls() -> Any:
+    from dynamo.llm import KvEventPublisher
+
+    return KvEventPublisher
+
+
+def _assert_tokenspeed_kv_events_supported() -> None:
+    try:
+        module = importlib.import_module("tokenspeed.runtime.pd.kv_events")
+    except ImportError as exc:
+        raise RuntimeError(
+            "TokenSpeed KV events require tokenspeed.runtime.pd.kv_events"
+        ) from exc
+
+    factory = getattr(module, "EventPublisherFactory", None)
+    config_cls = getattr(module, "KVEventsConfig", None)
+    fields = getattr(config_cls, "model_fields", {}) if config_cls is not None else {}
+    if not hasattr(factory, "is_enabled") or "enable_kv_cache_events" not in fields:
+        raise RuntimeError(
+            "TokenSpeed KV events require a TokenSpeed build with "
+            "KVEventsConfig.enable_kv_cache_events and "
+            "EventPublisherFactory.is_enabled support"
+        )
+
+
+def _local_dp_rank_range(server_args: Any) -> range:
+    mapping = getattr(server_args, "mapping", None)
+    attn_mapping = getattr(mapping, "attn", None)
+    dp_size = (
+        _optional_int(getattr(attn_mapping, "dp_size", None))
+        or _optional_int(getattr(server_args, "data_parallel_size", None))
+        or 1
+    )
+    if dp_size <= 1:
+        return range(0, 1)
+
+    nnodes = _optional_int(getattr(mapping, "nnodes", None)) or _optional_int(
+        getattr(server_args, "nnodes", None)
+    )
+    nnodes = nnodes or 1
+    node_rank = _optional_int(getattr(server_args, "node_rank", None)) or 0
+
+    dp_ranks_per_node = dp_size // nnodes
+    start = node_rank * dp_ranks_per_node
+    end = min(dp_size, start + dp_ranks_per_node)
+    return range(start, end)
+
+
+def _offset_zmq_endpoint_port(endpoint: str | None, dp_rank: int) -> str | None:
+    if not endpoint or dp_rank == 0:
+        return endpoint
+
+    if "inproc" in endpoint:
+        return f"{endpoint}_dp{dp_rank}"
+    if "tcp" in endpoint:
+        last_colon_idx = endpoint.rfind(":")
+        if last_colon_idx < 0:
+            return endpoint
+        base_addr = endpoint[:last_colon_idx]
+        base_port = int(endpoint[last_colon_idx + 1 :])
+        return f"{base_addr}:{base_port + dp_rank}"
+    raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
+
+
+def _format_zmq_connect_endpoint(endpoint: str | None) -> str:
+    if not endpoint:
+        raise ValueError("TokenSpeed kv_events_config is missing an endpoint")
+    return endpoint.replace("*", "127.0.0.1")
