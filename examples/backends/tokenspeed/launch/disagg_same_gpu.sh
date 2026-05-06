@@ -26,7 +26,12 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 BLOCK_SIZE="${BLOCK_SIZE:-64}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
-MEM_UTIL="${MEM_UTIL:-0.3}"
+# Bound the KV pool deterministically — when two workers share a GPU, the
+# default fraction-of-available-memory math goes negative for the second
+# worker after the first has loaded weights. 16 K tokens fits inside even
+# a tight per-worker budget.
+MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-16384}"
+MEM_UTIL="${MEM_UTIL:-0.4}"
 BOOTSTRAP_PORT_PREFILL="${BOOTSTRAP_PORT_PREFILL:-8998}"
 PREFILL_SYSTEM_PORT="${PREFILL_SYSTEM_PORT:-8081}"
 DECODE_SYSTEM_PORT="${DECODE_SYSTEM_PORT:-8082}"
@@ -47,6 +52,7 @@ COMMON_FLAGS=(
     --disaggregation-transfer-backend mooncake
     --block-size "$BLOCK_SIZE"
     --max-num-seqs "$MAX_NUM_SEQS"
+    --max-total-tokens "$MAX_TOTAL_TOKENS"
     --gpu-memory-utilization "$MEM_UTIL"
     --attention-backend triton
     --disable-kvstore
@@ -59,9 +65,13 @@ DYN_SYSTEM_PORT=$PREFILL_SYSTEM_PORT python3 -m dynamo.tokenspeed \
     --disaggregation-mode prefill \
     --disaggregation-bootstrap-port "$BOOTSTRAP_PORT_PREFILL" &
 
-# Decode worker — receives KV from prefill via Mooncake.
+# Decode worker — receives KV from prefill via Mooncake. --enforce-eager
+# avoids CUDA-graph capture which exercises kernels whose precompiled
+# cubins may not cover the host GPU's compute capability (e.g. Blackwell
+# sm_120 missing from older tokenspeed-kernel builds).
 DYN_SYSTEM_PORT=$DECODE_SYSTEM_PORT python3 -m dynamo.tokenspeed \
     "${COMMON_FLAGS[@]}" \
-    --disaggregation-mode decode &
+    --disaggregation-mode decode \
+    --enforce-eager &
 
 wait
