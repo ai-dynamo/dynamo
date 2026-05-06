@@ -18,7 +18,6 @@ use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::{DistributedRuntime, Runtime};
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::EngineAdapter;
@@ -148,10 +147,6 @@ impl Default for WorkerConfig {
 }
 
 /// Lifecycle state for [`Worker`].
-///
-/// Only three states are observable to callers because the lifecycle
-/// `tokio::Mutex` serializes start and cleanup — `Starting` / `Stopping`
-/// transitions live entirely inside the lock holder and never escape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LifecycleState {
     /// `start_engine` has not been called (or shutdown arrived first and
@@ -172,7 +167,7 @@ enum LifecycleState {
 pub struct Worker {
     engine: Arc<dyn LLMEngine>,
     config: WorkerConfig,
-    state: Mutex<LifecycleState>,
+    state: LifecycleState,
 }
 
 impl Worker {
@@ -180,7 +175,7 @@ impl Worker {
         Self {
             engine,
             config,
-            state: Mutex::new(LifecycleState::Init),
+            state: LifecycleState::Init,
         }
     }
 
@@ -196,7 +191,7 @@ impl Worker {
     ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
     ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
-    ///      Phase 1/2/3 token-cancellation teardown.
+    ///      request-plane drain and transport teardown.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -212,7 +207,15 @@ impl Worker {
     ///
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
-    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
+    pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+        // Validate the worker config up front so misconfiguration surfaces
+        // before any signal handlers, tokio tasks, or runtime construction.
+        // The same validation is also reachable via `run_inner`, but doing
+        // it here means a user who passes an unsupported `model_input`
+        // doesn't pay the cost of installing signal handlers and spawning
+        // a listener task just to get an InvalidArgument error.
+        validate_model_input(self.config.model_input)?;
+
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
         // task's first poll is captured by the kernel-side handler rather
@@ -234,9 +237,8 @@ impl Worker {
             })?;
 
         // Single shared shutdown signal observed across all phases. The
-        // background task only flips the token — it intentionally does
-        // not touch the lifecycle mutex, so `start_engine` cannot deadlock
-        // on a signal-handler holding the lock.
+        // background task only flips the token; lifecycle transitions stay
+        // on this owned Worker instance.
         let shutdown_token = CancellationToken::new();
         let signal_token = shutdown_token.clone();
         let signal_handle = tokio::spawn(async move {
@@ -252,26 +254,28 @@ impl Worker {
         // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds, otherwise
         // we exit(911). Healthy long-running workers never hit this — the
         // timer only starts after `shutdown_token` is cancelled.
-        let inner_fut = self.run_inner(runtime, &shutdown_token);
-        tokio::pin!(inner_fut);
+        let outcome = {
+            let inner_fut = self.run_inner(runtime, &shutdown_token);
+            tokio::pin!(inner_fut);
 
-        let outcome = tokio::select! {
-            result = &mut inner_fut => result,
-            _ = shutdown_token.cancelled() => {
-                let timeout = graceful_shutdown_timeout();
-                tracing::debug!(
-                    "graceful shutdown started; deadline {}s",
-                    timeout.as_secs()
-                );
-                match tokio::time::timeout(timeout, &mut inner_fut).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::error!(
-                            "Graceful shutdown exceeded {}s; force-exiting with code 911. \
-                             Set DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to override.",
-                            timeout.as_secs()
-                        );
-                        std::process::exit(911);
+            tokio::select! {
+                result = &mut inner_fut => result,
+                _ = shutdown_token.cancelled() => {
+                    let timeout = graceful_shutdown_timeout();
+                    tracing::debug!(
+                        "graceful shutdown started; deadline {}s",
+                        timeout.as_secs()
+                    );
+                    match tokio::time::timeout(timeout, &mut inner_fut).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            tracing::error!(
+                                "Graceful shutdown exceeded {}s; force-exiting with code 911. \
+                                 Set DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to override.",
+                                timeout.as_secs()
+                            );
+                            std::process::exit(911);
+                        }
                     }
                 }
             }
@@ -288,10 +292,12 @@ impl Worker {
     }
 
     async fn run_inner(
-        &self,
+        &mut self,
         runtime: Runtime,
         shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
+        // model_input was already validated at the top of `run`; re-checking
+        // here would double-error on misconfig.
         let drt = DistributedRuntime::from_settings(runtime)
             .await
             .map_err(|e| {
@@ -346,9 +352,9 @@ impl Worker {
     }
 
     /// Full graceful-shutdown orchestrator: discovery unregister →
-    /// grace period → drain → cleanup. Shared by every shutdown path —
+    /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
-    async fn orchestrator_steps(&self, endpoint: &dynamo_runtime::component::Endpoint) {
+    async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
@@ -357,44 +363,37 @@ impl Worker {
         self.run_engine_shutdown_steps().await;
     }
 
-    /// Mutex-guarded start. The lifecycle mutex is purely defensive:
-    /// `start_engine` is called once and every `cleanup_once` invocation
-    /// (whether from inside `run_inner` via the orchestrator paths or
-    /// from `Worker::run`'s post-`run_inner` safety net) is strictly
-    /// sequential within a single `Worker::run`. The lock provides
-    /// memory ordering for state transitions but does not serialize
-    /// concurrent callers (there are none).
-    async fn start_engine(&self) -> Result<EngineConfig, DynamoError> {
-        let mut guard = self.state.lock().await;
+    /// Start the engine exactly once. `Worker::run` consumes `self`, so all
+    /// lifecycle transitions are single-threaded and do not need a mutex.
+    async fn start_engine(&mut self) -> Result<EngineConfig, DynamoError> {
         // `start_engine` is called once from `run_inner`, which consumes
         // `self`. Hitting any other state is a programmer error worth
         // panicking over in release as well as debug builds.
         assert_eq!(
-            *guard,
+            self.state,
             LifecycleState::Init,
             "start_engine called in unexpected state {:?}",
-            *guard
+            self.state
         );
         match self.engine.start().await {
             Ok(cfg) => {
-                *guard = LifecycleState::Running;
+                self.state = LifecycleState::Running;
                 Ok(cfg)
             }
             Err(e) => {
-                *guard = LifecycleState::Stopped;
+                self.state = LifecycleState::Stopped;
                 Err(e)
             }
         }
     }
 
-    /// Mutex-guarded, idempotent cleanup.
-    async fn cleanup_once(&self) {
-        let mut guard = self.state.lock().await;
-        match *guard {
+    /// Idempotent cleanup.
+    async fn cleanup_once(&mut self) {
+        match self.state {
             LifecycleState::Init | LifecycleState::Stopped => {
                 // Pre-start shutdown, already cleaned up, or start failed —
                 // nothing engine-side to do.
-                *guard = LifecycleState::Stopped;
+                self.state = LifecycleState::Stopped;
                 return;
             }
             LifecycleState::Running => {}
@@ -406,13 +405,13 @@ impl Worker {
         // Mark stopped even on failure so a follow-up call no-ops; engines
         // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
         // attempt can hang or raise.
-        *guard = LifecycleState::Stopped;
+        self.state = LifecycleState::Stopped;
     }
 
     /// Drive the serve loop and the shutdown orchestrator. Returns when
     /// either the serve loop exits or `shutdown` is cancelled.
     async fn serve_with_orchestrator(
-        &self,
+        &mut self,
         engine_config: &EngineConfig,
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
@@ -486,9 +485,9 @@ impl Worker {
     }
 
     /// Engine-facing shutdown sequence: grace period sleep → `engine.drain()`
-    /// → `cleanup_once()`. Each step swallows non-fatal failures so a
+    /// → `cleanup_once()`. Each engine step swallows non-fatal failures so a
     /// misbehaving engine can't block the worker from exiting.
-    async fn run_engine_shutdown_steps(&self) {
+    async fn run_engine_shutdown_steps(&mut self) {
         self.run_engine_shutdown_steps_with_grace(grace_period_secs())
             .await
     }
@@ -497,7 +496,7 @@ impl Worker {
     /// period. Lets unit tests assert on call ordering without setting
     /// `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (which is process-global
     /// and would race other parallel tests).
-    async fn run_engine_shutdown_steps_with_grace(&self, grace: f64) {
+    async fn run_engine_shutdown_steps_with_grace(&mut self, grace: f64) {
         if grace > 0.0 {
             tracing::info!("Grace period {:.2}s before drain", grace);
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
@@ -609,6 +608,21 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
         ));
     }
     Ok(out)
+}
+
+fn validate_model_input(model_input: ModelInput) -> Result<(), DynamoError> {
+    if model_input == ModelInput::Tokens {
+        return Ok(());
+    }
+
+    Err(err(
+        ErrorType::Backend(BackendError::InvalidArgument),
+        format!(
+            "dynamo_backend_common::Worker currently supports only ModelInput::Tokens; got '{}'. \
+             ModelInput::Text and ModelInput::Tensor require dedicated raw-request adapters.",
+            model_input.as_str()
+        ),
+    ))
 }
 
 async fn build_local_model(
@@ -724,6 +738,23 @@ mod tests {
         assert!(e.to_string().contains("bogus"));
     }
 
+    #[test]
+    fn validate_model_input_accepts_tokens() {
+        validate_model_input(ModelInput::Tokens).unwrap();
+    }
+
+    #[test]
+    fn validate_model_input_rejects_text_and_tensor() {
+        for input in [ModelInput::Text, ModelInput::Tensor] {
+            let e = validate_model_input(input).unwrap_err();
+            assert_eq!(
+                e.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+            assert!(e.to_string().contains(input.as_str()));
+        }
+    }
+
     // -------------------------------------------------------------------
     // Lifecycle state machine tests
     // -------------------------------------------------------------------
@@ -788,31 +819,31 @@ mod tests {
     #[tokio::test]
     async fn start_engine_init_to_running_on_success() {
         let (engine, _) = StateMockEngine::new(false);
-        let worker = worker_with(engine);
+        let mut worker = worker_with(engine);
         let cfg = worker.start_engine().await.expect("start");
         assert_eq!(cfg.model, "mock");
-        assert_eq!(*worker.state.lock().await, LifecycleState::Running);
+        assert_eq!(worker.state, LifecycleState::Running);
     }
 
     #[tokio::test]
     async fn start_engine_init_to_stopped_on_failure() {
         let (engine, cleanup_calls) = StateMockEngine::new(true);
-        let worker = worker_with(engine);
+        let mut worker = worker_with(engine);
         let res = worker.start_engine().await;
         assert!(res.is_err(), "start should fail");
-        assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
+        assert_eq!(worker.state, LifecycleState::Stopped);
 
         // cleanup_once is a no-op after a failed start: the state machine
         // skips engine.cleanup() because the engine never became running.
         worker.cleanup_once().await;
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
+        assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
     #[tokio::test]
     async fn cleanup_once_is_idempotent() {
         let (engine, cleanup_calls) = StateMockEngine::new(false);
-        let worker = worker_with(engine);
+        let mut worker = worker_with(engine);
         worker.start_engine().await.unwrap();
 
         worker.cleanup_once().await;
@@ -823,17 +854,17 @@ mod tests {
         // called three times — guards against the vLLM/TRT-LLM NCCL
         // double-teardown hang.
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
+        assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
     #[tokio::test]
     async fn cleanup_once_noops_when_never_started() {
         let (engine, cleanup_calls) = StateMockEngine::new(false);
-        let worker = worker_with(engine);
+        let mut worker = worker_with(engine);
         // Pre-start signal path: cleanup before start completes.
         worker.cleanup_once().await;
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
+        assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
     // The pre-start shutdown path is handled in `run_inner` via a
@@ -908,7 +939,7 @@ mod tests {
         // Use the explicit-grace helper so we don't have to mutate the
         // process-global env var (which would race other parallel tests).
         let (engine, log) = OrderingMockEngine::new(false);
-        let worker = worker_with(engine);
+        let mut worker = worker_with(engine);
         worker.start_engine().await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
@@ -924,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
         let (engine, log) = OrderingMockEngine::new(true); // drain fails
-        let worker = worker_with(engine);
+        let mut worker = worker_with(engine);
         worker.start_engine().await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
@@ -932,7 +963,7 @@ mod tests {
         // Drain ran (and failed), but cleanup still ran exactly once.
         let recorded = log.lock().unwrap().clone();
         assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
-        assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
+        assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
     // The "drain skipped when engine never started" scenario isn't
@@ -1094,10 +1125,14 @@ mod tests {
         };
 
         // Snapshot prior values so we don't leak state to other tests.
-        let prev: Vec<_> = ["DYN_DISCOVERY_BACKEND", "DYN_REQUEST_PLANE", "DYN_EVENT_PLANE"]
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
+        let prev: Vec<_> = [
+            "DYN_DISCOVERY_BACKEND",
+            "DYN_REQUEST_PLANE",
+            "DYN_EVENT_PLANE",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
 
         cfg.apply_to_env();
         assert_eq!(std::env::var("DYN_DISCOVERY_BACKEND").unwrap(), "file");

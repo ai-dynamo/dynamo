@@ -12,8 +12,9 @@
 //! Exposed under `dynamo._core.backend` as `Worker`, `WorkerConfig`,
 //! `EngineConfig`, and `RuntimeConfig`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
+use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -43,6 +45,9 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
     parent.add_submodule(&m)?;
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("dynamo._core.backend", &m)?;
     Ok(())
 }
 
@@ -364,11 +369,16 @@ struct PyLLMEngine {
     // `PythonAsyncEngine` in `engine.rs`.
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
+    trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
 }
 
 impl PyLLMEngine {
     fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
-        Self { engine, event_loop }
+        Self {
+            engine,
+            event_loop,
+            trace_contexts: Arc::new(StdMutex::new(HashMap::new())),
+        }
     }
 
     /// Call a no-arg async method on `self.engine` and await it on
@@ -394,6 +404,20 @@ impl PyLLMEngine {
         })??;
 
         py_future.await
+    }
+}
+
+struct TraceContextGuard {
+    request_id: String,
+    trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
+}
+
+impl Drop for TraceContextGuard {
+    fn drop(&mut self) {
+        self.trace_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.request_id);
     }
 }
 
@@ -433,13 +457,25 @@ impl LLMEngine for PyLLMEngine {
     ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
+        let trace_context = get_distributed_tracing_context();
+        let request_id = ctx.id().to_string();
+        let trace_guard = trace_context.as_ref().map(|trace_context| {
+            self.trace_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request_id.clone(), trace_context.clone());
+            TraceContextGuard {
+                request_id,
+                trace_contexts: self.trace_contexts.clone(),
+            }
+        });
 
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(ctx, None))?;
+                let py_ctx = Py::new(py, PyContext::new(ctx, trace_context))?;
 
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("context", &py_ctx)?;
@@ -461,6 +497,7 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)?;
 
         let mapped = async_stream::stream! {
+            let _trace_guard = trace_guard;
             let mut inner = std::pin::pin!(stream);
             while let Some(item) = inner.next().await {
                 let py_obj = match item {
@@ -523,12 +560,19 @@ impl LLMEngine for PyLLMEngine {
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
+        let trace_context = self
+            .trace_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(ctx.id())
+            .cloned()
+            .or_else(get_distributed_tracing_context);
 
         let res: Result<(), PyErr> = async move {
             let py_future = tokio::task::spawn_blocking(move || {
                 Python::with_gil(|py| -> PyResult<_> {
                     let bound = engine.bind(py);
-                    let py_ctx = Py::new(py, PyContext::new(ctx, None))?;
+                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context))?;
                     let coroutine = bound.call_method1("abort", (py_ctx,))?;
                     let locals = TaskLocals::new(event_loop.bind(py).clone());
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
@@ -551,18 +595,6 @@ impl LLMEngine for PyLLMEngine {
     }
 
     async fn drain(&self) -> Result<(), DynamoError> {
-        // Treat `drain` as optional even if the ABC defines a default
-        // no-op: engines that never override it can short-circuit so we
-        // don't pay a GIL hop during shutdown.
-        let has_drain = Python::with_gil(|py| {
-            self.engine
-                .bind(py)
-                .hasattr("drain")
-                .unwrap_or(false)
-        });
-        if !has_drain {
-            return Ok(());
-        }
         self.call_method0_async("drain")
             .await
             .map_err(py_err_to_dynamo)?;
