@@ -13,7 +13,7 @@ The primary objective in optimizing LLM inference is maximizing tokens per secon
 
 Steady-state throughput metrics, while useful, capture only a narrow slice of the system's true behavior. In production inference environments, workloads are inherently dynamic: demand varies over time, model selections evolve, configurations are continuously tuned in pursuit of better efficiency, and failures necessitate periodic restarts. Each of these events disrupts the steady state.
 
-Crucially, the system's responsiveness to these disruptions becomes a first-order concern. Bringing up a new inference instance — even for a single GPU under a fixed model and configuration — can take on the order of minutes. From a systems perspective, this is not merely latency; it is a prolonged interval of resource underutilization. During this time, expensive GPU capacity is allocated but not generating tokens, and therefore not generating revenue.
+Crucially, the system's responsiveness to these disruptions becomes a first-order concern. Bringing up a new inference instance, even for a single GPU under a fixed model and configuration, can take on the order of minutes. During this prolonged interval of resource underutilization, expensive GPU capacity is allocated but not generating tokens, and thereby not generating revenue.
 
 Here is a breakdown of the cold start time of various models for a single-GPU workload:
 
@@ -177,6 +177,8 @@ The payoff is that the path that gets weights onto the GPU is now **completely d
 Where the loader gets the weights from is its own concern. In a real cluster, we want a single source of truth for which models are cached where, deduplicated downloads from external sources like HuggingFace, and ideally GPU-to-GPU RDMA between nodes that already have the weights resident. This is exactly what weight transfer engines like [ModelExpress](https://github.com/ai-dynamo/modelexpress) (MX) are built for, and the intended production path is to have `gms-loader` be a shim that exposes GMS's stored allocations directly to different weight transfer backends — peer GPU over NIXL/RDMA, disk over GPUDirect Storage, HuggingFace, etc.
 
 We are still in the process of developing the integration with MX, among other transfer engine backends. For now, the fallback is to also use NFS for the weights, which eliminates the full host-side materialization of the weights but still causes some NFS bandwidth contention with the ongoing CRIU restore. Nonetheless, we still see a major reduction in startup time, even with this fallback.
+
+![Snapshot restore time with GMS, weights reside on NFS PVC](./figures/gms_pvc_restore_bench.svg)
 
 ### Full Overlap with External Weight Restoration
 
