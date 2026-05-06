@@ -4,7 +4,7 @@
 import asyncio
 
 # Timing notes (measured locally):
-# - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests.
+# - GPU-1 subset (`-m "gpu_1 and not gpu_2"`): 130.43s total for 3 tests on vLLM 0.20.0.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import json
@@ -491,7 +491,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
     request,
@@ -519,7 +519,7 @@ def test_vllm_kv_router_basic(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
     request,
@@ -547,7 +547,7 @@ def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_vllm_multiple_workers(
     request,
@@ -645,7 +645,7 @@ def test_router_decisions_vllm_disagg(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(360)  # vLLM 0.20.x startup can exceed 150s on contended CI runners
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [

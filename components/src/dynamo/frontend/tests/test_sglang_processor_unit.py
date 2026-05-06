@@ -62,7 +62,7 @@ def tokenizer():
 # ---------------------------------------------------------------------------
 
 
-class TestBuildDynamoPreproc:  # FE.7 — worker subprocess preproc construction
+class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc construction
     """Test sampling parameter projection from request to Dynamo format."""
 
     def test_defaults(self):
@@ -258,7 +258,7 @@ class TestBuildDynamoPreproc:  # FE.7 — worker subprocess preproc construction
 # ---------------------------------------------------------------------------
 
 
-class TestMapFinishReason:  # FE.5 — finish_reason remap (frontend layer)
+class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer)
     """Test Dynamo-to-OpenAI finish reason mapping."""
 
     def test_none_passthrough(self):
@@ -303,7 +303,7 @@ class TestMapFinishReason:  # FE.5 — finish_reason remap (frontend layer)
 # ---------------------------------------------------------------------------
 
 
-class TestConvertTools:  # FE.3 — OpenAI tool schema → SGLang Tool/Function
+class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Function
     """Test OpenAI tool dict to SGLang Tool conversion."""
 
     def test_none_returns_none(self):
@@ -373,7 +373,7 @@ class TestConvertTools:  # FE.3 — OpenAI tool schema → SGLang Tool/Function
 # ---------------------------------------------------------------------------
 
 
-class TestCreateParsers:  # FE.2 — tool/reasoning parser dispatch
+class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
     """Test parser creation logic."""
 
     def test_no_parsers(self):
@@ -391,7 +391,7 @@ class TestCreateParsers:  # FE.2 — tool/reasoning parser dispatch
         assert rp is not None
 
 
-class TestBuildToolCallGuidedDecoding:  # FE.3 — guided-decoding setup for tool_choice
+class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     def test_none_when_no_tools(self):
         assert (
             build_tool_call_guided_decoding(
@@ -713,7 +713,7 @@ class TestBuildToolCallGuidedDecoding:  # FE.3 — guided-decoding setup for too
 # ---------------------------------------------------------------------------
 
 
-class TestParseJsonArrayBuffer:  # FE.6 — incremental JSON-array buffer parsing
+class TestParseJsonArrayBuffer:  # FRONTEND.6 — incremental JSON-array buffer parsing
     """Test JSON array fallback parser for constrained decoding output."""
 
     def test_single_tool_call(self):
@@ -789,7 +789,7 @@ class TestParseJsonArrayBuffer:  # FE.6 — incremental JSON-array buffer parsin
         assert calls[0].name == "g"
 
 
-class TestNormalizePromptTokenIds:  # FE.6 — prompt-token-id normalization
+class TestNormalizePromptTokenIds:  # FRONTEND.6 — prompt-token-id normalization
     def test_batch_encoding_like_object_uses_input_ids(self):
         class FakeBatchEncoding:
             def __init__(self):
@@ -806,7 +806,7 @@ class TestNormalizePromptTokenIds:  # FE.6 — prompt-token-id normalization
         ) == [1, 2, 3]
 
 
-class TestRuntimeConfigParserName:  # FE.2 — parser name resolution from runtime config
+class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from runtime config
     def test_missing_runtime_config_returns_none(self):
         class FakeMdc:
             def runtime_config(self):
@@ -834,7 +834,7 @@ class TestRuntimeConfigParserName:  # FE.2 — parser name resolution from runti
 # ---------------------------------------------------------------------------
 
 
-class TestPreprocessChatRequest:  # FE.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
+class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
     """Test end-to-end preprocessing with a real tokenizer."""
 
     def test_basic_chat(self, tokenizer):
@@ -1411,7 +1411,7 @@ class TestPreprocessChatRequest:  # FE.1 — chat-template input preprocessing (
 # ---------------------------------------------------------------------------
 
 
-class TestIncrementalDetokenization:  # FE.6 — token-id stream → text
+class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     """Test the sliding-window incremental detokenizer."""
 
     def test_basic_decode(self, tokenizer):
@@ -1482,7 +1482,7 @@ class TestIncrementalDetokenization:  # FE.6 — token-id stream → text
 # ---------------------------------------------------------------------------
 
 
-class TestFastPlainTextPath:  # FE.6 — fast path that skips parser when no markers
+class TestFastPlainTextPath:  # FRONTEND.6 — fast path that skips parser when no markers
     """Test the fast path when no parsers are active."""
 
     def test_fast_path_active(self, tokenizer):
@@ -1521,7 +1521,7 @@ class TestFastPlainTextPath:  # FE.6 — fast path that skips parser when no mar
 # ---------------------------------------------------------------------------
 
 
-class TestReasoningParsing:  # FE.9 — reasoning ↔ tool-call orchestration
+class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestration
     """Test reasoning content extraction via post-processor."""
 
     def test_reasoning_separated(self, tokenizer):
@@ -1560,24 +1560,24 @@ class TestReasoningParsing:  # FE.9 — reasoning ↔ tool-call orchestration
 class TestUtilities:  # (mixed — see per-test annotations)
     """Test shared utility functions."""
 
-    def test_random_uuid_format(self):  # FE.4
+    def test_random_uuid_format(self):  # FRONTEND.4
         """random_uuid produces 16-char hex string."""
         uid = random_uuid()
         assert len(uid) == 16
         int(uid, 16)  # Should not raise
 
-    def test_random_uuid_unique(self):  # FE.4
+    def test_random_uuid_unique(self):  # FRONTEND.4
         """Two calls produce different UUIDs."""
         assert random_uuid() != random_uuid()
 
-    def test_random_call_id_format(self):  # FE.4
+    def test_random_call_id_format(self):  # FRONTEND.4
         """random_call_id produces call_<16hex> format."""
         cid = random_call_id()
         assert cid.startswith("call_")
         assert len(cid) == 21  # "call_" + 16 hex chars
         int(cid[5:], 16)  # Should not raise
 
-    def test_preprocess_error(self):  # FE.8
+    def test_preprocess_error(self):  # FRONTEND.8
         """PreprocessError stores message and stringifies."""
         err = PreprocessError("n=2 unsupported")
         assert "n=2" in str(err)
@@ -1588,7 +1588,7 @@ class TestUtilities:  # (mixed — see per-test annotations)
 # ---------------------------------------------------------------------------
 
 
-class TestWorkerResultPicklability:  # FE.7 — worker subprocess boundary picklability
+class TestWorkerResultPicklability:  # FRONTEND.7 — worker subprocess boundary picklability
     """Test that worker results survive ProcessPoolExecutor round-trip."""
 
     def test_full_result(self):
@@ -1642,7 +1642,7 @@ class TestWorkerResultPicklability:  # FE.7 — worker subprocess boundary pickl
 # ---------------------------------------------------------------------------
 
 
-class TestDeprecationWarning:  # FE.8 — legacy/deprecated field warnings
+class TestDeprecationWarning:  # FRONTEND.8 — legacy/deprecated field warnings
     """Test that --use-sglang-tokenizer deprecation warning is in place."""
 
     def test_deprecation_warning_in_source(self):

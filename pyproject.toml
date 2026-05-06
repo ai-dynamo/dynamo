@@ -14,6 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.2.0",
+    "aiohttp>=3.9.0,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -50,7 +51,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.20.0",
+    "vllm[flashinfer,runai,otel]==0.20.1",
     # vllm-omni is installed separately in container builds (see
     # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
     # pip/uv dependency resolution for omni can override the vLLM torch stack.

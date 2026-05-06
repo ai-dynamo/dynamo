@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     /// Single tool call, thinking mode (direct V4 analog of the V3 tool fixture).
-    /// `CASE.1` + `CASE.8` + `CASE.9` — single tool call, streaming assembly, paired with reasoning. Also validates `CASE.12` finish_reason=tool_calls.
+    /// `PARSER.1` + `PARSER.8` + `PARSER.9` — single tool call, streaming assembly, paired with reasoning. Also validates `PARSER.12` finish_reason=tool_calls.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_with_tools_vllm() {
         let file_path = format!(
@@ -1168,7 +1168,7 @@ mod tests {
     }
 
     /// No tool call — thinking + plain body; finish_reason=stop.
-    /// `CASE.3` + `CASE.10` — no tool call + reasoning only. Also validates `CASE.12` finish_reason=stop.
+    /// `PARSER.3` + `PARSER.10` — no tool call + reasoning only. Also validates `PARSER.12` finish_reason=stop.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_with_no_tools_vllm() {
         let file_path = format!(
@@ -1208,7 +1208,7 @@ mod tests {
     }
 
     /// Two parallel tool calls inside one DSML block.
-    /// `CASE.2` — parallel tool calls in one DSML block.
+    /// `PARSER.2` — parallel tool calls in one DSML block.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_multi_tool_vllm() {
         let file_path = format!(
@@ -1220,7 +1220,7 @@ mod tests {
 
     /// string="true" vs string="false" — numbers, booleans, arrays, objects must
     /// round-trip as their proper JSON types inside arguments.
-    /// `CASE.7` — complex args (mixed string="true|false" → strings / numbers / bools / arrays / objects round-trip).
+    /// `PARSER.7` — complex args (mixed string="true|false" → strings / numbers / bools / arrays / objects round-trip).
     #[tokio::test]
     async fn test_deepseek_v4_e2e_mixed_param_types_vllm() {
         let file_path = format!(
@@ -1232,7 +1232,7 @@ mod tests {
 
     /// Body text emitted before the DSML block — parser must populate both
     /// normal_content and tool_calls.
-    /// `CASE.13` — normal text interleaved before the DSML block.
+    /// `PARSER.13` — normal text interleaved before the DSML block.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_content_before_tool_vllm() {
         let file_path = format!(
@@ -1245,7 +1245,7 @@ mod tests {
     /// Parameter value containing unicode, emoji, embedded quotes/newlines/tabs,
     /// and fragments that look like sentinels but aren't — must not confuse the
     /// parser, which anchors only on the exact </｜DSML｜parameter> token.
-    /// `CASE.7` — Unicode / special characters inside argument values. (`CASE.xml.entities` is N/A for DSML — no entity decoding.)
+    /// `PARSER.7` — Unicode / special characters inside argument values. (`PARSER.xml1` is N/A for DSML — no entity decoding.)
     #[tokio::test]
     async fn test_deepseek_v4_e2e_special_chars_vllm() {
         let file_path = format!(
@@ -1257,7 +1257,7 @@ mod tests {
 
     /// Adversarial streaming: every DSML character is its own delta (~200 chunks).
     /// Exercises buffer accumulation across chunk boundaries.
-    /// `CASE.8` — streaming chunk-boundary splits (tokens straddle chunks).
+    /// `PARSER.8` — streaming chunk-boundary splits (tokens straddle chunks).
     #[tokio::test]
     async fn test_deepseek_v4_e2e_fragmented_tokens_vllm() {
         let file_path = format!(
@@ -1418,9 +1418,9 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
-    /// `CASE.5` + `CASE.8` (PR #8208) — kimi-k2 truncated mid-argument
+    /// `PARSER.5` + `PARSER.8` (PR #8208) — kimi-k2 truncated mid-argument
     /// (no `<|tool_call_end|>`), streaming, customer regression. Also
-    /// validates `CASE.12` finish_reason=stop passthrough.
+    /// validates `PARSER.12` finish_reason=stop passthrough.
     ///
     /// Repro for the production leak observed against kimi-k2-6: the
     /// model stops mid-argument with
