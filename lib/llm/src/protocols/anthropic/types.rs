@@ -805,7 +805,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: 1726000000,

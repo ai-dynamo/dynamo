@@ -1290,7 +1290,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason,
-            stop_reason: None,
             logprobs: None,
         };
         Annotated {

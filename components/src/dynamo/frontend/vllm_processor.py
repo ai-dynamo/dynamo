@@ -49,6 +49,7 @@ from .utils import (
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    nvext_extra_field_requested,
     random_uuid,
 )
 
@@ -645,6 +646,10 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    if stop_reason is not None and nvext_extra_field_requested(
+                        request, "stop_reason"
+                    ):
+                        dynamo_out["nvext"] = {"stop_reason": stop_reason}
 
                     yield dynamo_out
             _nvtx.end_range(rng_stream)

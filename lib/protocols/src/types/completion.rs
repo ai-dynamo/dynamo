@@ -13,47 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::OpenAIError;
 
-use super::{
-    ChatCompletionStreamOptions, CompletionFinishReason, CompletionUsage, Logprobs, Prompt, Stop,
-    StopReason,
-};
+use super::{ChatCompletionStreamOptions, Prompt, Stop};
 
-/// Completion choice with inference-serving extensions.
-///
-/// Extends upstream `Choice` with:
-/// - `stop_reason`: the matched stop sequence, token ID, or token ID sequence
-///   reported by inference backends
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct Choice {
-    pub text: String,
-    pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logprobs: Option<Logprobs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<CompletionFinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
-}
-
-/// Non-streaming or streaming text completion response.
-#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
-pub struct CreateCompletionResponse {
-    /// A unique identifier for the completion.
-    pub id: String,
-    pub choices: Vec<Choice>,
-    /// The Unix timestamp (in seconds) of when the completion was created.
-    pub created: u32,
-
-    /// The model used for completion.
-    pub model: String,
-    /// This fingerprint represents the backend configuration that the model runs with.
-    pub system_fingerprint: Option<String>,
-
-    /// The object type, which is always "text_completion".
-    pub object: String,
-    pub usage: Option<CompletionUsage>,
-}
+// Re-export response type from upstream (identical)
+pub use async_openai::types::completions::CreateCompletionResponse;
 
 /// Custom deserializer for the echo parameter that only accepts booleans.
 /// Rejects integers and strings with clear error messages.
@@ -209,18 +172,19 @@ mod tests {
     }
 
     #[test]
-    fn completion_choice_serializes_stop_reason() {
+    fn completion_choice_serializes_openai_shape() {
+        use crate::types::{Choice, CompletionFinishReason};
+
         let choice = Choice {
             text: "hello".to_string(),
             index: 0,
             logprobs: None,
             finish_reason: Some(CompletionFinishReason::Stop),
-            stop_reason: Some(StopReason::String("END".to_string())),
         };
 
         let value = serde_json::to_value(choice).expect("serialize choice");
 
         assert_eq!(value["finish_reason"], "stop");
-        assert_eq!(value["stop_reason"], "END");
+        assert_eq!(value["text"], "hello");
     }
 }

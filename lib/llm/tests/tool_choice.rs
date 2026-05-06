@@ -491,7 +491,6 @@ fn make_text_chunk(
                 } else {
                     None
                 },
-                stop_reason: None,
                 logprobs: None,
             }],
             created: 1234567890,

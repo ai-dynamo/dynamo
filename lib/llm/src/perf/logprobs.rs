@@ -963,7 +963,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: Some(ChatChoiceLogprobs {
                         content: Some(token_logprobs),
                         refusal: None,
@@ -999,7 +998,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1353,7 +1351,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None, // No logprobs
                 }],
                 created: 1234567890,

@@ -51,6 +51,7 @@ pub use async_openai::types::chat::{
     ChatCompletionRequestToolMessageContentPart,
     ChatCompletionResponseMessageAudio,
     ChatCompletionTokenLogprob,
+    Choice,
     CompletionFinishReason,
     CompletionTokensDetails,
     CompletionUsage,
@@ -695,9 +696,6 @@ pub struct ChatChoice {
     pub index: u32,
     pub message: ChatCompletionResponseMessage,
     pub finish_reason: Option<FinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
 }
 
@@ -746,19 +744,12 @@ pub struct ChatCompletionStreamResponseDeltaFunctionCall {
     pub arguments: Option<String>,
 }
 
-/// Streaming chat choice with stop reason support.
-///
-/// Extends upstream `ChatChoiceStream` with:
-/// - `stop_reason`: the matched stop sequence (string) or stop token ID (integer)
-///   reported by inference backends
+/// Streaming chat choice.
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct ChatChoiceStream {
     pub index: u32,
     pub delta: ChatCompletionStreamResponseDelta,
     pub finish_reason: Option<FinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
 }
 

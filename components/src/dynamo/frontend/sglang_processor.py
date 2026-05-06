@@ -39,7 +39,13 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    nvext_extra_field_requested,
+    random_uuid,
+    worker_warmup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -482,6 +488,7 @@ class SglangProcessor:
                 new_ids = engine_response["token_ids"]
                 raw_finish = engine_response.get("finish_reason")
                 finish_reason = _map_finish_reason(raw_finish)
+                stop_reason = engine_response.get("stop_reason")
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
@@ -517,6 +524,10 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                        if stop_reason is not None and nvext_extra_field_requested(
+                            request, "stop_reason"
+                        ):
+                            dynamo_out["nvext"] = {"stop_reason": stop_reason}
 
                         yield dynamo_out
 

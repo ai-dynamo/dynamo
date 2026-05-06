@@ -3765,7 +3765,6 @@ mod tests {
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3797,7 +3796,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3899,7 +3897,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3971,7 +3968,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -4008,7 +4004,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 

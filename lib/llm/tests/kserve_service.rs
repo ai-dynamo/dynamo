@@ -119,7 +119,7 @@ pub mod kserve_test {
             let stream = stream! {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 for word in word_list {
-                    yield Annotated::from_data(generator.create_choice(0, Some(word.to_string()), None, None, None));
+                    yield Annotated::from_data(generator.create_choice(0, Some(word.to_string()), None, None));
                 }
             };
 

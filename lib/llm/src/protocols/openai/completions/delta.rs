@@ -198,7 +198,6 @@ impl DeltaGenerator {
         index: u32,
         text: Option<String>,
         finish_reason: Option<dynamo_protocols::types::CompletionFinishReason>,
-        stop_reason: Option<dynamo_protocols::types::StopReason>,
         logprobs: Option<dynamo_protocols::types::Logprobs>,
     ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
@@ -216,7 +215,6 @@ impl DeltaGenerator {
                 text: text.unwrap_or_default(),
                 index,
                 finish_reason,
-                stop_reason,
                 logprobs,
             }],
             usage: if self.options.enable_usage && self.options.continuous_usage_stats {
@@ -309,16 +307,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         );
 
         let finish_reason = delta.finish_reason.map(Into::into);
+        let stop_reason = delta.stop_reason.clone();
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let mut response = self.create_choice(
-            index,
-            delta.text.clone(),
-            finish_reason,
-            delta.stop_reason,
-            logprobs,
-        );
+        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -337,6 +330,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
+            stop_reason,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
@@ -493,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn test_choice_from_postprocessor_preserves_stop_reason() {
+    fn test_stop_reason_is_suppressed_without_nvext_extra_field() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-stop-reason".to_string());
         let mut output = final_backend_output();
@@ -505,12 +499,27 @@ mod tests {
             .choice_from_postprocessor(output)
             .expect("choice generation");
 
-        assert_eq!(
-            response.inner.choices[0].stop_reason,
-            Some(dynamo_protocols::types::StopReason::String(
-                "END".to_string()
-            ))
-        );
+        let response_json = serde_json::to_value(&response).expect("serialize response");
+        assert!(response_json["choices"][0].get("stop_reason").is_none());
+        assert!(response_json.get("nvext").is_none());
+    }
+
+    #[test]
+    fn test_stop_reason_emits_in_nvext_when_requested() {
+        let request = create_test_request_with_extra_fields(vec!["stop_reason".to_string()]);
+        let mut generator = request.response_generator("req-stop-reason-nvext".to_string());
+        let mut output = final_backend_output();
+        output.stop_reason = Some(dynamo_protocols::types::StopReason::String(
+            "END".to_string(),
+        ));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let response_json = serde_json::to_value(&response).expect("serialize response");
+        assert!(response_json["choices"][0].get("stop_reason").is_none());
+        assert_eq!(response_json["nvext"]["stop_reason"], "END");
     }
 
     #[test]

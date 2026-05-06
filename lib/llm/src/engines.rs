@@ -159,12 +159,13 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
                 id += 1;
             }
 
-            let response = deltas.create_choice(0, None, Some(dynamo_protocols::types::FinishReason::Stop), None, None);
+            let response =
+                deltas.create_choice(0, None, Some(dynamo_protocols::types::FinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
         };
 
@@ -192,11 +193,16 @@ impl
             let mut id = 1;
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(dynamo_protocols::types::CompletionFinishReason::Stop), None, None);
+            let response = deltas.create_choice(
+                0,
+                None,
+                Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                None,
+            );
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None, error: None };
 
         };

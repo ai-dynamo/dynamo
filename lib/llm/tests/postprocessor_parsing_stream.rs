@@ -289,7 +289,6 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
             reasoning_content: None,
         },
         finish_reason: None,
-        stop_reason: None,
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
@@ -324,7 +323,6 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
             reasoning_content: None,
         },
         finish_reason: Some(FinishReason::Stop),
-        stop_reason: None,
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
