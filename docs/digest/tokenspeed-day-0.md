@@ -14,4 +14,6 @@ Two pieces are worth calling out. First, TokenSpeed includes new MLA kernel work
 
 Dynamo now has day-0 support for running TokenSpeed as a Dynamo backend through `python -m dynamo.tokenspeed`. The Dynamo frontend remains the user-facing OpenAI-compatible API entrypoint and handles request routing, streaming responses, and cancellation.
 
+See the [Kimi K2.5 TokenSpeed recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/tokenspeed/agg/nvidia) for the current Dynamo launch recipe.
+
 Things are moving quickly. Upstream TokenSpeed calls out ongoing work on model coverage, P/D, EPLB, KV store, Mamba cache, VLM, metrics, Hopper optimization, and related runtime features.
