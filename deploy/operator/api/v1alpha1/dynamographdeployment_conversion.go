@@ -73,9 +73,9 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	hubOrigin := restoredHubSpec != nil
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
 	if hash, ok := getAnnFromObj(&src.ObjectMeta, annCurrentWorkerHash); ok && hash != "" {
-		legacyHash, err := computeLegacyDGDWorkersSpecHash(src)
+		legacyHash, err := ComputeV1alpha1DGDWorkersSpecHash(src)
 		if err != nil {
-			return fmt.Errorf("compute legacy DGD worker hash: %w", err)
+			return fmt.Errorf("compute v1alpha1 DGD worker hash: %w", err)
 		}
 		setAnnOnObj(&dst.ObjectMeta, AnnotationDGDLegacyWorkerHash, legacyHash)
 	}

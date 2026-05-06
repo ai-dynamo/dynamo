@@ -17,10 +17,17 @@ const (
 	annCurrentWorkerHash          = "nvidia.com/current-worker-hash"
 )
 
-func computeLegacyDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
+// ComputeV1alpha1DGDWorkersSpecHash computes the worker hash used by the
+// v1alpha1 DGD controller before v1beta1 conversion. ConvertTo stores this
+// value on the v1beta1 hub object so the v1beta1 controller can migrate
+// existing v1alpha1 hashes without rolling workers.
+//
+// Keep this in the api/v1alpha1 package so conversion can call it without an
+// api/v1alpha1 -> internal/dynamo -> api/v1alpha1 import cycle.
+func ComputeV1alpha1DGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
 	var workerNames []string
 	for name, spec := range dgd.Spec.Services {
-		if spec != nil && isLegacyWorkerComponent(spec.ComponentType) {
+		if spec != nil && isV1alpha1WorkerComponent(spec.ComponentType) {
 			workerNames = append(workerNames, name)
 		}
 	}
@@ -28,7 +35,7 @@ func computeLegacyDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error)
 
 	hashInputs := make(map[string]DynamoComponentDeploymentSharedSpec)
 	for _, name := range workerNames {
-		hashInputs[name] = stripLegacyNonPodTemplateFields(dgd.Spec.Services[name])
+		hashInputs[name] = stripV1alpha1NonPodTemplateFields(dgd.Spec.Services[name])
 	}
 
 	data, err := json.Marshal(hashInputs)
@@ -40,11 +47,11 @@ func computeLegacyDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error)
 	return hex.EncodeToString(hash[:])[:8], nil
 }
 
-func isLegacyWorkerComponent(componentType string) bool {
+func isV1alpha1WorkerComponent(componentType string) bool {
 	return componentType == "worker" || componentType == "prefill" || componentType == "decode"
 }
 
-func stripLegacyNonPodTemplateFields(spec *DynamoComponentDeploymentSharedSpec) DynamoComponentDeploymentSharedSpec {
+func stripV1alpha1NonPodTemplateFields(spec *DynamoComponentDeploymentSharedSpec) DynamoComponentDeploymentSharedSpec {
 	stripped := *spec
 
 	stripped.Annotations = nil
