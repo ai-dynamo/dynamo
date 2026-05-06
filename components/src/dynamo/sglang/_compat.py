@@ -20,12 +20,6 @@ import logging
 from functools import lru_cache
 from typing import Any
 
-from sglang.srt.utils.network import (  # noqa: F401 — re-exported for callers
-    NetworkAddress,
-    get_local_ip_auto,
-    get_zmq_socket,
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -152,11 +146,8 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 
 __all__ = [
-    "NetworkAddress",
     "enable_disjoint_streaming_output",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
-    "get_local_ip_auto",
     "get_scheduler_info",
-    "get_zmq_socket",
 ]
