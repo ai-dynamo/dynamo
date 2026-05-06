@@ -47,6 +47,14 @@ class frontend_perf:
 
     # Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     STAGE_DURATION_SECONDS = "stage_duration_seconds"
+    # Per-stage inflight request gauge (labels: stage, phase)
+    # Tracks how many requests are currently in each pipeline stage.
+    # Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    STAGE_REQUESTS = "stage_requests"
+    # Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    STAGE_PREPROCESS = "preprocess"
+    STAGE_ROUTE = "route"
+    STAGE_DISPATCH = "dispatch"
     # Tokenization time in preprocessor
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
@@ -73,6 +81,9 @@ class frontend_service:
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
     # Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     INFLIGHT_REQUESTS = "inflight_requests"
+    # Number of requests currently being handled by the frontend, from HTTP handler
+    # entry to response completion. Clearer name for what inflight_requests measures.
+    ACTIVE_REQUESTS = "active_requests"
     # Number of disconnected clients (gauge that can go up and down)
     DISCONNECTED_CLIENTS = "disconnected_clients"
     # Duration of LLM requests
@@ -112,6 +123,11 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Total number of times migration was disabled because the sequence length
+    # exceeded the configured max_seq_len limit
+    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
+        "model_migration_max_seq_len_exceeded_total"
+    )
     # Total number of request cancellations
     MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
     # Total number of requests rejected due to resource exhaustion
@@ -301,6 +317,8 @@ class router:
     INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
     # Output sequence length in tokens observed at the router
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+    # Predicted KV cache hit rate at routing time (0.0-1.0)
+    KV_HIT_RATE = "router_kv_hit_rate"
 
 
 class router_request:
@@ -363,22 +381,6 @@ class tokio_perf:
 class transport:
     """Transport-specific metrics (TCP / NATS)"""
 
-    # NOTE: Nested classes added manually because the codegen does not yet
-    # handle Rust submodules (see TODO in prometheus_parser.rs).
-    # Re-running gen-python-prometheus-names will overwrite this file and
-    # lose these classes until the codegen is updated.
-
-    class tcp:
-        POOL_ACTIVE = "tcp_pool_active"
-        POOL_IDLE = "tcp_pool_idle"
-        BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
-        BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
-        ERRORS_TOTAL = "tcp_errors_total"
-        SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
-
-    class nats:
-        ERRORS_TOTAL = "nats_errors_total"
-
 
 class trtllm_additional:
     """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
@@ -421,5 +423,19 @@ class work_handler:
     NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
     # Backend processing: handle_payload entry to first response sent
     TIME_TO_FIRST_RESPONSE_SECONDS = "time_to_first_response_seconds"
+    # Current items in the bounded work queue awaiting dispatcher pickup (gauge)
+    QUEUE_DEPTH = "queue_depth"
+    # Configured capacity of the bounded work queue (gauge, static)
+    QUEUE_CAPACITY = "queue_capacity"
+    # Total times enqueuing work failed because the dispatcher channel was closed.
+    # tokio bounded mpsc applies backpressure on full — saturation shows up as
+    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
+    # Time spent waiting to acquire a worker-pool permit (histogram)
+    PERMIT_WAIT_SECONDS = "permit_wait_seconds"
+    # Current number of active worker-pool tasks holding a permit (gauge)
+    POOL_ACTIVE_TASKS = "pool_active_tasks"
+    # Configured worker-pool size / total permits (gauge, static)
+    POOL_CAPACITY = "pool_capacity"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"

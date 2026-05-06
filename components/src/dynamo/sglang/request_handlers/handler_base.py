@@ -26,6 +26,8 @@ from typing import (
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
     KvEventPublisher,
@@ -144,7 +146,7 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
-        self.enable_trace = config.server_args.enable_trace
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         # Set up metrics and KV publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
@@ -449,9 +451,24 @@ class LoraMixin:
                                 "lora_id": lora_id,
                             }
 
+                            # Match the base-model registration topology so the
+                            # prefill router activates for the LoRA model name
+                            # the same way it does for the base model. Without
+                            # this, prefill workers register the LoRA as a
+                            # chat-completions target and the frontend routes
+                            # chat requests directly to prefill, which then
+                            # waits forever for a KV transfer. For non-prefill
+                            # workers, honor --endpoint-types so the LoRA is
+                            # exposed on the same endpoints as the base model.
+                            if self.config.serving_mode == DisaggregationMode.PREFILL:
+                                lora_model_type = ModelType.Prefill
+                            else:
+                                lora_model_type = parse_endpoint_types(
+                                    self.config.dynamo_args.endpoint_types
+                                )
                             await register_llm(
                                 model_input=ModelInput.Tokens,
-                                model_type=ModelType.Chat | ModelType.Completions,
+                                model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.server_args.model_path,
                                 kv_cache_block_size=self.config.server_args.page_size,
@@ -699,7 +716,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
-        self.enable_trace = config.server_args.enable_trace
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -1062,6 +1079,11 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
                 return {"json_schema": json.dumps(json_schema)}
+            structural_tag = guided_decoding.get("structural_tag")
+            if structural_tag is not None:
+                if hasattr(structural_tag, "model_dump"):
+                    structural_tag = structural_tag.model_dump()
+                return {"structural_tag": json.dumps(structural_tag)}
         return {}
 
     @staticmethod

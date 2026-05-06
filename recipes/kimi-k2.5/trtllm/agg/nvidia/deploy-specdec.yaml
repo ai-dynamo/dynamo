@@ -59,7 +59,7 @@ spec:
             - -c
           args:
             - python3 -m dynamo.frontend --router-mode kv --router-reset-states --http-port 8000 --discovery-backend kubernetes --request-plane nats
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
     TrtllmWorker:
       componentType: worker
       envFromSecret: hf-token-secret
@@ -93,7 +93,7 @@ spec:
                 --kv-block-size 32 \
                 --dyn-tool-call-parser kimi_k2 \
                 --dyn-reasoning-parser kimi_k25
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           env:
             - name: MODEL_NAME
               value: nvidia/Kimi-K2.5-NVFP4

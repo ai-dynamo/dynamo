@@ -6,8 +6,11 @@
 import argparse
 import dataclasses
 import logging
+import os
 from typing import Optional
 
+import huggingface_hub
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 
 try:
@@ -422,6 +425,31 @@ def parse_omni_args() -> OmniConfig:
 
     vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
+
+    # Resolve repo id to local snapshot path under HF_HUB_OFFLINE so
+    # vllm-omni diffusion workers don't hit transformers v5's offline
+    # LocalEntryNotFoundError (vLLM's EngineArgs does the same rewrite).
+    if (
+        huggingface_hub.constants.HF_HUB_OFFLINE
+        and config.model
+        and not os.path.exists(config.model)
+    ):
+        model_id = config.model
+        config.model = get_model_path(
+            config.model, getattr(vllm_args, "revision", None)
+        )
+        if model_id != config.model:
+            # Preserve the original repo id as the user-facing model name
+            # so /v1/models still advertises "Wan-AI/..." not the snapshot path.
+            if getattr(config, "served_model_name", None) is None:
+                config.served_model_name = model_id
+            logger.info(
+                "HF_HUB_OFFLINE is True; replaced omni model_id [%s] "
+                "with model_path [%s] so vllm-omni diffusion workers "
+                "see a local snapshot.",
+                model_id,
+                config.model,
+            )
 
     engine_args = OmniEngineArgs.from_cli_args(vllm_args)
 

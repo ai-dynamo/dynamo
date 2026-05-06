@@ -6,16 +6,23 @@
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+import dynamo.sglang._compat as sglang_compat
+from dynamo.sglang._compat import (
+    ensure_sglang_top_level_exports,
+    filter_supported_async_generate_kwargs,
+)
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -36,6 +43,162 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_compat_restores_sglang_top_level_exports():
+    """Dynamo supports SGLang builds that omit top-level Engine/ServerArgs."""
+    import sglang as sgl
+    from sglang.srt.entrypoints.engine import Engine
+    from sglang.srt.server_args import ServerArgs
+
+    missing = object()
+    original_engine = getattr(sgl, "Engine", missing)
+    original_server_args = getattr(sgl, "ServerArgs", missing)
+
+    try:
+        if hasattr(sgl, "Engine"):
+            delattr(sgl, "Engine")
+        if hasattr(sgl, "ServerArgs"):
+            delattr(sgl, "ServerArgs")
+
+        ensure_sglang_top_level_exports()
+
+        assert sgl.Engine is Engine
+        assert sgl.ServerArgs is ServerArgs
+    finally:
+        if original_engine is missing:
+            if hasattr(sgl, "Engine"):
+                delattr(sgl, "Engine")
+        else:
+            sgl.Engine = original_engine
+
+        if original_server_args is missing:
+            if hasattr(sgl, "ServerArgs"):
+                delattr(sgl, "ServerArgs")
+        else:
+            sgl.ServerArgs = original_server_args
+
+
+def test_compat_filters_async_generate_kwargs_for_older_engines():
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    kwargs = {
+        "input_ids": [1, 2, 3],
+        "return_routed_experts": True,
+    }
+
+    assert filter_supported_async_generate_kwargs(OldEngine(), kwargs) == {
+        "input_ids": [1, 2, 3]
+    }
+
+
+def test_compat_keeps_async_generate_kwargs_for_newer_engines():
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    kwargs = {"return_routed_experts": True}
+
+    assert filter_supported_async_generate_kwargs(NewEngine(), kwargs) == kwargs
+
+
+def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
+    class VariadicEngine:
+        async def async_generate(self, **kwargs):
+            return None
+
+    kwargs = {"return_routed_experts": True}
+
+    assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+def test_routed_experts_kwarg_omitted_when_flag_off():
+    """Default config (no enable_return_routed_experts) → empty dict."""
+
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    server_args = SimpleNamespace()  # flag absent → treated as False
+
+    assert (
+        DecodeWorkerHandler._resolve_routed_experts_kwargs(NewEngine(), server_args)
+        == {}
+    )
+
+
+def test_routed_experts_kwarg_dropped_on_deepseek_v4_engine():
+    """Opt-in + sglang deepseek_v4-shaped engine (no kwarg, no **kwargs) → empty dict.
+
+    Mirrors the deepseek_v4 branch of sglang/srt/entrypoints/engine.py:
+    async_generate has explicit named params and no return_routed_experts.
+    The compat layer must drop the kwarg even when the user opted in.
+    """
+
+    class DeepSeekV4Engine:
+        async def async_generate(
+            self,
+            prompt=None,
+            sampling_params=None,
+            input_ids=None,
+            stream=False,
+            bootstrap_host=None,
+            bootstrap_port=None,
+            bootstrap_room=None,
+            data_parallel_rank=None,
+            external_trace_header=None,
+            rid=None,
+        ):
+            return None
+
+    server_args = SimpleNamespace(enable_return_routed_experts=True)
+
+    assert (
+        DecodeWorkerHandler._resolve_routed_experts_kwargs(
+            DeepSeekV4Engine(), server_args
+        )
+        == {}
+    )
+
+
+def test_routed_experts_kwarg_forwarded_when_flag_on_and_supported():
+    """Opt-in + engine with kwarg in signature → kwarg forwarded as True."""
+
+    class NewEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    server_args = SimpleNamespace(enable_return_routed_experts=True)
+
+    assert DecodeWorkerHandler._resolve_routed_experts_kwargs(
+        NewEngine(), server_args
+    ) == {"return_routed_experts": True}
+
+
+def test_compat_caches_async_generate_signature_inspection(monkeypatch):
+    class CachedEngine:
+        async def async_generate(self, return_routed_experts=False):
+            return None
+
+    sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
+    calls = 0
+    original_signature = sglang_compat.inspect.signature
+
+    def counting_signature(obj):
+        nonlocal calls
+        calls += 1
+        return original_signature(obj)
+
+    monkeypatch.setattr(sglang_compat.inspect, "signature", counting_signature)
+
+    kwargs = {"return_routed_experts": True}
+    assert filter_supported_async_generate_kwargs(CachedEngine(), kwargs) == kwargs
+    assert filter_supported_async_generate_kwargs(CachedEngine(), kwargs) == kwargs
+    assert calls == 1
+
+    sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -288,3 +451,98 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
     assert "request" not in payload
     assert payload["bootstrap_info"]["bootstrap_host"] == FAKE_BOOTSTRAP_HOST
     assert payload["stop_conditions"]["max_tokens"] == 1
+
+
+# ---------------------------------------------------------------------------
+# LoRA registration model_type gate
+# ---------------------------------------------------------------------------
+# Pins the serving_mode → model_type selection in LoraMixin.load_lora so a
+# refactor that flips prefill back to Chat|Completions cannot silently land:
+# it would re-introduce the disagg hang where the frontend routes
+# /v1/chat/completions directly to the prefill worker.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serving_mode, endpoint_types, expected_model_type_str",
+    [
+        ("prefill", "chat,completions", "prefill"),
+        ("decode", "chat,completions", "chat,completions"),
+        ("agg", "chat,completions", "chat,completions"),
+        ("decode", "completions", "completions"),
+        ("agg", "chat", "chat"),
+    ],
+)
+async def test_lora_registration_model_type_gate(
+    monkeypatch, serving_mode, endpoint_types, expected_model_type_str
+):
+    """LoraMixin.load_lora must select model_type based on serving_mode.
+
+    PREFILL → ModelType.Prefill (so the prefill router activates and the frontend
+    does not route chat completions directly to prefill).
+    Otherwise → parse_endpoint_types(endpoint_types) (mirrors base-model
+    registration so --endpoint-types overrides are honored).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from dynamo.common.constants import DisaggregationMode
+    from dynamo.sglang.request_handlers import handler_base
+    from dynamo.sglang.request_handlers.handler_base import LoraMixin
+
+    # Capture the kwargs passed to register_llm.
+    captured: dict = {}
+
+    async def fake_register_llm(**kw):
+        captured.update(kw)
+
+    # Fake LoRA manager that returns a successful download.
+    fake_lora_manager = MagicMock()
+    fake_lora_manager.download_lora = AsyncMock(
+        return_value={"status": "success", "local_path": "/tmp/fake_lora"}
+    )
+
+    monkeypatch.setattr(handler_base, "register_llm", fake_register_llm)
+    monkeypatch.setattr(handler_base, "get_lora_manager", lambda: fake_lora_manager)
+    monkeypatch.setattr(handler_base, "lora_name_to_id", lambda name: 12345)
+
+    # Fake SGLang engine — only the LoRA load path is exercised.
+    fake_load_result = SimpleNamespace(success=True, error_message=None)
+    fake_engine = MagicMock()
+    fake_engine.tokenizer_manager = MagicMock()
+    fake_engine.tokenizer_manager.load_lora_adapter = AsyncMock(
+        return_value=fake_load_result
+    )
+
+    # Exercise the mixin in isolation — avoids needing a concrete subclass
+    # with abstract methods, real publisher, runtime, etc. The mixin only
+    # touches engine, config, generate_endpoint, and its own LoRA tracking.
+    class _Host(LoraMixin):
+        pass
+
+    handler = _Host()
+    handler.engine = fake_engine
+    handler.generate_endpoint = MagicMock()
+
+    config = MagicMock()
+    config.serving_mode = DisaggregationMode(serving_mode)
+    config.server_args.model_path = "/models/base"
+    config.server_args.page_size = 16
+    config.dynamo_args.endpoint_types = endpoint_types
+    handler.config = config
+
+    handler._init_lora_tracking()
+
+    # Drain the async generator.
+    results = [
+        chunk
+        async for chunk in handler.load_lora(
+            {"lora_name": "test_lora", "source": {"uri": "s3://x/y"}}
+        )
+    ]
+
+    assert results and results[-1]["status"] == "success", results
+    assert captured, "register_llm was not invoked"
+    assert (
+        str(captured["model_type"]) == expected_model_type_str
+    ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    assert captured["lora_name"] == "test_lora"

@@ -356,6 +356,7 @@ async def run_thorough(
         isl=isl,
         osl=osl,
         num_gpus_per_node=dgdr.hardware.numGpusPerNode,
+        total_gpus=total_gpus,
         k8s_pvc_name=model_cache.pvcName,
         k8s_pvc_mount_path=model_cache.pvcMountPath,
         k8s_model_path_in_pvc=model_cache.pvcModelPath,

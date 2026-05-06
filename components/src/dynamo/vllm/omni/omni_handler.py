@@ -40,6 +40,8 @@ class EngineInputs:
         fps: Frames per second, only meaningful for video requests.
         response_format: Desired response format (e.g. "url" or "b64_json" for
             image requests). None means use the default for the request type.
+        output_format: The output format to use for the response.
+            None means use the default for the request type.
     """
 
     prompt: Union[OmniTextPrompt, Dict[str, Any]]
@@ -48,6 +50,7 @@ class EngineInputs:
     fps: int = 0
     speed: float = 1.0
     response_format: str | None = None
+    output_format: str | None = None
 
 
 class OmniHandler(BaseOmniHandler):
@@ -185,6 +188,7 @@ class OmniHandler(BaseOmniHandler):
                         request_type=inputs.request_type,
                         fps=inputs.fps,
                         response_format=inputs.response_format,
+                        output_format=inputs.output_format,
                         previous_text=previous_text,
                         speed=inputs.speed,
                     )

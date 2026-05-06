@@ -138,10 +138,15 @@ modelExpressURL: ""
 checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
-
-  # Path written by worker when model is loaded and ready for checkpointing
-  # Must match the path expected by checkpoint-enabled runtime images
-  readyForCheckpointFilePath: "/tmp/ready-for-checkpoint"
+  # Localhost seccomp profile applied to checkpoint+restore pods to block
+  # io_uring (which CRIU cannot dump). The default profile is applied unless
+  # seccomp.disabled=true is set. Set seccomp.disabled=true on OpenShift
+  # (custom localhost profiles require privileged SCC) or when using a CRIU
+  # build with io_uring support. Override the default path by setting
+  # seccomp.profile.
+  seccomp:
+    disabled: false
+    profile: profiles/block-iouring.json
 
 # Webhook configuration
 webhook:

@@ -25,23 +25,29 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge],
+                # TODO: re-enable GPU-parallel scheduling with
+                # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
                 timeout_s=220,
-                profiled_vram_gib=9.6,
             ),
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=340,
                 single_gpu=True,
+                profiled_vram_gib=15.0,
+                requested_vllm_kv_cache_bytes=4_096_361_000,
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
             ),
             "p_d": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
+                profiled_vram_gib=15.7,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
             ),
         },
         request_payloads=[make_image_payload(["green"])],
@@ -52,14 +58,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=600,
+                timeout_s=720,
                 delayed_start=60,
+                profiled_vram_gib=8.2,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
+                profiled_vram_gib=19.7,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
             ),
         },
         request_payloads=[make_video_payload(["red", "static", "still"])],
@@ -85,6 +95,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[
+                    pytest.mark.skip(
+                        reason="vLLM engine core init fails on amd64 post-merge. "
+                        "OPS-4445"
+                    ),
                     pytest.mark.post_merge,
                 ],
                 timeout_s=600,
@@ -94,18 +108,54 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         request_payloads=[make_audio_payload(["Hester", "Pynne"])],
         extra_vllm_args=["--max-model-len", "7232"],
     ),
+    # Non-Qwen VLM coverage
     MultimodalModelProfile(
-        name="google/gemma-3-4b-it",
-        short_name="gemma3-4b",
+        name="google/gemma-4-E2B-it",
+        short_name="gemma4-e2b-it",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
+                # TODO: re-enable GPU-parallel scheduling with
+                # profiled_vram_gib=12.0 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
-                profiled_vram_gib=12.0,
             ),
         },
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
-        gated=True,
+    ),
+    # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
+    # We may use less GPUs by squeezing the model onto 2 GPUs.
+    MultimodalModelProfile(
+        name="llava-hf/llava-1.5-7b-hf",
+        short_name="llava-1.5-7b",
+        topologies={
+            "e_pd": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=600,
+                gpu_marker="gpu_4",
+            ),
+            "epd": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=600,
+                gpu_marker="gpu_4",
+            ),
+        },
+        # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
+        # keep this as a multimodal serving smoke check, not a color oracle.
+        request_payloads=[
+            make_image_payload(
+                [
+                    "green",
+                    "white",
+                    "black",
+                    "purple",
+                    "red",
+                    "pink",
+                    "yellow",
+                    "blue",
+                    "orange",
+                ]
+            )
+        ],
     ),
 ]

@@ -113,7 +113,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
-| Lifecycle [required]    | pre_merge, post_merge, nightly, weekly, release                  | When the test should run           |
+| Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
@@ -509,9 +509,48 @@ Long-running tests **must** have an explicit timeout. A test that hangs (e.g., w
 - For Rust, use `#[timeout(Duration::from_secs(300))]` or set a default timeout in `Cargo.toml`.
 - In CI, the workflow also enforces a global job timeout (see workflow YAML files). Per-test timeouts catch problems earlier and with a clearer error message than a blanket job cancellation.
 
+### When NOT to bump pytest timeouts (CI runner-poisoning)
+
+A test failing with `pytest-timeout` or `URL check failed after Ns` is **not always** a "wait longer" problem. On L4 CI runners we've observed a cascade where the *symptom* looks like a timeout but the *cause* is runner-environment exhaustion:
+
+1. Runner runs out of memory (or fills its disk during a heavy test).
+2. The OOM killer (or disk-pressure death) takes out the per-test ephemeral **etcd** instance (dynamic ports like `127.0.0.1:2387`, not the default `2379`).
+3. The Dynamo worker process tries to register endpoints / publish metrics / get a lease and fails repeatedly with:
+   ```
+   dynamo_runtime::transports::etcd::lease: Failed to establish keep-alive stream
+   error=grpc request error: code: 'The service is currently unavailable',
+   message: "tcp connect error",
+   ConnectError("tcp connect error", 127.0.0.1:2387,
+                Os { code: 111, kind: ConnectionRefused, message: "Connection refused" })
+   ```
+4. The worker never finishes startup; the test's URL health check eventually times out (often after 600s), and **every subsequent test on the same runner inherits the poisoned state** and fails in cascading ways.
+
+How to recognize the cascade vs a genuine slow cold-load:
+
+- **Cascade signal:** Multiple unrelated tests in the same job fail (e.g. `disaggregated`, `multi_node_tp_headless`, `lora_aggregated_router` all timing out at exactly 601.7s on the URL check). The CI dashboard auto-categorizes the job with `oom`, `disk-space-error`, and `etcd-error` tags simultaneously.
+- **Genuine cold-load signal:** A single specific test fails deterministically near a clean budget boundary (e.g. exactly 146.79s for a 147s budget) across many runs. Bumping that one test's timeout helps.
+
+If you see the cascade signal, **do not** bump pytest timeouts. The fix lives in CI infra (bigger runners, disk cleanup between tests, per-test runner reset) — not in the test code.
+
 ### Time Budgets
 
 - If a test exceeds its time budget (see [Test Types and Locations](#test-types-and-locations)), profile it with `pytest --durations=0` and consider mocking heavy dependencies, using a smaller model checkpoint, or moving it to a nightly/weekly pipeline with `@pytest.mark.slow`.
+
+### Pipeline Time Budgets
+
+Each lifecycle marker corresponds to a CI pipeline with an aggregate wall-clock budget. When adding or marking a test, the pipeline it lands in must continue to fit under its budget:
+
+| Marker       | Pipeline budget | Rationale                                                                 |
+|--------------|-----------------|---------------------------------------------------------------------------|
+| `pre_merge`  | < 30 min        | Runs on every PR; fast feedback is required to keep developers unblocked. |
+| `post_merge` | < 1 hr          | Runs after merge to `main`; catches regressions quickly without gating PRs.|
+| `nightly`    | < 3 hr          | Runs once per day; covers longer integration and multi-GPU scenarios.     |
+
+Guidance when adding a test:
+
+- Pick the **lightest** lifecycle marker the test can live in. A test that only needs to run daily should not be marked `pre_merge`.
+- Before marking a new test `pre_merge`, check the test's expected runtime and confirm the pre-merge pipeline still fits under 30 min. If it wouldn't, move the test to `post_merge` or `nightly`, or shrink it (mock heavy dependencies, smaller checkpoint, fewer cases).
+- If a pipeline is already near its budget, prefer downgrading existing slow tests (`pre_merge` → `post_merge`, `post_merge` → `nightly`) over adding more.
 
 ### Time Budget Industry Practices
 

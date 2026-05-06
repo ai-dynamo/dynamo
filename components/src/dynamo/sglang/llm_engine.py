@@ -9,6 +9,7 @@ and feature gap details.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import AsyncGenerator
@@ -25,17 +26,20 @@ from dynamo.common.backend.engine import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
+from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import parse_args
 
 logger = logging.getLogger(__name__)
 
 
 class SglangLLMEngine(LLMEngine):
-    def __init__(self, server_args):
+    def __init__(self, server_args, dynamo_args):
         self.server_args = server_args
+        self.dynamo_args = dynamo_args
         self.engine = None
         self._input_param_manager = None
         self._skip_tokenizer_init = server_args.skip_tokenizer_init
+        self._use_sglang_tokenizer = dynamo_args.use_sglang_tokenizer
 
     @classmethod
     async def from_args(
@@ -46,12 +50,10 @@ class SglangLLMEngine(LLMEngine):
         dynamo_args = config.dynamo_args
 
         model_input = (
-            ModelInput.Text
-            if not server_args.skip_tokenizer_init
-            else ModelInput.Tokens
+            ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
         )
 
-        engine = cls(server_args)
+        engine = cls(server_args, dynamo_args)
         worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
@@ -73,7 +75,7 @@ class SglangLLMEngine(LLMEngine):
         # Capacity fields -- sourced the same way as register.py in the
         # non-unified path so the Rust runtime gets consistent values.
         total_kv_blocks = None
-        scheduler_info = getattr(self.engine, "scheduler_info", None) or {}
+        scheduler_info = get_scheduler_info(self.engine)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
         page_size = self.server_args.page_size
         if max_total_tokens and page_size:
@@ -111,7 +113,11 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: GenerateChunk = {"token_ids": []}
+            # SGLang includes an output index when n>1. Preserve it so the
+            # Rust/OpenAI response layer can keep choices separate; default to
+            # 0 for legacy/non-n chunks.
+            output_idx = res.get("index") or 0
+            out: GenerateChunk = {"token_ids": [], "index": output_idx}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 
@@ -122,6 +128,7 @@ class SglangLLMEngine(LLMEngine):
                     completion_tokens = meta_info.get("completion_tokens", 0)
                     yield {
                         "token_ids": [],
+                        "index": output_idx,
                         "finish_reason": "cancelled",
                         "completion_usage": {
                             "prompt_tokens": prompt_tokens,
@@ -149,6 +156,7 @@ class SglangLLMEngine(LLMEngine):
                 completion_tokens = meta_info.get("completion_tokens", 0)
                 yield {
                     "token_ids": output_ids,
+                    "index": output_idx,
                     "finish_reason": "cancelled",
                     "completion_usage": {
                         "prompt_tokens": prompt_tokens,
@@ -176,29 +184,48 @@ class SglangLLMEngine(LLMEngine):
             logger.info("SGLang engine shutdown")
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
-        if self._skip_tokenizer_init:
+        if not self._use_sglang_tokenizer:
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
+                "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
         else:
             param_mapping = {
                 "temperature": request.get("temperature"),
                 "top_p": request.get("top_p"),
                 "top_k": request.get("top_k"),
+                "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
         return {k: v for k, v in param_mapping.items() if v is not None}
+
+    @staticmethod
+    def _get_guided_decoding_params(guided_decoding: object) -> dict:
+        if isinstance(guided_decoding, dict):
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                return {"json_schema": json.dumps(json_schema)}
+            structural_tag = guided_decoding.get("structural_tag")
+            if structural_tag is not None:
+                if hasattr(structural_tag, "model_dump"):
+                    structural_tag = structural_tag.model_dump()
+                return {"structural_tag": json.dumps(structural_tag)}
+        return {}
 
     def _get_input_param(self, request: GenerateRequest) -> dict:
         assert self._input_param_manager is not None, "Engine not initialized"
         request_input = self._input_param_manager.get_input_param(
-            request, use_tokenizer=not self._skip_tokenizer_init
+            request, use_tokenizer=self._use_sglang_tokenizer
         )
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input

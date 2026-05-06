@@ -30,6 +30,8 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      benchmarks: ${{ steps.changes.outputs.benchmarks }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -68,6 +70,7 @@ jobs:
       - trtllm-copy-to-acr
       - planner-build
       - planner-test
+      - frontend-build
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -82,6 +85,17 @@ jobs:
       - name: Check all deploy test jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+
+  dynamo-status-check:
+    runs-on: ubuntu-slim
+    needs:
+      - changed-files
+      - dynamo-pipeline
+    if: always()
+    steps:
+      - name: Check all dynamo jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   # ============================================================================
   # Operator
@@ -244,6 +258,18 @@ jobs:
       build_timeout_minutes: 45
     secrets: inherit
 
+  frontend-build:
+    name: frontend
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+    secrets: inherit
+
   # ============================================================================
   # TEST PIPELINES
   # ============================================================================
@@ -264,6 +290,10 @@ jobs:
       cpu_only_test_markers: pre_merge and vllm and gpu_0
       gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 45
+      # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
+      # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -359,15 +389,39 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      amd_runner: prod-tester-amd-v1
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: '2'
       run_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
+  # DYNAMO RUNTIME PIPELINE
+  # ============================================================================
+
+  dynamo-pipeline:
+    name: dynamo-runtime
+    needs: [changed-files]
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.planner == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.benchmarks == 'true'
+    uses: ./.github/workflows/dynamo-pipeline.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
   # ============================================================================
@@ -384,7 +438,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   sglang-compliance:
@@ -397,7 +451,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   trtllm-compliance:
@@ -410,7 +464,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   planner-compliance:
@@ -423,7 +477,19 @@ jobs:
       target: planner
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: frontend
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   # ============================================================================
@@ -441,7 +507,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -457,7 +523,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -511,7 +577,7 @@ jobs:
 
   deploy-test-vllm:
     name: vllm Deploy Test
-    needs: [changed-files, deploy-operator, vllm-copy-to-acr, vllm-multi-gpu-test]
+    needs: [changed-files, deploy-operator, vllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -527,7 +593,7 @@ jobs:
 
   deploy-test-sglang:
     name: sglang Deploy Test
-    needs: [changed-files, deploy-operator, sglang-copy-to-acr, sglang-multi-gpu-test]
+    needs: [changed-files, deploy-operator, sglang-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -543,7 +609,7 @@ jobs:
 
   deploy-test-trtllm:
     name: trtllm Deploy Test
-    needs: [changed-files, deploy-operator, trtllm-copy-to-acr, trtllm-multi-gpu-test]
+    needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -585,6 +651,7 @@ jobs:
       - sglang-multi-gpu-test
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
+      - dynamo-pipeline
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

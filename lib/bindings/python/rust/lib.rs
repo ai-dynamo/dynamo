@@ -34,9 +34,10 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
+
+use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
 use crate::llm::local_model::ModelRuntimeConfig;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
@@ -187,6 +188,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::fpm::FpmEventRelay>()?;
+    m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
@@ -263,7 +265,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -274,7 +276,7 @@ fn register_model<'p>(
     model_name: Option<&str>,
     context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
-    router_mode: Option<RouterMode>,
+    router_config: Option<PyRouterConfig>,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
@@ -282,6 +284,7 @@ fn register_model<'p>(
     media_fetcher: Option<MediaFetcher>,
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
+    self_host_metadata: Option<bool>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill
@@ -306,8 +309,10 @@ fn register_model<'p>(
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
-    let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
-    let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
+    // Only embed router_config in the MDC when the caller explicitly provided it.
+    // This preserves backward-compat: workers that don't specify router_config continue to
+    // fall back to the frontend-level global router config via the watcher.
+    let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -361,6 +366,7 @@ fn register_model<'p>(
             if let Some(cfg) = runtime_config {
                 card.runtime_config = cfg.inner;
             }
+            card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
@@ -396,12 +402,16 @@ fn register_model<'p>(
             .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
-            .router_config(Some(router_config))
+            .router_config(explicit_router_config.clone())
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
             .media_fetcher(media_fetcher.map(|m| m.inner));
+        // Absence falls through to the DYN_SELF_HOST_METADATA env var default.
+        if let Some(enabled) = self_host_metadata {
+            builder.self_host_metadata(enabled);
+        }
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
 
@@ -644,14 +654,14 @@ impl DistributedRuntime {
             });
         }
 
-        let event_plane_is_nats =
-            std::env::var(config::environment_names::event_plane::DYN_EVENT_PLANE)
-                .map(|v| v.eq_ignore_ascii_case("nats"))
-                .unwrap_or(true);
+        let event_transport_kind = discovery_backend_config.resolve_event_transport_kind();
 
         let nats_enabled = request_plane.is_nats()
             || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok()
-            || event_plane_is_nats;
+            || matches!(
+                event_transport_kind,
+                dynamo_runtime::discovery::EventTransportKind::Nats
+            );
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
@@ -661,6 +671,7 @@ impl DistributedRuntime {
                 None
             },
             request_plane,
+            event_transport_kind,
         };
         let inner = runtime
             .secondary()
@@ -1062,6 +1073,46 @@ impl Client {
                         .map_err(to_pyerr)?
                 }
                 _ => client.random(request_ctx).await.map_err(to_pyerr)?,
+            };
+            tokio::spawn(process_stream(stream, tx));
+            Ok(AsyncResponseStream::new(rx, annotated))
+        })
+    }
+
+    /// Send a request using device-aware weighted routing.
+    /// Preferentially routes to GPU (CUDA) workers; CPU workers receive overflow
+    /// only when GPU workers are sufficiently loaded (controlled by DYN_ENCODER_CUDA_TO_CPU_RATIO).
+    /// With the default ratio of 8, all requests go to GPU workers unless they are
+    /// handling 8x more load than CPU workers.
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    fn device_aware_weighted<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+        annotated: Option<bool>,
+        context: Option<context::Context>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
+        let annotated = annotated.unwrap_or(false);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let client = self.router.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream = match context {
+                Some(context) => {
+                    let span = get_span_for_context(&context, "device_aware_weighted");
+                    client
+                        .device_aware_weighted(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
+                }
+                _ => client
+                    .device_aware_weighted(request_ctx)
+                    .await
+                    .map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(rx, annotated))

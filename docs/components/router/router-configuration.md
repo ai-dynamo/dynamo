@@ -13,7 +13,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. It also enables priority scheduling via `priority` hints in `nvext.agent_hints`. Must be greater than 0. Set to `None` to disable queueing.
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. It also enables priority scheduling via `priority` hints in `nvext.agent_hints`. Must be greater than 0. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend.
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
 
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
@@ -24,7 +24,7 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 
 ## KV Event Transport and Persistence
 
-- `--no-router-kv-events`: Disables KV event tracking. By default, the router uses KV events to monitor block creation and deletion from workers. When disabled, the router predicts cache state from routing decisions with TTL-based expiration and pruning.
+- `--no-router-kv-events`: Disables KV event tracking. By default, the router uses KV events to monitor block creation and deletion from workers. When disabled, the router predicts cache state from routing decisions with TTL-based expiration.
 - `--router-durable-kv-events`: **Deprecated.** Enables JetStream mode for KV event transport. The event-plane subscriber in local indexer mode is now the recommended path.
 - `--router-reset-states`: Only applies in JetStream mode (`--router-durable-kv-events`). Resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting from a fresh state.
 - `--router-snapshot-threshold`: Only applies in JetStream mode (`--router-durable-kv-events`). Sets the number of messages in JetStream before triggering a snapshot.
@@ -40,8 +40,6 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 ## KV Indexer / Approx KV Indexer
 
 - `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
-- `--router-max-tree-size`: Maximum tree size before pruning is triggered. Defaults to 1048576 (2^20 blocks) when `--no-router-kv-events` is used.
-- `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. Defaults to 0.8 when `--no-router-kv-events` is used.
 - `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). With KV events enabled, values greater than 1 use the concurrent radix tree; approximate mode always uses a single-threaded indexer.
 
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
@@ -60,7 +58,7 @@ These activate automatically with `--router-mode kv` -- no additional flags are 
 
 `--router-kv-overlap-score-weight` is the primary knob for balancing prefill efficiency against decode load. Prefill-heavy workloads benefit from a higher weight, which steers requests toward workers with better cache overlap and reduces TTFT. Decode-heavy workloads benefit from a lower weight, which distributes decode load more evenly and reduces ITL. The default of 1.0 is a reasonable starting point. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`.
 
-Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration and pruning.
+Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration.
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
 
@@ -69,6 +67,13 @@ Use `--no-router-track-prefill-tokens` when a router is serving decode-only traf
 Use `--router-track-output-blocks` when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. If you also pass `nvext.agent_hints.osl` per request, the router applies fractional decay to output blocks so that requests nearing completion contribute less future load.
 
 `--router-queue-threshold` controls when incoming requests are held in a priority queue. The router waits while all workers exceed the configured fraction of `max_num_batched_tokens`, then releases work as capacity frees up. Set it to `None` to disable queueing entirely.
+
+**Note for the SGLang backend.** Since [#8220](https://github.com/ai-dynamo/dynamo/pull/8220), the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
+
+- If `--max-prefill-tokens` is set, MDC's `max_num_batched_tokens` equals that value (the per-step prefill window — the value most users expect).
+- If `--max-prefill-tokens` is not set, MDC's `max_num_batched_tokens` falls back to `max_total_num_tokens` from SGLang's `scheduler_info`, which is the **total KV cache pool** in tokens. On large GPUs with high `mem-fraction-static` the pool can be hundreds of thousands of tokens — much larger than `chunked-prefill-size`.
+
+The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
 
 Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config.
 

@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "1.1.0"
+version = "1.2.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==1.1.0",
+    "ai-dynamo-runtime==1.2.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -50,7 +50,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.19.0",
+    "vllm[flashinfer,runai,otel]==0.20.1",
     # vllm-omni is installed separately in container builds (see
     # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
     # pip/uv dependency resolution for omni can override the vLLM torch stack.
@@ -58,6 +58,7 @@ vllm = [
     "blake3>=1.0.0,<2.0.0",
     "soundfile>=0.13.1",
     "librosa>=0.10.0",
+    "ray==2.55.0",
 ]
 
 sglang = [
@@ -222,6 +223,9 @@ filterwarnings = [
     # SGLang quantization warnings on CPU-only runners
     "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
     "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
+    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
+    # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
+    "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
 ]
 
 
@@ -232,6 +236,8 @@ markers = [
     "post_merge: marks tests to run after merge",
     "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
+    "skip_in_nightly: excludes a test from the nightly pipeline only (still runs in pre_merge/post_merge). Used via `not skip_in_nightly` in nightly-ci.yml marker filters",
+    "frontend_api_surface_compliance: marks tests that validate Dynamo's HTTP API surface (Responses/Anthropic wire shape, tool-call routing) against upstream compliance harnesses",
     "weekly: marks tests to run weekly",
     "release: marks tests to run on release pipelines",
     "gpu_0: marks tests that don't require GPU",
@@ -283,6 +289,7 @@ markers = [
     "asyncio: asyncio test marker",
     # Third-party plugin markers
     "timeout: test timeout in seconds (pytest-timeout plugin)",
+    "flaky: rerun a flaky test on failure (pytest-rerunfailures plugin)",
 ]
 
 # Linting/formatting

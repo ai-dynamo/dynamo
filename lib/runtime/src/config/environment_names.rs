@@ -312,6 +312,61 @@ pub mod llm {
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
+
+    /// Audit sink configuration
+    pub mod audit {
+        /// Audit sink selection. Comma-separated values: `stderr`, `nats`.
+        /// Setting any non-empty value enables audit recording.
+        pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
+
+        /// Force audit emission even when the request `store` flag is `false`.
+        pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
+
+        /// In-process audit bus capacity.
+        pub const DYN_AUDIT_CAPACITY: &str = "DYN_AUDIT_CAPACITY";
+
+        /// NATS subject the JetStream audit sink publishes to.
+        pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
+    }
+
+    /// Agent trace configuration
+    pub mod agent_trace {
+        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
+
+        /// Local output path for normalized agent trace records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
+        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
+
+        /// In-process trace bus capacity.
+        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
+
+        /// JSONL sink buffer size in bytes.
+        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
+
+        /// JSONL sink periodic flush interval in milliseconds.
+        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL sink roll threshold in record lines.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
+
+        /// Enable replay-oriented prompt block hashes in agent request trace records.
+        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
+
+        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+
+        /// Optional first-frame ZMQ topic filter for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
+    }
 }
 
 /// Model loading and caching environment variables
@@ -365,7 +420,13 @@ pub mod tcp_response_stream {
 
 /// Event Plane transport environment variables
 pub mod event_plane {
-    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    /// Event transport selection: "zmq" or "nats".
+    ///
+    /// When unset the default depends on the discovery backend:
+    /// - `file` / `mem` backends: defaults to `zmq` (no external services required).
+    /// - `etcd` / `kubernetes` backends: defaults to `nats`.
+    ///
+    /// Set this explicitly to override the context-aware default.
     pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
 
     /// Event plane codec selection: "json" or "msgpack".
@@ -516,6 +577,20 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::audit::DYN_AUDIT_SINKS,
+            llm::audit::DYN_AUDIT_FORCE_LOGGING,
+            llm::audit::DYN_AUDIT_CAPACITY,
+            llm::audit::DYN_AUDIT_NATS_SUBJECT,
+            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
+            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
+            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,

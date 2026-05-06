@@ -24,6 +24,7 @@ processor:
     - "metadata.resourceVersion"
     - "metadata.selfLink"
     - "metadata.uid"
+    - "dynamoNamespace"
     - "status.conditions[*].lastTransitionTime"
     - "status.observedGeneration"
     - "TypeMeta$"

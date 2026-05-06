@@ -486,6 +486,7 @@ async fn test_multi_turn_with_continuation() {
 pub mod openai_preprocessor_tests {
     // re-export all the tests from the parent module
     pub use super::*;
+    use dynamo_llm::protocols::openai::nvext::{AgentContext, NvExt};
     use std::collections::HashSet;
 
     #[tokio::test]
@@ -526,6 +527,55 @@ pub mod openai_preprocessor_tests {
         assert_eq!(
             eos_token_id_set,
             vec![200002, 199999, 200012].into_iter().collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_context_propagates_to_preprocessed_request() {
+        if let Err(e) = get_hf_token() {
+            println!("HF_TOKEN is not set, skipping test: {}", e);
+            return;
+        }
+        let mdc = make_mdc_from_repo(
+            "tests/data/sample-models",
+            "openai/gpt-oss-120b",
+            "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+            Some(vec![PromptContextMixin::OaiChat]),
+        )
+        .await;
+
+        let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let mut request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
+        request.nvext = Some(
+            NvExt::builder()
+                .agent_context(
+                    AgentContext::builder()
+                        .workflow_type_id("deep_research:v1".to_string())
+                        .workflow_id("run-123".to_string())
+                        .program_id("run-123:researcher-0".to_string())
+                        .parent_program_id("run-123:orchestrator".to_string())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+
+        let preprocessed_request = oai_preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap()
+            .0;
+
+        let agent_context = preprocessed_request
+            .agent_context
+            .expect("agent_context should propagate");
+        assert_eq!(agent_context.workflow_type_id, "deep_research:v1");
+        assert_eq!(agent_context.workflow_id, "run-123");
+        assert_eq!(agent_context.program_id, "run-123:researcher-0");
+        assert_eq!(
+            agent_context.parent_program_id.as_deref(),
+            Some("run-123:orchestrator")
         );
     }
 }

@@ -279,8 +279,7 @@ Returns:
 ```json
 {
   "scores": {"1": {"0": 32}, "2": {"1": 0}},
-  "frequencies": [1, 1],
-  "tree_sizes": {"1": {"0": 5}, "2": {"1": 3}}
+  "frequencies": [1, 1]
 }
 ```
 

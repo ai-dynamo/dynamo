@@ -18,7 +18,10 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
+        shared_cache::HicacheSharedKvCache,
+    },
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{
@@ -610,6 +613,26 @@ impl ModelManager {
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
         let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
+
+        // Build shared cache client based on shared_cache_type.
+        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
+            .as_ref()
+            .map(|c| c.shared_cache_type)
+            .unwrap_or_default()
+        {
+            dynamo_kv_router::SharedCacheType::None => None,
+            dynamo_kv_router::SharedCacheType::Hicache => {
+                let worker_component_name = &endpoint.id().component;
+                tracing::info!(
+                    worker_component = worker_component_name,
+                    "Using HiCache shared KV cache"
+                );
+                Some(Box::new(HicacheSharedKvCache::new(
+                    workers_with_configs.clone(),
+                )))
+            }
+        };
+
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
@@ -621,6 +644,7 @@ impl ModelManager {
             worker_type,
             model_name,
             is_eagle,
+            shared_cache,
         )
         .await?;
         Ok(Arc::new(chooser))
@@ -1152,8 +1176,6 @@ mod tests {
     use crate::kv_router::PrefillRouter;
 
     /// Helper: make a WorkerSet with an activated PrefillRouter attached.
-    /// The router is marked as activated to simulate a real deployment where
-    /// the prefill endpoint has already rendezvoused with the decode side.
     fn make_worker_set_with_prefill_router(
         namespace: &str,
         mdcsum: &str,

@@ -32,6 +32,7 @@ class PrefillPlanner(NativePlannerBase):
                 worker_info=self.prefill_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.PREFILL,
+                aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(prefill_fpms=fpms)
         except Exception as e:
@@ -70,6 +71,7 @@ class DecodePlanner(NativePlannerBase):
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
+                aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(decode_fpms=fpms)
         except Exception as e:
@@ -108,6 +110,7 @@ class AggPlanner(NativePlannerBase):
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
+                aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(agg_fpms=fpms)
         except Exception as e:
@@ -155,6 +158,7 @@ class DisaggPlanner(NativePlannerBase):
                     worker_info=worker_info,
                     profile_results_dir=self.config.profile_results_dir,
                     component_type=component,
+                    aic_spec=self.config.aic_interpolation,
                 )
                 self.state_machine.load_benchmark_fpms(**{kwarg: fpms})
             except Exception as e:

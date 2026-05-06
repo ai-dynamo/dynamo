@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
 from dynamo.profiler.utils.aiperf import get_decode_itl_and_thpt_per_gpu
 from dynamo.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
-from dynamo.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from dynamo.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
@@ -127,37 +126,6 @@ def profile_decode(
             num_gpus=num_gpus,
             attention_dp_size=attention_dp_size,
         )
-
-    return _profile_decode_helper(
-        work_dir,
-        num_gpus,
-        max_kv_tokens,
-        max_context_length,
-        interpolation_granularity,
-        get_itl_and_thpt_per_gpu,
-        attention_dp_size,
-    )
-
-
-def profile_decode_aiconfigurator(
-    work_dir: str,
-    num_gpus: int,
-    max_kv_tokens: int,
-    max_context_length: int,
-    interpolation_granularity: int,
-    ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
-    attention_dp_size: int,
-    **model_config_kwargs: Any,
-) -> None:
-    def get_itl_and_thpt_per_gpu(isl, osl, num_request):
-        perf_dict = ai_configurator_perf_estimator.estimate_perf(
-            isl,
-            osl,
-            num_request,
-            mode="decode",
-            **model_config_kwargs,
-        )
-        return perf_dict["tpot"], perf_dict["tokens/s/gpu"]
 
     return _profile_decode_helper(
         work_dir,

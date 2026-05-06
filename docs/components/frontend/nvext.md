@@ -35,9 +35,10 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
+| `agent_context` | object | `None` | Preprocessor | Passive workflow and program identity for agent traces. See [Agent Context](#agent-context). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -49,6 +50,36 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 |--------|-----------|
 | `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
 | `x-prefill-instance-id` | `prefill_worker_id` |
+
+## Agent Context
+
+The `agent_context` sub-object carries passive workflow and program identity for
+agentic requests. Dynamo uses this metadata to emit request traces when the
+agent trace sink is enabled. It does not change routing, scheduling, or cache
+behavior.
+
+| Field | Type | Required | Description |
+|-------|------|:--------:|-------------|
+| `workflow_type_id` | `string` | Yes | Reusable profile or agent class label. |
+| `workflow_id` | `string` | Yes | Workflow, run, or structured stage identifier. |
+| `program_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
+| `parent_program_id` | `string` | No | Parent program that spawned this program, typically for subagents. |
+
+```json
+{
+    "nvext": {
+        "agent_context": {
+            "workflow_type_id": "deep_research",
+            "workflow_id": "research-run-42",
+            "program_id": "research-run-42:researcher",
+            "parent_program_id": "research-run-42:planner"
+        }
+    }
+}
+```
+
+For trace sink configuration and JSONL schema details, see
+[Agent Context and Tracing](../../agents/agent-context.md).
 
 ## Agent Hints
 
@@ -163,6 +194,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 |-------|---------------|-------------|
 | `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
+| `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
 
 ### Example response `nvext`
@@ -190,4 +222,5 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
+| [Agent Context and Tracing](../../agents/agent-context.md) | Passive workflow/program identity and JSONL request traces |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |

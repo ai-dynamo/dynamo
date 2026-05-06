@@ -36,11 +36,14 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ptr "k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
@@ -1492,6 +1495,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
@@ -1697,6 +1704,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2093,6 +2104,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2147,6 +2162,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2303,6 +2322,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2357,6 +2380,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2489,6 +2516,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -2686,6 +2717,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -3104,6 +3139,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3158,6 +3197,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3301,6 +3344,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3355,6 +3402,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
 														Value: "19090",
+													},
+													{
+														Name:  "DYN_FORWARDPASS_METRIC_PORT",
+														Value: "20380",
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3487,6 +3538,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -3684,6 +3739,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -4013,6 +4072,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -4171,6 +4231,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -4258,6 +4319,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -4283,6 +4345,7 @@ func TestExpandRolesForService(t *testing.T) {
 		serviceName     string
 		numberOfNodes   int32
 		serviceReplicas *int32
+		component       *v1alpha1.DynamoComponentDeploymentSharedSpec
 		expected        []ServiceRole
 	}{
 		{
@@ -4338,11 +4401,99 @@ func TestExpandRolesForService(t *testing.T) {
 				{Name: "test-service", Role: RoleMain, Replicas: 0},
 			},
 		},
+		{
+			name:          "single-node GMS with 1 shadow",
+			serviceName:   "svc",
+			numberOfNodes: 1,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc", Role: RoleMain, Replicas: 2, Rank: 0},
+			},
+		},
+		{
+			name:          "single-node GMS with 3 shadows",
+			serviceName:   "svc",
+			numberOfNodes: 1,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 3},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc", Role: RoleMain, Replicas: 4, Rank: 0},
+			},
+		},
+		{
+			name:          "single-node standalone inter-pod GMS (no failover)",
+			serviceName:   "svc",
+			numberOfNodes: 1,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc", Role: RoleMain, Replicas: 1, Rank: 0},
+			},
+		},
+		{
+			name:          "multinode GMS 2 nodes 1 shadow",
+			serviceName:   "svc",
+			numberOfNodes: 2,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc-ldr", Role: RoleLeader, Replicas: 2, Rank: 0},
+				{Name: "svc-gms-1", Role: RoleGMS, Replicas: 1, Rank: 1},
+				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 2, Rank: 1},
+			},
+		},
+		{
+			name:          "multinode GMS 3 nodes 2 shadows",
+			serviceName:   "svc",
+			numberOfNodes: 3,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+				Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 2},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc-ldr", Role: RoleLeader, Replicas: 3, Rank: 0},
+				{Name: "svc-gms-1", Role: RoleGMS, Replicas: 1, Rank: 1},
+				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 3, Rank: 1},
+				{Name: "svc-gms-2", Role: RoleGMS, Replicas: 1, Rank: 2},
+				{Name: "svc-wkr-2", Role: RoleWorker, Replicas: 3, Rank: 2},
+			},
+		},
+		{
+			name:          "multinode standalone inter-pod GMS (no failover)",
+			serviceName:   "svc",
+			numberOfNodes: 2,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc-ldr", Role: RoleLeader, Replicas: 1, Rank: 0},
+				{Name: "svc-gms-1", Role: RoleGMS, Replicas: 1, Rank: 1},
+				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 1, Rank: 1},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes)
+			component := tt.component
+			if component == nil {
+				component = &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+			}
+			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes, component)
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("expandRolesForService() = %v, want %v", result, tt.expected)
 			}
@@ -4802,8 +4953,8 @@ func TestApplyCliqueStartupDependencies(t *testing.T) {
 				gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			}
 
-			// Apply dependencies
-			applyCliqueStartupDependencies(gangSet, tt.roles, tt.backendFramework, tt.numberOfNodes)
+			// Apply dependencies (non-GMS)
+			applyCliqueStartupDependencies(gangSet, tt.roles, tt.backendFramework, tt.numberOfNodes, false)
 
 			// Verify StartupType
 			if tt.expectStartupType {
@@ -4830,6 +4981,80 @@ func TestApplyCliqueStartupDependencies(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyCliqueStartupDependencies_GMS(t *testing.T) {
+	t.Run("gms_single_node_engine_starts_after_gms", func(t *testing.T) {
+		gmsRoles := []ServiceRole{
+			{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+			{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
+		}
+		gangSet := &grovev1alpha1.PodCliqueSet{
+			Spec: grovev1alpha1.PodCliqueSetSpec{
+				Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{Name: "svc-gms-0", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "svc-gms-0", Replicas: 1}},
+						{Name: "svc", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "svc", Replicas: 2}},
+					},
+				},
+			},
+		}
+
+		applyCliqueStartupDependencies(gangSet, gmsRoles, BackendFrameworkVLLM, 1, true)
+
+		if gangSet.Spec.Template.StartupType == nil || *gangSet.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeExplicit {
+			t.Fatal("expected CliqueStartupTypeExplicit")
+		}
+		for _, c := range gangSet.Spec.Template.Cliques {
+			switch c.Name {
+			case "svc-gms-0":
+				if c.Spec.StartsAfter != nil {
+					t.Errorf("GMS clique should have no startsAfter, got %v", c.Spec.StartsAfter)
+				}
+			case "svc":
+				if !reflect.DeepEqual(c.Spec.StartsAfter, []string{"svc-gms-0"}) {
+					t.Errorf("engine clique startsAfter = %v, want [svc-gms-0]", c.Spec.StartsAfter)
+				}
+			}
+		}
+	})
+
+	t.Run("gms_does_not_leak_startsAfter_to_unrelated_cliques", func(t *testing.T) {
+		gmsRoles := []ServiceRole{
+			{Name: "engine-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+			{Name: "engine", Role: RoleMain, Rank: 0, Replicas: 2},
+		}
+		gangSet := &grovev1alpha1.PodCliqueSet{
+			Spec: grovev1alpha1.PodCliqueSetSpec{
+				Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "frontend", Replicas: 1}},
+						{Name: "engine-gms-0", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "engine-gms-0", Replicas: 1}},
+						{Name: "engine", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "engine", Replicas: 2}},
+					},
+				},
+			},
+		}
+
+		applyCliqueStartupDependencies(gangSet, gmsRoles, BackendFrameworkVLLM, 1, true)
+
+		for _, c := range gangSet.Spec.Template.Cliques {
+			switch c.Name {
+			case "frontend":
+				if c.Spec.StartsAfter != nil {
+					t.Errorf("frontend clique should have no startsAfter, got %v", c.Spec.StartsAfter)
+				}
+			case "engine-gms-0":
+				if c.Spec.StartsAfter != nil {
+					t.Errorf("GMS clique should have no startsAfter, got %v", c.Spec.StartsAfter)
+				}
+			case "engine":
+				if !reflect.DeepEqual(c.Spec.StartsAfter, []string{"engine-gms-0"}) {
+					t.Errorf("engine clique startsAfter = %v, want [engine-gms-0]", c.Spec.StartsAfter)
+				}
+			}
+		}
+	})
 }
 
 func TestGetCliqueStartupDependencies(t *testing.T) {
@@ -5064,6 +5289,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -5140,6 +5366,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -5263,6 +5490,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -5369,6 +5597,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 			if !assert.NoError(t, err) {
 				return
@@ -5421,8 +5650,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
-							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"}, {Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
+							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
+							{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
+							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
@@ -5537,6 +5769,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -5634,6 +5867,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -5870,6 +6104,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -6082,6 +6317,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -6268,6 +6504,7 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -6859,8 +7096,8 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			Labels: map[string]string{
-				"user-label":                        "keep",
-				snapshotprotocol.RestoreTargetLabel: commonconsts.KubeLabelValueTrue,
+				"user-label":                       "keep",
+				snapshotprotocol.CheckpointIDLabel: "stale-hash",
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
@@ -6884,10 +7121,10 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 	})
 	assert.Equal(t, "keep", labels["user-label"])
 	assert.Equal(t, "keep-too", labels["extra-label"])
-	_, hasRestoreTarget := labels[snapshotprotocol.RestoreTargetLabel]
 	_, hasCheckpointHash := labels[snapshotprotocol.CheckpointIDLabel]
-	assert.False(t, hasRestoreTarget)
-	assert.False(t, hasCheckpointHash)
+	assert.False(t, hasCheckpointHash, "checkpoint-id label must be cleared when checkpoint is not Ready")
+	_, hasTargetAnnotation := annotations[snapshotprotocol.TargetContainersAnnotation]
+	assert.False(t, hasTargetAnnotation, "target-containers annotation must be cleared when checkpoint is not Ready")
 }
 
 func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testing.T) {
@@ -6895,9 +7132,6 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 		&v1alpha1.DynamoComponentDeploymentSharedSpec{
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
-			Labels: map[string]string{
-				snapshotprotocol.RestoreTargetLabel: "false",
-			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
 					snapshotprotocol.CheckpointIDLabel: "stale-hash",
@@ -6917,8 +7151,10 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 		Ready:   true,
 		Hash:    "resolved-hash",
 	})
-	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[snapshotprotocol.RestoreTargetLabel])
-	assert.Equal(t, "resolved-hash", labels[snapshotprotocol.CheckpointIDLabel])
+	assert.Equal(t, "resolved-hash", labels[snapshotprotocol.CheckpointIDLabel],
+		"ready checkpoint must overwrite stale checkpoint-id with the resolved hash")
+	assert.Equal(t, commonconsts.MainContainerName, annotations[snapshotprotocol.TargetContainersAnnotation],
+		"ready checkpoint must stamp the default target-containers annotation")
 }
 
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
@@ -6952,6 +7188,368 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 	assert.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
 	assert.Equal(t, "test-dgd", labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 	assert.Equal(t, "workerhash", labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
+// TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels pins the
+// contract that inter-pod GMS weight-server cliques (RoleGMS) do NOT carry
+// the kubernetes discovery labels, while engine cliques (RoleMain / RoleLeader
+// / RoleWorker) do — the latter matches the behavior introduced by
+// #8067 "per-container kube discovery for multi-engine pods". The Rust
+// discovery daemon (lib/runtime/src/discovery/kube/daemon.rs) uses these
+// labels as a reflector filter; GMS pods run gpu_memory_service.cli.server,
+// not the dynamo runtime, and never register a DynamoWorkerMetadata CR, so
+// they must be excluded to avoid reflector-store bloat and spurious wake-ups.
+func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "test-ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+						Enabled: true,
+						Mode:    v1alpha1.GMSModeInterPod,
+					},
+					Failover: &v1alpha1.FailoverSpec{
+						Enabled:    true,
+						Mode:       v1alpha1.GMSModeInterPod,
+						NumShadows: 1,
+					},
+				},
+			},
+		},
+	}
+
+	controllerConfig := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+		Infrastructure: configv1alpha1.InfrastructureConfiguration{
+			ETCDAddress: "etcd-address",
+			NATSAddress: "nats-address",
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var sawGMS, sawEngine bool
+	for _, clique := range got.Spec.Template.Cliques {
+		_, hasBackend := clique.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend]
+		_, hasEnabled := clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled]
+		if strings.Contains(clique.Name, "gms") {
+			sawGMS = true
+			assert.False(t, hasBackend, "GMS clique %q must not carry KubeLabelDynamoDiscoveryBackend", clique.Name)
+			assert.False(t, hasEnabled, "GMS clique %q must not carry KubeLabelDynamoDiscoveryEnabled", clique.Name)
+		} else {
+			sawEngine = true
+			assert.True(t, hasBackend, "engine clique %q must carry KubeLabelDynamoDiscoveryBackend (#8067 contract)", clique.Name)
+			assert.True(t, hasEnabled, "engine clique %q must carry KubeLabelDynamoDiscoveryEnabled (#8067 contract)", clique.Name)
+		}
+	}
+	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")
+	assert.True(t, sawEngine, "test setup should produce at least one engine clique")
+}
+
+// TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets pins the
+// contract that inter-pod GMS weight-server cliques (RoleGMS) are never
+// shaped as snapshot restore targets, even when the service has
+// checkpoint.enabled=true with a Ready checkpoint. GMS pods run
+// gpu_memory_service.cli.server, load weights fresh from disk, and have
+// no CRIU state to capture; shaping them as restore targets would replace
+// the GMS wrapper command with `sleep infinity` and break the layout.
+//
+// Engine cliques in the same service must still be shaped: target-
+// containers annotation set to "main", restore-target label set to true,
+// and the placeholder `sleep infinity` command injected so the snapshot
+// agent can drive the restore.
+func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "test-ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+						Enabled: true,
+						Mode:    v1alpha1.GMSModeInterPod,
+					},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{Enabled: true},
+				},
+			},
+		},
+	}
+
+	controllerConfig := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+		Infrastructure: configv1alpha1.InfrastructureConfiguration{
+			ETCDAddress: "etcd-address",
+			NATSAddress: "nats-address",
+		},
+		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
+	}
+
+	// snapshot-agent DaemonSet fixture so InjectCheckpointIntoPodSpec can
+	// discover the checkpoint PVC storage in the target namespace.
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-agent",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: snapshotprotocol.SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: snapshotprotocol.SnapshotAgentVolumeName, MountPath: "/checkpoints",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: snapshotprotocol.SnapshotAgentVolumeName,
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
+						},
+					}},
+				},
+			},
+		},
+	}).Build()
+
+	infoByService := map[string]*checkpoint.CheckpointInfo{
+		"decode": {Enabled: true, Ready: true, Hash: "abc123def4567890"},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var sawGMS, sawEngine bool
+	for _, clique := range got.Spec.Template.Cliques {
+		targetAnnotation := clique.Annotations[snapshotprotocol.TargetContainersAnnotation]
+		checkpointID := clique.Labels[snapshotprotocol.CheckpointIDLabel]
+		mainContainer := findContainerInClique(t, clique, commonconsts.MainContainerName)
+
+		if strings.Contains(clique.Name, "gms") {
+			sawGMS = true
+			assert.Empty(t, targetAnnotation, "GMS clique %q must not carry snapshot-target-containers annotation", clique.Name)
+			assert.Empty(t, checkpointID, "GMS clique %q must not carry checkpoint-id label (would make it look like a restore target)", clique.Name)
+			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
+				"GMS clique %q main container command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name)
+		} else {
+			sawEngine = true
+			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
+				"engine clique %q must carry snapshot-target-containers=main annotation", clique.Name)
+			assert.NotEmpty(t, checkpointID,
+				"engine clique %q must carry checkpoint-id label (selected by snapshot-agent restore informer)", clique.Name)
+			assert.Equal(t, []string{"sleep", "infinity"}, mainContainer.Command,
+				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
+		}
+	}
+	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")
+	assert.True(t, sawEngine, "test setup should produce at least one engine clique")
+}
+
+func findContainerInClique(t *testing.T, clique *grovev1alpha1.PodCliqueTemplateSpec, name string) *corev1.Container {
+	t.Helper()
+	for i := range clique.Spec.PodSpec.Containers {
+		if clique.Spec.PodSpec.Containers[i].Name == name {
+			return &clique.Spec.PodSpec.Containers[i]
+		}
+	}
+	t.Fatalf("container %q not found in clique %q", name, clique.Name)
+	return nil
+}
+
+// TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets pins the
+// contract that intra-pod failover services (Failover.Mode=intraPod) stamp
+// the snapshot-target-containers annotation with "engine-0,engine-1" on
+// the restore pod and shape every engine container as a restore target.
+// Intra-pod failover clones the main container into engine-0 + engine-1 and
+// both engines must be driven by the snapshot agent from the same checkpoint.
+func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "test-ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					Failover: &v1alpha1.FailoverSpec{
+						Enabled: true,
+						Mode:    v1alpha1.GMSModeIntraPod,
+					},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{Enabled: true},
+				},
+			},
+		},
+	}
+
+	controllerConfig := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+		Infrastructure: configv1alpha1.InfrastructureConfiguration{
+			ETCDAddress: "etcd-address",
+			NATSAddress: "nats-address",
+		},
+		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-agent",
+			Namespace: "test-ns",
+			Labels: map[string]string{
+				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: snapshotprotocol.SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: snapshotprotocol.SnapshotAgentVolumeName, MountPath: "/checkpoints",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: snapshotprotocol.SnapshotAgentVolumeName,
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
+						},
+					}},
+				},
+			},
+		},
+	}).Build()
+
+	infoByService := map[string]*checkpoint.CheckpointInfo{
+		"decode": {
+			Enabled:                 true,
+			Ready:                   true,
+			Hash:                    "abc123def4567890",
+			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var sawDecode bool
+	for _, clique := range got.Spec.Template.Cliques {
+		if strings.Contains(clique.Name, "gms") {
+			t.Fatalf("intra-pod failover must not produce a GMS clique: %q", clique.Name)
+		}
+		sawDecode = true
+		assert.Equal(t, "engine-0,engine-1", clique.Annotations[snapshotprotocol.TargetContainersAnnotation],
+			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
+		for _, engineName := range IntraPodFailoverEngineContainerNames() {
+			c := findContainerInClique(t, clique, engineName)
+			assert.Equal(t, []string{"sleep", "infinity"}, c.Command,
+				"%s in clique %q must be shaped as a snapshot restore target", engineName, clique.Name)
+			foundMount := false
+			for _, m := range c.VolumeMounts {
+				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
+					foundMount = true
+					assert.Equal(t, engineName, m.SubPath,
+						"%s in clique %q must have its own subPath on the control volume", engineName, clique.Name)
+				}
+			}
+			assert.True(t, foundMount, "%s in clique %q must mount the snapshot-control volume", engineName, clique.Name)
+		}
+	}
+	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
+}
+
+// TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins
+// the contract that per-rank engine cliques in an inter-pod failover cohort
+// use MinAvailable=1 even when multinode (numberOfNodes > 1). Replicas here
+// represent (primary + shadows) AT THAT RANK — redundant hot spares of each
+// other, NOT NCCL peers. Gang-scheduling them (MinAvailable = Replicas) would
+// require every shadow at every rank to be Ready before Grove considered the
+// clique available, which defeats failover. See the minAvailable comment in
+// renderClique for the full rationale.
+func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *testing.T) {
+	const numberOfNodes int32 = 2
+	const numShadows int32 = 1
+	const totalEnginePods = numShadows + 1 // primary + shadows per rank
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType:    commonconsts.ComponentTypeDecode,
+					Replicas:         ptr.To(int32(1)),
+					Multinode:        &v1alpha1.MultinodeSpec{NodeCount: numberOfNodes},
+					Resources:        &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+					Failover:         &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: numShadows},
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
+		},
+		&controller_common.RuntimeConfig{DRAEnabled: true},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var sawEngineClique bool
+	for _, clique := range got.Spec.Template.Cliques {
+		require.NotNil(t, clique.Spec.MinAvailable, "clique %q has nil MinAvailable", clique.Name)
+		if strings.Contains(clique.Name, "gms") {
+			assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "GMS clique %q MinAvailable", clique.Name)
+			assert.EqualValues(t, 1, clique.Spec.Replicas, "GMS clique %q Replicas", clique.Name)
+			continue
+		}
+		sawEngineClique = true
+		assert.EqualValues(t, totalEnginePods, clique.Spec.Replicas,
+			"multinode failover engine clique %q Replicas should be primary+shadows=%d", clique.Name, totalEnginePods)
+		assert.EqualValues(t, 1, *clique.Spec.MinAvailable,
+			"multinode failover engine clique %q MinAvailable must be 1 (shadows are redundant hot spares, NOT NCCL peers)", clique.Name)
+	}
+	assert.True(t, sawEngineClique, "test setup should produce at least one engine (non-GMS) clique")
 }
 
 func TestIsWorkerComponent(t *testing.T) {
@@ -7048,6 +7646,34 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	assert.Equal(t, "my-dgd-worker", dcd.Name)
 	assert.Empty(t, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash])
 	assert.Equal(t, int32(3), *dcd.Spec.Replicas)
+}
+
+// TestGenerateSingleDCD_RollingUpdateZeroReplicas verifies that when
+// NewWorkerReplicas is explicitly 0 (maxSurge=0, first reconcile), the new DCD
+// is created with 0 replicas instead of falling through to the desired count.
+func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(4))},
+			},
+		},
+	}
+
+	ruCtx := RollingUpdateContext{
+		NewWorkerHash:     "aabb1122",
+		OldWorkerReplicas: map[string]int32{"decode": 3},
+		NewWorkerReplicas: map[string]int32{"decode": 0},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, ruCtx)
+	assert.NoError(t, err)
+
+	decodeDCD := dcds["decode"]
+	assert.Equal(t, "my-dgd-decode-aabb1122", decodeDCD.Name)
+	assert.Equal(t, int32(0), *decodeDCD.Spec.Replicas,
+		"new DCD must respect NewWorkerReplicas=0, not fall through to desired=4")
 }
 
 func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
@@ -7235,7 +7861,8 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,
+				nil, // checkpointInfo
+				nil, // deployerOverride
 			)
 
 			if (err != nil) != tt.wantErr {

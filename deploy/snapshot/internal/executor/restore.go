@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/kubernetes"
 
@@ -39,7 +38,11 @@ type RestoreRequest struct {
 // Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
-func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (int, error) {
+//
+// Returns the placeholder container's host PID so callers can reach into the
+// container's mount namespace (e.g. to write sentinels under /snapshot-control)
+// without re-resolving via the runtime.
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (int, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -50,7 +53,7 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
 	hostInspectStart := time.Now()
-	snap, err := inspectRestore(ctx, ctrd, log, req)
+	snap, err := inspectRestore(ctx, rt, log, req)
 	if err != nil {
 		return 0, err
 	}
@@ -90,14 +93,15 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 
 	log.Info("=== External restore completed ===",
 		"restored_pid", result.RestoredPID,
+		"placeholder_host_pid", snap.PlaceholderPID,
 		"validation_duration", time.Since(validationStart),
 		"total_duration", time.Since(restoreStart),
 	)
 
-	return result.RestoredPID, nil
+	return snap.PlaceholderPID, nil
 }
 
-func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
+func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
 	if req.CheckpointLocation == "" {
 		return nil, fmt.Errorf("checkpoint location is required")
 	}
@@ -125,7 +129,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		containerName = "main"
 	}
 
-	placeholderPID, _, err := snapshotruntime.ResolveContainerByPod(ctx, ctrd, req.PodName, req.PodNamespace, containerName)
+	placeholderPID, _, err := rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}

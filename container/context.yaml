@@ -16,7 +16,7 @@ dynamo:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-  epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1
+  epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
@@ -35,7 +35,7 @@ dynamo:
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  ffmpeg_version: "7.1"
+  ffmpeg_version: "8.1"
   efa_version: 1.47.0
 
 vllm:
@@ -44,13 +44,13 @@ vllm:
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: 12.9.1-runtime-ubuntu24.04
-    vllm_ref: v0.19.0
+    vllm_ref: v0.20.1
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: 13.0.2-runtime-ubuntu24.04
-    vllm_ref: v0.19.0
+    vllm_ref: v0.20.1
   xpu:
     base_image: intel/deep-learning-essentials
     runtime_image: intel/deep-learning-essentials
@@ -64,8 +64,8 @@ vllm:
     base_image_tag: 24.04
     runtime_image_tag: 24.04
     vllm_ref: v0.16.0
-  flashinf_ref: v0.6.6
-  lmcache_ref: 0.4.2
+  flashinf_ref: v0.6.8.post1
+  lmcache_ref: 0.4.4
   vllm_omni_ref: "release/v0.19.0rc1"
   nixl_ref: 0.10.1
   max_jobs: "10"
@@ -73,7 +73,7 @@ vllm:
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress_p2p: "false"
-  modelexpress_ref: "3d73992ce6c10e52ddc54f7f12af35d27e173f15"
+  modelexpress_ref: "76fc5d7f06c37121ee8789a29fac6f9b08c4743a"  # v0.3.0
 
 sglang:
   cuda12.9:
@@ -86,7 +86,9 @@ sglang:
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.5.10.post1-cu130-runtime
-  nixl_ref: v1.0.1
+  # SGLang uses the NIXL stack from the upstream lmsysorg/sglang runtime image.
+  # Do not add nixl_ref here: Dynamo does not build or install its NIXL wheel
+  # for SGLang, and SGLang does not use Dynamo KVBM/block-manager at runtime.
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
@@ -104,10 +106,10 @@ trtllm:
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/
-  pip_wheel: tensorrt-llm==1.3.0rc11
+  pip_wheel: tensorrt-llm==1.3.0rc13
   trtllm_wheel_image: nvcr.io/nvidia/tensorrt-llm/release:${TENSORRTLLM_PIP_WHEEL#*==}
 
-  github_trtllm_commit: v1.3.0rc11
+  github_trtllm_commit: v1.3.0rc13
   torch_version: 2.11.0a0+eb65b36914.nv26.2
   torch_tensorrt_version: 2.11.0a0
   torchvision_version: 0.25.0a0+1e53952f.nv26.2.44259020

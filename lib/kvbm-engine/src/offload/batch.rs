@@ -366,17 +366,13 @@ impl<T: BlockMetadata> BatchCollector<T> {
         let mut flush_timer = tokio::time::interval(self.config.flush_interval);
         flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        let mut poll_interval = tokio::time::interval(Duration::from_micros(100));
-        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
         loop {
+            while let Some(item) = self.input_queue.pop_valid() {
+                self.handle_eval_result(item.data).await;
+            }
+
             tokio::select! {
-                // Poll queue for items
-                _ = poll_interval.tick() => {
-                    while let Some(item) = self.input_queue.pop_valid() {
-                        self.handle_eval_result(item.data).await;
-                    }
-                }
+                _ = self.input_queue.notified() => {}
                 // Periodic flush timer
                 _ = flush_timer.tick() => {
                     self.try_flush().await;

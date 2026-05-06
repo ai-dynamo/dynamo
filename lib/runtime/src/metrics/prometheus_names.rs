@@ -177,6 +177,10 @@ pub mod frontend_service {
     /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
+    /// Number of requests currently being handled by the frontend, from HTTP handler
+    /// entry to response completion. Clearer name for what inflight_requests measures.
+    pub const ACTIVE_REQUESTS: &str = "active_requests";
+
     /// Number of disconnected clients (gauge that can go up and down)
     pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
@@ -194,6 +198,12 @@ pub mod frontend_service {
 
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
+
+    /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    pub const SHARED_CACHE_HIT_RATE: &str = "shared_cache_hit_rate";
+
+    /// Shared cache blocks beyond device overlap for the selected worker
+    pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
 
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
@@ -372,6 +382,26 @@ pub mod work_handler {
     /// Backend processing: handle_payload entry to first response sent
     pub const TIME_TO_FIRST_RESPONSE_SECONDS: &str = "time_to_first_response_seconds";
 
+    /// Current items in the bounded work queue awaiting dispatcher pickup (gauge)
+    pub const QUEUE_DEPTH: &str = "queue_depth";
+
+    /// Configured capacity of the bounded work queue (gauge, static)
+    pub const QUEUE_CAPACITY: &str = "queue_capacity";
+
+    /// Total times enqueuing work failed because the dispatcher channel was closed.
+    /// Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
+    /// this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
+    pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
+
+    /// Time spent waiting to acquire a worker-pool permit (histogram)
+    pub const PERMIT_WAIT_SECONDS: &str = "permit_wait_seconds";
+
+    /// Current number of active worker-pool tasks holding a permit (gauge)
+    pub const POOL_ACTIVE_TASKS: &str = "pool_active_tasks";
+
+    /// Configured worker-pool size / total permits (gauge, static)
+    pub const POOL_CAPACITY: &str = "pool_capacity";
+
     /// Label name for error type classification
     pub const ERROR_TYPE_LABEL: &str = "error_type";
 
@@ -504,6 +534,12 @@ pub mod routing_overhead {
 
     /// Total routing overhead per request
     pub const TOTAL_MS: &str = "overhead_total_ms";
+
+    /// Time spent querying the shared KV cache (Mooncake)
+    pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
+
+    /// Total shared cache query errors (timeouts, HTTP failures)
+    pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
 /// Router request metrics (component-scoped aggregate histograms + counter)
@@ -536,12 +572,30 @@ pub mod router {
 
     /// Output sequence length in tokens observed at the router
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+
+    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
+
+    /// Shared cache blocks beyond device overlap for the selected worker
+    pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
 }
 
 /// Frontend pipeline stage and event-loop metrics
 pub mod frontend_perf {
     /// Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     pub const STAGE_DURATION_SECONDS: &str = "stage_duration_seconds";
+    /// Per-stage inflight request gauge (labels: stage, phase)
+    /// Tracks how many requests are currently in each pipeline stage.
+    /// Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    pub const STAGE_REQUESTS: &str = "stage_requests";
+
+    /// Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    pub const STAGE_PREPROCESS: &str = "preprocess";
+    pub const STAGE_ROUTE: &str = "route";
+    pub const STAGE_DISPATCH: &str = "dispatch";
     /// Tokenization time in preprocessor
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor

@@ -57,6 +57,7 @@ dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-tokenizers = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -75,12 +76,15 @@ either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 hf-hub = { workspace = true }
+ipnet = { workspace = true }
+lru = { workspace = true }
 rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
@@ -149,9 +153,6 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
-tiktoken-rs = { version = "0.9", default-features = false }
-rustc-hash = "1.1"
-fastokens = { workspace = true }
 
 # backend
 galil-seiferas = { version = "0.1" }
@@ -166,8 +167,8 @@ json-five = { version = "0.3" }
 reqwest = { workspace = true }
 base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
-video-rs = { version = "0.10.5", optional = true }
-ffmpeg-next = { version = "7.1.0", optional = true }
+video-rs = { version = "0.11.0", optional = true }
+ffmpeg-next = { version = "8.1.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }

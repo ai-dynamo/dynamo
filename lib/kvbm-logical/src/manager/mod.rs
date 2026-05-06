@@ -78,6 +78,20 @@ impl<T: BlockMetadata> BlockManager<T> {
     ///
     /// Returns `None` if fewer than `count` blocks are available across both pools.
     pub fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
+        self.allocate_blocks_with_evictions(count)
+            .map(|(blocks, _evicted)| blocks)
+    }
+
+    /// Like [`allocate_blocks`](Self::allocate_blocks) but also reports the
+    /// [`SequenceHash`] of each block evicted from the inactive pool to
+    /// satisfy the allocation. Callers maintaining a shadow view of which
+    /// registrations are alive (e.g. the mocker's router-event bridge) can
+    /// translate these hashes into cache-invalidation events directly,
+    /// avoiding an O(N) presence scan over the registry.
+    pub fn allocate_blocks_with_evictions(
+        &self,
+        count: usize,
+    ) -> Option<(Vec<MutableBlock<T>>, Vec<SequenceHash>)> {
         let _guard = self.allocate_mutex.lock();
         let from_reset = self.reset_pool.allocate_blocks(count);
         let from_reset_count = from_reset.len();
@@ -85,7 +99,7 @@ impl<T: BlockMetadata> BlockManager<T> {
 
         let remaining_needed = count - blocks.len();
         match self.inactive_pool.allocate_blocks(remaining_needed) {
-            Some(remaining) => {
+            Some((remaining, evicted)) => {
                 let eviction_count = remaining.len() as u64;
                 blocks.extend(remaining);
 
@@ -94,7 +108,7 @@ impl<T: BlockMetadata> BlockManager<T> {
                     .inc_allocations_from_reset(from_reset_count as u64);
                 self.metrics.inc_evictions(eviction_count);
 
-                Some(blocks)
+                Some((blocks, evicted))
             }
             None => None,
         }

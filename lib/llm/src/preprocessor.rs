@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
-    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
-    TOKENIZE_SECONDS,
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
+    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
@@ -153,6 +153,8 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// KV cache block size published in the model deployment card.
+    kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
@@ -190,6 +192,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -205,6 +208,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            kv_cache_block_size,
             tool_call_parser,
             media_loader,
             context_length,
@@ -235,6 +239,7 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
 
@@ -267,7 +272,7 @@ impl OpenAIPreprocessor {
             .with_context(|| "Failed to gather multimodal data")?;
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["preprocess"])
+            .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
@@ -307,7 +312,23 @@ impl OpenAIPreprocessor {
 
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
-        builder.output_options(request.extract_output_options()?);
+
+        // Some parsers rely on `<|tool_call>`, `<|channel>`, etc. being
+        // visible in the decoded text. The default `skip_special_tokens=true`
+        // strips them and silently bypasses parsing. Mirror upstream's
+        // per-parser `adjust_request` hook by flipping the default to false
+        // for parsers that need special tokens preserved, unless the caller
+        // has explicitly set `skip_special_tokens`.
+        let mut output_options = request.extract_output_options()?;
+        if output_options.skip_special_tokens.is_none()
+            && Self::parser_requires_special_tokens(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            output_options.skip_special_tokens = Some(false);
+        }
+        builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
@@ -317,6 +338,7 @@ impl OpenAIPreprocessor {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
+            builder.agent_context(nvext.agent_context.clone());
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -563,7 +585,13 @@ impl OpenAIPreprocessor {
                             // Completions will use raw_prompt, no template
                             let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
-                            // Check if backend_instance_id is present and token_data is provided
+                            // If nvext.token_data is present, use the pre-computed tokens
+                            // directly and skip tokenization.  This avoids redundant
+                            // tokenization when an external component (e.g. the GAIE EPP
+                            // KV-router) has already tokenized the prompt.
+                            // When backend_instance_id is set without token_data, warn
+                            // but fall back to tokenization (backward compat for non-GAIE
+                            // routers that set the header without providing tokens).
                             let has_backend_instance_id = request
                                 .nvext()
                                 .and_then(|ext| ext.backend_instance_id)
@@ -572,23 +600,22 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
-                                if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
-                                        tokens.len()
-                                    );
-                                    // need ownership for the builder, so clone.
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
-                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                    (encoding.token_ids().to_vec(), false)
-                                }
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
+                                token_data
+                            {
+                                tracing::info!(
+                                    token_count = tokens.len(),
+                                    first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+                                );
+                                (tokens.clone(), true)
+                            } else if has_backend_instance_id {
+                                tracing::warn!(
+                                    "backend_instance_id provided but no token_data; tokenizing prompt"
+                                );
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
                             } else {
-                                // No backend_instance_id provided, continue the normal flow.
                                 let encoding = self.encode_with_timing(&prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
@@ -683,6 +710,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &NvCreateEmbeddingRequest,
     ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
@@ -748,12 +776,44 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Try to parse reasoning content only if parser is configured
+        // Kimi K2.5 tool-continuation turns produce the final user-facing
+        // answer directly from the tool result. If the prompt happened to end
+        // with `<think>`, starting the force-reasoning parser in reasoning mode
+        // mislabels that answer as reasoning_content. DeepSeek V4 is the
+        // opposite: its formatter can seed `<think>` for post-tool turns and
+        // the model may emit only the closing `</think>`, so preserving the
+        // injected-reasoning signal is required to avoid leaking the close tag.
+        let last_is_tool = matches!(
+            request.inner.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(_))
+        );
+        let suppress_reasoning_after_tool = last_is_tool
+            && matches!(
+                self.runtime_config.reasoning_parser.as_deref(),
+                Some("kimi_k25")
+            );
+
+        // tool_choice=required/named forces the backend into guided decoding,
+        // which constrains output to a bare JSON shape with no reasoning
+        // wrapper. Running the reasoning parser on that output is both
+        // pointless (nothing to extract) and actively harmful for parsers
+        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
+        // append-think), because the prefix would contaminate the
+        // tool-call JSON fed into the jail.
+        let tool_choice_forces_guided_json = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+
+        // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !Self::is_reasoning_disabled_by_request(
                 self.runtime_config.reasoning_parser.as_deref(),
                 request.chat_template_args.as_ref(),
-            );
+            )
+            && !suppress_reasoning_after_tool
+            && !tool_choice_forces_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -816,6 +876,7 @@ impl OpenAIPreprocessor {
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
+        trace_tokens_enabled: bool,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -833,6 +894,7 @@ impl OpenAIPreprocessor {
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
             finished: bool,
+            trace_tokens_enabled: bool,
         }
 
         let state = State {
@@ -844,6 +906,7 @@ impl OpenAIPreprocessor {
             finish_reason_sent: false,
             usage_chunk_sent: false,
             finished: false,
+            trace_tokens_enabled,
         };
 
         // transform the common response stream into a chat response stream
@@ -882,11 +945,11 @@ impl OpenAIPreprocessor {
                         let chunk_tokens = backend_output.token_ids.len();
                         inner.cumulative_output_tokens += chunk_tokens;
 
-                        let isl = inner.response_generator.get_isl().unwrap_or(0) as usize;
+                        let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
                         (chunk_tokens, isl)
                     } else {
-                        (0, 0)
+                        (0, None)
                     };
 
                     let current_osl = inner.cumulative_output_tokens;
@@ -923,7 +986,7 @@ impl OpenAIPreprocessor {
                         .and_then(|t| t.decode_worker_type())
                         .map(String::from);
                     let llm_metrics = LLMMetricAnnotation {
-                        input_tokens: isl,
+                        input_tokens: isl.unwrap_or(0),
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
@@ -937,6 +1000,14 @@ impl OpenAIPreprocessor {
                         detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
+                    if inner.trace_tokens_enabled {
+                        crate::agents::trace::record_llm_metric_tokens(
+                            tracker.as_deref(),
+                            isl,
+                            current_osl,
+                            None,
+                        );
+                    }
 
                     // Flush per-request detokenize accumulators to global Prometheus counters
                     // (once per request instead of per-token).
@@ -978,6 +1049,10 @@ impl OpenAIPreprocessor {
                         let usage_chunk = inner.response_generator.create_usage_chunk();
                         let usage = inner.response_generator.get_usage();
                         let tracker = inner.response_generator.tracker();
+                        let cached_tokens = usage
+                            .prompt_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.cached_tokens.map(|c| c as usize));
                         let prefill_worker_id =
                             tracker.as_ref().and_then(|t| t.prefill_worker_id());
                         let prefill_dp_rank = tracker.as_ref().and_then(|t| t.prefill_dp_rank());
@@ -995,10 +1070,7 @@ impl OpenAIPreprocessor {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
                             chunk_tokens: 0,
-                            cached_tokens: usage
-                                .prompt_tokens_details
-                                .as_ref()
-                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            cached_tokens,
                             prefill_worker_id,
                             prefill_dp_rank,
                             prefill_worker_type,
@@ -1011,6 +1083,14 @@ impl OpenAIPreprocessor {
                                 .and_then(|t| t.detokenize_total_latency()),
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
+                        if inner.trace_tokens_enabled {
+                            crate::agents::trace::record_llm_metric_tokens(
+                                tracker.as_deref(),
+                                Some(usage.prompt_tokens as usize),
+                                usage.completion_tokens as usize,
+                                cached_tokens,
+                            );
+                        }
 
                         // Flush per-request detokenize accumulators to global Prometheus counters
                         // (once per request instead of per-token).
@@ -1153,33 +1233,27 @@ impl OpenAIPreprocessor {
 
         // Configure jail based on tool_choice
         //
-        // When a tool_call_parser is configured, always use marker-based mode
-        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
-        // Immediate JSON mode is only a fallback for required/named when no
-        // parser exists (the model is expected to emit raw JSON in that case).
+        // For tool_choice=required or named we mirror SGLang / vLLM: assume the
+        // backend applied guided decoding and emit a bare JSON shape, so parse
+        // via the JSON array parser (base_json_parser) rather than the model's
+        // native-format parser.  If a parser is also configured we still carry
+        // it so the Immediate branch can fall back to marker-based parsing for
+        // backends that do not honor guided decoding (e.g. XML-native models
+        // like qwen3_coder — see regression test_tool_choice_required_with_
+        // qwen3_coder_parser).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                builder = builder
+                    .tool_choice_named(named.function.name.clone())
+                    .named_tool_filter(named.function.name.clone());
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
-                    // Also install a named-tool filter so that if the model emits
-                    // the wrong tool, the parsed call is rejected before emission.
-                    builder = builder
-                        .tool_call_parser(parser)
-                        .named_tool_filter(named.function.name.clone());
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_named(named.function.name.clone());
+                    builder = builder.tool_call_parser(parser);
                 }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
+                builder = builder.tool_choice_required();
                 if let Some(parser) = tool_call_parser {
-                    // Parser-aware path: use marker-based jail so the parser
-                    // handles format-specific output (XML, pythonic, etc.).
                     builder = builder.tool_call_parser(parser);
-                } else {
-                    // No parser: fall back to Immediate JSON jail mode.
-                    builder = builder.tool_choice_required();
                 }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
@@ -1196,12 +1270,40 @@ impl OpenAIPreprocessor {
         jail.apply_with_finish_reason(stream)
     }
 
+    /// Whether the selected tool-call or reasoning parser depends on the
+    /// engine emitting special tokens (e.g. Gemma 4's `<|tool_call>` /
+    /// `<|channel>`). Mirrors upstream vLLM's per-parser `adjust_request`
+    /// hooks. Used to flip the request default for `skip_special_tokens`
+    /// from `true` to `false` so the parsers actually see the markers
+    /// they're matching on.
+    fn parser_requires_special_tokens(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        // gpt-oss / harmony parsers consume `<|channel|>analysis<|message|>...<|end|>`
+        // markers; without them the parser silently produces empty
+        // reasoning_content. Same shape as gemma4's `<|think|>` markers.
+        matches!(
+            tool_call_parser,
+            Some("gemma4") | Some("gemma-4") | Some("harmony")
+        ) || matches!(
+            reasoning_parser,
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss")
+        )
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
     ///   or "force_nonempty_content": true.
-    /// For deepseek_r1: disabled when chat_template_args contains "thinking": false
-    ///   or "thinking_mode": "chat".
+    /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
+    ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
+    ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
+    /// For gemma4: disabled when chat_template_args contains "enable_thinking": false.
+    ///   Gemma 4's chat template injects `<|think|>` only when `enable_thinking is
+    ///   defined and enable_thinking` (truthy), so when callers explicitly set the
+    ///   flag false the model emits no `<|channel>` markers and the parser would
+    ///   only ever fall through.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -1230,14 +1332,25 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("deepseek_r1") => {
-                if let Some(args) = chat_template_args {
-                    if let Some(thinking) = args.get("thinking") {
-                        return thinking == &serde_json::Value::Bool(false);
-                    }
-                    if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                        return mode == "chat";
-                    }
+            Some("deepseek_r1") | Some("deepseek_v4") | Some("deepseek-v4")
+            | Some("deepseekv4") => {
+                if let Some(enabled) =
+                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
+                {
+                    return !enabled;
+                }
+                if let Some(args) = chat_template_args
+                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+                {
+                    return mode == "chat";
+                }
+                false
+            }
+            Some("gemma4") | Some("gemma-4") => {
+                if let Some(enabled) =
+                    crate::preprocessor::prompt::thinking_bool_from_args(chat_template_args)
+                {
+                    return !enabled;
                 }
                 false
             }
@@ -1368,6 +1481,34 @@ impl
             .preprocess_request(&request, tracker.as_deref())
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
+        let trace_state = if crate::agents::trace::is_enabled() {
+            common_request.agent_context.clone().map(|agent_context| {
+                let request_model = common_request.model.clone();
+                let request_tracker = tracker.clone();
+                let replay_metrics = crate::agents::trace::request_replay_metrics(
+                    &common_request.token_ids,
+                    self.kv_cache_block_size,
+                );
+                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
+                    .and_then(|context| context.x_request_id)
+                    .or_else(|| {
+                        context
+                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
+                            .ok()
+                            .map(|value| value.as_ref().clone())
+                    });
+                (
+                    agent_context,
+                    request_model,
+                    request_tracker,
+                    x_request_id,
+                    replay_metrics,
+                )
+            })
+        } else {
+            None
+        };
+        let trace_tokens_enabled = trace_state.is_some();
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -1400,6 +1541,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            trace_tokens_enabled,
         );
 
         let transformed_stream =
@@ -1438,6 +1580,37 @@ impl
             &self.tokenizer,
         );
 
+        let final_stream = if let Some((
+            agent_context,
+            request_model,
+            request_tracker,
+            x_request_id,
+            replay_metrics,
+        )) = trace_state
+        {
+            let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
+            tokio::spawn(async move {
+                done_fut.await;
+                if request_tracker.is_none() {
+                    tracing::warn!(
+                        request_id,
+                        "agent_context present but request tracker is missing; emitting partial trace"
+                    );
+                }
+                let mut metrics = crate::agents::trace::request_metrics(
+                    request_id,
+                    x_request_id,
+                    request_model,
+                    request_tracker.as_deref(),
+                );
+                metrics.replay = replay_metrics;
+                crate::agents::trace::emit_request_end(agent_context, metrics);
+            });
+            stream
+        } else {
+            final_stream
+        };
+
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
 
@@ -1462,6 +1635,8 @@ impl
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
+
         // unpack the request
         let (mut request, context) = request.into_parts();
 
@@ -1519,6 +1694,9 @@ impl
             .collect();
         let annotations_stream = stream::iter(annotations);
 
+        // End preprocess stage before handing off to downstream (route/dispatch).
+        drop(_stage_guard);
+
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
 
@@ -1530,6 +1708,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            false,
         );
 
         // prepend the annotations to the response stream
@@ -1654,6 +1833,77 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
+    #[test]
+    fn test_parser_requires_special_tokens() {
+        let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
+            (
+                Some("gemma4"),
+                None,
+                true,
+                "gemma4 tool-call only → required",
+            ),
+            (
+                None,
+                Some("gemma4"),
+                true,
+                "gemma4 reasoning only → required",
+            ),
+            (
+                Some("gemma-4"),
+                None,
+                true,
+                "gemma-4 hyphen alias (tool) → required",
+            ),
+            (
+                None,
+                Some("gemma-4"),
+                true,
+                "gemma-4 hyphen alias (reasoning) → required",
+            ),
+            (
+                Some("gemma4"),
+                Some("gemma4"),
+                true,
+                "gemma4 paired → required",
+            ),
+            (Some("hermes"), None, false, "hermes → not required"),
+            (
+                Some("harmony"),
+                None,
+                true,
+                "harmony tool-call only → required",
+            ),
+            (
+                None,
+                Some("gpt_oss"),
+                true,
+                "gpt_oss reasoning only → required",
+            ),
+            (
+                Some("harmony"),
+                Some("gpt_oss"),
+                true,
+                "harmony + gpt_oss paired → required",
+            ),
+            (
+                Some("kimi_k2"),
+                Some("kimi_k25"),
+                false,
+                "kimi_k2 paired → not required",
+            ),
+            (None, None, false, "no parsers → not required"),
+        ];
+        for (tool, reasoning, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::parser_requires_special_tokens(*tool, *reasoning),
+                *expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+
+    /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_is_reasoning_disabled_by_request() {
         let thinking_true = {
@@ -1796,6 +2046,86 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "nemotron_nano + empty args → enabled",
+            ),
+            // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
+            // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_false),
+                true,
+                "deepseek_v4 + thinking=false → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_true),
+                false,
+                "deepseek_v4 + thinking=true → enabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseek_v4 + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&thinking_mode_thinking),
+                false,
+                "deepseek_v4 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                None,
+                false,
+                "deepseek_v4 + no args → enabled",
+            ),
+            (
+                Some("deepseek-v4"),
+                Some(&thinking_false),
+                true,
+                "deepseek-v4 (hyphen alias) + thinking=false → disabled",
+            ),
+            (
+                Some("deepseekv4"),
+                Some(&thinking_mode_chat),
+                true,
+                "deepseekv4 (joined alias) + thinking_mode=chat → disabled",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&enable_thinking_false),
+                true,
+                "deepseek_v4 + enable_thinking=false → disabled (vLLM alias)",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some(&enable_thinking_true),
+                false,
+                "deepseek_v4 + enable_thinking=true → enabled (vLLM alias)",
+            ),
+            (
+                Some("gemma4"),
+                Some(&enable_thinking_false),
+                true,
+                "gemma4 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("gemma4"),
+                Some(&enable_thinking_true),
+                false,
+                "gemma4 + enable_thinking=true → enabled",
+            ),
+            (
+                Some("gemma4"),
+                None,
+                false,
+                "gemma4 + no args → enabled (parser still runs but is a no-op when no markers arrive)",
+            ),
+            (
+                Some("gemma-4"),
+                Some(&enable_thinking_false),
+                true,
+                "gemma-4 (hyphen alias) + enable_thinking=false → disabled",
             ),
         ];
 

@@ -212,7 +212,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
@@ -280,7 +280,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-doc \
         --disable-static \
         --disable-x86asm \
-        --disable-postproc \
         --disable-network \
         --disable-encoders \
         --disable-muxers \
@@ -442,9 +441,9 @@ ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
@@ -483,7 +482,7 @@ COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% if device == "cuda" %}
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
@@ -495,6 +494,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ##################################
 ##### wheel_builder ##############
 ##################################
+{% if "nixl_ref" in context[framework] %}
 # Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
 # Runtime templates COPY from this stage.
 
@@ -570,7 +570,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
@@ -591,9 +591,9 @@ COPY components/ /opt/dynamo/components/
 ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
@@ -626,3 +626,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+{% else %}
+# SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
+# build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo
+# wheels and build tools from a common wheel_builder stage name.
+# SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
+# absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
+FROM runtime_wheel_builder AS wheel_builder
+{% endif %}

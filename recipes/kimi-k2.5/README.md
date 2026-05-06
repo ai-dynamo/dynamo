@@ -9,7 +9,7 @@ There are two model weight variants, each with its own model download and deploy
 | Variant | Model | Status | Modality | Deploy Configs | Notes |
 |---------|-------|--------|----------|---------------|-------|
 | **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
-| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml), and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | All configs are compatible with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional |
+| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml) and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | All configs are compatible with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional |
 
 All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 
@@ -85,7 +85,7 @@ curl http://localhost:8000/v1/chat/completions \
 > text backbone (`text_config`) only. The vision encoder is not loaded, so image inputs are not
 > processed. Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
 
-The nvidia variant supports text inference with reasoning parsing (`--dyn-reasoning-parser kimi_k25`) and tool calling (`--dyn-tool-call-parser kimi_k2`). It also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`, as well as a deployment `deploy-specdec.yaml` that uses speculative decoding.
+The nvidia variant supports text inference with reasoning parsing (`--dyn-reasoning-parser kimi_k25`) and tool calling (`--dyn-tool-call-parser kimi_k2`). It also ships `deploy-specdec.yaml` that uses speculative decoding.
 
 ### Quick Start
 
