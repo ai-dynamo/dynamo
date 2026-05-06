@@ -151,6 +151,73 @@ async fn realtime_websocket_session_update_echoes_session_updated() {
     let _ = handle.await;
 }
 
+/// `input_audio_buffer.append` round-trips through the engine: client sends
+/// base64 audio, server emits one or more `response.output_audio.delta`
+/// frames echoing it back, terminated by `response.output_audio.done`. End-to-
+/// end check that streamed multi-frame engine output reaches the wire.
+#[tokio::test]
+async fn realtime_websocket_audio_append_streams_deltas_then_done() {
+    ensure_echo_engine_installed();
+
+    let port = get_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    let token = CancellationToken::new();
+    let handle = service.spawn(token.clone()).await;
+    wait_for_health(port).await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+
+    let audio = "A".repeat(200);
+    let body = serde_json::json!({
+        "type": "input_audio_buffer.append",
+        "audio": audio.clone(),
+    });
+    ws.send(Message::Text(body.to_string()))
+        .await
+        .expect("send append");
+
+    let mut deltas = String::new();
+    let mut got_done = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !got_done && tokio::time::Instant::now() < deadline {
+        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("frame within 2s")
+            .expect("stream not closed")
+            .expect("no transport error");
+        let Message::Text(text) = frame else {
+            panic!("expected Text frame, got {frame:?}");
+        };
+        let event: Value = serde_json::from_str(&text).expect("response is valid JSON");
+        match event.get("type").and_then(|t| t.as_str()) {
+            Some("response.output_audio.delta") => {
+                let delta = event
+                    .get("delta")
+                    .and_then(|d| d.as_str())
+                    .expect("delta is a string");
+                deltas.push_str(delta);
+            }
+            Some("response.output_audio.done") => got_done = true,
+            other => panic!("unexpected event type {other:?} in audio echo stream: {event}"),
+        }
+    }
+
+    let _ = ws.close(None).await;
+    token.cancel();
+    let _ = handle.await;
+
+    assert!(got_done, "engine should emit response.output_audio.done");
+    assert_eq!(
+        deltas, audio,
+        "concatenated deltas should reproduce the input audio"
+    );
+}
+
 /// After a client-initiated close, the server should let the engine drain
 /// (sender side dropped → `req_rx` returns None → engine response stream ends)
 /// and emit its own Close frame as part of the cleanup. Covers the

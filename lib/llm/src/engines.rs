@@ -25,7 +25,8 @@ use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
 use dynamo_protocols::types::realtime::{
     EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent,
-    RealtimeServerEventError, RealtimeServerEventSessionUpdated,
+    RealtimeServerEventError, RealtimeServerEventResponseAudioDelta,
+    RealtimeServerEventResponseAudioDone, RealtimeServerEventSessionUpdated,
 };
 
 //
@@ -131,19 +132,30 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
     Arc::new(data)
 }
 
+/// How many base64 characters per [`response.output_audio.delta`] frame the
+/// echo engine emits. Picked small enough to demonstrate streaming (multiple
+/// deltas per append) on typical audio buffers, large enough to keep the
+/// frame count reasonable. Has no semantic meaning beyond pacing.
+const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
+
 /// Bidirectional echo engine over the OpenAI Realtime event surface.
 ///
 /// For each [`RealtimeClientEvent`] the client sends, the engine emits a
-/// single [`RealtimeServerEvent`]:
-/// * [`RealtimeClientEvent::SessionUpdate`] → [`RealtimeServerEvent::SessionUpdated`]
-///   echoing the requested `session` payload back.
+/// short stream of [`RealtimeServerEvent`]s that demonstrates the round-trip:
+/// * [`RealtimeClientEvent::SessionUpdate`] → one
+///   [`RealtimeServerEvent::SessionUpdated`] echoing the requested `session`.
+/// * [`RealtimeClientEvent::InputAudioBufferAppend`] → one or more
+///   [`RealtimeServerEvent::ResponseOutputAudioDelta`] frames echoing the
+///   base64 audio back in `ECHO_AUDIO_DELTA_CHUNK_LEN`-character chunks,
+///   terminated by [`RealtimeServerEvent::ResponseOutputAudioDone`].
 /// * Every other variant → [`RealtimeServerEvent::Error`] with
 ///   `code = "echo_engine_unsupported"` and a message naming the variant.
 ///
 /// Used by the experimental `/v1/realtime` WebSocket endpoint to demonstrate
 /// end-to-end bidirectional plumbing. The mock is intentionally minimal:
-/// real session lifecycle, audio buffering, transcription, and response
-/// generation belong to a downstream engine, not here.
+/// real session lifecycle, audio buffering, transcription, and full response
+/// generation (including `response.created` / `response.done` envelope events)
+/// belong to a downstream engine, not here.
 pub struct EchoBidirectionalEngine {}
 
 #[async_trait]
@@ -160,48 +172,108 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
 
         let output = stream! {
             let ctx = ctx_for_stream;
-            let mut chunk_index: u64 = 0;
+            let mut turn: u64 = 0;
+            let mut frame: u64 = 0;
 
             while let Some(client_event) = incoming.next().await {
                 if ctx.is_stopped() {
                     break;
                 }
-                chunk_index += 1;
-                let event_id = format!("event_{session_id}_{chunk_index}");
+                turn += 1;
+                let response_id = format!("resp_{session_id}_{turn}");
+                let item_id = format!("item_{session_id}_{turn}");
 
-                let server_event = match client_event {
+                match client_event {
                     RealtimeClientEvent::SessionUpdate(req) => {
-                        RealtimeServerEvent::SessionUpdated(RealtimeServerEventSessionUpdated {
-                            event_id,
-                            session: req.session,
-                        })
-                    }
-                    other => RealtimeServerEvent::Error(RealtimeServerEventError {
-                        event_id,
-                        error: RealtimeAPIError {
-                            r#type: "invalid_request_error".to_string(),
-                            code: Some("echo_engine_unsupported".to_string()),
-                            message: format!(
-                                "echo engine does not support client event {}",
-                                other.event_type()
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::SessionUpdated(
+                                RealtimeServerEventSessionUpdated {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    session: req.session,
+                                },
                             ),
-                            param: None,
-                            event_id: None,
-                        },
-                    }),
-                };
-
-                yield Annotated {
-                    id: Some(chunk_index.to_string()),
-                    data: Some(server_event),
-                    event: None,
-                    comment: None,
-                    error: None,
-                };
+                        );
+                    }
+                    RealtimeClientEvent::InputAudioBufferAppend(req) => {
+                        // Echo the base64 audio back in `ECHO_AUDIO_DELTA_CHUNK_LEN`-sized
+                        // deltas so observers see real streaming, then terminate
+                        // with a single `output_audio.done`. Note: chunking is on
+                        // base64-character boundaries, not byte boundaries, which
+                        // is fine for transport echo — receivers concatenate the
+                        // deltas before decoding.
+                        let chars: Vec<char> = req.audio.chars().collect();
+                        for chunk in chars.chunks(ECHO_AUDIO_DELTA_CHUNK_LEN) {
+                            if ctx.is_stopped() {
+                                break;
+                            }
+                            frame += 1;
+                            yield annotated_event(
+                                frame,
+                                RealtimeServerEvent::ResponseOutputAudioDelta(
+                                    RealtimeServerEventResponseAudioDelta {
+                                        event_id: format!("event_{session_id}_{frame}"),
+                                        response_id: response_id.clone(),
+                                        item_id: item_id.clone(),
+                                        output_index: 0,
+                                        content_index: 0,
+                                        delta: chunk.iter().collect(),
+                                    },
+                                ),
+                            );
+                        }
+                        if ctx.is_stopped() {
+                            break;
+                        }
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::ResponseOutputAudioDone(
+                                RealtimeServerEventResponseAudioDone {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    response_id: response_id.clone(),
+                                    item_id: item_id.clone(),
+                                    output_index: 0,
+                                    content_index: 0,
+                                },
+                            ),
+                        );
+                    }
+                    other => {
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::Error(RealtimeServerEventError {
+                                event_id: format!("event_{session_id}_{frame}"),
+                                error: RealtimeAPIError {
+                                    r#type: "invalid_request_error".to_string(),
+                                    code: Some("echo_engine_unsupported".to_string()),
+                                    message: format!(
+                                        "echo engine does not support client event {}",
+                                        other.event_type()
+                                    ),
+                                    param: None,
+                                    event_id: None,
+                                },
+                            }),
+                        );
+                    }
+                }
             }
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
+}
+
+fn annotated_event(frame: u64, event: RealtimeServerEvent) -> Annotated<RealtimeServerEvent> {
+    Annotated {
+        id: Some(frame.to_string()),
+        data: Some(event),
+        event: None,
+        comment: None,
+        error: None,
     }
 }
 
@@ -486,18 +558,69 @@ mod tests {
         }
     }
 
-    /// Any non-SessionUpdate client event is rejected with a single Error server event
-    /// naming the wire-tag of the offending variant.
+    /// `input_audio_buffer.append` echoes the supplied base64 audio back as one
+    /// or more `response.output_audio.delta` frames sized at most
+    /// `ECHO_AUDIO_DELTA_CHUNK_LEN`, terminated by a single
+    /// `response.output_audio.done`. Frame IDs (response_id, item_id) are
+    /// stable across the deltas + done so receivers can group them.
     #[tokio::test]
-    async fn echo_bidirectional_unknown_event_emits_error() {
+    async fn echo_bidirectional_append_streams_audio_deltas_then_done() {
+        // 200 base64 chars → 4 deltas (3×64 + 1×8) + 1 done.
+        let audio = "A".repeat(200);
         let append = parse_client_event(serde_json::json!({
             "type": "input_audio_buffer.append",
-            "audio": ""
+            "audio": audio.clone(),
         }));
 
         let engine = EchoBidirectionalEngine {};
         let mut response_stream = engine
             .generate(make_input(vec![append]))
+            .await
+            .expect("generate");
+
+        let mut deltas: Vec<RealtimeServerEventResponseAudioDelta> = Vec::new();
+        let mut done: Option<RealtimeServerEventResponseAudioDone> = None;
+        while let Some(chunk) = response_stream.next().await {
+            match chunk.data.expect("annotated payload") {
+                RealtimeServerEvent::ResponseOutputAudioDelta(d) => deltas.push(d),
+                RealtimeServerEvent::ResponseOutputAudioDone(d) => {
+                    assert!(done.is_none(), "exactly one done frame");
+                    done = Some(d);
+                }
+                other => panic!("unexpected event in audio echo stream: {other:?}"),
+            }
+        }
+        let done = done.expect("done frame missing");
+
+        assert_eq!(deltas.len(), 200_usize.div_ceil(ECHO_AUDIO_DELTA_CHUNK_LEN));
+        assert_eq!(
+            deltas.iter().map(|d| d.delta.as_str()).collect::<String>(),
+            audio,
+            "concatenated deltas should equal the input audio"
+        );
+
+        // response_id + item_id must be stable across all frames in the turn.
+        let response_id = &deltas[0].response_id;
+        let item_id = &deltas[0].item_id;
+        assert!(deltas.iter().all(|d| &d.response_id == response_id));
+        assert!(deltas.iter().all(|d| &d.item_id == item_id));
+        assert_eq!(&done.response_id, response_id);
+        assert_eq!(&done.item_id, item_id);
+    }
+
+    /// Client events the echo engine doesn't model (anything other than
+    /// SessionUpdate / InputAudioBufferAppend) are rejected with a single
+    /// Error server event naming the wire-tag of the offending variant.
+    #[tokio::test]
+    async fn echo_bidirectional_unknown_event_emits_error() {
+        let item_create = parse_client_event(serde_json::json!({
+            "type": "conversation.item.create",
+            "item": { "type": "message", "role": "user", "content": [] }
+        }));
+
+        let engine = EchoBidirectionalEngine {};
+        let mut response_stream = engine
+            .generate(make_input(vec![item_create]))
             .await
             .expect("generate");
 
@@ -507,7 +630,7 @@ mod tests {
         match chunk.data.expect("annotated payload") {
             RealtimeServerEvent::Error(err) => {
                 assert_eq!(err.error.code.as_deref(), Some("echo_engine_unsupported"));
-                assert!(err.error.message.contains("input_audio_buffer.append"));
+                assert!(err.error.message.contains("conversation.item.create"));
             }
             other => panic!("expected error, got {other:?}"),
         }
