@@ -132,70 +132,66 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-          
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        # Run from the container's baked-in workspace, not the GHA checkout,
+        # so the sanity check reflects what the image actually ships.
+        working-directory: /workspace
+        run: |
+          set +e
+          python ./deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
 
-      # - name: Run Sanity Check on Runtime Image
-      #   if: ${{ inputs.run_sanity_check }}
-      #   shell: bash
-      #   run: |
-      #     echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
-
-      #     export WORKSPACE=/workspace
-
-      #     set +e
-      #     docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-      #     SANITY_CHECK_EXIT_CODE=$?
-      #     set -e
-      #     if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-      #       echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-      #       exit ${SANITY_CHECK_EXIT_CODE}
-      #     else
-      #       echo "✅ Sanity check passed"
-      #     fi
-      # - name: Run CPU-only tests (parallelized)
-      #   if: ${{ inputs.run_cpu_only_tests }}
-      #   timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-      #     pytest_marks: ${{ inputs.cpu_only_test_markers }}
-      #     test_suite_name: ${{ inputs.test_suite_name }}
-      #     test_type: "pre_merge_cpu"
-      #     platform_arch: ${{ matrix.platform }}
-      #     hf_token: ${{ secrets.HF_TOKEN }}
-      #     parallel_mode: ${{ inputs.cpu_parallel_mode }}
-      #     dind_as_sidecar: 'true'
-      #     enable_coverage: ${{ inputs.enable_coverage }}
-      # - name: Run GPU tests (parallel)
-      #   timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-      #   if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-      #     pytest_marks: ${{ inputs.gpu_test_markers }}
-      #     test_suite_name: ${{ inputs.test_suite_name }}
-      #     test_type: "pre_merge_gpu_parallel"
-      #     platform_arch: ${{ matrix.platform }}
-      #     hf_token: ${{ secrets.HF_TOKEN }}
-      #     # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
-      #     # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
-      #     parallel_mode: 'auto'
-      #     max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
-      #     dind_as_sidecar: 'true'
-      #     enable_coverage: ${{ inputs.enable_coverage }}
-      # - name: Run GPU tests (sequential)
-      #   timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-      #   # !cancelled() so a parallel-stage failure doesn't hide sequential results.
-      #   if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-      #   uses: ./.github/actions/pytest
-      #   with:
-      #     image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-      #     # When the parallel stage runs, exclude profiled tests here so they don't run twice.
-      #     pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
-      #     test_suite_name: ${{ inputs.test_suite_name }}
-      #     test_type: "pre_merge_gpu"
-      #     platform_arch: ${{ matrix.platform }}
-      #     hf_token: ${{ secrets.HF_TOKEN }}
-      #     parallel_mode: 'none'
-      #     dind_as_sidecar: 'true'
-      #     enable_coverage: ${{ inputs.enable_coverage }}
+      - name: Run CPU-only tests (parallelized)
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.cpu_only_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_cpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: ${{ inputs.cpu_parallel_mode }}
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'false'
+      - name: Run GPU tests (parallel)
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu_parallel"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
+          # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
+          parallel_mode: 'auto'
+          max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'true'
+      - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        # !cancelled() so a parallel-stage failure doesn't hide sequential results.
+        if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          # When the parallel stage runs, exclude profiled tests here so they don't run twice.
+          pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'true'
