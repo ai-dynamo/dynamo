@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -240,6 +241,12 @@ pub struct Worker {
     /// Determines whether `run()` should call `runtime.shutdown()` at the
     /// end — we only want to tear down a runtime we own.
     owns_runtime: bool,
+    /// Single-shot guard — flipped to `true` on the first `run()` call.
+    /// The Rust `Worker` underneath consumes `self`; calling `run()`
+    /// twice from Python would build a second `RsWorker` and call
+    /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
+    /// don't tolerate. We surface a clear `RuntimeError` instead.
+    consumed: AtomicBool,
 }
 
 #[pymethods]
@@ -288,12 +295,27 @@ impl Worker {
             event_loop: Arc::new(event_loop),
             config: config.inner,
             owns_runtime,
+            consumed: AtomicBool::new(false),
         })
     }
 
     /// Drive the full lifecycle: start engine → register model → serve →
     /// (on signal) orchestrate graceful shutdown → cleanup → return.
     fn run<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        // Worker is single-shot — flip the consumed flag atomically so
+        // a second `await worker.run()` raises clearly instead of
+        // re-initializing the engine.
+        if self
+            .consumed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Worker.run() can only be called once per Worker instance; \
+                 construct a new Worker to run again",
+            ));
+        }
+
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();

@@ -213,6 +213,26 @@ impl Worker {
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
     pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
+        // Install the OS signal handlers synchronously, before spawning
+        // anything, so a SIGTERM delivered between this point and the
+        // task's first poll is captured by the kernel-side handler rather
+        // than the OS default (which would terminate the process abruptly).
+        // `Signal::recv` then drives the shared cancellation token.
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    format!("install SIGTERM handler: {e}"),
+                )
+            })?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    format!("install SIGINT handler: {e}"),
+                )
+            })?;
+
         // Single shared shutdown signal observed across all phases. The
         // background task only flips the token — it intentionally does
         // not touch the lifecycle mutex, so `start_engine` cannot deadlock
@@ -220,7 +240,10 @@ impl Worker {
         let shutdown_token = CancellationToken::new();
         let signal_token = shutdown_token.clone();
         let signal_handle = tokio::spawn(async move {
-            wait_for_shutdown_signal().await;
+            tokio::select! {
+                _ = sigterm.recv() => tracing::info!("SIGTERM received"),
+                _ = sigint.recv() => tracing::info!("SIGINT received"),
+            }
             signal_token.cancel();
         });
 
@@ -286,32 +309,31 @@ impl Worker {
         // alive.
         if shutdown.is_cancelled() {
             tracing::info!("Shutdown signal observed during engine.start(); running orchestrator");
-            return self.run_post_start_shutdown(endpoint).await;
+            self.orchestrator_steps(&endpoint).await;
+            return Ok(());
         }
 
         self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
             .await
     }
 
-    /// Discovery unregister + grace period + drain + cleanup. Used when a
-    /// signal arrives between `engine.start()` and the serve loop, so we
-    /// short-circuit serving entirely.
-    async fn run_post_start_shutdown(
-        &self,
-        endpoint: dynamo_runtime::component::Endpoint,
-    ) -> Result<(), DynamoError> {
+    /// Full graceful-shutdown orchestrator: discovery unregister →
+    /// grace period → drain → cleanup. Shared by every shutdown path —
+    /// pre-serve (mid-start signal) and the serve loop's signal arm.
+    async fn orchestrator_steps(&self, endpoint: &dynamo_runtime::component::Endpoint) {
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
             tracing::info!("Endpoint unregistered from discovery");
         }
         self.run_engine_shutdown_steps().await;
-        Ok(())
     }
 
-    /// Mutex-guarded start. The lock is held through `engine.start()` so a
-    /// concurrent `cleanup_once` waits for start to finish before deciding
-    /// what to do.
+    /// Mutex-guarded start. The lifecycle mutex is purely defensive here:
+    /// `start_engine` is called once from `run_inner`, and `cleanup_once`
+    /// is only invoked after `run_inner` returns. The lock provides
+    /// memory ordering for state transitions but does not serialize
+    /// concurrent callers (there are none).
     async fn start_engine(&self) -> Result<EngineConfig, DynamoError> {
         let mut guard = self.state.lock().await;
         // `start_engine` is called once from `run_inner`, which consumes
@@ -429,18 +451,7 @@ impl Worker {
             }
         }
 
-        // Step 1: discovery unregister — router stops routing here.
-        if let Err(e) = endpoint.unregister_endpoint_instance().await {
-            tracing::warn!(error = %e, "discovery unregister failed");
-        } else {
-            tracing::info!("Endpoint unregistered from discovery");
-        }
-
-        // Steps 2-4: grace period, drain, cleanup. Factored out so the
-        // engine-side ordering can be unit-tested without standing up a
-        // real DistributedRuntime + endpoint.
-        self.run_engine_shutdown_steps().await;
-
+        self.orchestrator_steps(&endpoint).await;
         Ok(())
     }
 
@@ -467,33 +478,6 @@ impl Worker {
         }
 
         self.cleanup_once().await;
-    }
-}
-
-/// Block on either SIGTERM or SIGINT (Ctrl+C). Both signal types use
-/// dedicated `tokio::signal` streams so the listener runs cleanly under
-/// any tokio runtime configuration.
-async fn wait_for_shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut sigterm = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to install SIGTERM handler");
-            return std::future::pending::<()>().await;
-        }
-    };
-    let mut sigint = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to install SIGINT handler");
-            return std::future::pending::<()>().await;
-        }
-    };
-
-    tokio::select! {
-        _ = sigterm.recv() => tracing::info!("SIGTERM received"),
-        _ = sigint.recv() => tracing::info!("SIGINT received"),
     }
 }
 
