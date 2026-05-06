@@ -183,7 +183,7 @@ _gpu_utils_self_test() {
     echo "=== sglang: token cap env ==="
     result=$(_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS=1024 \
         build_sglang_gpu_mem_args)
-    _assert "token cap" "--max-total-tokens 1024" "$result"
+    _assert "token cap" "--max-total-tokens 1024 --mem-fraction-static 0.9" "$result"
 
     echo ""
     echo "=== sglang: no override = empty ==="
