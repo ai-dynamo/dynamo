@@ -77,7 +77,7 @@ Each agent operates on the workload pods on its own node independently, so check
 Note: running CRIU restore inside of the placeholder's namespace allows the restored workload pod to not need a privileged security context, which means we don't compromise on Kubernetes isolation/security best practices.
 
 ### Why not native Kubernetes checkpoint?
-Some OCI runtimes — namely `runc` and `runsc` — already have built-in container-level checkpoint/restore capabilities, and `runc` in particular delegates to CRIU. Higher-level container managers like `podman` and `docker` expose checkpoint/restore by going through the underlying runtime. The checkpoints produced are full OCI images with the checkpointed process tree state baked in. However, we had a few requirements that prevented us from using these native checkpoint/restore capabilities:
+Some OCI runtimes (namely `runc` and `runsc`) already have built-in container-level checkpoint/restore capabilities, and `runc` in particular delegates to CRIU. Higher-level container managers like Podman and Docker expose checkpoint/restore by going through the underlying runtime. The checkpoints produced are full OCI images with the checkpointed process tree state baked in. However, we had a few requirements that prevented us from using these native checkpoint/restore capabilities:
 
 - We needed to perform heavy customization and optimization of both CRIU and cuda-checkpoint (more on this in Optimizations #2 and #3).
 - We couldn't rely on whether or not checkpoint/restore feature gates were exposed, even at the CRI level, because some cloud service providers do not offer control of kubelet at all. Moreover, this would also require installing CRIU on the host, which isn't always possible.
@@ -130,7 +130,7 @@ We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read 
 
 ![Native AIO pipeline: up to 128 reads in flight via io_submit and io_getevents, storage device runs them concurrently.](./figures/aio_pipeline_after.svg)
 
-On its own, AIO already accounts for the bulk of the gain — for instance, AIO alone brings CRIU restore time from ~82s to ~50s on Llama 3.3 70B FP8 and from ~119s to ~73s on GPT-OSS 120B. The remaining gap to single-digit seconds comes from the parallel memfd restore described next.
+<!-- TODO: anecdotes for AIO perf on its own -->
 
 #### Direct I/O and the Page Cache
 Where the storage backend supports it, both anonymous and shared memory reads use `O_DIRECT`. Restore is mostly a one-pass stream from checkpoint files into destination memory, so caching the input pages in the kernel page cache is usually wasteful. Without direct I/O, a large restore can temporarily fill the page cache with checkpoint data while also allocating the destination shmem pages, increasing memory pressure and evicting useful data for other workloads.
@@ -179,6 +179,7 @@ Where the loader gets the weights from is its own concern. In a real cluster, we
 We are still in the process of developing the integration with MX, among other transfer engine backends. For now, the fallback is to also use NFS for the weights, which eliminates the full host-side materialization of the weights but still causes some NFS bandwidth contention with the ongoing CRIU restore. Nonetheless, we still see a major reduction in startup time, even with this fallback.
 
 ### Full Overlap with External Weight Restoration
+
 To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore with a faster channel for restoring the weights, we implemented a proof-of-concept backend for `gms-loader` where the weights for each model are sharded across 8 SSDs on a node, and ensured the restored workload was on the same node as the checkpoint.
 
 This setup isolates the parallel-restore claim from network storage variability and shows what the rest of the system can do when the weight source isn't the bottleneck. The loader pipelines reads with GPU copies (a pool of threads issuing `cudaMemcpyAsync` over multiple CUDA streams) so storage→host and host→GPU run continuously rather than fully materializing the weights in host memory.
