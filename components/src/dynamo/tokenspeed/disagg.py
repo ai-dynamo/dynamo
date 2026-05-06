@@ -54,9 +54,7 @@ def runtime_disaggregated_endpoint(server_args: Any) -> Tuple[str, int]:
     return resolve_bootstrap_host(server_args), int(port)
 
 
-def validate_disagg_compatibility(
-    mode: DisaggregationMode, server_args: Any
-) -> None:
+def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) -> None:
     """Cheap pre-flight checks before the engine is started.
 
     The user can extend this — see TODO below — to enforce additional
