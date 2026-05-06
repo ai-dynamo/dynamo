@@ -3,3 +3,6 @@
 
 pub mod coding;
 pub mod common;
+
+#[path = "../kv_router/common/mod.rs"]
+pub mod kv_router_common;
