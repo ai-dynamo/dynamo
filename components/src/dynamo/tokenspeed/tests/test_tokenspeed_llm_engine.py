@@ -5,7 +5,9 @@ import json
 
 import pytest
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.llm_engine import (
+    _validate_single_choice_sampling,
     build_sampling_params,
     convert_output_to_chunk,
 )
@@ -28,10 +30,7 @@ def test_build_sampling_params_maps_dynamo_request():
                 "seed": 123,
                 "n": 1,
                 "guided_decoding": {
-                    "json": {"type": "object"},
                     "choice": ["yes", "no"],
-                    "grammar": "root ::= \"x\"",
-                    "structural_tag": {"begin": "<a>", "schema": {"type": "object"}},
                 },
             },
             "stop_conditions": {
@@ -39,6 +38,7 @@ def test_build_sampling_params_maps_dynamo_request():
                 "min_tokens": 2,
                 "ignore_eos": True,
                 "stop_token_ids_hidden": [7, 8],
+                "stop_token_ids": [8, 9],
             },
         },
         model_max_len=100,
@@ -56,14 +56,75 @@ def test_build_sampling_params_maps_dynamo_request():
     assert params["max_new_tokens"] == 17
     assert params["min_new_tokens"] == 2
     assert params["ignore_eos"] is True
-    assert params["stop_token_ids"] == [7, 8]
-    assert json.loads(params["json_schema"]) == {"type": "object"}
+    assert params["stop_token_ids"] == [7, 8, 9]
     assert params["regex"] == "(yes|no)"
+
+
+def test_build_sampling_params_maps_json_guided_decoding():
+    params = build_sampling_params(
+        {
+            "token_ids": [1],
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {"type": "object"},
+                },
+            },
+        },
+        model_max_len=10,
+    )
+
+    assert json.loads(params["json_schema"]) == {"type": "object"}
+
+
+def test_build_sampling_params_maps_grammar_guided_decoding():
+    params = build_sampling_params(
+        {
+            "token_ids": [1],
+            "sampling_options": {
+                "guided_decoding": {
+                    "grammar": "root ::= \"x\"",
+                },
+            },
+        },
+        model_max_len=10,
+    )
+
     assert params["ebnf"] == 'root ::= "x"'
+
+
+def test_build_sampling_params_maps_structural_tag_guided_decoding():
+    params = build_sampling_params(
+        {
+            "token_ids": [1],
+            "sampling_options": {
+                "guided_decoding": {
+                    "structural_tag": {"begin": "<a>", "schema": {"type": "object"}},
+                },
+            },
+        },
+        model_max_len=10,
+    )
+
     assert json.loads(params["structural_tag"]) == {
         "begin": "<a>",
         "schema": {"type": "object"},
     }
+
+
+def test_build_sampling_params_rejects_multiple_guided_constraints():
+    with pytest.raises(InvalidArgument, match="one constraint"):
+        build_sampling_params(
+            {
+                "token_ids": [1],
+                "sampling_options": {
+                    "guided_decoding": {
+                        "json": {"type": "object"},
+                        "choice": ["yes", "no"],
+                    },
+                },
+            },
+            model_max_len=10,
+        )
 
 
 def test_build_sampling_params_uses_dynamic_max_tokens():
@@ -100,3 +161,25 @@ def test_convert_output_to_chunk_maps_finish_reason_and_usage():
             "total_tokens": 5,
         },
     }
+
+
+def test_convert_output_to_chunk_normalizes_abort_finish_reason():
+    chunk = convert_output_to_chunk(
+        {
+            "output_ids": [],
+            "meta_info": {
+                "finish_reason": "abort_request",
+                "prompt_tokens": 1,
+                "completion_tokens": 0,
+            },
+        }
+    )
+
+    assert chunk["finish_reason"] == "cancelled"
+
+
+def test_validate_single_choice_sampling_rejects_n_greater_than_one():
+    with pytest.raises(InvalidArgument, match="n=2"):
+        _validate_single_choice_sampling(
+            {"token_ids": [1], "sampling_options": {"n": 2}}
+        )

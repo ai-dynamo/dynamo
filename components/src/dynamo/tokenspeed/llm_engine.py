@@ -19,6 +19,7 @@ from dynamo.common.backend.engine import (
     LLMEngine,
 )
 from dynamo.common.backend.worker import WorkerConfig
+from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
@@ -67,7 +68,7 @@ class TokenspeedLLMEngine(LLMEngine):
             or getattr(self.server_args, "max_total_tokens", None)
         )
         total_kv_blocks = (
-            max_total_tokens // block_size
+            (max_total_tokens + block_size - 1) // block_size
             if max_total_tokens is not None and block_size
             else None
         )
@@ -178,7 +179,10 @@ def build_sampling_params(
     if ignore_eos is not None:
         params["ignore_eos"] = ignore_eos
 
-    stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
+    stop_token_ids = _merge_stop_token_ids(
+        stop_conditions.get("stop_token_ids_hidden"),
+        stop_conditions.get("stop_token_ids"),
+    )
     if stop_token_ids:
         params["stop_token_ids"] = stop_token_ids
 
@@ -195,7 +199,9 @@ def convert_output_to_chunk(out: dict[str, Any]) -> GenerateChunk:
 
     finish_reason = meta_info.get("finish_reason")
     if finish_reason is not None:
-        chunk["finish_reason"] = _finish_reason_type(finish_reason)
+        chunk["finish_reason"] = normalize_finish_reason(
+            _finish_reason_type(finish_reason)
+        )
         prompt_tokens = int(meta_info.get("prompt_tokens") or 0)
         completion_tokens = int(meta_info.get("completion_tokens") or 0)
         chunk["completion_usage"] = {
@@ -211,25 +217,42 @@ def _guided_decoding_params(guided_decoding: dict[str, Any]) -> dict[str, Any]:
     params: dict[str, Any] = {}
 
     json_schema = guided_decoding.get("json")
+    regex = guided_decoding.get("regex")
+    choice = guided_decoding.get("choice")
+    grammar = guided_decoding.get("grammar")
+    structural_tag = guided_decoding.get("structural_tag")
+
+    if regex is None and choice:
+        valid_choices = [str(c) for c in choice if c is not None]
+        if valid_choices:
+            regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
+
+    constraints = {
+        "json": json_schema,
+        "regex": regex,
+        "grammar": grammar,
+        "structural_tag": structural_tag,
+    }
+    active_constraints = [
+        name for name, value in constraints.items() if value is not None
+    ]
+    if len(active_constraints) > 1:
+        raise InvalidArgument(
+            "TokenSpeed guided decoding supports one constraint at a time; "
+            f"got {', '.join(active_constraints)}"
+        )
+
     if json_schema is not None:
         params["json_schema"] = (
             json_schema if isinstance(json_schema, str) else json.dumps(json_schema)
         )
 
-    regex = guided_decoding.get("regex")
-    choice = guided_decoding.get("choice")
-    if regex is None and choice:
-        valid_choices = [str(c) for c in choice if c is not None]
-        if valid_choices:
-            regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
     if regex is not None:
         params["regex"] = regex
 
-    grammar = guided_decoding.get("grammar")
     if grammar is not None:
         params["ebnf"] = grammar
 
-    structural_tag = guided_decoding.get("structural_tag")
     if structural_tag is not None:
         if hasattr(structural_tag, "model_dump"):
             structural_tag = structural_tag.model_dump()
@@ -248,6 +271,17 @@ def _finish_reason_type(finish_reason: Any) -> str:
     if isinstance(finish_reason, dict):
         return str(finish_reason.get("type") or "unknown")
     return str(finish_reason)
+
+
+def _merge_stop_token_ids(*token_id_lists: Any) -> list[int]:
+    merged: list[int] = []
+    seen: set[int] = set()
+    for token_ids in token_id_lists:
+        for token_id in token_ids or []:
+            if token_id not in seen:
+                seen.add(token_id)
+                merged.append(token_id)
+    return merged
 
 
 def _validate_single_choice_sampling(request: GenerateRequest) -> None:
