@@ -3,6 +3,13 @@
 .vscode/
 .helix
 issues/
+
+# Compliance: NOTICES / ATTRIBUTIONS are generated per-image at build time
+# and ship inside the runtime container under /legal/. Never committed.
+ATTRIBUTIONS-*.md
+ATTRIBUTIONS.md
+NOTICES-*.txt
+NOTICES.txt
 plans/
 *rendered.Dockerfile
 [Bb]inlog/
