@@ -19,9 +19,17 @@ There is **no public `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image** at th
 this recipe was written; TokenSpeed integration in Dynamo is still in flight. This
 directory ships a [`Dockerfile`](Dockerfile) that builds a Dynamo+TokenSpeed image
 on top of `docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0` (the upstream
-TokenSpeed runtime, pinned by tag for reproducibility). Run the build, push the result
-to a registry your cluster can pull from, then update the `image:` fields in
-[`deploy.yaml`](deploy.yaml).
+TokenSpeed runtime base, pinned by tag for reproducibility).
+
+The lightseek runner image is the **runtime base only** — it ships CUDA 13, PyTorch
+2.11, and mooncake, but not the TokenSpeed engine itself (the engine is not yet
+published on PyPI; only a name-reservation placeholder exists). This Dockerfile
+installs TokenSpeed from upstream source per the official guide at
+[lightseek.org/tokenspeed/guides/getting-started](https://lightseek.org/tokenspeed/guides/getting-started),
+then layers Dynamo on top.
+
+Run the build, push the result to a registry your cluster can pull from, then
+update the `image:` fields in [`deploy.yaml`](deploy.yaml).
 
 ### 1. Build the Dynamo+TokenSpeed image
 

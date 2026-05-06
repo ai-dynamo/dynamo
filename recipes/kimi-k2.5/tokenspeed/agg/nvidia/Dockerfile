@@ -30,19 +30,43 @@
 #   --build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
 # or for arm64 base images:
 #   --build-arg ARCH=arm64
+#
+# The runner image is the runtime base only; this Dockerfile installs the
+# TokenSpeed engine itself from github.com/lightseekorg/tokenspeed, following
+# the upstream guide at lightseek.org/tokenspeed/guides/getting-started. Pin
+# the TokenSpeed source ref via --build-arg TOKENSPEED_GIT_REF=<ref>.
 ARG BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0
 ARG ARCH=amd64
 ARG CARGO_BUILD_JOBS=16
 
 FROM ${BASE_IMAGE} AS tokenspeed_base
 ARG ARCH
+ARG TOKENSPEED_GIT_REF=main
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git; \
     rm -rf /var/lib/apt/lists/*
+
+# Install TokenSpeed from upstream source. The public lightseekorg/tokenspeed-runner
+# image ships only the runtime base (CUDA, PyTorch, mooncake); the engine itself
+# is not yet published on PyPI. Mirrors the upstream guide at
+# https://lightseek.org/tokenspeed/guides/getting-started.
+# Override the source ref (a branch / tag / commit SHA) with --build-arg TOKENSPEED_GIT_REF=<ref>.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    git clone https://github.com/lightseekorg/tokenspeed.git /opt/tokenspeed; \
+    cd /opt/tokenspeed; \
+    git checkout "${TOKENSPEED_GIT_REF}"; \
+    pip install -e "./python" --no-build-isolation; \
+    pip install -e tokenspeed-kernel/python/ --no-build-isolation; \
+    pip install -e tokenspeed-scheduler/
 
 # Dynamo services used by local agg/backend smoke tests.
 RUN set -eux; \
@@ -60,12 +84,12 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
+# build-essential and git already installed in tokenspeed_base for the
+# TokenSpeed kernel build; this layer adds the remaining Rust/Dynamo tooling.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        build-essential \
-        git \
         libclang-dev \
         pkg-config \
         protobuf-compiler; \
