@@ -169,9 +169,6 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 Wheels are built using a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but not officially verified.
 
-> [!Caution]
-> KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
-
 ## Cloud Service Provider Compatibility
 
 ### AWS
