@@ -34,8 +34,6 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for worker sampling. 0 = deterministic |
 | `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
 | `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |
-| `--router-max-tree-size` | `DYN_ROUTER_MAX_TREE_SIZE` | `1048576` | Max radix tree size before pruning (no-events mode) |
-| `--router-prune-target-ratio` | `DYN_ROUTER_PRUNE_TARGET_RATIO` | `0.8` | Target size ratio after pruning (no-events mode) |
 | `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync state across multiple router instances |
 | `--router-snapshot-threshold` | `DYN_ROUTER_SNAPSHOT_THRESHOLD` | `1000000` | Messages before triggering a snapshot |
 | `--router-reset-states` / `--no-router-reset-states` | `DYN_ROUTER_RESET_STATES` | `false` | Reset router state on startup. **Warning:** affects existing replicas |
@@ -68,9 +66,9 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--migration-limit` | `DYN_MIGRATION_LIMIT` | `0` | Max request migrations per worker disconnect. 0 = disabled |
-| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | — | KV cache utilization fraction (0.0–1.0) for busy detection |
-| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | — | Absolute token count for prefill busy detection |
-| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | — | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold |
+| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
+| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
+| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `10.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
 
 ## Model Discovery
 

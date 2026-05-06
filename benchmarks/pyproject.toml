@@ -40,7 +40,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@1fe8084c817194827706947cc175107ee9e6ea25",
+    "aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@b33a136e78f9351a7ad17db1e2a1abd7b295cc6a",
     "aiperf==0.6.0",
     "matplotlib",
     "networkx",

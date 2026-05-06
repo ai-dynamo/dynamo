@@ -670,8 +670,6 @@ class ApproxKvIndexer:
         endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1048576,
-        router_prune_target_ratio: float = 0.8,
     ) -> None:
         """
         Create an `ApproxKvIndexer` object
@@ -680,8 +678,6 @@ class ApproxKvIndexer:
             component: The component to associate with this indexer
             kv_block_size: The KV cache block size
             router_ttl_secs: TTL for blocks in seconds (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
-            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
 
@@ -835,6 +831,69 @@ class FpmEventRelay:
         ...
 
 
+class FpmDirectPublisher:
+    """
+    Direct Forward Pass Metrics publisher used by in-process producers such
+    as the TRT-LLM adapter. The underlying Rust publisher owns per-DP-rank
+    serialization tasks (each with its own 1s idle heartbeat timer) and a
+    single event-plane publisher task. Python callers do not manage
+    heartbeat: when ``publish`` is not called for ``IDLE_HEARTBEAT_INTERVAL``
+    (1.0s, matching vLLM's ``HEARTBEAT_INTERVAL``), the Rust side emits a
+    zeroed snapshot on that rank's channel.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        worker_id: str,
+        dp_size: int = 1,
+    ) -> None:
+        """
+        Create a publisher with ``dp_size`` per-DP-rank channels.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+            worker_id: Unique worker identifier stamped on every emitted FPM.
+            dp_size: Number of DP ranks to allocate channels for. Use ``1``
+                when attention DP is disabled.
+        """
+        ...
+
+    def publish(
+        self,
+        *,
+        dp_rank: int,
+        scheduled_num_prefill_requests: int,
+        scheduled_sum_prefill_tokens: int,
+        scheduled_sum_prefill_kv_tokens: int,
+        scheduled_num_decode_requests: int,
+        scheduled_sum_decode_kv_tokens: int,
+        queued_num_prefill_requests: int,
+        queued_sum_prefill_tokens: int,
+        queued_num_decode_requests: int,
+        queued_sum_decode_kv_tokens: int,
+        wall_time_secs: float,
+    ) -> None:
+        """
+        Publish one iteration's FPM snapshot for the given DP rank.
+
+        All parameters are keyword-only on the Python side: adjacent ints
+        with similar units (``scheduled_*`` vs ``queued_*``, ``*_prefill_*``
+        vs ``*_decode_*``) cannot be distinguished by the type system, so
+        a transposition would silently corrupt every published snapshot.
+
+        Variance fields (var_prefill_length, var_decode_kv_tokens,
+        var_queued_prefill_length, var_queued_decode_kv_tokens) are defaulted
+        to 0.0 per the MVP scope; a follow-up PR can add Welford-based
+        variance computation.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the publisher and its per-rank serialization tasks."""
+        ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -903,6 +962,23 @@ class FpmEventSubscriber:
         Returns:
             dict mapping ``(worker_id, dp_rank)`` to raw msgspec bytes.
             Decode each value with ``forward_pass_metrics.decode(data)``.
+        """
+        ...
+
+    def get_model_cards(self) -> dict[str, str]:
+        """
+        Snapshot of model deployment cards keyed by worker id.
+
+        The snapshot is filtered against the known-workers set so entries
+        for already-removed workers are not returned.  Values are the raw
+        ``ModelDeploymentCard`` serialized as a JSON string; callers parse
+        whichever fields they need (e.g. ``runtime_config``,
+        ``display_name``).
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``worker_id`` to ``card_json`` (JSON string).
         """
         ...
 
@@ -1187,8 +1263,6 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1048576,
-        router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
@@ -1218,8 +1292,6 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
-            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
             router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 4.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
@@ -1541,6 +1613,9 @@ def run_mocker_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     trace_block_size: int = 512,
+    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
+    trace_shared_prefix_ratio: float = 0.0,
+    trace_num_prefix_groups: int = 0,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...

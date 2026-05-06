@@ -7,8 +7,8 @@
 //! `find_matches` operations while maintaining correctness for write operations.
 //!
 //! Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
-//! `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and a
-//! `DashMap<..., RwLock<FxHashMap<...>>>` for the lookup table.
+//! `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and worker-thread-local
+//! reverse lookup tables.
 //!
 //! # Limitations vs RadixTree
 //!
@@ -20,19 +20,19 @@
 //!
 //! - Multiple `find_matches` can run in parallel (read locks only)
 //! - Write operations (`apply_event`, `remove_worker`) acquire write locks
-//! - Outer `DashMap` provides shard-level locking for per-worker access.
-//!   Inner `RwLock` per worker allows per-worker write concurrency.
+//! - Worker threads own their reverse lookup state for event apply/remove.
 //! - Deadlock prevention: always lock parent before child, hand-over-hand locking
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
+    WorkerLookupStats, WorkerTask,
+};
 use crate::active_set::reconcile_active_workers;
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::*;
@@ -104,7 +104,7 @@ impl CleanableNode for Block {
 ///
 /// Unlike `RadixTree` which uses `Rc<RefCell<>>` and requires single-threaded access,
 /// `ConcurrentRadixTree` uses `Arc<RwLock<>>` per node and a
-/// `DashMap<..., RwLock<FxHashMap<...>>>` for the lookup table,
+/// worker-thread-local lookup tables,
 /// enabling concurrent `find_matches` operations.
 ///
 /// # Limitations vs RadixTree
@@ -117,15 +117,13 @@ impl CleanableNode for Block {
 ///
 /// - Multiple `find_matches` can run in parallel (read locks only)
 /// - Write operations (`apply_event`, `remove_worker`) acquire write locks
-/// - Outer `DashMap` provides shard-level locking for per-worker access.
-/// - Inner `RwLock` per worker allows per-worker write concurrency.
+/// - Worker threads own their reverse lookup state for event apply/remove.
 /// - Deadlock prevention: always lock parent before child, hand-over-hand locking
 pub struct ConcurrentRadixTree {
     /// This is the root of the radix/prefix tree.
     /// This will only contain root blocks.
     root: SharedBlock,
 
-    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
     cleanup: CleanupState,
 }
 
@@ -164,7 +162,6 @@ impl ConcurrentRadixTree {
     pub fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
-            tree_sizes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
         }
     }
@@ -217,13 +214,6 @@ impl ConcurrentRadixTree {
         if early_exit && active_count == 1 {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
-            }
-            for worker in scores.scores.keys() {
-                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-                }
             }
             return scores;
         }
@@ -285,15 +275,6 @@ impl ConcurrentRadixTree {
             scores.scores.insert(*worker, matched_depth);
         }
 
-        // Get tree sizes from lookup.
-        for worker in scores.scores.keys() {
-            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                scores
-                    .tree_sizes
-                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-            }
-        }
-
         scores
     }
 
@@ -309,6 +290,7 @@ impl ConcurrentRadixTree {
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
@@ -317,16 +299,13 @@ impl ConcurrentRadixTree {
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id),
+            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
                 // Ensure the worker is tracked in lookup before clearing,
                 // matching RadixTree behavior where `lookup.entry(worker).or_default()`
                 // fires before the match arm.
                 lookup.entry(worker).or_default();
-                self.tree_sizes
-                    .entry(worker)
-                    .or_insert_with(|| AtomicUsize::new(0));
                 self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }
@@ -340,6 +319,7 @@ impl ConcurrentRadixTree {
         worker: WorkerWithDpRank,
         op: KvCacheStoreData,
         id: u64,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         // Ensure this worker has an entry in the outer map.
         let worker_lookup = lookup.entry(worker).or_default();
@@ -364,14 +344,10 @@ impl ConcurrentRadixTree {
         };
 
         let mut needs_worker_insert = false;
-
-        let mut num_blocks_added = 0;
+        let mut duplicate_store = !op.blocks.is_empty();
 
         // In each iteration, we lock the parent block and insert the worker into it from
         // the previous iteration. This avoids locking a block twice.
-        //
-        // Track tree size from worker_lookup insertions so it matches the single-threaded
-        // radix tree's `lookup.len()` semantics and naturally includes the tail block.
         for block_data in op.blocks {
             let child = {
                 let mut parent_guard = current.write();
@@ -379,8 +355,8 @@ impl ConcurrentRadixTree {
                 // Insert worker into this node if it was the child from the
                 // previous iteration (skip for the initial parent, which is
                 // not one of the blocks being stored).
-                if needs_worker_insert {
-                    parent_guard.workers.insert(worker);
+                if needs_worker_insert && parent_guard.workers.insert(worker) {
+                    duplicate_store = false;
                 }
                 needs_worker_insert = true;
 
@@ -390,6 +366,7 @@ impl ConcurrentRadixTree {
                         {
                             let existing_guard = existing.read();
                             if existing_guard.block_hash != Some(block_data.block_hash) {
+                                duplicate_store = false;
                                 tracing::warn!(
                                     expected = ?block_data.block_hash,
                                     actual = ?existing_guard.block_hash,
@@ -400,6 +377,7 @@ impl ConcurrentRadixTree {
                         existing.clone()
                     }
                     None => {
+                        duplicate_store = false;
                         // Reuse from lookup or create new
                         let new_block = worker_lookup
                             .get(&block_data.block_hash)
@@ -417,11 +395,12 @@ impl ConcurrentRadixTree {
             };
 
             // Update lookup
-            if worker_lookup
-                .insert(block_data.block_hash, child.clone())
-                .is_none()
-            {
-                num_blocks_added += 1;
+            match worker_lookup.insert(block_data.block_hash, child.clone()) {
+                Some(existing) if Arc::ptr_eq(&existing, &child) => {}
+                Some(_) => duplicate_store = false,
+                None => {
+                    duplicate_store = false;
+                }
             }
 
             current = child;
@@ -429,18 +408,12 @@ impl ConcurrentRadixTree {
 
         // Insert worker into the last child (not yet handled since there is
         // no subsequent iteration to pick it up).
-        if needs_worker_insert {
-            current.write().workers.insert(worker);
+        if needs_worker_insert && current.write().workers.insert(worker) {
+            duplicate_store = false;
         }
 
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_add(num_blocks_added, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_blocks_added));
-            }
+        if duplicate_store && let Some(counters) = counters {
+            counters.inc_warning(EventWarningKind::DuplicateStore);
         }
 
         Ok(())
@@ -464,8 +437,6 @@ impl ConcurrentRadixTree {
             return Err(KvCacheEventError::BlockNotFound);
         };
 
-        let mut num_removed = 0;
-
         for block_hash in op.block_hashes {
             let Some(block) = worker_lookup.remove(&block_hash) else {
                 tracing::debug!(
@@ -479,18 +450,6 @@ impl ConcurrentRadixTree {
             };
 
             block.write().drop_worker(worker);
-
-            num_removed += 1;
-        }
-
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_sub(num_removed, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_removed));
-            }
         }
 
         Ok(())
@@ -519,15 +478,6 @@ impl ConcurrentRadixTree {
 
                 if keep_worker {
                     lookup.insert(worker, FxHashMap::default());
-                    // Reset tree size to 0 but keep the entry so get_workers()
-                    // still returns this worker (matches RadixTree::clear_all_blocks behavior).
-                    if let Some(size) = self.tree_sizes.get(&worker) {
-                        size.store(0, Ordering::Relaxed);
-                    }
-                } else {
-                    // Fully remove the worker from tree_sizes so get_workers()
-                    // no longer returns it (matches RadixTree::remove_worker behavior).
-                    self.tree_sizes.remove(&worker);
                 }
             }
         }
@@ -544,7 +494,6 @@ impl ConcurrentRadixTree {
             for (_, block) in worker_lookup.into_iter() {
                 block.write().drop_worker(key);
             }
-            self.tree_sizes.remove(&key);
         }
     }
 
@@ -555,19 +504,6 @@ impl ConcurrentRadixTree {
         worker_id: WorkerId,
     ) {
         self.remove_or_clear_worker_blocks(lookup, worker_id, true);
-    }
-
-    /// Get all worker IDs currently tracked in the radix tree.
-    /// Returns unique worker_ids (ignoring dp_rank differences).
-    pub fn get_workers(&self) -> Vec<WorkerId> {
-        let mut worker_ids: Vec<WorkerId> = self
-            .tree_sizes
-            .iter()
-            .map(|entry| entry.key().worker_id)
-            .collect();
-        worker_ids.sort_unstable();
-        worker_ids.dedup();
-        worker_ids
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
@@ -608,6 +544,7 @@ impl ConcurrentRadixTree {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
                             parent_hash,
+                            start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash,
                                 mm_extra_info: None,
@@ -648,12 +585,29 @@ impl SyncIndexer for ConcurrentRadixTree {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut lookup, event);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
                         c.inc(kind, result);
+                    }
+                }
+                WorkerTask::EventWithAck { event, resp } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    let applied = result.is_ok();
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                    let _ = resp.send(applied);
+                }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
@@ -669,6 +623,17 @@ impl SyncIndexer for ConcurrentRadixTree {
                     // Handled directly via dump_events() on the shared tree.
                     // Should not be reached, but respond with empty to avoid blocking.
                     let _ = _sender.send(Ok(Vec::new()));
+                }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        lookup
+                            .iter()
+                            .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
+                    );
+                    let _ = sender.send(stats);
+                }
+                WorkerTask::Flush(sender) => {
+                    let _ = sender.send(());
                 }
                 WorkerTask::Terminate => {
                     break;

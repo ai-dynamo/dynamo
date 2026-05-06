@@ -310,6 +310,7 @@ impl SglangKvManager {
             event_id: self.next_event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash,
+                start_position: None,
                 blocks,
             }),
             dp_rank: self.dp_rank,

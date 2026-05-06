@@ -59,6 +59,20 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
     }
 }
 
+/// EOF-as-end-token recovery — finalize-only path. Returns the JSON-looking
+/// tail after `start_token` when the outer end-token never arrived. Gated on
+/// `JsonParserConfig::allow_eof_recovery` so streaming early-exit doesn't
+/// fire mid-stream before the end-token has shown up.
+fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Option<String> {
+    let start_pos = input.find(start_token)?;
+    let tail = input[start_pos + start_token.len()..].trim();
+    if tail.starts_with('{') || tail.starts_with('[') {
+        Some(tail.to_string())
+    } else {
+        None
+    }
+}
+
 // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
 // Handles single tool and multiple tool call cases for single start_token like <|python_tag|>
 fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<String> {
@@ -110,6 +124,56 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         return Some(String::new());
     }
     Some(format!("[{}]", items.join(",")))
+}
+
+/// Attempt to repair JSON truncated by max_tokens / EOS. Walks the input
+/// tracking string state and brace/bracket nesting; on EOF closes any
+/// open string and pops outstanding closers. Returns `Some(repaired)` only
+/// when at least one closer needed to be appended (so we don't churn
+/// already-valid JSON).
+pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for c in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    if !escape && !in_string && stack.is_empty() {
+        return None;
+    }
+    let mut repaired = s.to_string();
+    // EOF mid-escape sequence: pair the trailing `\` with another `\` so the
+    // closing quote we append next isn't itself escaped.
+    if escape {
+        repaired.push('\\');
+    }
+    if in_string {
+        repaired.push('"');
+    }
+    while let Some(closer) = stack.pop() {
+        repaired.push(closer);
+    }
+    Some(repaired)
 }
 
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
@@ -180,8 +244,9 @@ pub fn try_tool_call_parse_basic_json(
     let tool_call_start_tokens = &config.tool_call_start_tokens;
     let tool_call_end_tokens = &config.tool_call_end_tokens;
 
-    // Early exit if no tokens configured
-    if tool_call_start_tokens.is_empty() {
+    // Early exit if no tokens configured (unless bare_json_mode forces the
+    // no-marker extraction path).
+    if tool_call_start_tokens.is_empty() && !config.bare_json_mode {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -191,10 +256,12 @@ pub fn try_tool_call_parse_basic_json(
     let mut normal_text = trimmed.to_string();
     let mut found_start_token_with_no_valid_json = false;
 
-    // First, check if ANY start token exists in the input
-    let has_start_token = tool_call_start_tokens
-        .iter()
-        .any(|token| !token.is_empty() && normal_text.contains(token));
+    // First, check if ANY start token exists in the input. `bare_json_mode`
+    // short-circuits this to false so we always take the no-marker branch.
+    let has_start_token = !config.bare_json_mode
+        && tool_call_start_tokens
+            .iter()
+            .any(|token| !token.is_empty() && normal_text.contains(token));
 
     if !has_start_token {
         // No start tokens found, try to extract JSON directly. Everything that starts with { or [ is considered a potential JSON.
@@ -234,7 +301,17 @@ pub fn try_tool_call_parse_basic_json(
                     }
                     (false, false) => {
                         // Start and end token case
-                        let result = extract_tool_call_content(&json, start_token, end_token);
+                        let mut result = extract_tool_call_content(&json, start_token, end_token);
+                        // EOF recovery: only when explicitly opted in (finalize
+                        // path). Streaming jails leave `allow_eof_recovery=false`
+                        // so the parser doesn't claim a complete call before
+                        // the end-token has actually arrived.
+                        if result.is_none()
+                            && config.allow_eof_recovery
+                            && json.contains(start_token.as_str())
+                        {
+                            result = extract_tool_call_content_eof_recovery(&json, start_token);
+                        }
                         if let Some(content) = result {
                             // Check if we found a start token but got empty JSON back
                             // This indicates the token was found but no valid JSON followed
@@ -326,6 +403,43 @@ pub fn try_tool_call_parse_basic_json(
         return Ok((results, Some(normal_text)));
     }
 
+    // Truncation recovery: balance unclosed strings/braces (common
+    // max_tokens / EOS pattern) and retry the same three parses. Gated on
+    // `allow_eof_recovery` so streaming jails don't claim a complete tool
+    // call while the model is still emitting JSON tokens.
+    if config.allow_eof_recovery
+        && let Some(repaired) = try_repair_truncated_json(json)
+    {
+        let repaired = repaired.as_str();
+        if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(repaired) {
+            return Ok((
+                vec![parse(single.name, single.parameters)?],
+                Some(normal_text),
+            ));
+        } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(repaired) {
+            return Ok((
+                vec![parse(single.name, single.arguments)?],
+                Some(normal_text),
+            ));
+        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(repaired) {
+            let mut results = Vec::new();
+            for item in array {
+                if let Ok(func_args) =
+                    serde_json::from_value::<CalledFunctionArguments>(item.clone())
+                {
+                    results.push(parse(func_args.name, func_args.arguments)?);
+                } else if let Ok(func_params) =
+                    serde_json::from_value::<CalledFunctionParameters>(item)
+                {
+                    results.push(parse(func_params.name, func_params.parameters)?);
+                }
+            }
+            if !results.is_empty() {
+                return Ok((results, Some(normal_text)));
+            }
+        }
+    }
+
     // If we found a start token but no valid JSON, return empty content
     // to avoid leaking the token and invalid JSON content
     if found_start_token_with_no_valid_json {
@@ -385,10 +499,28 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
 }
 
 #[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    // EOF inside an escape sequence (`{"k":"a\` → `{"k":"a\\"}`). Without
+    // the `escape` guard, the appended `"` would itself be escaped and the
+    // resulting JSON would still be invalid.
+    #[test]
+    fn test_repair_eof_after_backslash() {
+        let repaired = try_repair_truncated_json(r#"{"k":"a\"#).expect("must repair");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&repaired).is_ok(),
+            "repaired must parse: {:?}",
+            repaired
+        );
+    }
+}
+
+#[cfg(test)]
 mod detect_parser_tests {
     use super::*;
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_hermes() {
         let text =
             r#"<tool_call>{"name": "search", "parameters": { "query": "rust" } }</tool_call>"#;
@@ -401,7 +533,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token() {
         let text = r#"{"name": "search", "parameters": { "query": "rust" } }"#;
         let config = JsonParserConfig {
@@ -413,7 +545,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper, PARSER.batch.8
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token_with_normal_text() {
         let text = r#"Here it is {"name": "#;
         let config = JsonParserConfig {
@@ -425,7 +557,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_square_brackets() {
         // These kind of false positives are expected when calling this function for stream=True
         let text = r#"Here it is [{"name": "search","#;
@@ -438,7 +570,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_false_positive() {
         // These kind of false positives are expected when calling this function for stream=True
         let text = r#"Here it is { Whats up"#;
@@ -451,7 +583,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_nemotron_deci() {
         let text =
             r#"<TOOLCALL>[{"name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
@@ -464,7 +596,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_lllama3_json_token() {
         let text = r#"<|python_tag|>{ "name": }"#;
         let config = JsonParserConfig {
@@ -476,7 +608,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_mistral_token() {
         let text = r#"Hello Yo ! [TOOL_CALLS]{"name": "search", "#;
         let config = JsonParserConfig {
@@ -488,7 +620,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_phi4_token() {
         let text = r#"functools{"name": "search", "#;
         let config = JsonParserConfig {
@@ -500,7 +632,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_fun() {
         // Test the streaming scenario where "fun" arrives first
         let text = r#"fun"#;
@@ -516,7 +648,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_func() {
         let text = r#"func"#;
         let config = JsonParserConfig {
@@ -531,7 +663,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_f() {
         let text = r#"f"#;
         let config = JsonParserConfig {
@@ -546,7 +678,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_with_prefix() {
         // Test case where text ends with a partial token (more realistic streaming scenario)
         let text = r#"Hello fun"#;
@@ -562,7 +694,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_phi4_avoid_false_positive() {
         // Test to ensure we don't get false positives for unrelated text
         let text = r#"funny joke"#;
@@ -578,7 +710,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test]
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_phi4_no_match() {
         let text = r#"hello world"#;
         let config = JsonParserConfig {

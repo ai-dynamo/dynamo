@@ -63,11 +63,10 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
-{{- if .Values.namespaceRestriction.enabled }}
 ---
 # ClusterRole for patching webhook configurations and CRDs (cluster-scoped resources).
-# Only needed in namespace-restricted mode; in cluster-wide mode the manager
-# ClusterRole already has full access.
+# These are cluster-scoped resources that cannot be granted via a namespace-scoped Role,
+# so they are always provided as a dedicated ClusterRole regardless of namespace-restriction mode.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -117,4 +116,3 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
-{{- end }}

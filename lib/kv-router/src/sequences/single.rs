@@ -29,8 +29,6 @@ use uuid::Uuid;
 use rustc_hash::FxHashSet;
 
 use super::block_tracker::BlockTracker;
-#[cfg(test)]
-use super::prefill_tracker::added_prefill_tokens;
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
@@ -109,22 +107,18 @@ pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
-    #[cfg(test)]
-    block_size: usize,
     last_expiry_check_time: Instant,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub(super) fn new(block_size: usize) -> Self {
-        assert!(block_size > 1, "block_size must be greater than 1");
+        assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
-            #[cfg(test)]
-            block_size,
             last_expiry_check_time: Instant::now(),
         }
     }
@@ -164,7 +158,6 @@ impl ActiveSequences {
 
     /// Add a new request with optional prompt-token load accounting.
     /// Returns block membership transitions plus any expired request IDs removed during cleanup.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
@@ -330,43 +323,6 @@ impl ActiveSequences {
         acquire.became_present_on_worker.then_some(random_hash)
     }
 
-    #[cfg(test)]
-    fn potential_blocks_and_tokens_with_prefill_tracking(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlap: u32,
-        track_prefill_tokens: bool,
-        decay_now: Instant,
-    ) -> (usize, usize) {
-        let potential_blocks = if let Some(token_seq) = token_sequence {
-            self.new_blocks(token_seq) + self.active_blocks()
-        } else {
-            self.active_blocks()
-        };
-        let active_tokens = self.active_tokens(decay_now);
-        let potential_tokens = if track_prefill_tokens {
-            added_prefill_tokens(self.block_size, isl, overlap) + active_tokens
-        } else {
-            active_tokens
-        };
-
-        (potential_blocks, potential_tokens)
-    }
-
-    /// Match a request against existing blocks and return the number of new blocks that would be added
-    pub(super) fn new_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        token_sequence
-            .iter()
-            .filter(|block| !self.blocks.unique_blocks.contains_key(block))
-            .count()
-    }
-
-    /// Return the total number of blocks that would be used if the token sequence was added.
-    pub(super) fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        self.new_blocks(token_sequence) + self.active_blocks()
-    }
-
     /// Force expiry of stale requests if the timer has elapsed.
     /// Returns block membership transitions plus the set of expired request IDs that were removed.
     pub(super) fn force_expiry(&mut self) -> SequenceMutationOutcome {
@@ -449,8 +405,7 @@ mod tests {
         }
     }
 
-    fn tracking_hint(block_size: usize, isl: usize, overlap: u32) -> Option<PrefillLoadHint> {
-        let tokens = added_prefill_tokens(block_size, isl, overlap);
+    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
         (tokens > 0).then_some(PrefillLoadHint {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
@@ -467,7 +422,7 @@ mod tests {
             Some(vec![1, 2]),
             None,
             true,
-            tracking_hint(4, 8, 0),
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(
@@ -487,7 +442,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(4, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(
@@ -525,7 +480,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(4, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(
@@ -575,7 +530,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(block_size, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -586,7 +541,7 @@ mod tests {
             Some(vec![4]),
             None,
             true,
-            tracking_hint(block_size, 4, 0),
+            tracking_hint(4),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -597,7 +552,7 @@ mod tests {
             Some(vec![1, 2, 3, 4]),
             None,
             true,
-            tracking_hint(block_size, 16, 4),
+            tracking_hint(0),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -627,7 +582,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(block_size, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -644,7 +599,7 @@ mod tests {
             Some(vec![1, 2]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 2);
@@ -673,7 +628,7 @@ mod tests {
             Some(vec![1, 2, 3]),
             None,
             true,
-            tracking_hint(block_size, 12, 0),
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 12);
@@ -689,7 +644,7 @@ mod tests {
             Some(vec![4, 5]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 8);
@@ -720,30 +675,6 @@ mod tests {
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
         seq_manager.free(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.active_blocks(), 0);
-    }
-
-    #[test]
-    fn test_potential_blocks_and_tokens_without_prefill_tracking_ignores_prompt_load() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let decay_now = Instant::now();
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1, 2, 3]),
-            None,
-            false,
-            None,
-            decay_now,
-        );
-
-        let (blocks, tokens) = seq_manager.potential_blocks_and_tokens_with_prefill_tracking(
-            Some(&[1, 2, 3, 4]),
-            16,
-            0,
-            false,
-            decay_now,
-        );
-        assert_eq!(blocks, 4);
-        assert_eq!(tokens, 0);
     }
 
     #[test]
@@ -806,7 +737,7 @@ mod tests {
             Some(vec![1, 2]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             Instant::now(),
         );
         seq_manager.add_request_with_prefill_tracking(
@@ -814,7 +745,7 @@ mod tests {
             Some(vec![3, 4]),
             None,
             true,
-            tracking_hint(block_size, 8, 0),
+            tracking_hint(8),
             Instant::now(),
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -852,7 +783,7 @@ mod tests {
             Some(vec![5]),
             None,
             true,
-            tracking_hint(block_size, 4, 0),
+            tracking_hint(4),
             Instant::now(),
         );
         assert!(expired.expired_request_ids.is_empty());

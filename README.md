@@ -28,6 +28,10 @@ limitations under the License.
 
 # Dynamo
 
+<!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
+> [!NOTE]
+> **Day-0 DeepSeek-V4 recipes available.** Tested Kubernetes deployment paths for [DeepSeek-V4-Pro](recipes/deepseek-v4/deepseek-v4-pro/) and [DeepSeek-V4-Flash](recipes/deepseek-v4/deepseek-v4-flash/) are merged to main on both **vLLM** and **SGLang**, with a prebuilt SGLang container image published on NGC.
+
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
 Built in Rust for performance, Python for extensibility.
@@ -104,7 +108,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -118,13 +122,17 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.0.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.1.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.1.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
+Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then:
+
 ```bash
-pip install "ai-dynamo[sglang]"   # or [vllm] or [trtllm]
+uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm]
 ```
+
+> **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/getting-started/local-installation.md) for TRT-LLM-specific instructions.
 
 Then start the frontend and a worker as shown above. See the [full installation guide](docs/getting-started/local-installation.md) for system dependencies and backend-specific notes.
 
@@ -250,7 +258,7 @@ To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 - **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
 - **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
 - **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
-- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/dynamo-benchmarking)** — Compare deployment topologies with AIPerf
+- **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design-docs/disagg-serving.md

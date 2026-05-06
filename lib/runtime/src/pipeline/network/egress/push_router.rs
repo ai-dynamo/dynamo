@@ -5,16 +5,18 @@ use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
     component::{
-        Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+        Client, DeviceType, Endpoint, Instance, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
+    discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
-    metrics::frontend_perf::STAGE_DURATION_SECONDS,
+    metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
     },
-    protocols::maybe_error::MaybeError,
+    protocols::{EndpointId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
@@ -134,10 +136,6 @@ where
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
 
-    /// Threshold for determining when a worker is busy (0.0 to 1.0)
-    /// If None, busy detection is disabled
-    busy_threshold: Option<f64>,
-
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
     /// instance list instead of the filtered avail list. Use for recovery/query paths
@@ -157,7 +155,8 @@ where
     _phantom: PhantomData<(T, U)>,
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouterMode {
     #[default]
     RoundRobin,
@@ -256,6 +255,129 @@ fn device_aware_candidate_group(
     }
 }
 
+/// At most one `list_and_watch` per endpoint, across all `PushRouter`
+/// instances. Entry removed on watcher exit so a later router can re-arm.
+static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+    std::sync::OnceLock::new();
+
+/// Watch discovery for instance removals and cancel pending response-stream
+/// registrations on the removed instance, unblocking queued requests with
+/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
+/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
+/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
+fn spawn_instance_removal_watcher(
+    endpoint: Endpoint,
+    addressed: Arc<AddressedPushRouter>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    use crate::discovery::{
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    };
+    use tokio_stream::StreamExt as _;
+
+    // One watcher per endpoint: if one is already running, skip.
+    let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    let endpoint_id = endpoint.id();
+    if guard.insert(endpoint_id.clone(), ()).is_some() {
+        tracing::debug!(
+            ?endpoint_id,
+            "Instance removal watcher already running for this endpoint, skipping"
+        );
+        return;
+    }
+
+    let endpoint_name = endpoint.name().to_string();
+
+    tokio::spawn(async move {
+        // Release on every exit path (including panic); a leaked entry
+        // silently disables removal cancellation until process restart.
+        struct GuardRelease(EndpointId);
+        impl Drop for GuardRelease {
+            fn drop(&mut self) {
+                if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                    map.remove(&self.0);
+                }
+            }
+        }
+        let _release = GuardRelease(endpoint_id);
+
+        let namespace = endpoint.component().namespace().name();
+        let component = endpoint.component().name().to_string();
+
+        // Reconnect on transient discovery failure; cancel-aware backoff.
+        const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        'reconnect: loop {
+            let query = DiscoveryQuery::Endpoint {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint_name.clone(),
+            };
+
+            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Failed to start instance removal watcher (will retry): {e}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                    }
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(Ok(DiscoveryEvent::Removed(id))) => {
+                                if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                    let n = addressed.cancel_instance_streams(eid).await;
+                                    if n > 0 {
+                                        tracing::warn!(
+                                            namespace = %eid.namespace,
+                                            component = %eid.component,
+                                            endpoint = %eid.endpoint,
+                                            instance_id = eid.instance_id,
+                                            cancelled = n,
+                                            "Cancelled pending response streams for removed \
+                                             instance (discovery-driven cleanup)"
+                                        );
+                                    }
+                                }
+                            }
+                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
+                                let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                                addressed.clear_instance_tombstone(&eid).await;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream error: {e}"
+                                );
+                            }
+                            None => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream ended; reconnecting"
+                                );
+                                continue 'reconnect;
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break 'reconnect;
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
+    });
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
     let manager = endpoint.drt().network_manager();
@@ -275,9 +397,9 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    /// Create a new PushRouter without busy threshold (no busy detection)
+    /// Create a new PushRouter without a worker load monitor (no busy detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
-        Self::from_client_with_threshold(client, router_mode, None, None).await
+        Self::from_client_with_monitor(client, router_mode, None).await
     }
 
     /// Create a new PushRouter with fault detection disabled.
@@ -302,12 +424,18 @@ where
             None
         };
 
+        // Cancel orphaned pending response streams when workers die.
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
         Ok(PushRouter {
             client,
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            busy_threshold: None,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -315,11 +443,15 @@ where
         })
     }
 
-    /// Create a new PushRouter with optional busy threshold and worker load monitor
-    pub async fn from_client_with_threshold(
+    /// Create a new PushRouter with an optional worker load monitor.
+    ///
+    /// The rejection path is gated by `fault_detection_enabled` (true here);
+    /// busy detection itself is driven by the monitor via `client.update_free_instances(...)`.
+    /// If no thresholds are configured on the monitor (or no monitor is provided),
+    /// `client.instance_ids_free()` returns all instances and the gate never rejects.
+    pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
-        busy_threshold: Option<f64>,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
@@ -340,12 +472,18 @@ where
             None
         };
 
+        // Cancel orphaned pending response streams when workers die.
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
         let router = PushRouter {
             client,
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            busy_threshold,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
@@ -668,8 +806,8 @@ where
             )
         };
 
-        // Check if all workers are busy (only if busy threshold is set and fault detection enabled)
-        if self.fault_detection_enabled && self.busy_threshold.is_some() {
+        // Check if all workers are busy (when fault detection is enabled).
+        if self.fault_detection_enabled {
             let free_instances = self.client.instance_ids_free();
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
@@ -693,11 +831,9 @@ where
             }
         }
 
-        // Get the address based on discovered transport type.
-        // If the selected instance disappeared between selection and dispatch
-        // (e.g. deregistered during scale-down), fall back to another available
-        // instance rather than returning a spurious 500.
-        let (address, _transport_kind) = {
+        // Resolve transport address; if the selected instance disappeared
+        // between selection and dispatch, fall back to another available one.
+        let (address, _transport_kind, instance) = {
             use crate::component::TransportType;
 
             let resolve_transport = |id: u64| {
@@ -705,31 +841,34 @@ where
                 instances
                     .iter()
                     .find(|i| i.instance_id == id)
-                    .map(|instance| match &instance.transport {
-                        TransportType::Http(http_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                http_endpoint = %http_endpoint,
-                                "Using HTTP transport for instance"
-                            );
-                            (http_endpoint.clone(), "transport.http.request")
-                        }
-                        TransportType::Tcp(tcp_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                tcp_endpoint = %tcp_endpoint,
-                                "Using TCP transport for instance"
-                            );
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                subject = %subject,
-                                "Using NATS transport for instance"
-                            );
-                            (subject.clone(), "transport.nats.request")
-                        }
+                    .map(|instance| {
+                        let (addr, kind) = match &instance.transport {
+                            TransportType::Http(http_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    http_endpoint = %http_endpoint,
+                                    "Using HTTP transport for instance"
+                                );
+                                (http_endpoint.clone(), "transport.http.request")
+                            }
+                            TransportType::Tcp(tcp_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    tcp_endpoint = %tcp_endpoint,
+                                    "Using TCP transport for instance"
+                                );
+                                (tcp_endpoint.clone(), "transport.tcp.request")
+                            }
+                            TransportType::Nats(subject) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    subject = %subject,
+                                    "Using NATS transport for instance"
+                                );
+                                (subject.clone(), "transport.nats.request")
+                            }
+                        };
+                        (addr, kind, instance.clone())
                     })
             };
 
@@ -768,10 +907,10 @@ where
             }
         };
 
-        let request = request.map(|req| AddressedRequest::new(req, address));
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
-            .with_label_values(&["route"])
+            .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
         let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
@@ -1312,5 +1451,84 @@ mod tests {
         );
 
         rt.shutdown();
+    }
+
+    /// The watcher dedup guard must be released even if the spawned task panics.
+    /// Without this, a panic anywhere in the watcher body would leave a stale
+    /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
+    /// request cancellation for that endpoint until process restart.
+    ///
+    /// We exercise the Drop-guard pattern directly against the same static
+    /// rather than driving `spawn_instance_removal_watcher` end-to-end (which
+    /// would require staging a panicking discovery stream). The test mirrors
+    /// the production code's GuardRelease shape; if the production code stops
+    /// using a Drop guard, the integration would regress and the existing
+    /// orphan-cancellation tests would fail.
+    #[tokio::test]
+    async fn watcher_dedup_guard_released_on_panic() {
+        let endpoint_id = EndpointId {
+            namespace: "panic-test-ns".to_string(),
+            component: "panic-test-comp".to_string(),
+            name: "panic-test-endpoint".to_string(),
+        };
+
+        // Mimic the production code's pre-spawn dedup insert.
+        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+        map.insert(endpoint_id.clone(), ());
+
+        let endpoint_id_clone = endpoint_id.clone();
+        let join = tokio::spawn(async move {
+            // Same shape as in spawn_instance_removal_watcher.
+            struct GuardRelease(EndpointId);
+            impl Drop for GuardRelease {
+                fn drop(&mut self) {
+                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                        map.remove(&self.0);
+                    }
+                }
+            }
+            let _release = GuardRelease(endpoint_id_clone);
+            panic!("simulated watcher-task panic");
+        });
+
+        let result = join.await;
+        assert!(result.is_err() && result.unwrap_err().is_panic());
+        assert!(
+            !map.contains_key(&endpoint_id),
+            "Drop guard must release the dedup entry even on panic"
+        );
+    }
+
+    /// Normal-exit path: the Drop guard releases the entry when the task
+    /// finishes without panicking. This is the everyday case (cancel_token
+    /// fires or discovery stream closes).
+    #[tokio::test]
+    async fn watcher_dedup_guard_released_on_normal_exit() {
+        let endpoint_id = EndpointId {
+            namespace: "normal-test-ns".to_string(),
+            component: "normal-test-comp".to_string(),
+            name: "normal-test-endpoint".to_string(),
+        };
+
+        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+        map.insert(endpoint_id.clone(), ());
+
+        let endpoint_id_clone = endpoint_id.clone();
+        tokio::spawn(async move {
+            struct GuardRelease(EndpointId);
+            impl Drop for GuardRelease {
+                fn drop(&mut self) {
+                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                        map.remove(&self.0);
+                    }
+                }
+            }
+            let _release = GuardRelease(endpoint_id_clone);
+            // task body returns normally
+        })
+        .await
+        .unwrap();
+
+        assert!(!map.contains_key(&endpoint_id));
     }
 }

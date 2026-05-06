@@ -61,6 +61,10 @@ pub struct BasicReasoningParser {
     stream_reasoning: bool,
     _buffer: String,
     stripped_think_start: bool,
+    /// Optional marker that force-exits reasoning mode when encountered inside a
+    /// reasoning block (e.g. Kimi-K2/K2.5 models sometimes emit
+    /// `<|tool_calls_section_begin|>` without first closing `</think>`).
+    tool_start_token: Option<String>,
 }
 
 impl BasicReasoningParser {
@@ -77,7 +81,15 @@ impl BasicReasoningParser {
             stream_reasoning,
             _buffer: String::new(),
             stripped_think_start: false,
+            tool_start_token: None,
         }
+    }
+
+    /// Enables force-exit from reasoning when `token` appears inside an open reasoning
+    /// block.
+    pub fn with_tool_start_token(mut self, token: impl Into<String>) -> Self {
+        self.tool_start_token = Some(token.into());
+        self
     }
 }
 
@@ -101,8 +113,17 @@ impl ReasoningParser for BasicReasoningParser {
             };
         }
 
-        // If force_reasoning and no start tag, treat entire text as reasoning
-        if self._in_reasoning && !has_think_tag && !text.contains(&self.think_end_token) {
+        // If force_reasoning and no start tag, no end tag, and no tool-start marker,
+        // treat entire text as reasoning.
+        let has_tool_start = self
+            .tool_start_token
+            .as_deref()
+            .is_some_and(|tok| text.contains(tok));
+        if self._in_reasoning
+            && !has_think_tag
+            && !text.contains(&self.think_end_token)
+            && !has_tool_start
+        {
             return ParserResult {
                 normal_text: String::new(),
                 reasoning_text: text.to_string(),
@@ -121,15 +142,39 @@ impl ReasoningParser for BasicReasoningParser {
                 if text[cursor..].starts_with(&self.think_start_token) {
                     cursor += self.think_start_token.len();
                 }
-                // We're inside a reasoning block — look for end token
-                if let Some(end_offset) = text[cursor..].find(&self.think_end_token) {
-                    reasoning_parts.push(&text[cursor..cursor + end_offset]);
-                    cursor += end_offset + self.think_end_token.len();
-                    currently_reasoning = false;
-                } else {
-                    // No end token — rest is reasoning (truncated)
-                    reasoning_parts.push(&text[cursor..]);
-                    cursor = text.len();
+                // Look for the earliest reasoning exit point: either </think> or the
+                // optional tool_start_token (force-exit case).
+                let end_offset = text[cursor..].find(&self.think_end_token);
+                let tool_offset = self
+                    .tool_start_token
+                    .as_deref()
+                    .and_then(|tok| text[cursor..].find(tok));
+
+                match (end_offset, tool_offset) {
+                    (Some(e), Some(t)) if t < e => {
+                        // tool_start arrives before </think> — force-exit.
+                        reasoning_parts.push(&text[cursor..cursor + t]);
+                        normal_parts.push(&text[cursor + t..]);
+                        cursor = text.len();
+                        currently_reasoning = false;
+                    }
+                    (Some(e), _) => {
+                        reasoning_parts.push(&text[cursor..cursor + e]);
+                        cursor += e + self.think_end_token.len();
+                        currently_reasoning = false;
+                    }
+                    (None, Some(t)) => {
+                        // No </think> but tool_start is present — force-exit.
+                        reasoning_parts.push(&text[cursor..cursor + t]);
+                        normal_parts.push(&text[cursor + t..]);
+                        cursor = text.len();
+                        currently_reasoning = false;
+                    }
+                    (None, None) => {
+                        // No end token — rest is reasoning (truncated)
+                        reasoning_parts.push(&text[cursor..]);
+                        cursor = text.len();
+                    }
                 }
             } else {
                 // We're in normal text — look for start token
@@ -200,7 +245,29 @@ impl ReasoningParser for BasicReasoningParser {
             }
 
             if self._in_reasoning {
-                if let Some(end_idx) = current_text.find(self.think_end_token.as_str()) {
+                let end_idx = current_text.find(self.think_end_token.as_str());
+                let tool_idx = self
+                    .tool_start_token
+                    .as_deref()
+                    .and_then(|tok| current_text.find(tok));
+
+                // Prefer whichever marker appears first. If only one is present, use it.
+                let force_exit_idx = match (end_idx, tool_idx) {
+                    (Some(e), Some(t)) if t < e => Some(t),
+                    (None, Some(t)) => Some(t),
+                    _ => None,
+                };
+
+                if let Some(tool_at) = force_exit_idx {
+                    accumulated_reasoning.push_str(&current_text[..tool_at]);
+                    accumulated_normal.push_str(&current_text[tool_at..]);
+                    self._buffer.clear();
+                    self._in_reasoning = false;
+                    self.stripped_think_start = false;
+                    break;
+                }
+
+                if let Some(end_idx) = end_idx {
                     // End of reasoning block: accumulate content and transition out.
                     accumulated_reasoning.push_str(&current_text[..end_idx]);
                     let after_end = end_idx + self.think_end_token.len();
@@ -211,8 +278,16 @@ impl ReasoningParser for BasicReasoningParser {
                 } else {
                     // No complete end token — check for partial at end of buffer
                     // (e.g., "reasoning content</th" where "</th" is a prefix of "</think>").
+                    // Partial prefixes of tool_start_token must also be buffered so the
+                    // force-exit marker isn't split into reasoning text.
                     if self.stream_reasoning {
-                        let ol = overlap(&current_text, &self.think_end_token);
+                        let ol_end = overlap(&current_text, &self.think_end_token);
+                        let ol_tool = self
+                            .tool_start_token
+                            .as_deref()
+                            .map(|tok| overlap(&current_text, tok))
+                            .unwrap_or(0);
+                        let ol = ol_end.max(ol_tool);
                         if ol >= 2 {
                             let safe_end = current_text.len() - ol;
                             if safe_end > 0 {
@@ -268,8 +343,9 @@ impl ReasoningParser for BasicReasoningParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
+    #[test] // REASONING.batch.1
     fn test_detect_and_parse_reasoning_reasoning() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -278,7 +354,7 @@ mod tests {
         assert_eq!(result.normal_text, "and more text.");
         assert_eq!(result.reasoning_text, "with reasoning");
     }
-    #[test]
+    #[test] // REASONING.batch.3 — no reasoning content
     fn test_detect_and_parse_reasoning_reasoning_no_reasoning() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -286,7 +362,7 @@ mod tests {
         assert_eq!(result.normal_text, "This is a test without reasoning.");
         assert_eq!(result.reasoning_text, "");
     }
-    #[test]
+    #[test] // REASONING.batch.4, REASONING.batch.1
     fn test_detect_and_parse_reasoning_reasoning_truncated_reasoning() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -295,7 +371,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "with truncated reasoning");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_parse_reasoning_streaming_incremental() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -304,7 +380,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_parse_reasoning_streaming_incremental_complete() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -316,7 +392,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "with reasoning");
     }
 
-    #[test]
+    #[test] // REASONING.batch.4, REASONING.batch.5, REASONING.stream.3, REASONING.batch.1
     fn test_parse_reasoning_streaming_incremental_no_end_token() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
@@ -325,7 +401,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "with reasoning");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2, REASONING.batch.1 — multi-block
     fn test_detect_and_parse_reasoning_multiple_reasoning_blocks() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -337,7 +413,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "first reasoningsecond reasoning");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2, REASONING.stream.3, REASONING.batch.1
     fn test_streaming_multiple_reasoning_blocks() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
@@ -353,7 +429,7 @@ mod tests {
         assert_eq!(result2.normal_text, "  end"); // " " prefix + " end" suffix
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_partial_token_matching_opening_tag() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -372,7 +448,7 @@ mod tests {
         assert_eq!(result2.reasoning_text, "reasoning content");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_partial_token_matching_closing_tag() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
@@ -389,7 +465,7 @@ mod tests {
         assert_eq!(result2.reasoning_text, "reasoning content");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3
     fn test_buffer_state_persistence_across_calls() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
@@ -415,7 +491,7 @@ mod tests {
         assert_eq!(result4.reasoning_text, "part1 part2 part3");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_streaming_with_stream_reasoning_enabled() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -436,7 +512,7 @@ mod tests {
         assert_eq!(result3.reasoning_text, "more");
     }
 
-    #[test]
+    #[test] // REASONING.batch.1 — nested
     fn test_nested_reasoning_blocks() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -451,7 +527,7 @@ mod tests {
         assert_eq!(result.normal_text, "reasoning</think> normal");
     }
 
-    #[test]
+    #[test] // REASONING.batch.4, REASONING.batch.5
     fn test_malformed_missing_closing_tag() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -460,7 +536,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "reasoning without closing tag");
     }
 
-    #[test]
+    #[test] // REASONING.batch.4
     fn test_malformed_stray_closing_tag() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -469,7 +545,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.batch.4
     fn test_malformed_multiple_opening_tags() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -481,7 +557,7 @@ mod tests {
         assert_eq!(result.normal_text, "normal");
     }
 
-    #[test]
+    #[test] // REASONING.batch.6, REASONING.batch.1
     fn test_empty_reasoning_block() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -490,7 +566,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.batch.1, PARSER.fmt.2
     fn test_whitespace_only_reasoning_block() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -499,7 +575,7 @@ mod tests {
         assert_eq!(result.reasoning_text, ""); // Should be empty after trim
     }
 
-    #[test]
+    #[test] // REASONING.batch.1 — force-mode
     fn test_force_reasoning_mode() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
@@ -508,7 +584,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "no think tags here");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_streaming_reset_state_after_complete_block() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -548,7 +624,7 @@ mod tests {
         assert_eq!(r3.normal_text, " final");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2, REASONING.batch.3
     fn test_post_reasoning_angle_bracket_not_buffered() {
         // After reasoning ends, a standalone `<` should pass through immediately
         // as normal text. It must NOT be buffered as a potential prefix of <think>
@@ -574,7 +650,7 @@ mod tests {
         assert_eq!(r3.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2
     fn test_post_reasoning_tool_call_xml_preserved() {
         // Simulates the MiniMax tool call scenario: reasoning followed by XML tool call.
         // The `<` in `<invoke` must not be consumed by the reasoning parser.
@@ -603,7 +679,7 @@ mod tests {
         assert_eq!(r6.normal_text, "invoke name=\"get_weather\">");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.3
     fn test_interleaved_streaming_across_chunks() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -633,7 +709,7 @@ mod tests {
         assert_eq!(r6.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2, REASONING.batch.1
     fn test_three_reasoning_blocks_non_streaming() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -645,7 +721,7 @@ mod tests {
         assert_eq!(result.normal_text, "one  two  three");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3
     fn test_streaming_transition_chunk() {
         // </think> and <think> arrive in the same chunk.
         // With loop-based processing, the second block's opening content is emitted
@@ -669,7 +745,7 @@ mod tests {
         assert_eq!(r3.normal_text, " end");
     }
 
-    #[test]
+    #[test] // REASONING.batch.1, REASONING.batch.3
     fn test_interleaved_with_force_reasoning() {
         // deepseek_r1 mode: force_reasoning=true, first tokens are reasoning without <think>
         let mut parser =
@@ -692,7 +768,7 @@ mod tests {
         assert_eq!(r3.normal_text, " done");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.3
     fn test_interleaved_partial_think_tag_between_blocks() {
         // After first reasoning block, partial <think> tag arrives across chunks
         let mut parser =
@@ -713,7 +789,7 @@ mod tests {
         assert_eq!(r3.normal_text, " end");
     }
 
-    #[test]
+    #[test] // REASONING.batch.3, helper
     fn test_lone_angle_bracket_between_reasoning_blocks() {
         // A lone `<` between reasoning blocks should pass through (not buffer)
         let mut parser =
@@ -738,7 +814,7 @@ mod tests {
         assert_eq!(r4.normal_text, " done");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_force_reasoning_stream_false_buffers_until_end_token() {
         // force_reasoning=true, stream_reasoning=false: content is buffered until </think>
         // arrives, then returned as a single chunk. This is the expected behavior.
@@ -760,7 +836,7 @@ mod tests {
         assert_eq!(r3.normal_text, " answer");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2, REASONING.stream.3, REASONING.batch.1
     fn test_multiple_full_blocks_in_single_streaming_chunk() {
         // Two complete <think>...</think> blocks arrive in one chunk.
         // The loop exhausts all transitions in a single call — both blocks are fully
@@ -781,7 +857,7 @@ mod tests {
         assert_eq!(r2.normal_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_partial_end_token_stream_reasoning_true() {
         // Partial </think> split across chunks with stream_reasoning=true.
         // The partial-end-token buffer check only fires when the parser is ALREADY in
@@ -806,7 +882,7 @@ mod tests {
         assert_eq!(r3.normal_text, " normal");
     }
 
-    #[test]
+    #[test] // REASONING.batch.3, REASONING.batch.8
     fn test_empty_string_input_various_states() {
         // Empty string input should always return empty results without changing state
         let mut parser =
@@ -834,7 +910,7 @@ mod tests {
         assert_eq!(r3.normal_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.batch.2, REASONING.stream.3, REASONING.batch.1
     fn test_force_reasoning_stream_false_multiple_blocks() {
         // force_reasoning=true (deepseek_r1 mode), stream_reasoning=false.
         // First block uses forced-reasoning (no explicit <think>); subsequent blocks
@@ -855,7 +931,7 @@ mod tests {
         assert_eq!(r2.normal_text, " normal2");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3 — GLM-5 burst pattern
     fn test_glm5_pattern_a_burst_single_chunk() {
         // GLM-5 Pattern A: the entire completion arrives in one SSE event.
         // Format: <think>T1</think><tool_call>A</tool_call><think>T2</think><tool_call>B</tool_call>
@@ -882,7 +958,7 @@ mod tests {
         assert_eq!(r2.normal_text, "");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.2, REASONING.batch.3
     fn test_tool_call_xml_between_reasoning_blocks_streaming() {
         // GLM-5 Pattern A chunk-by-chunk: verifies that tool call XML between reasoning
         // blocks lands in normal_text, not reasoning_text, across separate SSE events.
@@ -916,7 +992,7 @@ mod tests {
     // Ported from PR #6448 (ryanolson) with additional fakeout tests.
     // =========================================================================
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_opening_tag_batched() {
         // Backend batches tokens: "Hello world <th" arrives as one chunk
         let mut parser =
@@ -933,7 +1009,7 @@ mod tests {
         assert_eq!(r2.normal_text, " answer");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_batched_tag_boundary_split() {
         // Aggressive batching: <think> tag split with normal text prefix
         let mut parser =
@@ -948,7 +1024,7 @@ mod tests {
         assert_eq!(r2.normal_text, "42");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_closing_tag_stream_reasoning_false() {
         // With stream_reasoning=false, content stays buffered until </think>.
         // Partial </think> split mid-string while in reasoning mode.
@@ -965,7 +1041,7 @@ mod tests {
         assert_eq!(r2.normal_text, " normal text");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_closing_tag_stream_reasoning_true() {
         // With stream_reasoning=true, reasoning content is emitted incrementally.
         // The partial "</th" at the end must NOT be emitted as reasoning text.
@@ -983,7 +1059,7 @@ mod tests {
         assert_eq!(r2.normal_text, " normal text");
     }
 
-    #[test]
+    #[test] // REASONING.stream.3, REASONING.batch.3
     fn test_batched_interleaved_with_mid_string_partial() {
         // First block complete in chunk 1, second block's <think> split at boundary
         let mut parser =
@@ -999,7 +1075,7 @@ mod tests {
         assert_eq!(r2.normal_text, "answer2");
     }
 
-    #[test]
+    #[test] // helper
     fn test_partial_tag_false_positive() {
         // "<th" looks like partial <think> but "thesis" is not <think>
         let mut parser =
@@ -1015,7 +1091,7 @@ mod tests {
         assert_eq!(r2.reasoning_text, "");
     }
 
-    #[test]
+    #[test] // helper
     fn test_partial_closing_tag_fakeout() {
         // Ollama-style fakeout: "</th" buffered, but "ing>" completes "</thing>" not "</think>"
         let mut parser =
@@ -1036,7 +1112,7 @@ mod tests {
         assert_eq!(r3.normal_text, "done");
     }
 
-    #[test]
+    #[test] // internal helper
     fn test_overlap_helper_function() {
         // Direct tests for the overlap utility
         assert_eq!(overlap("abc</th", "</think>"), 4);
@@ -1052,5 +1128,97 @@ mod tests {
         assert_eq!(overlap("text◁th", "◁think▷"), 5);
         assert_eq!(overlap("text◁/thi", "◁/think▷"), 7);
         assert_eq!(overlap("no match", "◁think▷"), 0);
+    }
+
+    fn kimi_k2_parser() -> BasicReasoningParser {
+        // Mirrors the `kimi_k25` registration in reasoning/mod.rs.
+        BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true)
+            .with_tool_start_token(crate::reasoning::KIMI_K2_TOOL_SECTION_BEGIN)
+    }
+
+    #[rstest] // REASONING.stream.3 — Kimi K2 split
+    #[case(
+        "thinking text <|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
+        "thinking text",
+        "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
+    )]
+    #[case("r</think>a", "r", "a")]
+    #[case(
+        "reasoning</think>answer <|tool_calls_section_begin|>tc",
+        "reasoning",
+        "answer <|tool_calls_section_begin|>tc"
+    )]
+    fn test_kimi_k2_one_shot_split(
+        #[case] input: &str,
+        #[case] expected_reasoning: &str,
+        #[case] expected_normal: &str,
+    ) {
+        let mut parser = kimi_k2_parser();
+        let r = parser.detect_and_parse_reasoning(input, &[]);
+        assert_eq!(r.reasoning_text, expected_reasoning);
+        assert_eq!(r.normal_text, expected_normal);
+    }
+
+    #[test] // REASONING.stream.3, REASONING.batch.1
+    fn test_force_exit_streaming_single_chunk() {
+        let mut parser = kimi_k2_parser();
+        let r = parser.parse_reasoning_streaming_incremental(
+            "thinking text <|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>",
+            &[],
+        );
+        assert_eq!(r.reasoning_text, "thinking text ");
+        assert_eq!(
+            r.normal_text,
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.foo:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"
+        );
+    }
+
+    #[test] // REASONING.stream.3, REASONING.batch.1
+    fn test_force_exit_streaming_split_across_chunks() {
+        let mut parser = kimi_k2_parser();
+
+        let r1 = parser.parse_reasoning_streaming_incremental("thinking ", &[]);
+        assert_eq!(r1.reasoning_text, "thinking ");
+        assert_eq!(r1.normal_text, "");
+
+        // Second chunk ends with a prefix of the tool marker — the suffix must be buffered.
+        let r2 = parser.parse_reasoning_streaming_incremental("text <|tool_cal", &[]);
+        assert_eq!(r2.reasoning_text, "text ");
+        assert_eq!(r2.normal_text, "");
+
+        let r3 = parser.parse_reasoning_streaming_incremental("ls_section_begin|>rest", &[]);
+        assert_eq!(r3.reasoning_text, "");
+        assert_eq!(r3.normal_text, "<|tool_calls_section_begin|>rest");
+    }
+
+    #[test] // REASONING.stream.3, helper
+    fn test_force_exit_partial_marker_resolves_as_non_marker() {
+        // First chunk ends with "<|tool_ca" (prefix of marker) — must be buffered.
+        // Second chunk "xxx" makes the combined "<|tool_caxxx" which is NOT a marker.
+        // With force_reasoning=true, the content then flushes as reasoning.
+        let mut parser = kimi_k2_parser();
+
+        let r1 = parser.parse_reasoning_streaming_incremental("abc <|tool_ca", &[]);
+        assert_eq!(r1.reasoning_text, "abc ");
+        assert_eq!(r1.normal_text, "");
+
+        let r2 = parser.parse_reasoning_streaming_incremental("xxx", &[]);
+        assert_eq!(r2.reasoning_text, "<|tool_caxxx");
+        assert_eq!(r2.normal_text, "");
+    }
+
+    #[test] // REASONING.batch.1
+    fn test_no_tool_start_token_behaves_as_before() {
+        // Without the tool_start_token setter, BasicReasoningParser is byte-identical
+        // to the pre-patch behavior — the marker is just reasoning content.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let r =
+            parser.detect_and_parse_reasoning("thinking <|tool_calls_section_begin|>stuff", &[]);
+        assert_eq!(
+            r.reasoning_text,
+            "thinking <|tool_calls_section_begin|>stuff"
+        );
+        assert_eq!(r.normal_text, "");
     }
 }
