@@ -514,19 +514,19 @@ impl Worker {
 /// Read the post-signal shutdown deadline from
 /// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
 /// On expiry the worker hard-exits with code 911 — same contract as the
-/// upstream `worker.execute` flow we bypass.
+/// upstream `worker.execute` flow we bypass. Defaults are imported from
+/// `dynamo_runtime::worker` so a default change there propagates here
+/// without manual sync.
 fn graceful_shutdown_timeout() -> Duration {
     use dynamo_runtime::config::environment_names::worker as env_worker;
+    use dynamo_runtime::worker::{
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE,
+    };
 
-    // `dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_*` are
-    // re-implemented here rather than imported so backend-common's
-    // contract is self-documenting.
-    const DEFAULT_DEBUG: u64 = 5;
-    const DEFAULT_RELEASE: u64 = 30;
     let default = if cfg!(debug_assertions) {
-        DEFAULT_DEBUG
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
     } else {
-        DEFAULT_RELEASE
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
     };
 
     let secs = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
@@ -1003,6 +1003,47 @@ mod tests {
     fn grace_period_treats_empty_as_unset() {
         with_env(GRACE_PERIOD_ENV, Some(""), || {
             assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // graceful_shutdown_timeout env-var parsing
+    // -------------------------------------------------------------------
+
+    const SHUTDOWN_TIMEOUT_ENV: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
+
+    fn expected_default_timeout_secs() -> u64 {
+        if cfg!(debug_assertions) {
+            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
+        } else {
+            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
+        }
+    }
+
+    #[test]
+    fn shutdown_timeout_default_when_unset() {
+        with_env(SHUTDOWN_TIMEOUT_ENV, None, || {
+            assert_eq!(
+                graceful_shutdown_timeout(),
+                Duration::from_secs(expected_default_timeout_secs())
+            );
+        });
+    }
+
+    #[test]
+    fn shutdown_timeout_parses_valid_value() {
+        with_env(SHUTDOWN_TIMEOUT_ENV, Some("42"), || {
+            assert_eq!(graceful_shutdown_timeout(), Duration::from_secs(42));
+        });
+    }
+
+    #[test]
+    fn shutdown_timeout_falls_back_to_default_on_parse_error() {
+        with_env(SHUTDOWN_TIMEOUT_ENV, Some("not-a-number"), || {
+            assert_eq!(
+                graceful_shutdown_timeout(),
+                Duration::from_secs(expected_default_timeout_secs())
+            );
         });
     }
 
