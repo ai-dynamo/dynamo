@@ -187,14 +187,9 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
-# Copy the NIXL C++ SDK (headers + libs) from wheel_builder so `cargo build`
-# can link nixl-sys (-lnixl, -lnixl_build, -lnixl_common). The runtime stage
-# doesn't need this — it uses the prebuilt Python wheel — but the dev stage
-# builds from source via maturin develop.
-# - SGLang: upstream lmsysorg/sglang runtime ships only the NIXL Python wheel,
-#   not the C++ SDK; copy it from wheel_builder here.
-# - vllm/trtllm/none: NIXL is already at /opt/nvidia/nvda_nixl in runtime; the
-#   COPY below is idempotent (overwrites with same content from wheel_builder).
+# NIXL C++ SDK (+ ucx, libfabric, gdrcopy) for cargo to link nixl-sys.
+# - sglang: upstream runtime ships only the Python wheel; SDK comes from here.
+# - vllm/trtllm/none: SDK already in runtime; this COPY is a no-op overwrite.
 {% if device == "cuda" %}
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     if [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
@@ -221,9 +216,6 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
 {% else %}
-# All CUDA frameworks resolve NIXL the same way (lib64 layout from wheel_builder).
-# For vllm/trtllm/none: resets values already set in runtime (no harm).
-# For sglang: sets them for the first time (required — upstream runtime omits SDK).
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
@@ -245,9 +237,8 @@ ENV CUDA_HOME=/usr/local/cuda \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
-# Base LD_LIBRARY_PATH with universal paths (all CUDA frameworks have these
-# now that sglang dev copies the NIXL SDK from wheel_builder).
-# Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
+# Base LD_LIBRARY_PATH for NIXL + UCX. Framework-specific paths are added in
+# /etc/profile.d/50-framework-paths.sh.
 {% if device == "cuda" %}
 ENV LD_LIBRARY_PATH=\
 ${NIXL_LIB_DIR}:\
