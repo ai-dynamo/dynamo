@@ -163,7 +163,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       cuda_version: '["12.9"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -267,7 +267,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       cuda_version: '["13.1"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -362,7 +362,7 @@ jobs:
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
@@ -444,7 +444,7 @@ jobs:
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       run_gpu_tests: false

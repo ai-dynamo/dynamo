@@ -36,6 +36,8 @@ spec:
         - jsonPath: .metadata.creationTimestamp
           name: AGE
           type: date
+      deprecated: true
+      deprecationWarning: nvidia.com/v1alpha1 DynamoGraphDeploymentScalingAdapter is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentScalingAdapter
       name: v1alpha1
       schema:
         openAPIV3Schema:
@@ -116,6 +118,122 @@ spec:
           type: object
       served: true
       storage: true
+      subresources:
+        scale:
+          labelSelectorPath: .status.selector
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.replicas
+        status: {}
+    - additionalPrinterColumns:
+        - description: DynamoGraphDeployment name
+          jsonPath: .spec.dgdRef.name
+          name: DGD
+          type: string
+        - description: Component name
+          jsonPath: .spec.dgdRef.componentName
+          name: COMPONENT
+          type: string
+        - description: Current replicas
+          jsonPath: .status.replicas
+          name: REPLICAS
+          type: integer
+        - jsonPath: .metadata.creationTimestamp
+          name: AGE
+          type: date
+      name: v1beta1
+      schema:
+        openAPIV3Schema:
+          description: |-
+            DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual
+            components within a DynamoGraphDeployment. It implements the Kubernetes scale
+            subresource, enabling integration with HPA, KEDA, and custom autoscalers.
+
+            The adapter acts as an intermediary between autoscalers and the DGD,
+            ensuring that only the adapter controller modifies the DGD's component replicas.
+            This prevents conflicts when multiple autoscaling mechanisms are in play.
+
+            v1alpha1 remains the storage version; conversion between served versions is
+            handled by the operator's conversion webhook
+            (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                DynamoGraphDeploymentScalingAdapterSpec defines the desired state of a
+                DynamoGraphDeploymentScalingAdapter.
+              properties:
+                dgdRef:
+                  description: dgdRef references the DynamoGraphDeployment and the specific component to scale.
+                  properties:
+                    componentName:
+                      description: |-
+                        componentName is the `componentName` of the entry within the target
+                        DGD's `spec.components` list to scale.
+                      minLength: 1
+                      type: string
+                    name:
+                      description: name is the `metadata.name` of the target DynamoGraphDeployment.
+                      minLength: 1
+                      type: string
+                  required:
+                    - componentName
+                    - name
+                  type: object
+                replicas:
+                  description: |-
+                    replicas is the desired number of replicas for the target component.
+                    This field is modified by external autoscalers (HPA/KEDA/Planner) or
+                    manually by users.
+                  format: int32
+                  minimum: 0
+                  type: integer
+              required:
+                - dgdRef
+                - replicas
+              type: object
+            status:
+              description: |-
+                DynamoGraphDeploymentScalingAdapterStatus defines the observed state of a
+                DynamoGraphDeploymentScalingAdapter.
+              properties:
+                lastScaleTime:
+                  description: lastScaleTime is the last time the adapter scaled the target component.
+                  format: date-time
+                  type: string
+                replicas:
+                  description: |-
+                    replicas is the current number of replicas for the target component.
+                    This is synced from the DGD's component replicas and is required for
+                    the scale subresource.
+                  format: int32
+                  type: integer
+                selector:
+                  description: |-
+                    selector is a label selector string for the pods managed by this
+                    adapter. Required for HPA compatibility via the scale subresource.
+                  type: string
+              required:
+                - replicas
+              type: object
+          type: object
+      served: true
+      storage: false
       subresources:
         scale:
           labelSelectorPath: .status.selector

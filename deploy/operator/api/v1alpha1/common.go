@@ -71,8 +71,12 @@ type Autoscaling struct {
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!(has(self.disabled) && self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
+// +kubebuilder:validation:XValidation:rule="(has(self.disabled) && self.disabled) || (has(self.size) && quantity(self.size).isGreaterThan(quantity('0')))",message="size is required when disabled is false"
 type SharedMemorySpec struct {
+	// Disabled, when true, opts out of mounting a shared-memory medium for the
+	// component. When false (or unset), shared memory is enabled and Size is
+	// required (enforced by the validating webhook). Size is ignored when
+	// Disabled is true.
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
 }

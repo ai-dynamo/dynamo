@@ -153,6 +153,8 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// KV cache block size published in the model deployment card.
+    kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
@@ -190,6 +192,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -205,6 +208,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            kv_cache_block_size,
             tool_call_parser,
             media_loader,
             context_length,
@@ -1276,8 +1280,16 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
-        matches!(tool_call_parser, Some("gemma4") | Some("gemma-4"))
-            || matches!(reasoning_parser, Some("gemma4") | Some("gemma-4"))
+        // gpt-oss / harmony parsers consume `<|channel|>analysis<|message|>...<|end|>`
+        // markers; without them the parser silently produces empty
+        // reasoning_content. Same shape as gemma4's `<|think|>` markers.
+        matches!(
+            tool_call_parser,
+            Some("gemma4") | Some("gemma-4") | Some("harmony")
+        ) || matches!(
+            reasoning_parser,
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss")
+        )
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -1473,6 +1485,10 @@ impl
             common_request.agent_context.clone().map(|agent_context| {
                 let request_model = common_request.model.clone();
                 let request_tracker = tracker.clone();
+                let replay_metrics = crate::agents::trace::request_replay_metrics(
+                    &common_request.token_ids,
+                    self.kv_cache_block_size,
+                );
                 let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
                     .and_then(|context| context.x_request_id)
                     .or_else(|| {
@@ -1481,7 +1497,13 @@ impl
                             .ok()
                             .map(|value| value.as_ref().clone())
                     });
-                (agent_context, request_model, request_tracker, x_request_id)
+                (
+                    agent_context,
+                    request_model,
+                    request_tracker,
+                    x_request_id,
+                    replay_metrics,
+                )
             })
         } else {
             None
@@ -1563,6 +1585,7 @@ impl
             request_model,
             request_tracker,
             x_request_id,
+            replay_metrics,
         )) = trace_state
         {
             let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
@@ -1574,12 +1597,13 @@ impl
                         "agent_context present but request tracker is missing; emitting partial trace"
                     );
                 }
-                let metrics = crate::agents::trace::request_metrics(
+                let mut metrics = crate::agents::trace::request_metrics(
                     request_id,
                     x_request_id,
                     request_model,
                     request_tracker.as_deref(),
                 );
+                metrics.replay = replay_metrics;
                 crate::agents::trace::emit_request_end(agent_context, metrics);
             });
             stream
@@ -1809,6 +1833,7 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
@@ -1844,6 +1869,24 @@ mod tests {
             ),
             (Some("hermes"), None, false, "hermes → not required"),
             (
+                Some("harmony"),
+                None,
+                true,
+                "harmony tool-call only → required",
+            ),
+            (
+                None,
+                Some("gpt_oss"),
+                true,
+                "gpt_oss reasoning only → required",
+            ),
+            (
+                Some("harmony"),
+                Some("gpt_oss"),
+                true,
+                "harmony + gpt_oss paired → required",
+            ),
+            (
                 Some("kimi_k2"),
                 Some("kimi_k25"),
                 false,
@@ -1860,6 +1903,7 @@ mod tests {
         }
     }
 
+    /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_is_reasoning_disabled_by_request() {
         let thinking_true = {
