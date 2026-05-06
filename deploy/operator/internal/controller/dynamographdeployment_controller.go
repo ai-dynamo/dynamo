@@ -1858,7 +1858,7 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx
 
 	pcsOwnerRef := metav1.GetControllerOf(pcs)
 	if pcsOwnerRef == nil ||
-		pcsOwnerRef.Kind != "DynamoGraphDeployment" {
+		pcsOwnerRef.Kind != consts.ResourceTypeDynamoGraphDeployment {
 		log.FromContext(ctx).V(1).Info("PodCliqueSet missing DynamoGraphDeployment controller ownerReference",
 			"pcsName", pcs.Name,
 			"namespace", pcs.Namespace)
