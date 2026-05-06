@@ -246,12 +246,37 @@ the unified path does not yet support.
 - `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
 - Finish reason normalization handled by Rust layer
+- **Disaggregated serving** (router-resolved bootstrap mode and synchronous-fallback
+  mode) — see "Disaggregated serving contract" below
+
+### Disaggregated serving contract
+
+A backend opts into prefill/decode disaggregation by populating fields on the
+``EngineConfig`` returned by ``LLMEngine.start()``:
+
+* Set ``model_type=ModelType.Prefill`` on prefill workers so Dynamo's discovery
+  promotes the worker to its prefill router. Decode and aggregated workers leave
+  this ``None`` and inherit ``WorkerConfig.endpoint_types``.
+* Set ``disaggregated_endpoint=(host, port)`` on prefill workers that use
+  **router-resolved bootstrap mode** (SGLang's pattern, used by TokenSpeed).
+  ``Worker`` calls ``runtime_config.set_disaggregated_endpoint(host, port)`` for
+  you; the Rust ``PrefillRouter`` then resolves it per request and synthesizes a
+  ``disaggregated_state`` payload (host/port/room) into each decode request.
+  Backends using **synchronous fallback** (vLLM's `kv_transfer_params` flow,
+  TRT-LLM's opaque struct) leave this ``None`` and instead emit
+  ``GenerateChunk.disaggregated_state`` from prefill ``generate()`` — the runtime
+  forwards that into ``GenerateRequest.disaggregated_state`` on the decode side.
+* Optionally set ``enable_local_indexer=False`` on prefill workers since they
+  ship KV out immediately and don't need a local prefix-match indexer.
+
+The decode-side ``generate()`` reads ``request["disaggregated_state"]`` (or
+fails fast in DECODE mode if missing) and forwards whatever the schema requires
+into the underlying engine's request.
 
 ### Common gaps (all engines)
 
 | Feature | Description |
 |---------|-------------|
-| Disaggregated serving | Prefill/decode worker split, bootstrap coordination, KV transfer |
 | Metrics & Prometheus | Engine-level metrics, KV cache utilization gauges, Prometheus multiprocess registry |
 | KV event publishing | Prefix cache events (BlockStored/Removed) to router via ZMQ or NATS |
 | Health check payloads | Per-engine custom health check payloads (BOS token probe, etc.) |
