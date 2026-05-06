@@ -304,32 +304,26 @@ jobs:
           done
 
           # ---- EFA runtime images ----
-          # vllm/trtllm EFA are amd64 only; sglang EFA is multi-arch (amd64+arm64).
+          # All EFA runtime images are multi-arch (amd64+arm64).
           # crane copy preserves multi-arch manifests automatically.
           # Nightly publishes EFA under the `-efa-amd64` suffix; releases use `-efa`.
           echo ""
           echo "=== EFA Runtime Images ==="
 
-          if [[ "${NIGHTLY}" == "true" ]]; then
-            EFA_SUFFIX="efa-amd64"
-          else
-            EFA_SUFFIX="efa"
-          fi
-
-          # vllm EFA (CUDA 12, amd64 only)
+          # vllm EFA (CUDA 12)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
-          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # sglang EFA (CUDA 12, multi-arch)
+          # sglang EFA (CUDA 12)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
-          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
 
-          # trtllm EFA (CUDA 13, amd64 only)
+          # trtllm EFA (CUDA 13)
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
-          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
           echo ""
@@ -456,15 +450,10 @@ jobs:
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [[ "${NIGHTLY}" == "true" ]]; then
-            EFA_SUFFIX="efa-amd64"
-          else
-            EFA_SUFFIX="efa"
-          fi
-          echo "EFA runtime images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}\` (amd64)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-${EFA_SUFFIX}\` (amd64)" >> $GITHUB_STEP_SUMMARY
+          echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY

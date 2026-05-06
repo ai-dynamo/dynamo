@@ -18,7 +18,7 @@ cargo run -p dynamo-bench --bin claude_trace_export -- \
 
 That command writes two files:
 
-- Mooncake JSONL: benchmark rows with `session_id`, `input_length`, `output_length`, `hash_ids`, and `timestamp` or `delay`
+- Mooncake JSONL: benchmark rows with optional `session_id`, `input_length`, `output_length`, `hash_ids`, and `timestamp` or `delay`
 - Sidecar JSONL: text-free structural metadata such as context shape, top-level tool calls, and nested progress-derived timing
 
 The sidecar path is derived from the output path by inserting `.sidecar` before the extension.
