@@ -85,22 +85,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # REVERT THIS — the `push` branch resolves a main SHA for dev-branch
+          # REVERT THIS — the `push` branch resolves main HEAD for dev-branch
           # testing; once the push trigger is removed this whole if/else
           # collapses to `SHA="${GITHUB_SHA}"`.
+          #
+          # Use the actual main HEAD (not last successful post-merge): our
+          # build jobs produce and push the ECR images themselves, so we
+          # don't depend on post-merge having already run for this SHA. The
+          # last-successful-post-merge approach picks stale SHAs whenever
+          # post-merge has been red recently, which then mismatches the
+          # current runner image (CUDA/sccache toolchain) and breaks the
+          # docker build.
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            SHA=$(gh run list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --workflow=post-merge-ci.yml \
-              --branch=main \
-              --status=success \
-              --limit=1 \
-              --json headSha --jq '.[0].headSha // empty')
+            SHA=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
             if [ -z "${SHA}" ]; then
-              echo "::error::No successful post-merge run on main; cannot resolve source SHA for push-driven nightly."
+              echo "::error::Failed to resolve main HEAD via gh api."
               exit 1
             fi
-            echo "Resolved push event source SHA from latest successful post-merge: ${SHA}"
+            echo "Resolved push event source SHA from main HEAD: ${SHA}"
           else
             SHA="${GITHUB_SHA}"
             echo "Using caller SHA: ${SHA}"
