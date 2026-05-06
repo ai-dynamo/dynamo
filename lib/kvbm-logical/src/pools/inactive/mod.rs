@@ -139,8 +139,20 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         hashes: &[SequenceHash],
         touch: bool,
     ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
+        let Some((&first_hash, remaining_hashes)) = hashes.split_first() else {
+            return Vec::new();
+        };
+
         let mut inner = self.inner.write();
-        let matched_blocks = inner.backend.find_matches(hashes, touch);
+        let Some(first_block) = inner.backend.find_match(first_hash, touch) else {
+            return Vec::new();
+        };
+
+        let mut matched_blocks = Vec::with_capacity(hashes.len());
+        matched_blocks.push(first_block);
+        if !remaining_hashes.is_empty() {
+            matched_blocks.extend(inner.backend.find_matches(remaining_hashes, touch));
+        }
 
         let count = matched_blocks.len();
         if let Some(ref m) = self.metrics {
@@ -156,25 +168,6 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                     as Arc<dyn RegisteredBlock<T>>
             })
             .collect()
-    }
-
-    /// Find one block by sequence hash and return it as a RegisteredBlock guard.
-    pub(crate) fn find_block(
-        &self,
-        hash: SequenceHash,
-        touch: bool,
-    ) -> Option<Arc<dyn RegisteredBlock<T>>> {
-        let mut inner = self.inner.write();
-        let block = inner.backend.find_match(hash, touch)?;
-
-        if let Some(ref m) = self.metrics {
-            m.dec_inactive_pool_size();
-        }
-
-        Some(
-            PrimaryBlock::new_attached(Arc::new(block), self.return_fn.clone())
-                as Arc<dyn RegisteredBlock<T>>,
-        )
     }
 
     /// Scan for all blocks matching the given hashes (doesn't stop on miss).

@@ -880,7 +880,9 @@ impl KvManager {
                         // Not active: try inactive via PLH lookup, else allocate fresh.
                         let plh = plhs[plh_idx];
                         plh_idx += 1;
-                        if let Some(immutable) = self.block_manager.match_block(plh) {
+                        if let Some(immutable) =
+                            self.block_manager.match_blocks(&[plh]).into_iter().next()
+                        {
                             self.active_full
                                 .entry(*seq_hash)
                                 .or_default()
