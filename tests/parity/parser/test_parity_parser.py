@@ -73,7 +73,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("vllm", "glm47", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "qwen3_coder", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "glm47", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
     # SGLang's GptOssDetector requires a strict '<|start|>assistant<|channel|>commentary'
     # bot_token; bare '<|channel|>commentary' variants (PARSER.batch.1, .6, .13)
     # are not detected at all.
@@ -120,7 +119,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("sglang", "kimi_k2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    ("sglang", "qwen3_coder", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("sglang", "harmony", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     # PARSER.batch.5 (missing end-token recovery) — impl-defined.
     ("vllm", "qwen3_coder", "PARSER.batch.5"): _RECOVERY_CONTRACT,
