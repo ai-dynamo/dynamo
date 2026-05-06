@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.20.0"
+VLLM_VER="0.20.1"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 
@@ -181,7 +181,7 @@ fi
 if [ "$DEVICE" = "cuda" ]; then
     echo "\n=== Installing vLLM & FlashInfer ==="
 
-    # vLLM 0.20.0 switches the default PyPI CUDA wheel to CUDA 13.0.
+    # vLLM 0.20.x switches the default PyPI CUDA wheel to CUDA 13.0.
     # Use the release wheel variant index for CUDA-specific vLLM binaries,
     # and ask uv for the matching torch backend for the PyTorch stack.
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."

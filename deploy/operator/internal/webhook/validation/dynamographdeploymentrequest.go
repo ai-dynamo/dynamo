@@ -62,12 +62,36 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 		))
 	}
 
+	// Validate SLA fields.
+	if slaErr := v.validateSLA(); slaErr != nil {
+		err = errors.Join(err, slaErr)
+	}
+
 	// Validate GPU hardware information is available (last, so other errors are collected first).
 	if gpuErr := v.validateGPUHardwareInfo(); gpuErr != nil {
 		err = errors.Join(err, gpuErr)
 	}
 
 	return nil, err
+}
+
+// validateSLA validates optional SLA fields.
+func (v *DynamoGraphDeploymentRequestValidator) validateSLA() error {
+	sla := v.request.Spec.SLA
+	if sla == nil || sla.OptimizationType == nil {
+		return nil
+	}
+	switch *sla.OptimizationType {
+	case nvidiacomv1beta1.OptimizationTypeLatency, nvidiacomv1beta1.OptimizationTypeThroughput:
+		return nil
+	default:
+		return fmt.Errorf(
+			"spec.sla.optimizationType %q is invalid: must be %q or %q",
+			*sla.OptimizationType,
+			nvidiacomv1beta1.OptimizationTypeLatency,
+			nvidiacomv1beta1.OptimizationTypeThroughput,
+		)
+	}
 }
 
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.

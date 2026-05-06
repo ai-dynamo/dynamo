@@ -67,16 +67,55 @@ def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None
 
 
 def _materialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    """Convert message objects to plain dicts for apply_chat_template."""
-    normalized = []
+    """Convert message objects to plain dicts for apply_chat_template.
+
+    Returns deep-copied dicts so subsequent in-place normalization (e.g.
+    _normalize_assistant_tool_call_arguments) does not leak back into
+    the caller-owned request object.
+    """
+    normalized: list[dict[str, Any]] = []
     for msg in messages:
         if hasattr(msg, "model_dump"):
+            # model_dump() already returns a fresh dict tree.
             normalized.append(msg.model_dump(exclude_none=False))
         elif isinstance(msg, dict):
-            normalized.append(msg)
+            normalized.append(copy.deepcopy(msg))
         else:
-            normalized.append(dict(msg))
+            normalized.append(copy.deepcopy(dict(msg)))
+    _normalize_assistant_tool_call_arguments(normalized)
     return normalized
+
+
+def _normalize_assistant_tool_call_arguments(messages: list[dict[str, Any]]) -> None:
+    """Parse assistant tool_call ``arguments`` from JSON string to dict in place.
+
+    Some chat templates (notably qwen3-coder) call ``arguments | items`` on
+    assistant tool_calls, which requires ``arguments`` to be a mapping rather
+    than the JSON string carried by the OpenAI wire format.  Mirror SGLang
+    native's behaviour (``serving_chat.py``) so multi-turn conversations
+    containing prior tool calls render correctly.
+
+    Malformed JSON is left untouched so the chat-template error remains
+    visible to the caller instead of being silently corrupted.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str) and args:
+                try:
+                    fn["arguments"] = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
 
 def create_parsers(

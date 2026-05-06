@@ -121,6 +121,7 @@ jobs:
     # version_selector not empty -- name: cuda12, linux/amd64
     # version_selector cpu/empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.version_selector == 'xpu' && 'xpu' || (matrix.version_selector == '' || matrix.version_selector == 'cpu') && 'cpu' || format('cuda{0}', matrix.version_selector) }}
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
@@ -289,6 +290,7 @@ jobs:
           platform: ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }}
           device: ${{ matrix.version_selector == 'xpu' && 'xpu' || matrix.version_selector == 'cpu' && 'cpu' || 'cuda' }}
           cuda_version: ${{ matrix.version_selector }}
+          build_target: ${{ (inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -301,7 +303,7 @@ jobs:
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ${{ inputs.extra_build_args }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -309,21 +311,9 @@ jobs:
           arch: ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }}
           cuda_version: ${{ (matrix.version_selector == 'xpu' || matrix.version_selector == 'cpu') && '' || matrix.version_selector }}
       - name: Build and Push Test Image
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
-          CACHE_TAG="test-${PLAIN_TAG}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
-          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
-          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
-          fi
-
           PUSH_ARGS=""
           if [ "${{ inputs.push_image }}" == "true" ]; then
             PUSH_ARGS="--push"
@@ -343,7 +333,6 @@ jobs:
             --platform ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
-            ${CACHE_ARGS} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash

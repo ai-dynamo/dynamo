@@ -39,7 +39,7 @@ spec:
           args:
             - -m
             - dynamo.frontend
-            - --no-decode-fallback
+            - --enforce-disagg
           env:
             - name: POD_UID
               valueFrom:

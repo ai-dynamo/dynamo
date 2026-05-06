@@ -64,6 +64,7 @@ use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -377,6 +378,38 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
+fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
+    if !crate::agents::trace::is_enabled() {
+        return;
+    }
+
+    if let Some(x_request_id) = headers
+        .get(X_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        request.insert(
+            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.to_string(),
+        );
+    }
+}
+
+fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
+    source: &Context<T>,
+    target: &mut Context<U>,
+) {
+    if !crate::agents::trace::is_enabled() {
+        return;
+    }
+
+    if let Ok(x_request_id) = source.get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY) {
+        target.insert(
+            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.as_ref().clone(),
+        );
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -403,7 +436,8 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -657,7 +691,8 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -883,7 +918,8 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -1499,7 +1535,8 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -2223,8 +2260,7 @@ async fn videos(
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
-    // Videos are typically not streamed, so we default to non-streaming
-    let streaming = false;
+    let streaming = request.stream.unwrap_or(false);
 
     // Get the model name from the request (video generation model)
     let model = request.model.clone();
@@ -2260,30 +2296,69 @@ async fn videos(
         err_response
     })?;
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
-    let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_response_and_observe_metrics(
-            response,
-            &mut response_collector,
-            &mut http_queue_guard,
-        );
-    });
 
-    // Videos are typically returned as a single response (non-streaming)
-    // so we fold the stream into a single response
-    let response = NvVideosResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold videos stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    if streaming {
+        // [gluo TODO] revisit the cancellation handling here,
+        // should be unified with chat_completions.
+        let ctx = stream.context();
+        let (mut connection_handle, stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Videos.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
+        let stream = stream.flat_map(move |response| {
+            let sse_result = process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+            match sse_result {
+                Ok(Some(ev)) => stream::iter(vec![Ok(ev)]),
+                Ok(None) => stream::iter(vec![]),
+                Err(e) => stream::iter(vec![Err(e)]),
+            }
+        });
+        // monitor_for_disconnects: arms stream_handle, pre-marks inflight Cancelled,
+        // emits data:[DONE] on natural end, demotes to Internal on mid-stream Err,
+        // and kills the engine context when the client disconnects.
+        let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
 
-    inflight.mark_ok();
-    Ok(Json(response).into_response())
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        // Disarm immediately: we return the body directly, so disconnect detection
+        // transfers to stream_handle (armed inside monitor_for_disconnects).
+        connection_handle.disarm();
+        Ok(sse_stream.into_response())
+    } else {
+        let stream = stream.inspect(move |response| {
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response = NvVideosResponse::from_annotated_stream(stream)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+
+        inflight.mark_ok();
+        Ok(Json(response).into_response())
+    }
 }
 
 /// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
@@ -2463,7 +2538,6 @@ async fn audio_speech(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let response_format = request.response_format.clone();
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
@@ -2524,13 +2598,14 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If response contains b64_json audio data, decode and return as binary
+    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
+    // decode and return binary with content-type from AudioData.output_format.
     // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
     if let Some(first) = response.data.first()
         && let Some(b64) = &first.b64_json
         && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
     {
-        let content_type = match response_format.as_deref().unwrap_or("wav") {
+        let content_type = match first.output_format.as_str() {
             "mp3" => "audio/mpeg",
             "flac" => "audio/flac",
             "pcm" => "audio/pcm",

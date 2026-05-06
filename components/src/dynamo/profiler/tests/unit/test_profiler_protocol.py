@@ -9,21 +9,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-try:
-    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-except ImportError:
-    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
-from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
-    PickedParallelConfig,
-)
-from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
-from dynamo.profiler.utils.defaults import SearchStrategy
-from dynamo.profiler.utils.dgdr_v1beta1_types import (
-    DynamoGraphDeploymentRequestSpec,
-    OverridesSpec,
-)
-from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
-
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
@@ -32,14 +17,38 @@ pytestmark = [
     pytest.mark.parallel,
 ]
 
+try:
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+    from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
+        PickedParallelConfig,
+    )
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        BaseConfigModifier,
+        apply_dgd_overrides,
+    )
+    from dynamo.profiler.utils.defaults import SearchStrategy
+    from dynamo.profiler.utils.dgdr_v1beta1_types import (
+        DynamoGraphDeploymentRequestSpec,
+        OverridesSpec,
+    )
+    from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
+except ImportError:
+    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
+
+
+@pytest.fixture(autouse=True)
+def dgdr_name_env(monkeypatch):
+    """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
+    monkeypatch.setenv("DGDR_NAME", "test-dgdr")
+
 
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
-    """build_dgd_config applies per-node GPU shaping when topology is provided."""
+    """DP-only workers keep per-node GPU shaping without multinode inflation."""
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="Qwen/Qwen3-30B-A3B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -55,7 +64,57 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
         if service.get("subComponentType") == "decode"
     )
     assert decode_service["resources"]["limits"]["gpu"] == "8"
+    assert decode_service.get("multinode") is None
+
+
+def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
+    """Single instances that exceed node capacity still get multinode config."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="meta-llama/Llama-3-70B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp", "16"],
+        decode_replicas=1,
+        decode_gpus=16,
+        num_gpus_per_node=8,
+    )
+
+    decode_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    assert decode_service["resources"]["limits"]["gpu"] == "8"
     assert decode_service["multinode"] == {"nodeCount": 2}
+
+
+def test_build_dgd_config_multinode_parses_shell_joined_parallelism_args() -> None:
+    """Multinode detection should handle shell-joined CLI args from templates."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="meta-llama/Llama-3-70B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp 16", "--pp 2"],
+        decode_replicas=1,
+        decode_gpus=32,
+        num_gpus_per_node=8,
+    )
+
+    decode_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    assert decode_service["resources"]["limits"]["gpu"] == "8"
+    assert decode_service["multinode"] == {"nodeCount": 4}
 
 
 def test_apply_dgd_overrides_strips_envelope() -> None:
@@ -383,3 +442,102 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
         "tolerations"
         not in base_dgd["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for #8568: pvc_name without pvcModelPath should NOT double
+# the model path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_build_dgd_config_pvc_without_model_path_uses_hf_model_name(
+    backend,
+) -> None:
+    """When pvc_name is set but model_path is None (no pvcModelPath), workers
+    must receive the HF model ID — not the mount path — and the PVC must still
+    be mounted on all services.
+
+    Regression test for https://github.com/ai-dynamo/dynamo/issues/8568
+    """
+    modifier = CONFIG_MODIFIERS[backend]
+    pvc_name = "model-cache"
+    pvc_mount_path = "/opt/model-cache"
+    model_name = "Qwen/Qwen3-32B"
+
+    dgd_config = modifier.build_dgd_config(
+        mode="agg",
+        model_name=model_name,
+        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.0",
+        agg_cli_args=["--tp", "4"],
+        agg_replicas=1,
+        agg_gpus=4,
+        pvc_name=pvc_name,
+        pvc_mount_path=pvc_mount_path,
+        # model_path is intentionally omitted (pvcModelPath not set)
+    )
+
+    services = dgd_config["spec"]["services"]
+
+    # Workers must use HF model ID, NOT the mount path or a doubled path.
+    for svc_name, svc in services.items():
+        if svc_name in BaseConfigModifier._NON_WORKER_SERVICES:
+            continue
+        args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+        flat_args = " ".join(args) if args else ""
+        assert pvc_mount_path not in flat_args, (
+            f"Worker '{svc_name}' model arg should be the HF model ID, "
+            f"not the PVC mount path. args={args}"
+        )
+
+    # PVC must be declared in spec.pvcs
+    pvcs = dgd_config["spec"].get("pvcs", [])
+    pvc_names = [p["name"] for p in pvcs if isinstance(p, dict)]
+    assert pvc_name in pvc_names, f"PVC '{pvc_name}' not found in spec.pvcs"
+
+    # Every service must have a volumeMount for the PVC
+    for svc_name, svc in services.items():
+        vms = svc.get("volumeMounts", [])
+        mount_names = [vm["name"] for vm in vms if isinstance(vm, dict)]
+        assert (
+            pvc_name in mount_names
+        ), f"Service '{svc_name}' is missing volumeMount for PVC '{pvc_name}'"
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
+    """When both pvc_name and model_path are set (pvcModelPath provided),
+    workers must receive the full PVC path — not the HF model ID.
+
+    Ensures the explicit-pvcModelPath path still works after the fix.
+    """
+    modifier = CONFIG_MODIFIERS[backend]
+    pvc_name = "model-cache"
+    pvc_mount_path = "/opt/model-cache"
+    model_name = "Qwen/Qwen3-32B"
+    model_path = "/opt/model-cache/snapshots/abc123"
+
+    dgd_config = modifier.build_dgd_config(
+        mode="agg",
+        model_name=model_name,
+        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.0",
+        agg_cli_args=["--tp", "4"],
+        agg_replicas=1,
+        agg_gpus=4,
+        pvc_name=pvc_name,
+        pvc_mount_path=pvc_mount_path,
+        model_path=model_path,
+    )
+
+    services = dgd_config["spec"]["services"]
+
+    # Workers must use the explicit PVC model path
+    for svc_name, svc in services.items():
+        if svc_name in BaseConfigModifier._NON_WORKER_SERVICES:
+            continue
+        args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+        flat_args = " ".join(args) if args else ""
+        assert model_path in flat_args, (
+            f"Worker '{svc_name}' should use PVC model path '{model_path}'. "
+            f"args={args}"
+        )

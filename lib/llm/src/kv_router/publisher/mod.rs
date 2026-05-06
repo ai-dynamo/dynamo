@@ -27,17 +27,23 @@ use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
 };
 
+mod batching;
+mod dedup;
 mod event_processor;
+mod sinks;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
 #[cfg(test)]
-use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop};
-use event_processor::{
-    EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
-};
+use batching::BatchingState;
+#[cfg(test)]
+use dedup::EventDedupFilter;
+#[cfg(test)]
+use event_processor::run_event_processor_loop;
+use event_processor::{start_event_processor, start_event_processor_jetstream};
+use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 
@@ -356,6 +362,21 @@ impl KvEventPublisher {
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
+        match self.tx.send(placement_event) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+        }
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let placement_event = PlacementEvent::new(
+            Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+            event,
+        );
         match self.tx.send(placement_event) {
             Ok(()) => Ok(()),
             Err(err) => Err(mpsc::error::SendError(err.0.event)),
