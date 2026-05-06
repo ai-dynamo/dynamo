@@ -49,7 +49,7 @@ use super::{RouteDoc, service_v2};
 use crate::engines::EchoBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
     RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent, RealtimeServerEventError,
-    RealtimeServerEventSessionCreated, RealtimeSession, Session,
+    RealtimeServerEventSessionCreated, Session,
 };
 use uuid::Uuid;
 
@@ -117,7 +117,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
     // exchanges (which the engine handles).
     let session_created = RealtimeServerEvent::SessionCreated(RealtimeServerEventSessionCreated {
         event_id: format!("event_{}", Uuid::new_v4()),
-        session: Session::RealtimeSession(Box::new(RealtimeSession::default())),
+        session: Session::RealtimeSession(Box::default()),
     });
     let session_created_payload = match serde_json::to_string(&session_created) {
         Ok(s) => s,

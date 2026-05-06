@@ -147,12 +147,8 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
 pub struct EchoBidirectionalEngine {}
 
 #[async_trait]
-impl
-    AsyncEngine<
-        ManyIn<RealtimeClientEvent>,
-        ManyOut<Annotated<RealtimeServerEvent>>,
-        Error,
-    > for EchoBidirectionalEngine
+impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
+    for EchoBidirectionalEngine
 {
     async fn generate(
         &self,
@@ -470,9 +466,7 @@ mod tests {
     use dynamo_runtime::pipeline::Context;
     use futures::stream;
 
-    fn make_input(
-        events: Vec<RealtimeClientEvent>,
-    ) -> ManyIn<RealtimeClientEvent> {
+    fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
         RequestStream::new(Box::pin(stream::iter(events)), Context::new(()).context())
     }
 
