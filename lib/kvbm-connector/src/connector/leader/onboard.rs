@@ -133,6 +133,13 @@ impl ConnectorLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
+        tracing::info!(
+            event = "connector.start_onboarding.calls",
+            request_id = %request_id,
+            num_external_tokens,
+            total_block_ids = block_ids.len(),
+        );
+
         let shared_slot = self.get_slot(request_id)?;
 
         // Extract session_id and transition to Onboarding state
@@ -170,13 +177,23 @@ impl ConnectorLeader {
         let leader = self.clone();
         let handle = self.runtime.tokio();
         let request_id = request_id.to_string();
+        let onboard_block_count = onboard_blocks_ids.len();
+        let task_start = Instant::now();
+
+        tracing::info!(
+            event = "connector.start_onboarding.spawned",
+            request_id = %request_id,
+            onboard_blocks = onboard_block_count,
+        );
 
         handle.spawn(async move {
             match execute_onboarding(
                 leader.clone(),
                 shared_slot.clone(),
+                request_id.clone(),
                 onboard_blocks_ids.clone(),
                 staging_fut,
+                task_start,
             )
             .await
             {
@@ -216,9 +233,16 @@ impl ConnectorLeader {
                 .workers
                 .get()
                 .unwrap()
-                .mark_onboarding_complete(request_id)
+                .mark_onboarding_complete(request_id.clone())
                 .await
                 .expect("Failed to mark onboarding complete");
+
+            tracing::info!(
+                event = "connector.mark_onboarding_complete.done",
+                request_id = %request_id,
+                onboard_blocks = onboard_block_count,
+                total_us = task_start.elapsed().as_micros() as u64,
+            );
         });
 
         Ok(())
@@ -228,10 +252,13 @@ impl ConnectorLeader {
 async fn execute_onboarding(
     leader: Arc<ConnectorLeader>,
     slot: Arc<Mutex<RequestSlot>>,
+    request_id: String,
     block_ids: Vec<BlockId>,
     staging_fut: Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>,
+    task_start: Instant,
 ) -> Result<()> {
     let g1_block_ids = block_ids;
+    let g1_block_count = g1_block_ids.len();
     let start = Instant::now();
 
     // Wait for find_session completion by accessing it through the slot
@@ -251,7 +278,7 @@ async fn execute_onboarding(
     let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
 
     let num_blocks = g2_block_ids.len();
-    assert_eq!(num_blocks, g1_block_ids.len());
+    assert_eq!(num_blocks, g1_block_count);
 
     // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
@@ -264,22 +291,53 @@ async fn execute_onboarding(
     // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
     // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
     let start_xfer = Instant::now();
-    parallel_worker
-        .execute_local_transfer(
-            LogicalLayoutHandle::G2,
-            LogicalLayoutHandle::G1,
-            Arc::from(g2_block_ids),
-            Arc::from(g1_block_ids),
-            TransferOptions::default(),
-        )?
-        .await?;
+
+    tracing::info!(
+        event = "connector.execute_onboarding.dispatched",
+        request_id = %request_id,
+        g1_blocks = g1_block_count,
+        g2_blocks = num_blocks,
+        staging_us = staging_complete.duration_since(start).as_micros() as u64,
+        elapsed_us = task_start.elapsed().as_micros() as u64,
+        src = "kvbm_engine::G2",
+        dst = "kvbm_engine::G1",
+    );
+
+    let notification = parallel_worker.execute_local_transfer(
+        LogicalLayoutHandle::G2,
+        LogicalLayoutHandle::G1,
+        Arc::from(g2_block_ids),
+        Arc::from(g1_block_ids),
+        TransferOptions::default(),
+    )?;
+    let dispatch_returned = Instant::now();
+
+    tracing::info!(
+        event = "connector.execute_onboarding.dispatch_returned",
+        request_id = %request_id,
+        g1_blocks = g1_block_count,
+        g2_blocks = num_blocks,
+        dispatch_us = dispatch_returned.duration_since(start_xfer).as_micros() as u64,
+        elapsed_us = task_start.elapsed().as_micros() as u64,
+        src = "kvbm_engine::G2",
+        dst = "kvbm_engine::G1",
+    );
+
+    notification.await?;
     let end_xfer = Instant::now();
 
     tracing::info!(
+        event = "connector.execute_onboarding.completed",
+        request_id = %request_id,
         blocks = num_blocks,
+        g1_blocks = g1_block_count,
+        g2_blocks = num_blocks,
         staging_us = staging_complete.duration_since(start).as_micros() as u64,
+        dispatch_us = dispatch_returned.duration_since(start_xfer).as_micros() as u64,
+        xfer_wait_us = end_xfer.duration_since(dispatch_returned).as_micros() as u64,
         xfer_us = end_xfer.duration_since(start_xfer).as_micros() as u64,
         total_us = end_xfer.duration_since(start).as_micros() as u64,
+        elapsed_us = task_start.elapsed().as_micros() as u64,
         src = "kvbm_engine::G2",
         dst = "kvbm_engine::G1",
         "Onboard transfer complete"
