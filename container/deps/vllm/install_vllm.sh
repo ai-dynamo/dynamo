@@ -188,7 +188,7 @@ if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
         uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/test/xpu
         # Remove torch bundled oneccl to avoid conflicts
         uv pip uninstall oneccl oneccl-devel
-        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source (XPU)"  
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source (XPU)"
     else
         echo "⚠ Skipping vLLM-Omni (no cuda or xpu devices)"
     fi
