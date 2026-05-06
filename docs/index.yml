@@ -47,8 +47,8 @@ navigation:
       - page: Glossary
         path: reference/glossary.md
 
-  # ==================== Blog ====================
-  - section: Blog
+  # ==================== Digest ====================
+  - section: Digest
     path: blogs/index.mdx
     slug: blog
     contents:

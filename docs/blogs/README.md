@@ -1,8 +1,8 @@
-# Adding a Blog Post
+# Adding a Digest Post
 
-Follow these steps to publish a new blog post on the Dynamo docs site.
+Follow these steps to publish a new Digest post on the Dynamo docs site.
 
-## Step 1: Write the Blog Post
+## Step 1: Write the Digest Post
 
 Create a new Markdown file in this folder (`docs/blogs/`):
 
@@ -17,21 +17,21 @@ Add frontmatter at the top of the file:
 
 ```yaml
 ---
-title: Your Blog Post Title
+title: Your Digest Post Title
 description: A one-sentence summary shown in search results and social previews.
 ---
 ```
 
 ## Step 2: Add the Post to Navigation
 
-Open `docs/index.yml` and add a page entry under the **Blog** section:
+Open `docs/index.yml` and add a page entry under the **Digest** section:
 
 ```yaml
-  - section: Blog
+  - section: Digest
     path: blogs/index.mdx
     slug: blog
     contents:
-      - page: Your Blog Post Title
+      - page: Your Digest Post Title
         path: blogs/my-post-slug.md
 ```
 
@@ -44,7 +44,7 @@ Open `docs/blogs/index.mdx` and add a `<Card>` inside the existing `<CardGroup>`
 
 ```mdx
 <Card
-  title="Your Blog Post Title"
+  title="Your Digest Post Title"
   icon="regular newspaper"
   href="/dynamo/dev/blog/my-post-slug"
 >
@@ -68,16 +68,16 @@ Browse icons at https://fontawesome.com/icons (Free tier).
 
 ## Step 4 (Optional): Add the Post to the Navbar Dropdown
 
-Open `fern/docs.yml` and add a link under the Blog dropdown in `navbar-links`:
+Open `fern/docs.yml` and add a link under the Digest dropdown in `navbar-links`:
 
 ```yaml
 navbar-links:
   - type: dropdown
-    text: Blog
+    text: Digest
     links:
       - text: All Posts
         href: /dynamo/dev/blog
-      - text: Your Blog Post Title
+      - text: Your Digest Post Title
         href: /dynamo/dev/blog/my-post-slug
 ```
 
@@ -87,7 +87,7 @@ accessible from the landing page and sidebar.
 
 ## Quick Checklist
 
-- [ ] Blog post `.md` file created in `docs/blogs/`
-- [ ] Page entry added to `docs/index.yml` under the Blog section
+- [ ] Digest post `.md` file created in `docs/blogs/`
+- [ ] Page entry added to `docs/index.yml` under the Digest section
 - [ ] Card added to `docs/blogs/index.mdx`
-- [ ] (Optional) Link added to the Blog dropdown in `fern/docs.yml`
+- [ ] (Optional) Link added to the Digest dropdown in `fern/docs.yml`

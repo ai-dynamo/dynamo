@@ -110,7 +110,7 @@ redirects:
 # GitHub repository link in navbar
 navbar-links:
   - type: dropdown
-    text: Blog
+    text: Digest
     links:
       - text: All Posts
         href: /dynamo/dev/blog
