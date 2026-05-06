@@ -17,7 +17,7 @@ This directory contains two aggregated deployment configurations for the `nvidia
 - 1x8 B200 GPUs or 8x4 GB200 GPUs
 - A `hf-token-secret` Secret containing your Hugging Face token
 - A pre-existing `model-cache` PVC
-- `deploy-specdec.yaml` uses `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0` and works with a current top-of-tree Dynamo TRT-LLM image
+- `deploy-specdec.yaml` uses `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1` and works with a current top-of-tree Dynamo TRT-LLM image
 
 ---
 
@@ -42,7 +42,7 @@ Uses [`deploy-specdec.yaml`](deploy-specdec.yaml). This performant configuration
 ### Speculative Decoding Prerequisites
 
 - 8 GB200 nodes, each having 4 GPUs per node
-- Update the placeholder image tag `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0` in [`deploy-specdec.yaml`](deploy-specdec.yaml) before deploying.
+- Update the placeholder image tag `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1` in [`deploy-specdec.yaml`](deploy-specdec.yaml) before deploying.
 
 ### Additional Model Assets
 
