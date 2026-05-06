@@ -33,7 +33,7 @@ HOSTCACHE="${HOSTCACHE:-0}"
 
 if [ "$HOSTCACHE" = "1" ]; then HCTAG="hcon"; else HCTAG="hcoff"; fi
 
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-2.sqsh}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-debug.sqsh}"
 EXP_NAME="run_benchx_1ctx1gen_convrouter_pr13675_${HCTAG}_c${CONCURRENCY}"
 
 HF_TOKEN="${HF_TOKEN:-}"
