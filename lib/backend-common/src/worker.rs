@@ -378,22 +378,29 @@ impl Worker {
             tracing::info!("Endpoint unregistered from discovery");
         }
 
-        // Step 2: grace period — let in-flight router decisions land.
+        // Steps 2-4: grace period, drain, cleanup. Factored out so the
+        // engine-side ordering can be unit-tested without standing up a
+        // real DistributedRuntime + endpoint.
+        self.run_engine_shutdown_steps().await;
+
+        Ok(())
+    }
+
+    /// Engine-facing shutdown sequence: grace period sleep → `engine.drain()`
+    /// → `cleanup_once()`. Each step swallows non-fatal failures so a
+    /// misbehaving engine can't block the worker from exiting.
+    async fn run_engine_shutdown_steps(&self) {
         let grace = grace_period_secs();
         if grace > 0.0 {
             tracing::info!("Grace period {:.2}s before drain", grace);
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
         }
 
-        // Step 3: drain — backend-side hook for in-flight transfers.
         if let Err(e) = self.engine.drain().await {
             tracing::warn!(error = %e, "engine drain failed");
         }
 
-        // Step 4: engine.cleanup() — release resources while runtime alive.
         self.cleanup_once().await;
-
-        Ok(())
     }
 }
 
@@ -740,6 +747,148 @@ mod tests {
         );
         // engine.cleanup() never runs in this path.
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Orchestrator step-ordering tests
+    // -------------------------------------------------------------------
+
+    use std::sync::Mutex as StdMutex;
+
+    /// Engine that records the order of `drain` and `cleanup` calls into a
+    /// shared log so tests can assert on sequencing.
+    struct OrderingMockEngine {
+        log: Arc<StdMutex<Vec<&'static str>>>,
+        drain_should_fail: bool,
+    }
+
+    impl OrderingMockEngine {
+        fn new(drain_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let eng = Arc::new(Self {
+                log: log.clone(),
+                drain_should_fail,
+            });
+            (eng, log)
+        }
+    }
+
+    #[async_trait]
+    impl LLMEngine for OrderingMockEngine {
+        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+            self.log.lock().unwrap().push("start");
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+        ) -> Result<BoxStream<'static, crate::engine::LLMEngineOutput>, DynamoError> {
+            unreachable!("not used in orchestrator tests")
+        }
+
+        async fn drain(&self) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("drain");
+            if self.drain_should_fail {
+                Err(err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    "synthetic drain failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("cleanup");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_run_drain_before_cleanup() {
+        // Force grace period to 0 so the test doesn't sleep 5 seconds.
+        with_env(GRACE_PERIOD_ENV, Some("0"), || {});
+        let prev = std::env::var(GRACE_PERIOD_ENV).ok();
+        unsafe { std::env::set_var(GRACE_PERIOD_ENV, "0") };
+
+        let (engine, log) = OrderingMockEngine::new(false);
+        let worker = worker_with(engine);
+        worker.start_engine().await.unwrap();
+
+        worker.run_engine_shutdown_steps().await;
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec!["start", "drain", "cleanup"],
+            "drain must run before cleanup"
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(GRACE_PERIOD_ENV, v),
+                None => std::env::remove_var(GRACE_PERIOD_ENV),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
+        let prev = std::env::var(GRACE_PERIOD_ENV).ok();
+        unsafe { std::env::set_var(GRACE_PERIOD_ENV, "0") };
+
+        let (engine, log) = OrderingMockEngine::new(true); // drain fails
+        let worker = worker_with(engine);
+        worker.start_engine().await.unwrap();
+
+        worker.run_engine_shutdown_steps().await;
+
+        // Drain ran (and failed), but cleanup still ran exactly once.
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
+        assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(GRACE_PERIOD_ENV, v),
+                None => std::env::remove_var(GRACE_PERIOD_ENV),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_drain_skipped_when_engine_never_started() {
+        let prev = std::env::var(GRACE_PERIOD_ENV).ok();
+        unsafe { std::env::set_var(GRACE_PERIOD_ENV, "0") };
+
+        // Pre-start signal path: state transitions Init → Stopped without
+        // engine.start() ever running. drain still runs (default no-op for
+        // most engines) but cleanup must skip engine.cleanup() since no
+        // engine resources exist.
+        let (engine, log) = OrderingMockEngine::new(false);
+        let worker = worker_with(engine);
+        *worker.state.lock().await = LifecycleState::Stopped;
+
+        worker.run_engine_shutdown_steps().await;
+
+        // drain was called (orchestrator doesn't gate it on state — engines
+        // can decide internally whether they have anything to drain).
+        // cleanup was NOT called because the state machine short-circuits
+        // engine.cleanup when state is Init/Stopped.
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["drain"], "cleanup must be skipped pre-start");
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(GRACE_PERIOD_ENV, v),
+                None => std::env::remove_var(GRACE_PERIOD_ENV),
+            }
+        }
     }
 
     // -------------------------------------------------------------------
