@@ -208,7 +208,8 @@ jobs:
           # Sync digest/ directory
           if [ -d source-checkout/docs/digest ]; then
             echo "Syncing digest/ to docs-website branch..."
-            rm -rf docs-checkout/fern/digest docs-checkout/fern/blogs
+            # Keep fern/blogs for older versioned docs that still reference ../blogs.
+            rm -rf docs-checkout/fern/digest
             cp -r source-checkout/docs/digest docs-checkout/fern/digest
           fi
 
