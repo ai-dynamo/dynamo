@@ -9,9 +9,14 @@
 # baseline that proves the disagg topology is reachable + the worker-
 # side prometheus passthrough is wired end-to-end.
 #
-# REQUIREMENTS: needs >= 2 GPUs on the node (1 for prefill + 1 for
-# decode). On a single-GPU dev cluster the prefill pod will sit
-# Pending with FailedScheduling; run on a multi-GPU node or skip.
+# Uses tests/fault_tolerance/deploy/templates/vllm/disagg_same_gpu.yaml
+# (k8s mirror of examples/backends/vllm/launch/disagg_same_gpu.sh):
+# both workers fit on one GPU via tiny --gpu-memory-utilization,
+# capped --kv-cache-memory-bytes, and --enforce-eager. Requires the
+# cluster to have either >=2 GPUs OR nvidia-device-plugin
+# time-slicing enabled (1 physical GPU exposed as N logical via
+# sharing.timeSlicing.resources) so both pods can claim
+# nvidia.com/gpu: 1.
 
 import pytest
 
@@ -34,7 +39,9 @@ from tests.utils.managed_load import LoadConfig
 async def test_sanity_vllm_disagg(
     namespace, image, skip_service_restart, storage_class
 ):
-    spec = DeploymentSpec.from_backend("vllm", "disagg")
+    spec = DeploymentSpec(
+        "/workspace/tests/fault_tolerance/deploy/templates/vllm/disagg_same_gpu.yaml"
+    )
     served_model = spec["VllmDecodeWorker"].model
     await run_scenario(
         deployment_spec=spec,

@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Single-GPU vllm disagg deployment (Qwen3-0.6B). k8s mirror of
+# examples/backends/vllm/launch/disagg_same_gpu.sh: prefill + decode
+# co-resident on one GPU via tiny --gpu-memory-utilization, capped
+# --kv-cache-memory-bytes, and --enforce-eager. NixlConnector handles
+# the prefill->decode KV transfer so vllm:nixl_* counters register
+# on the prefill (P) instance.
+#
+# REQUIREMENTS: cluster either has >=2 GPUs (one per worker) or has
+# nvidia-device-plugin time-slicing enabled (1 physical GPU exposed
+# as N logical via sharing.timeSlicing.resources). On a single-GPU
+# node without time-slicing, the second worker will sit Pending with
+# FailedScheduling: "Insufficient nvidia.com/gpu".
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-same-gpu
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      envs:
+        # Distinct system_port per worker so the two prometheus servers
+        # don't collide when co-resident on the same node.
+        - name: DYN_SYSTEM_PORT
+          value: "8081"
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --enforce-eager
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            # Hard cap KV cache memory so prefill and decode can fit
+            # together on one GPU. ~976 MiB per worker, profiled-safe
+            # for Qwen3-0.6B at max-model-len 4096.
+            - --kv-cache-memory-bytes
+            - "1023525000"
+            # 0.01 keeps vLLM's startup free-memory check from
+            # rejecting the launch when a co-resident worker already
+            # holds VRAM.
+            - --gpu-memory-utilization
+            - "0.01"
+            - --max-model-len
+            - "4096"
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      envs:
+        - name: DYN_SYSTEM_PORT
+          value: "8082"
+        # Avoid NIXL side-channel port conflict with decode (default 20096).
+        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+          value: "20097"
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --enforce-eager
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+            - --kv-cache-memory-bytes
+            - "1023525000"
+            - --gpu-memory-utilization
+            - "0.01"
+            - --max-model-len
+            - "4096"
