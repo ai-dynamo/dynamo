@@ -3,8 +3,7 @@
 HTTP fetch client. Backend-neutral facade
 (`fetch_bytes` / `close_http_client`) over an `HttpClient` ABC with
 two concrete subclasses: `AiohttpClient` (default) and `HttpxClient`.
-Backend selection: `DYN_HTTP_BACKEND={aiohttp,httpx}` (legacy
-`DYN_MM_HTTP_BACKEND` is honored).
+Backend selection: `DYN_HTTP_BACKEND={aiohttp,httpx}`.
 
 ## Why aiohttp is the default
 

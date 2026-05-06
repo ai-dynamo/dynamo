@@ -4,8 +4,7 @@
 """Backend-neutral facade for Dynamo's HTTP fetch client.
 
 Env var ``DYN_HTTP_BACKEND`` selects the implementation behind the
-process-wide singleton used by :func:`fetch_bytes` (legacy
-``DYN_MM_HTTP_BACKEND`` is honored for backward compat):
+process-wide singleton used by :func:`fetch_bytes`:
 
   - ``aiohttp`` (default) — :class:`AiohttpClient` over an
     ``aiohttp.ClientSession``.
@@ -56,7 +55,9 @@ _default: Optional[HttpClient] = None
 def _create_client() -> HttpClient:
     """Pick a concrete client class based on ``DYN_HTTP_BACKEND``.
 
-    Honors legacy ``DYN_MM_HTTP_BACKEND`` via the alias mirror.
+    Mirrors any legacy ``DYN_MM_HTTP_*`` env vars to their canonical
+    ``DYN_HTTP_*`` names first, so the client's lazy ``from_env()``
+    inside ``HttpClient.__init__`` sees the migrated values.
     """
     _apply_legacy_env_aliases()
     name = os.environ.get("DYN_HTTP_BACKEND", "aiohttp").lower()

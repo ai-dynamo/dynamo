@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from dynamo.common import http as mm_http
-from dynamo.common.http import AiohttpClient, HttpxClient
+from dynamo.common.http import AiohttpClient, HttpxClient, from_env
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 
 pytestmark = [
@@ -58,11 +58,14 @@ async def test_invalid_backend_raises(monkeypatch) -> None:
         mm_http.get_default_client()
 
 
-async def test_legacy_mm_http_backend_env_var_still_honored(monkeypatch) -> None:
-    """Legacy ``DYN_MM_HTTP_BACKEND`` from before the rename still works."""
-    monkeypatch.delenv("DYN_HTTP_BACKEND", raising=False)
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
-    assert isinstance(mm_http.get_default_client(), HttpxClient)
+async def test_legacy_mm_http_env_var_still_honored(monkeypatch) -> None:
+    """Legacy ``DYN_MM_HTTP_*`` env vars from the deleted
+    ``dynamo.common.multimodal.http_client`` module still take effect.
+    """
+    monkeypatch.delenv("DYN_HTTP_MAX_CONNECTIONS", raising=False)
+    monkeypatch.setenv("DYN_MM_HTTP_MAX_CONNECTIONS", "77")
+    config = from_env()
+    assert config.max_connections == 77
 
 
 # --- Backend-neutral SSRF revalidation via fetch_bytes(policy=...) ---

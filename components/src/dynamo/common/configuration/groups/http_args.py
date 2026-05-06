@@ -30,18 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 # Map of canonical env var → list of legacy aliases (priority order).
-# Legacy ``DYN_MM_HTTP_*`` names predate the rename to ``DYN_HTTP_*``.
-# ``DYN_HTTP_TIMEOUT`` also accepts ``DYN_MM_HTTP_READ_TIMEOUT`` because
-# the read-vs-total semantic was clarified at the same time.
+# Only the six env vars that shipped via the now-deleted
+# ``dynamo.common.multimodal.http_client`` module are kept for back
+# compat. ``DYN_HTTP_TIMEOUT`` accepts ``DYN_MM_HTTP_READ_TIMEOUT``
+# because the read-vs-total semantic was clarified during the rename.
 _LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
-    "DYN_HTTP_BACKEND": ("DYN_MM_HTTP_BACKEND",),
     "DYN_HTTP_MAX_CONNECTIONS": ("DYN_MM_HTTP_MAX_CONNECTIONS",),
-    "DYN_HTTP_TIMEOUT": ("DYN_MM_HTTP_TIMEOUT", "DYN_MM_HTTP_READ_TIMEOUT"),
+    "DYN_HTTP_TIMEOUT": ("DYN_MM_HTTP_READ_TIMEOUT",),
     "DYN_HTTP_CONNECT_TIMEOUT": ("DYN_MM_HTTP_CONNECT_TIMEOUT",),
     "DYN_HTTP_MAX_KEEPALIVE": ("DYN_MM_HTTP_MAX_KEEPALIVE",),
     "DYN_HTTP_POOL_TIMEOUT": ("DYN_MM_HTTP_POOL_TIMEOUT",),
     "DYN_HTTP_CONCURRENCY": ("DYN_MM_HTTP_CONCURRENCY",),
-    "DYN_HTTP_KEEPALIVE_TIMEOUT": ("DYN_MM_HTTP_KEEPALIVE_TIMEOUT",),
 }
 
 _legacy_warned: set[str] = set()
