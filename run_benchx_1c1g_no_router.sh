@@ -60,6 +60,14 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
 mkdir -p "$RESULTS_DIR" "$REPO_DIR/bench/logs"
 
+{
+    echo "exp_name: $EXP_NAME"
+    echo "job_id: ${SLURM_JOB_ID:-unknown}"
+    echo "timestamp: $TIMESTAMP"
+    echo "container_image: $CONTAINER_IMAGE"
+    echo "concurrency: $CONCURRENCY"
+} > "$RESULTS_DIR/job_info.txt"
+
 SRUN_PIDS=()
 ROUTER_METRICS_PID=""
 
