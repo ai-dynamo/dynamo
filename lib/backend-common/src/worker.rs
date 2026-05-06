@@ -17,6 +17,7 @@ use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_runtime::pipeline::network::Ingress;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -196,7 +197,7 @@ impl Worker {
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
     ///   * Pre-start signal (during `DistributedRuntime` construction):
-    ///     the post-DRT cancellation check returns `EngineShutdown` and
+    ///     the post-DRT cancellation check returns `Ok(())` cleanly and
     ///     `engine.start()` is never called.
     ///   * Mid-start signal: `engine.start()` is allowed to complete (we
     ///     never cancel a partially-initialized engine mid-flight); the
@@ -325,13 +326,11 @@ impl Worker {
             "component and endpoint resolved"
         );
 
-        // Pre-start: bail before doing real engine work if shutdown already
-        // arrived during DRT construction.
+        // Shutdown arrived during DRT construction; engine never started,
+        // nothing to clean up.
         if shutdown.is_cancelled() {
-            return Err(err(
-                ErrorType::Backend(BackendError::EngineShutdown),
-                "shutdown requested before engine start",
-            ));
+            tracing::info!("Shutdown signal observed before engine.start(); exiting cleanly");
+            return Ok(());
         }
 
         let engine_config = self.start_engine().await?;
@@ -455,6 +454,14 @@ impl Worker {
             Some(self.config.metrics_labels.clone())
         };
 
+        // Hold a registration with the DRT's graceful-shutdown tracker for
+        // the entire serve + orchestrate window. If `Runtime::shutdown` is
+        // initiated externally, its Phase 2 wait will block on this guard
+        // (in addition to the endpoint's own registration), so Phase 3
+        // (NATS/etcd teardown) doesn't fire until our `orchestrator_steps`
+        // — discovery unregister, grace period, drain, cleanup — finishes.
+        let _orchestrator_registration = endpoint.drt().register_graceful_task();
+
         let serve_fut = endpoint
             .endpoint_builder()
             .handler(ingress)
@@ -466,14 +473,23 @@ impl Worker {
         tokio::select! {
             biased;
             result = &mut serve_fut => {
-                // Endpoint exited without a shutdown signal — usually an
-                // error path. Skip the orchestrator; cleanup runs in run().
-                return result.map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("serve: {e}"),
-                    )
-                });
+                match result {
+                    // Endpoint exited cleanly (e.g. DRT primary token
+                    // cancelled it) — run the orchestrator so drain/cleanup
+                    // don't race transport teardown.
+                    Ok(()) => {
+                        tracing::info!(
+                            "Endpoint completed gracefully; running shutdown orchestration"
+                        );
+                    }
+                    // Serve errored; cleanup_once in run() is the safety net.
+                    Err(e) => {
+                        return Err(err(
+                            ErrorType::Backend(BackendError::Unknown),
+                            format!("serve: {e}"),
+                        ));
+                    }
+                }
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
@@ -802,7 +818,10 @@ mod tests {
             &self,
             _request: PreprocessedRequest,
             _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
-        ) -> Result<BoxStream<'static, crate::engine::LLMEngineOutput>, DynamoError> {
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
             unreachable!("not used in state machine tests")
         }
 
@@ -912,7 +931,10 @@ mod tests {
             &self,
             _request: PreprocessedRequest,
             _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
-        ) -> Result<BoxStream<'static, crate::engine::LLMEngineOutput>, DynamoError> {
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
             unreachable!("not used in orchestrator tests")
         }
 

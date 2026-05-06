@@ -119,7 +119,7 @@ Standardize on:
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:
-  - Lifecycle state machine (Init → Starting → Running → Stopping → Stopped)
+  - Lifecycle state machine (Init → Running → Stopped)
   - SIGTERM/SIGINT handling and graceful shutdown orchestration
     (discovery unregister → grace period → drain → cleanup)
   - 3-phase distributed runtime shutdown after engine.cleanup() returns

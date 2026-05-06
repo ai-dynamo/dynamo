@@ -43,13 +43,19 @@ opt-out and lets `run.rs` stay non-generic.
 
 ## Contract for `generate`
 
-Exactly one **terminal chunk** must be the last item yielded. A terminal
-chunk is one with `finish_reason = Some(...)`. Non-terminal chunks
-leave `finish_reason` unset. Terminal chunks may carry tokens (the
-final tokens of the completion) or be empty — the contract is that
-`finish_reason` marks the end.
+The stream item type is `Result<LLMEngineOutput, DynamoError>`.
 
-`completion_usage` on a terminal chunk is optional (but recommended —
+Exactly one **terminal item** must be the last item yielded. A terminal
+item is either:
+
+  * `Ok(chunk)` with `finish_reason = Some(...)`, or
+  * `Err(dynamo_err)` carrying a typed mid-stream failure.
+
+Non-terminal items are `Ok(chunk)` with `finish_reason` unset. Terminal
+`Ok` chunks may carry tokens (the final tokens of the completion) or be
+empty — the contract is that `finish_reason` (or an `Err`) marks the end.
+
+`completion_usage` on a terminal `Ok` chunk is optional (but recommended —
 the OpenAI frontend aggregates it when present).
 
 In debug builds, the framework wraps the stream in a validator that
@@ -58,7 +64,7 @@ release.
 
 Rule the validator enforces:
 
-1. No chunk may be yielded after a terminal chunk.
+1. No item may be yielded after a terminal item (terminal `Ok` chunk or `Err`).
 
 The validator does **not** enforce "stream must end with a terminal
 chunk" — a stream may end early for legitimate reasons (adapter breaks
@@ -86,16 +92,22 @@ upstream `LLMEngineOutput` constructors, optionally chained with the
 use dynamo_backend_common::{chunk, LLMEngineOutput, LLMEngineOutputExt, usage};
 
 // Non-terminal
-yield chunk::token(id);
+yield Ok(chunk::token(id));
 
 // Length-terminated with final token(s) and usage stats.
-yield LLMEngineOutput::length()
+yield Ok(LLMEngineOutput::length()
     .with_tokens(vec![final_id])
-    .with_usage(usage(prompt_len, n));
+    .with_usage(usage(prompt_len, n)));
 
 // Cancellation with partial-usage stats.
-yield LLMEngineOutput::cancelled()
-    .with_usage(usage(prompt_len, generated));
+yield Ok(LLMEngineOutput::cancelled()
+    .with_usage(usage(prompt_len, generated)));
+
+// Typed mid-stream error — preserves BackendError variant downstream.
+yield Err(DynamoError::builder()
+    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+    .message("bad request")
+    .build());
 
 // Also available upstream: LLMEngineOutput::stop(), LLMEngineOutput::error(msg).
 ```
@@ -183,9 +195,15 @@ failed to start / crashed), `BackendError::Unknown` (uncategorized),
 could finish), `BackendError::Cancelled`, `BackendError::ResponseTimeout`,
 `BackendError::Disconnected`, `BackendError::ConnectionTimeout`.
 
-Mid-stream non-fatal errors are signalled via a terminal
-`LLMEngineOutput` with `finish_reason = Some(FinishReason::Error(msg))`.
-Use the existing `LLMEngineOutput::error(msg)` constructor.
+Mid-stream errors have two equivalent terminal forms:
+
+  * **Typed** (preferred): yield `Err(DynamoError)` from the stream.
+    Forwarded as `Annotated::error` with the `ErrorType::Backend(...)`
+    variant preserved end-to-end. Use this when the failure category
+    matters to the caller (e.g. `BackendError::InvalidArgument` vs.
+    `Disconnected`).
+  * **String**: yield `Ok(LLMEngineOutput::error(msg))`. Convenient for
+    pure message-level failures. Loses the typed `BackendError` variant.
 
 ## Logging
 

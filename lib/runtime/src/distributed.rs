@@ -455,6 +455,15 @@ impl DistributedRuntime {
         self.endpoint_discovery_sources.clone()
     }
 
+    /// Register an external long-running shutdown task with this runtime's
+    /// graceful-shutdown tracker. While the returned guard is alive,
+    /// `Runtime::shutdown` will keep waiting in Phase 2 (rather than
+    /// advancing to Phase 3 / NATS+etcd teardown). Drop the guard once
+    /// the task has finished.
+    pub fn register_graceful_task(&self) -> crate::utils::GracefulTaskGuard {
+        self.runtime.graceful_shutdown_tracker().register_task()
+    }
+
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
         self.routing_occupancy_states.clone()
     }

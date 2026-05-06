@@ -82,8 +82,25 @@ impl Worker {
         } else if let Some(rt) = RTHANDLE.get() {
             Ok(Runtime::from_handle(rt.clone())?)
         } else {
-            Runtime::from_settings()
+            // Fallback: build a fresh Runtime and publish its handle so
+            // subsequent `has_existing_runtime()` callers (e.g. the
+            // backend Python `Worker`) can tell that a runtime now
+            // exists in the process — even though we didn't go through
+            // `Worker::from_*`. Without this the cell stays empty and
+            // a later `Worker` would falsely conclude it owns the
+            // runtime and create a second one.
+            let runtime = Runtime::from_settings()?;
+            let _ = RTHANDLE.set(runtime.primary());
+            Ok(runtime)
         }
+    }
+
+    /// Whether a process-wide runtime has already been initialized
+    /// (`RT` populated by `Worker::from_*`, or `RTHANDLE` populated by
+    /// `runtime_from_existing`'s fallback / external callers).
+    /// Does *not* fall back to `Runtime::from_settings()`.
+    pub fn has_existing_runtime() -> bool {
+        RT.get().is_some() || RTHANDLE.get().is_some()
     }
 
     pub fn tokio_runtime(&self) -> anyhow::Result<&'static tokio::runtime::Runtime> {

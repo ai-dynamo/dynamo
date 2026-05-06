@@ -18,6 +18,7 @@ use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
 use tokio::task::JoinHandle;
 
@@ -91,24 +92,30 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut inner = chunks;
             let mut chunk_count: usize = 0;
             let mut cancelled = false;
-            while let Some(chunk) = inner.next().await {
+            while let Some(item) = inner.next().await {
                 chunk_count += 1;
-                // Record cancellation whenever the context reports it, but
-                // don't exit on that alone — a well-behaved engine will
-                // respond to `stop_generating()` by emitting its own
-                // terminal `Cancelled` chunk, and downstream must see it.
-                // We exit only on the engine's terminal chunk so the
-                // engine's final frame is always forwarded. Broken
-                // engines that never emit a terminal end the loop when
-                // their inner stream ends (the conformance kit catches
-                // the contract violation separately).
                 if ctx_for_stream.is_stopped() {
                     cancelled = true;
                 }
-                let is_terminal = chunk.finish_reason.is_some();
-                yield Annotated::from_data(chunk);
-                if is_terminal {
-                    break;
+                match item {
+                    Ok(chunk) => {
+                        let is_terminal = chunk.finish_reason.is_some();
+                        yield Annotated::from_data(chunk);
+                        if is_terminal {
+                            break;
+                        }
+                    }
+                    // Typed mid-stream failure — forward as Annotated::error
+                    // (preserves DynamoError variant) and stop polling.
+                    Err(dynamo_err) => {
+                        tracing::debug!(
+                            request_id = ctx_for_stream.id(),
+                            error = %dynamo_err,
+                            "engine stream yielded typed error",
+                        );
+                        yield Annotated::from_err(dynamo_err);
+                        break;
+                    }
                 }
             }
             tracing::debug!(
@@ -166,7 +173,7 @@ mod tests {
             &self,
             _request: PreprocessedRequest,
             context: Arc<dyn AsyncEngineContext>,
-        ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
             if let Some(make_err) = self.setup_err {
                 return Err(make_err());
             }
@@ -178,7 +185,7 @@ mod tests {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                     if context.is_stopped() { break; }
-                    yield c;
+                    yield Ok(c);
                 }
             }))
         }
@@ -299,13 +306,13 @@ mod tests {
             &self,
             _request: PreprocessedRequest,
             ctx: Arc<dyn AsyncEngineContext>,
-        ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
             Ok(Box::pin(async_stream::stream! {
-                yield chunk::token(1);
+                yield Ok(chunk::token(1));
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     if ctx.is_stopped() {
-                        yield LLMEngineOutput::cancelled().with_usage(usage(3, 1));
+                        yield Ok(LLMEngineOutput::cancelled().with_usage(usage(3, 1)));
                         break;
                     }
                 }
@@ -359,5 +366,56 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("BackendInvalidArgument"), "got: {msg}");
         assert!(msg.contains("bad param"), "got: {msg}");
+    }
+
+    /// Engine that yields one chunk and then a typed `Err(DynamoError)`,
+    /// proving the adapter forwards a mid-stream typed error as
+    /// `Annotated::error` with the `BackendError` variant intact.
+    struct TypedMidStreamErrEngine;
+
+    #[async_trait]
+    impl LLMEngine for TypedMidStreamErrEngine {
+        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: Arc<dyn AsyncEngineContext>,
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            Ok(Box::pin(async_stream::stream! {
+                yield Ok(chunk::token(1));
+                yield Err(DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("bad mid-stream")
+                    .build());
+            }))
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_forwards_typed_mid_stream_error_as_annotated_error() {
+        let adapter = EngineAdapter::new(Arc::new(TypedMidStreamErrEngine));
+        let input = Context::new(make_request(vec![1]));
+        let mut stream = adapter.generate(input).await.unwrap();
+
+        let first = stream.next().await.expect("first chunk");
+        assert!(first.data.is_some(), "first item carries data");
+
+        let err_item = stream.next().await.expect("typed error item");
+        assert!(err_item.is_error(), "second item must be Annotated::error");
+        let err = err_item.error.expect("typed DynamoError carried through");
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "typed BackendError variant must survive end-to-end"
+        );
+        assert!(err.to_string().contains("bad mid-stream"));
+
+        // No items after the typed error.
+        assert!(stream.next().await.is_none());
     }
 }

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, DynamoError, EngineConfig as RsEngineConfig, ErrorType,
-    FinishReason, LLMEngine, LLMEngineOutput, PreprocessedRequest,
+    LLMEngine, LLMEngineOutput, PreprocessedRequest,
     RuntimeConfig as RsRuntimeConfig, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
@@ -34,6 +34,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
+use crate::errors::py_exception_to_backend_error;
 use crate::to_pyerr;
 
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
@@ -258,10 +259,9 @@ pub struct Worker {
 impl Worker {
     #[new]
     fn new(engine: PyObject, config: WorkerConfig, event_loop: PyObject) -> PyResult<Self> {
-        // Determine whether this is the first runtime in the process. If
-        // `runtime_from_existing` succeeds, someone else (typically a
-        // `DistributedRuntime`) already constructed it and owns shutdown.
-        let owns_runtime = rs::Worker::runtime_from_existing().is_err();
+        // True existing-only check — `runtime_from_existing()` would
+        // synthesize a fresh runtime here and falsely mark us as shared.
+        let owns_runtime = !rs::Worker::has_existing_runtime();
 
         if owns_runtime {
             // Apply RuntimeConfig env overrides synchronously, on the
@@ -450,7 +450,7 @@ impl LLMEngine for PyLLMEngine {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let trace_context = get_distributed_tracing_context();
@@ -499,14 +499,7 @@ impl LLMEngine for PyLLMEngine {
                 let py_obj = match item {
                     Ok(obj) => obj,
                     Err(e) => {
-                        // Python engine raised mid-stream — terminate with
-                        // an Error chunk so downstream clients see a
-                        // well-formed terminal frame.
-                        let msg = e.to_string();
-                        yield LLMEngineOutput {
-                            finish_reason: Some(FinishReason::Error(msg)),
-                            ..LLMEngineOutput::default()
-                        };
+                        yield Err(py_err_to_dynamo(e));
                         return;
                     }
                 };
@@ -533,17 +526,18 @@ impl LLMEngine for PyLLMEngine {
                 .await;
 
                 match parsed {
-                    Ok(Ok(chunk)) => yield chunk,
+                    Ok(Ok(chunk)) => yield Ok(chunk),
                     Ok(Err(e)) => {
                         tracing::error!(error = %e, "failed to parse chunk from python engine");
-                        yield LLMEngineOutput {
-                            finish_reason: Some(FinishReason::Error(e.to_string())),
-                            ..LLMEngineOutput::default()
-                        };
+                        yield Err(py_err_to_dynamo(e));
                         return;
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "chunk parse offload error");
+                        yield Err(DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::Unknown))
+                            .message(format!("chunk parse offload error: {e}"))
+                            .build());
                         return;
                     }
                 }
@@ -623,7 +617,10 @@ where
 {
     let attr = match bound.getattr(name) {
         Ok(v) => v,
-        Err(_) => return Ok(None),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(bound.py()) => {
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
     };
     if attr.is_none() {
         return Ok(None);
@@ -631,12 +628,15 @@ where
     Ok(Some(attr.extract()?))
 }
 
-/// Map a Python exception class to the closest `BackendError` variant.
-/// Mirrors the existing logic in `engine.rs::process_item` so engines
-/// running through the new bridge produce the same error categories.
+/// Map a Python exception to a `BackendError` variant. `DynamoException`
+/// subclasses go through the shared mapping table; built-in Python
+/// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
-    let backend = Python::with_gil(|py| {
-        if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+    let (backend, message) = Python::with_gil(|py| {
+        if let Some(mapped) = py_exception_to_backend_error(py, &err) {
+            return mapped;
+        }
+        let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
             || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
         {
             BackendError::InvalidArgument
@@ -655,10 +655,11 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             BackendError::EngineShutdown
         } else {
             BackendError::Unknown
-        }
+        };
+        (backend, err.to_string())
     });
     DynamoError::builder()
         .error_type(ErrorType::Backend(backend))
-        .message(err.to_string())
+        .message(message)
         .build()
 }
