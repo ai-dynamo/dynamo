@@ -304,6 +304,33 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     return True  # we handled the test loop
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Replace the parent's --junitxml output with the GPU-parallel combined XML.
+
+    The orchestrator runs each test as its own pytest subprocess, so the parent
+    pytest's junitxml plugin only sees collection-time skips — real per-test
+    results live in /tmp/gpu_parallel_junit/combined.xml. trylast ensures we
+    overwrite after the junitxml plugin's own pytest_sessionfinish has run.
+    """
+    config = session.config
+    if config.stash.get(_gpu_slots_key, None) is None:
+        return
+    if config.getoption("max_vram_gib", default=None) is None:
+        return
+
+    parent_junit = getattr(config.option, "xmlpath", None)
+    if not parent_junit:
+        return
+
+    from tests.utils.pytest_parallel_gpu import _JUNIT_COMBINED
+
+    if not os.path.exists(_JUNIT_COMBINED):
+        return
+
+    shutil.copyfile(_JUNIT_COMBINED, parent_junit)
+
+
 @pytest.fixture()
 def set_ucx_tls_no_mm():
     """Set UCX env defaults for all tests."""
