@@ -138,13 +138,35 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "kimi-k2.5",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 300
+    "max_tokens": 300,
+    "skip_special_tokens": false,
+    "chat_template_kwargs": {"thinking": true}
   }'
 ```
 
 Kimi K2.5 emits a `<think>...</think>` reasoning prefix; the `kimi_k25` reasoning
 parser splits it out into the response's `reasoning_content` field, leaving the
 final answer in `content`. Send `max_tokens >= 200` to leave room for both phases.
+
+Both extra request fields are required:
+
+- `chat_template_kwargs: {thinking: true}` tells the chat template to emit the
+  `<think>` opener that primes the model to produce a reasoning block before the
+  answer. Without it the template skips the think prefix and the model's first
+  decoded token changes. (`thinking` is not a top-level OpenAI field, so it must
+  go inside `chat_template_kwargs` — Dynamo's frontend rejects unknown top-level
+  fields with `400 Unsupported parameter(s): thinking`.)
+- `skip_special_tokens: false` keeps structural tokens (`<|im_end|>`, `</think>`)
+  in the streamed output so the `kimi_k25` reasoning parser can find the
+  reasoning/content boundary. With the default `true`, the parser sees stripped
+  output, can't split the segments, and returns `content: null` with a small
+  number of trailing-stop tokens.
+
+The two knobs together restore the engine-side contract that the upstream
+`tokenspeed serve` monolith gets implicitly because it owns both the chat
+template and the parser in the same process; Dynamo's split (frontend renders
+template, worker streams output, parser runs after) creates a seam that needs
+explicit user-side wiring.
 
 ## Notes on parameter choice
 
