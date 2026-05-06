@@ -73,26 +73,7 @@ impl ZmqEventNormalizer {
         if matches!(raw, RawKvEvent::BlockStored { .. }) {
             self.learn_metadata(metadata, worker.dp_rank);
         }
-        let event_type = match &raw {
-            RawKvEvent::BlockStored { .. } => "stored",
-            RawKvEvent::BlockRemoved { .. } => "removed",
-            RawKvEvent::AllBlocksCleared => "cleared",
-            RawKvEvent::Ignored => "ignored",
-        };
-
-        let accepted = self.should_accept(metadata, worker.dp_rank);
-        tracing::info!(
-            target: "kv_event_debug",
-            event_type,
-            worker_id = worker.worker_id,
-            dp_rank = worker.dp_rank,
-            group_idx = ?metadata.group_idx,
-            kind = ?metadata.kv_cache_spec_kind,
-            sliding_window = ?metadata.kv_cache_spec_sliding_window,
-            accepted,
-            "kv_event_preprocess"
-        );
-        accepted.then_some(raw)
+        self.should_accept(metadata, worker.dp_rank).then_some(raw)
     }
 
     pub fn normalize_preprocessed(

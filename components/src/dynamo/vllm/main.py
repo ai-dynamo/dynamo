@@ -703,7 +703,7 @@ async def register_vllm_model(
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
-    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+    """Return vLLM cache and scheduler limits used for model registration."""
 
     try:
         # Get values directly from vllm_config instead of collective_rpc
@@ -719,8 +719,8 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
         }
 
-        logging.info(f"Cache config values: {cache_values}")
-        logging.info(f"Scheduler config values: {scheduler_values}")
+        logging.debug(f"Cache config values: {cache_values}")
+        logging.debug(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "block_size": cache_values["block_size"],

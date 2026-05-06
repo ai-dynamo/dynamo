@@ -18,6 +18,7 @@ MAIN_ATTENTION_KV_CACHE_KINDS = {
 
 
 def get_configured_kv_event_block_size(vllm_config: VllmConfig) -> int:
+    """Return the configured KV event block size, falling back to vLLM's cache block size."""
     additional_config = vllm_config.additional_config or {}
     return additional_config.get(
         DYNAMO_KV_EVENT_BLOCK_SIZE_KEY,
@@ -29,42 +30,40 @@ def select_main_attention_block_size(
     group_metadata: list[dict[str, Any]],
     fallback_block_size: int,
 ) -> int:
+    """Select the main-attention KV block size from engine cache-group metadata."""
     if not group_metadata:
         return fallback_block_size
 
-    fallback = group_metadata[0].get("block_size", fallback_block_size)
     for group in group_metadata:
         if group.get("kind") in MAIN_ATTENTION_KV_CACHE_KINDS:
             return group.get("block_size", fallback_block_size)
 
-    return fallback
+    return fallback_block_size
 
 
 async def configure_kv_event_block_size(
     engine: AsyncLLM,
     vllm_config: VllmConfig,
 ) -> int:
+    """Fetch engine cache-group metadata and cache the KV event block size on vLLM config."""
     fallback_block_size = vllm_config.cache_config.block_size
     try:
         group_metadata = await engine.engine_core.call_utility_async(
             "get_kv_cache_group_metadata"
         )
+    except Exception:
+        logger.exception(
+            "Failed to fetch KV cache group metadata; "
+            "falling back to vLLM cache_config.block_size"
+        )
+        kv_event_block_size = fallback_block_size
+    else:
         kv_event_block_size = select_main_attention_block_size(
             group_metadata,
             fallback_block_size,
         )
-    except Exception:
-        logger.exception(
-            "Failed to resolve main-attention KV event block size; "
-            "falling back to vLLM cache_config.block_size"
-        )
-        kv_event_block_size = fallback_block_size
 
+    if vllm_config.additional_config is None:
+        vllm_config.additional_config = {}
     vllm_config.additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY] = kv_event_block_size
-    logger.info(
-        "Resolved Dynamo KV event block size: scheduler_block_size=%s, "
-        "kv_event_block_size=%s",
-        fallback_block_size,
-        kv_event_block_size,
-    )
     return kv_event_block_size
