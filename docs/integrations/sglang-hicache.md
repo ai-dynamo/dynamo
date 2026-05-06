@@ -209,5 +209,5 @@ curl -s localhost:8000/metrics | grep shared_cache
 - [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html) and [Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite
-- [KVBM Guide](../../components/kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache
-- [KV Events for Custom Engines](../../integrations/kv-events-custom-engines.md) — the event protocol contract for backends other than SGLang
+- [KVBM Guide](../components/kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache
+- [KV Events for Custom Engines](kv-events-custom-engines.md) — the event protocol contract for backends other than SGLang

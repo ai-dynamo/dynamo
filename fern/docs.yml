@@ -101,11 +101,11 @@ redirects:
     destination: "/dynamo/dev/user-guides/agents"
   - source: "/dynamo/latest/planner/planner_intro.html"
     destination: "/dynamo/components/planner"
-  # SGLang HiCache moved from Integrations section to Backends > SGLang section
-  - source: "/dynamo/dev/integrations/sglang-hicache"
-    destination: "/dynamo/dev/backends/sglang/hicache"
-  - source: "/dynamo/integrations/sglang-hicache"
-    destination: "/dynamo/dev/backends/sglang/hicache"
+  # SGLang HiCache lives under Integrations; redirect from the older Backends > SGLang URL
+  - source: "/dynamo/dev/backends/sg-lang/hi-cache"
+    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
+  - source: "/dynamo/backends/sg-lang/hi-cache"
+    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
 
 # GitHub repository link in navbar
 navbar-links:

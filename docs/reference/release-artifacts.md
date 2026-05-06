@@ -30,6 +30,7 @@ Release history in this document begins at v0.6.0.
 | `tensorrtllm-runtime:1.1.0` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.3.0rc11` | `v13.1` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.1.0) | |
 | `tensorrtllm-runtime:1.1.0-efa-amd64` | Runtime container for TensorRT-LLM with AWS EFA | TRT-LLM `v1.3.0rc11` | `v13.1` | AMD64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.1.0-efa-amd64) | Experimental |
 | `dynamo-frontend:1.1.0` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=1.1.0) | |
+| `dynamo-planner:1.1.0` | Standalone Planner image used by Profiler jobs and Planner pods | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-planner?version=1.1.0) | New |
 | `kubernetes-operator:1.1.0` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=1.1.0) | |
 | `snapshot-agent:1.1.0` | Snapshot agent for fast GPU worker recovery via CRIU | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent?version=1.1.0) | Preview |
 
@@ -92,6 +93,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0-efa-amd64
 
 # Infrastructure containers
 docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
 docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.1.0
 docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.1.0
 ```
@@ -165,24 +167,58 @@ For a complete list of known issues, refer to the release notes for each version
 
 ---
 
-## Release History
+## Release Artifact History
 
-- **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)*: DeepSeek-V4-Flash and V4-Pro on Blackwell. Ships `vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (vLLM `v0.20.0`) plus `sglang-runtime:1.2.0-deepseek-v4-{cuda12,cuda13}-dev.2` built on upstream `lmsysorg/sglang:deepseek-v4-blackwell`. No TensorRT-LLM container, no other component containers, no Helm charts, no wheels published. Snapshot dev build for early-access V4 support; not QA-gated.
-- **v1.1.0**: First post-v1.0.0 release. SGLang `v0.5.10.post1` (NIXL `v1.0.1`, from upstream `lmsysorg/sglang` image), TRT-LLM `v1.3.0rc11` (NIXL `v0.10.1`), vLLM `v0.19.0` (NIXL `v0.10.1`). Resilient standalone KV indexer with recovery, Anthropic `/v1/messages` production-grade, SGLang multimodal disaggregated serving with embedding transfer / embedding cache / device-aware EPD routing, Mocker as performance-modeling and offline-replay engine, Planner FPM consolidation. See [Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) for breaking changes.
-- **v1.1.0-dev.3** *(experimental, partial)*: Preview release on `release/1.1.0-dev.3`. Ships only `tensorrtllm-runtime:1.1.0-dev.3` (TRT-LLM `v1.3.0rc11`) plus `ai-dynamo` and `ai-dynamo-runtime` wheels. No vLLM/SGLang containers, no other component containers, no Helm charts published. Not recommended for production use.
-- **v1.1.0-dev.2** *(experimental, partial)*: Preview release. Ships `sglang-runtime:1.1.0-dev.2` (SGLang `v0.5.9`) and `tensorrtllm-runtime:1.1.0-dev.2` (TRT-LLM `v1.3.0rc9`) plus `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels. No vLLM container, no other component containers, no Helm charts published. Not recommended for production use.
-- **v1.1.0-dev.1** *(experimental)*: Preview release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1`, vLLM `v0.17.1`, NIXL `v0.10.1`. Not recommended for production use.
-- **v1.0.2**: Patch release. Same backend versions as v1.0.0: SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1`, vLLM `v0.16.0`, NIXL `v0.10.1`.
-- **v1.0.1**: Patch release. Same backend versions as v1.0.0: SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1`, vLLM `v0.16.0`, NIXL `v0.10.1`.
-- **v1.0.0**: First major release. SGLang `v0.5.9`, TRT-LLM `v1.3.0rc5.post1` (CUDA 13.1), vLLM `v0.16.0`, NIXL `v0.10.1`. New `snapshot-agent` container and `snapshot` Helm chart (Preview). New EFA container variants for vLLM and TRT-LLM (Experimental, AMD64 only). New `dynamo-mocker` and `dynamo-kv-router` Rust crates. Deprecated `dynamo-crds` Helm chart (CRDs now managed by the Operator). `v1alpha1` CRDs deprecated.
-- **v0.9.1**: Updated TRT-LLM to `v1.3.0rc3`. All other backend versions unchanged from v0.9.0.
-- **v0.9.0.post1**: Fixed `dynamo-platform` Helm chart operator image tag (Helm chart only, NGC)
-- **v0.9.0**: Updated vLLM to `v0.14.1`, SGLang to `v0.5.8`, TRT-LLM to `v1.3.0rc1`, NIXL to `v0.9.0`. New `dynamo-tokens` Rust crate. Deprecated `dynamo-graph` Helm chart.
-- **v0.8.1.post1/.post2/.post3 Patches**: Experimental patch releases updating TRT-LLM only (PyPI wheels and TRT-LLM container). No other artifacts changed.
-- **Standalone Frontend Container**: `dynamo-frontend` added in v0.8.0
-- **EFA Runtimes**: Experimental AWS EFA variants for vLLM and TRT-LLM (AMD64 only) in v1.0.0
-- **CUDA 13 Runtimes**: Experimental CUDA 13 runtime for SGLang and vLLM in v0.8.0
-- **New Rust Crates**: `dynamo-memory` and `dynamo-config` added in v0.8.0
+Each bullet is a **delta** to what ships on NGC / Helm / PyPI / crates.io: net-new crates, removed Helm charts, or image lines that **split** or **appear** on the registry. See the inventory tables above for full matrices.
+
+Stable releases first (newest first). **`dev` / `post` tags** below are **one-off partial publishes** — they never ship the full stable artifact set.
+
+For backend version pins, see the version-pins table above and the [GitHub Releases](#github-releases) table below.
+
+**Stable Releases**
+
+- **v1.1.0**: **Images:** Split Planner into its own `dynamo-planner` image on NGC for Profiler jobs and Planner pods; worker and runtime images no longer bundle Planner (**artifact boundary change**, not a new engine capability). **Crates:** First publication on crates.io of **`dynamo-protocols`** (multi-protocol types; replaces **`dynamo-async-openai`**, deprecated — last release **`1.0.2`**).
+- **v1.0.2 / v1.0.1**: No artifact additions or removals versus v1.0.0.
+- **v1.0.0**: **Images:** `snapshot-agent`, EFA variants for vLLM and TRT-LLM (AMD64 only). **Crates:** First publish of `dynamo-mocker`, `dynamo-kv-router`. **Helm:** Added `snapshot` (preview); dropped deprecated `dynamo-crds` from the publish stream (CRDs owned by the Operator).
+- **v0.9.1**: No artifact additions or removals versus v0.9.0.
+- **v0.9.0**: **Crates:** First publish of `dynamo-tokens`. **Helm:** Dropped deprecated `dynamo-graph` from the publish stream.
+- **v0.8.0**: **Images:** `dynamo-frontend`, CUDA 13 variants for vLLM and SGLang. **Crates:** First publish of `dynamo-memory`, `dynamo-config`.
+
+**Ad Hoc Releases (`dev`, experimental tags)**
+
+- **v1.2.0-deepseek-v4-dev.2**: Subset only: `vllm-runtime:*-deepseek-v4-cuda13-dev.2` and `sglang-runtime:*-deepseek-v4-{cuda12,cuda13}-dev.2`. No TRT-LLM image, component images, Helm charts, or PyPI wheels for this tag.
+- **v1.1.0-dev.3**: Subset only: TRT-LLM runtime image plus `ai-dynamo` / `ai-dynamo-runtime` wheels.
+- **v1.1.0-dev.2**: Subset only: SGLang + TRT-LLM runtime images plus `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels (no vLLM image, no Helm full matrix).
+- **v1.1.0-dev.1**: Subset preview: all three backend runtime images plus wheels (still not a full stable publish).
+
+**Helm-only patches**
+
+- **v0.9.0.post1**: Republished `dynamo-platform` Helm chart only (operator image tag correction).
+
+**Backend-only patch trains**
+
+- **v0.8.1.post1 / .post2 / .post3**: Republished TRT-LLM runtime image and PyPI wheels only.
+
+### crates.io Rust Packages
+
+These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table lists each crate’s **first non-placeholder** publication on crates.io (excluding reservation uploads named `0.0.0-prerelease.0`). Dates are from the crates.io registry index.
+
+| Crate | First published version | Date (crates.io) |
+|-------|-------------------------|------------------|
+| `dynamo-runtime` | `0.1.0` | 2025-03-18 |
+| `dynamo-llm` | `0.2.0` | 2025-05-01 |
+| `dynamo-async-openai` | `0.4.1` | 2025-08-27 |
+| `dynamo-parsers` | `0.5.0` | 2025-09-18 |
+| `dynamo-memory` | `0.8.0` | 2026-01-15 |
+| `dynamo-config` | `0.8.0` | 2026-01-15 |
+| `dynamo-tokens` | `0.9.0` | 2026-02-12 |
+| `dynamo-mocker` | `1.0.0` | 2026-03-13 |
+| `dynamo-kv-router` | `1.0.0` | 2026-03-13 |
+| `dynamo-protocols` | `1.1.0` | 2026-05-04 |
+
+**`dynamo-async-openai`** is **deprecated**; **`1.0.2`** is its final crates.io release. Use **`dynamo-protocols`** for new dependencies ([crate](https://crates.io/crates/dynamo-protocols)).
+
+**`dynamo-tokenizers`** exists only in the Dynamo workspace and is **not** published on crates.io.
 
 ### GitHub Releases
 
@@ -327,6 +363,12 @@ For a complete list of known issues, refer to the release notes for each version
 | `kubernetes-operator:0.7.0` | AMD64/ARM64 | |
 | `kubernetes-operator:0.6.1` | AMD64/ARM64 | |
 | `kubernetes-operator:0.6.0` | AMD64/ARM64 | |
+
+#### dynamo-planner
+
+| Image:Tag | Arch | Notes |
+|-----------|------|-------|
+| `dynamo-planner:1.1.0` | AMD64/ARM64 | New |
 
 #### snapshot-agent
 
@@ -641,7 +683,7 @@ Not shipped for pre-release versions.
 - **Branch:** [release/1.1.0-dev.3](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.3)
 - **GitHub Tag:** [v1.1.0-dev.3](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3)
 - **Backends (branch ToT):** SGLang `v0.5.10.post1` | TensorRT-LLM `v1.3.0rc11` | vLLM `v0.19.0` | NIXL `v0.10.1`
-- **Coverage:** Partial -- only the TensorRT-LLM container and the `ai-dynamo` / `ai-dynamo-runtime` wheels are published. SGLang and vLLM containers, additional component containers (`dynamo-frontend`, `kubernetes-operator`, `snapshot-agent`), the `kvbm` wheel, and Helm charts are not published for this dev release.
+- **Coverage:** Partial -- only the TensorRT-LLM container and the `ai-dynamo` / `ai-dynamo-runtime` wheels are published. SGLang and vLLM containers, additional component containers (`dynamo-frontend`, `dynamo-planner`, `kubernetes-operator`, `snapshot-agent`), the `kvbm` wheel, and Helm charts are not published for this dev release.
 
 #### Container Images
 
@@ -673,7 +715,7 @@ Not shipped for pre-release versions.
 - **Branch:** [release/1.1.0-dev.2](https://github.com/ai-dynamo/dynamo/tree/release/1.1.0-dev.2)
 - **GitHub Tag:** [v1.1.0-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.2)
 - **Backends (branch ToT):** SGLang `v0.5.9` | TensorRT-LLM `v1.3.0rc9` | vLLM `v0.19.0` | NIXL `v0.10.1`
-- **Coverage:** Partial -- SGLang and TensorRT-LLM containers plus `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels are published. vLLM container, additional component containers (`dynamo-frontend`, `kubernetes-operator`, `snapshot-agent`), and Helm charts are not published for this dev release.
+- **Coverage:** Partial -- SGLang and TensorRT-LLM containers plus `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` wheels are published. vLLM container, additional component containers (`dynamo-frontend`, `dynamo-planner`, `kubernetes-operator`, `snapshot-agent`), and Helm charts are not published for this dev release.
 
 #### Container Images
 
