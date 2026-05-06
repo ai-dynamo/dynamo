@@ -1,4 +1,4 @@
-# Kimi-K2.5 nvidia/Kimi-K2.5-NVFP4 — TokenSpeed Aggregated Deployment on Kubernetes
+# [Experimental] Kimi-K2.5 nvidia/Kimi-K2.5-NVFP4 — TokenSpeed Aggregated Deployment on Kubernetes
 
 > **Text only:** the NVFP4 export of Kimi-K2.5 ships without vision-tower weights. The
 > TokenSpeed loader logs warnings for the missing `vision_tower.*` parameters and
