@@ -792,17 +792,23 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // Shared-memory
 // ---------------------------------------------------------------------------
 
-func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+// ConvertToV1beta1SharedMemorySize converts the v1alpha1 shared-memory struct
+// into the v1beta1 scalar representation.
+func ConvertToV1beta1SharedMemorySize(src *SharedMemorySpec) *resource.Quantity {
 	if src == nil {
 		return nil
 	}
 	if src.Disabled {
-		dst.SharedMemorySize = ptr.To(resource.MustParse("0"))
+		return ptr.To(resource.MustParse("0"))
+	}
+	if src.Size.IsZero() {
 		return nil
 	}
-	if !src.Size.IsZero() {
-		dst.SharedMemorySize = ptr.To(src.Size.DeepCopy())
-	}
+	return ptr.To(src.Size.DeepCopy())
+}
+
+func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+	dst.SharedMemorySize = ConvertToV1beta1SharedMemorySize(src)
 	return nil
 }
 
@@ -928,6 +934,128 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
+// ConvertToV1beta1GPUMemoryService converts the v1alpha1 GMS config into the
+// v1beta1 experimental GMS config. Disabled v1alpha1 configs are represented
+// by absence in v1beta1.
+func ConvertToV1beta1GPUMemoryService(src *GPUMemoryServiceSpec) *v1beta1.GPUMemoryServiceSpec {
+	if src == nil || !src.Enabled {
+		return nil
+	}
+	return &v1beta1.GPUMemoryServiceSpec{
+		Mode:            gmsModeToV1beta1(src.Mode),
+		DeviceClassName: src.DeviceClassName,
+	}
+}
+
+// ConvertToV1alpha1GPUMemoryService converts the v1beta1 experimental GMS
+// config into the v1alpha1 enabled config.
+func ConvertToV1alpha1GPUMemoryService(src *v1beta1.GPUMemoryServiceSpec) *GPUMemoryServiceSpec {
+	if src == nil {
+		return nil
+	}
+	return &GPUMemoryServiceSpec{
+		Enabled:         true,
+		Mode:            gmsModeFromV1beta1(src.Mode),
+		DeviceClassName: src.DeviceClassName,
+	}
+}
+
+// ConvertToV1beta1Failover converts the v1alpha1 failover config into the
+// v1beta1 experimental failover config. Disabled v1alpha1 configs are
+// represented by absence in v1beta1.
+func ConvertToV1beta1Failover(src *FailoverSpec) *v1beta1.FailoverSpec {
+	if src == nil || !src.Enabled {
+		return nil
+	}
+	return &v1beta1.FailoverSpec{
+		Mode:       gmsModeToV1beta1(src.Mode),
+		NumShadows: src.NumShadows,
+	}
+}
+
+// ConvertToV1alpha1Failover converts the v1beta1 experimental failover config
+// into the v1alpha1 enabled config.
+func ConvertToV1alpha1Failover(src *v1beta1.FailoverSpec) *FailoverSpec {
+	if src == nil {
+		return nil
+	}
+	return &FailoverSpec{
+		Enabled:    true,
+		Mode:       gmsModeFromV1beta1(src.Mode),
+		NumShadows: src.NumShadows,
+	}
+}
+
+// ConvertToV1beta1ComponentCheckpoint converts the v1alpha1 checkpoint config
+// into the v1beta1 experimental checkpoint config. Disabled v1alpha1 configs
+// are represented by absence in v1beta1.
+func ConvertToV1beta1ComponentCheckpoint(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpointConfig {
+	if src == nil || !src.Enabled {
+		return nil
+	}
+	dst := &v1beta1.ComponentCheckpointConfig{
+		Mode:     checkpointModeToV1beta1(src.Mode),
+		Identity: ConvertToV1beta1CheckpointIdentity(src.Identity),
+	}
+	if src.CheckpointRef != nil {
+		dst.CheckpointRef = ptr.To(*src.CheckpointRef)
+	}
+	return dst
+}
+
+// ConvertToV1alpha1ComponentCheckpoint converts the v1beta1 experimental
+// checkpoint config into the v1alpha1 enabled config.
+func ConvertToV1alpha1ComponentCheckpoint(src *v1beta1.ComponentCheckpointConfig) *ServiceCheckpointConfig {
+	if src == nil {
+		return nil
+	}
+	dst := &ServiceCheckpointConfig{
+		Enabled:  true,
+		Mode:     checkpointModeFromV1beta1(src.Mode),
+		Identity: ConvertToV1alpha1CheckpointIdentity(src.Identity),
+	}
+	if src.CheckpointRef != nil {
+		dst.CheckpointRef = ptr.To(*src.CheckpointRef)
+	}
+	return dst
+}
+
+// ConvertToV1beta1CheckpointIdentity converts checkpoint identity fields from
+// v1alpha1 to v1beta1.
+func ConvertToV1beta1CheckpointIdentity(src *DynamoCheckpointIdentity) *v1beta1.DynamoCheckpointIdentity {
+	if src == nil {
+		return nil
+	}
+	return &v1beta1.DynamoCheckpointIdentity{
+		Model:                src.Model,
+		BackendFramework:     src.BackendFramework,
+		DynamoVersion:        src.DynamoVersion,
+		TensorParallelSize:   src.TensorParallelSize,
+		PipelineParallelSize: src.PipelineParallelSize,
+		Dtype:                src.Dtype,
+		MaxModelLen:          src.MaxModelLen,
+		ExtraParameters:      src.ExtraParameters,
+	}
+}
+
+// ConvertToV1alpha1CheckpointIdentity converts checkpoint identity fields from
+// v1beta1 to v1alpha1.
+func ConvertToV1alpha1CheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *DynamoCheckpointIdentity {
+	if src == nil {
+		return nil
+	}
+	return &DynamoCheckpointIdentity{
+		Model:                src.Model,
+		BackendFramework:     src.BackendFramework,
+		DynamoVersion:        src.DynamoVersion,
+		TensorParallelSize:   src.TensorParallelSize,
+		PipelineParallelSize: src.PipelineParallelSize,
+		Dtype:                src.Dtype,
+		MaxModelLen:          src.MaxModelLen,
+		ExtraParameters:      src.ExtraParameters,
+	}
+}
+
 func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	var exp *v1beta1.ExperimentalSpec
 	ensureExp := func() *v1beta1.ExperimentalSpec {
@@ -937,28 +1065,16 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 		return exp
 	}
 
-	if src.GPUMemoryService != nil {
-		if src.GPUMemoryService.Enabled {
-			ensureExp().GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
-				Mode:            gmsModeToV1beta1(src.GPUMemoryService.Mode),
-				DeviceClassName: src.GPUMemoryService.DeviceClassName,
-			}
-		}
+	if gms := ConvertToV1beta1GPUMemoryService(src.GPUMemoryService); gms != nil {
+		ensureExp().GPUMemoryService = gms
 	}
 
-	if src.Failover != nil {
-		if src.Failover.Enabled {
-			ensureExp().Failover = &v1beta1.FailoverSpec{
-				Mode:       gmsModeToV1beta1(src.Failover.Mode),
-				NumShadows: src.Failover.NumShadows,
-			}
-		}
+	if failover := ConvertToV1beta1Failover(src.Failover); failover != nil {
+		ensureExp().Failover = failover
 	}
 
-	if src.Checkpoint != nil {
-		if src.Checkpoint.Enabled {
-			ensureExp().Checkpoint = checkpointToV1beta1(src.Checkpoint)
-		}
+	if checkpoint := ConvertToV1beta1ComponentCheckpoint(src.Checkpoint); checkpoint != nil {
+		ensureExp().Checkpoint = checkpoint
 	}
 
 	dst.Experimental = exp
@@ -966,74 +1082,16 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 
 func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
-		dst.GPUMemoryService = &GPUMemoryServiceSpec{
-			Enabled:         true,
-			Mode:            gmsModeFromV1beta1(src.Experimental.GPUMemoryService.Mode),
-			DeviceClassName: src.Experimental.GPUMemoryService.DeviceClassName,
-		}
+		dst.GPUMemoryService = ConvertToV1alpha1GPUMemoryService(src.Experimental.GPUMemoryService)
 	}
 
 	if src.Experimental != nil && src.Experimental.Failover != nil {
-		dst.Failover = &FailoverSpec{
-			Enabled:    true,
-			Mode:       gmsModeFromV1beta1(src.Experimental.Failover.Mode),
-			NumShadows: src.Experimental.Failover.NumShadows,
-		}
+		dst.Failover = ConvertToV1alpha1Failover(src.Experimental.Failover)
 	}
 
 	if src.Experimental != nil && src.Experimental.Checkpoint != nil {
-		dst.Checkpoint = checkpointFromV1beta1(src.Experimental.Checkpoint, true)
+		dst.Checkpoint = ConvertToV1alpha1ComponentCheckpoint(src.Experimental.Checkpoint)
 	}
-}
-
-func checkpointToV1beta1(src *ServiceCheckpointConfig) *v1beta1.ComponentCheckpointConfig {
-	dst := &v1beta1.ComponentCheckpointConfig{
-		Mode: checkpointModeToV1beta1(src.Mode),
-	}
-	// Deep-copy CheckpointRef so the v1alpha1 and v1beta1 objects do not
-	// share the same *string. A shared pointer would let a mutation on one
-	// side surface on the other after conversion, which violates the
-	// conversion-webhook contract.
-	if src.CheckpointRef != nil {
-		dst.CheckpointRef = ptr.To(*src.CheckpointRef)
-	}
-	if src.Identity != nil {
-		dst.Identity = &v1beta1.DynamoCheckpointIdentity{
-			Model:                src.Identity.Model,
-			BackendFramework:     src.Identity.BackendFramework,
-			DynamoVersion:        src.Identity.DynamoVersion,
-			TensorParallelSize:   src.Identity.TensorParallelSize,
-			PipelineParallelSize: src.Identity.PipelineParallelSize,
-			Dtype:                src.Identity.Dtype,
-			MaxModelLen:          src.Identity.MaxModelLen,
-			ExtraParameters:      src.Identity.ExtraParameters,
-		}
-	}
-	return dst
-}
-
-func checkpointFromV1beta1(src *v1beta1.ComponentCheckpointConfig, enabled bool) *ServiceCheckpointConfig {
-	dst := &ServiceCheckpointConfig{
-		Enabled: enabled,
-		Mode:    checkpointModeFromV1beta1(src.Mode),
-	}
-	// Deep-copy CheckpointRef -- see checkpointToV1beta1 for the rationale.
-	if src.CheckpointRef != nil {
-		dst.CheckpointRef = ptr.To(*src.CheckpointRef)
-	}
-	if src.Identity != nil {
-		dst.Identity = &DynamoCheckpointIdentity{
-			Model:                src.Identity.Model,
-			BackendFramework:     src.Identity.BackendFramework,
-			DynamoVersion:        src.Identity.DynamoVersion,
-			TensorParallelSize:   src.Identity.TensorParallelSize,
-			PipelineParallelSize: src.Identity.PipelineParallelSize,
-			Dtype:                src.Identity.Dtype,
-			MaxModelLen:          src.Identity.MaxModelLen,
-			ExtraParameters:      src.Identity.ExtraParameters,
-		}
-	}
-	return dst
 }
 
 // ---------------------------------------------------------------------------

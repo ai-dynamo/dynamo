@@ -89,58 +89,19 @@ func GetCheckpoint(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1be
 }
 
 func ToAlphaCheckpointConfig(src *v1beta1.ComponentCheckpointConfig) *v1alpha1.ServiceCheckpointConfig {
-	if src == nil {
-		return nil
-	}
-	dst := &v1alpha1.ServiceCheckpointConfig{
-		Enabled:       true,
-		Mode:          v1alpha1.CheckpointMode(src.Mode),
-		CheckpointRef: src.CheckpointRef,
-		Identity:      ToAlphaCheckpointIdentity(src.Identity),
-	}
-	return dst
+	return v1alpha1.ConvertToV1alpha1ComponentCheckpoint(src)
 }
 
 func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.DynamoCheckpointIdentity {
-	if src == nil {
-		return nil
-	}
-	return &v1alpha1.DynamoCheckpointIdentity{
-		Model:                src.Model,
-		BackendFramework:     src.BackendFramework,
-		DynamoVersion:        src.DynamoVersion,
-		TensorParallelSize:   src.TensorParallelSize,
-		PipelineParallelSize: src.PipelineParallelSize,
-		Dtype:                src.Dtype,
-		MaxModelLen:          src.MaxModelLen,
-		ExtraParameters:      src.ExtraParameters,
-	}
+	return v1alpha1.ConvertToV1alpha1CheckpointIdentity(src)
 }
 
 func ToAlphaGPUMemoryService(src *v1beta1.GPUMemoryServiceSpec) *v1alpha1.GPUMemoryServiceSpec {
-	if src == nil {
-		return nil
-	}
-	return &v1alpha1.GPUMemoryServiceSpec{
-		Enabled:         true,
-		Mode:            v1alpha1.GPUMemoryServiceMode(src.Mode),
-		DeviceClassName: src.DeviceClassName,
-	}
+	return v1alpha1.ConvertToV1alpha1GPUMemoryService(src)
 }
 
 func ToBetaSharedMemorySize(src *v1alpha1.SharedMemorySpec) *resource.Quantity {
-	if src == nil {
-		return nil
-	}
-	if src.Disabled {
-		zero := resource.MustParse("0")
-		return &zero
-	}
-	if src.Size.IsZero() {
-		return nil
-	}
-	size := src.Size.DeepCopy()
-	return &size
+	return v1alpha1.ConvertToV1beta1SharedMemorySize(src)
 }
 
 func GetDCDComponentName(dcd *v1beta1.DynamoComponentDeployment) string {
