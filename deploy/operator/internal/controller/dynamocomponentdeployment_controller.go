@@ -748,7 +748,10 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 	log := log.FromContext(ctx)
 	log.Info("Starting generateIngress")
 
-	ingressSpec, hasIngressSpec := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
+	ingressSpec, hasIngressSpec, err := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
+	if err != nil {
+		return nil, false, err
+	}
 	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opt.dynamoComponentDeployment.Name,
@@ -767,7 +770,10 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 	log := log.FromContext(ctx)
 	log.Info("Starting generateVirtualService")
 
-	ingressSpec, hasIngressSpec := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
+	ingressSpec, hasIngressSpec, err := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
+	if err != nil {
+		return nil, false, err
+	}
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opt.dynamoComponentDeployment.Name,
@@ -782,7 +788,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec), false, nil
 }
 
-func preservedAlphaIngressSpec(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (dynamo.IngressSpec, bool) {
+func preservedAlphaIngressSpec(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (dynamo.IngressSpec, bool, error) {
 	return dynamo.GetDCDPreservedAlphaIngressSpec(dcd)
 }
 
