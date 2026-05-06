@@ -59,6 +59,65 @@ trace to become a payload-heavy trajectory log. Full-fidelity ATIF export should
 come from the harness or from an offline join of harness/audit data with Dynamo
 trace records.
 
+## Worked Pattern: Joining a Harness Trajectory With Dynamo Telemetry
+
+A harness that already writes ATIF (Harbor's `terminus-2`, OpenHands, Mini-SWE,
+etc.) can be joined with Dynamo serving telemetry without changes to the ATIF
+schema:
+
+1. Run Dynamo with the shared sinks enabled so audit and trace land as
+   `.jsonl.gz` segments side by side:
+
+   ```bash
+   export DYN_AGENT_TRACE_SINKS=jsonl_gz
+   export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
+   export DYN_AUDIT_SINKS=jsonl_gz
+   export DYN_AUDIT_OUTPUT_PATH=/tmp/dynamo-audit
+   export DYN_AUDIT_FORCE_LOGGING=true
+   ```
+
+2. Make sure each LLM request reaching Dynamo carries
+   `nvext.agent_context.{session_type_id, session_id, trajectory_id}`. If the
+   harness does not natively know about `nvext`, a thin OpenAI-passthrough
+   that injects `agent_context` from environment variables keeps the harness
+   source untouched.
+
+3. After the run, merge Dynamo's audit and trace streams by `request_id` to
+   recover request payload + serving metrics in a single record per LLM call.
+
+4. Attach the merged stream to the harness trajectory in
+   [`trajectory.extra`][atif-rfc] (and, when the harness exposes per-step
+   token counts, fold per-call serving metrics into
+   `step.metrics.extra`):
+
+   ```json
+   {
+     "schema_version": "ATIF-v1.7",
+     "session_id": "...",
+     "steps": [...],
+     "extra": {
+       "dynamo": {
+         "summary": { "n_records": 2, "total_input_tokens": 1632,
+                      "total_output_tokens": 365, "mean_kv_hit_rate": 0.36 },
+         "joined_records": [
+           { "request_id": "...", "x_request_id": "...",
+             "input": { "messages": [...], "input_tokens": 693, "cached_tokens": 0 },
+             "output": { "content": "...", "output_tokens": 207,
+                         "ttft_ms": 121.98, "kv_hit_rate": 0.0 },
+             "worker": { "prefill_worker_id": ..., "decode_worker_id": ... }
+           }
+         ]
+       }
+     }
+   }
+   ```
+
+The result still parses against ATIF v1.7 because all additions live under
+optional `extra` fields. Consumers that do not understand the `dynamo` key can
+ignore it; downstream RL/SFT/debugging tools that do can read TTFT, KV hit
+rate, worker placement, and replay hashes per LLM call without re-running the
+workload.
+
 ## Current Dynamo Scope
 
 - Dynamo aligns identifier names with ATIF.
