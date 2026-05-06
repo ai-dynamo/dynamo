@@ -67,6 +67,31 @@ def run_serve_deployment(
                 "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(int(kv_mark.args[0]))
             )
 
+    if "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS" not in os.environ:
+        sglang_kv_mark = request.node.get_closest_marker("requested_sglang_kv_tokens")
+        if sglang_kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS",
+                str(int(sglang_kv_mark.args[0])),
+            )
+
+    if "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS" not in os.environ:
+        trtllm_kv_mark = request.node.get_closest_marker("requested_trtllm_kv_tokens")
+        if trtllm_kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
+                str(int(trtllm_kv_mark.args[0])),
+            )
+
+    if "_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES" not in os.environ:
+        trtllm_vram_mark = request.node.get_closest_marker("requested_trtllm_vram_gib")
+        if trtllm_vram_mark:
+            gib_to_bytes = int(trtllm_vram_mark.args[0] * 1024**3)
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES",
+                str(gib_to_bytes),
+            )
+
     # Stagger engine startup under xdist to avoid vLLM profiling race
     # (vLLM bug #10643: concurrent profilers miscount each other's memory).
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
