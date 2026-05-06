@@ -44,7 +44,13 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
 # pip from replacing that stack. Dev/local-dev build from source later in the
 # shared dev stage after the workspace is bind-mounted.
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+#
+# Glob is `ai_dynamo*.whl` (not `*.whl`) on purpose: the wheel_builder also
+# produces nixl-cu*.whl which is only needed by the dev stage's C++ SDK COPY
+# (see templates/dev.Dockerfile). Including it here would deposit ~tens of MB
+# of unused wheel into the runtime image, since `pip install --no-deps` below
+# only installs the ai_dynamo_runtime / ai_dynamo wheels.
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/ai_dynamo*.whl /opt/dynamo/wheelhouse/
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
