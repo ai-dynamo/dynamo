@@ -7,43 +7,9 @@ pub use dynamo_kv_router::test_utils::NoopSequencePublisher;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
 pub use dynamo_mocker::replay::ReplayWorkerArtifacts as WorkerReplayArtifacts;
-use indicatif::{ProgressBar, ProgressStyle};
-use serde::Serialize;
-use std::time::Duration;
+use indicatif::ProgressBar;
 
-/// Create a styled progress bar, optionally with a known total length.
-pub fn make_progress_bar(total: Option<u64>) -> ProgressBar {
-    let progress = match total {
-        Some(total) => ProgressBar::new(total),
-        None => ProgressBar::no_length(),
-    };
-
-    progress.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("#>-"),
-    );
-
-    progress
-}
-
-/// Results from a single benchmark run.
-#[derive(Clone, Copy, Serialize)]
-pub struct BenchmarkResults {
-    pub offered_ops_throughput: f32,
-    pub ops_throughput: f32,
-    pub offered_block_throughput: f32,
-    pub block_throughput: f32,
-    pub latency_p99_us: f32,
-}
-
-#[derive(Clone, Copy)]
-pub struct BenchmarkRun {
-    pub results: BenchmarkResults,
-    pub kept_up: bool,
-}
+use super::progress::make_progress_bar;
 
 /// Load, transform, and partition the mooncake trace into per-worker request lists.
 pub fn process_mooncake_trace(
@@ -73,74 +39,6 @@ pub fn maybe_rescale_ready_span(
     }
 }
 
-pub fn rescale_trace_timestamps<T, GetTimestamp, WithTimestamp>(
-    traces: &[Vec<T>],
-    benchmark_duration_ms: u64,
-    timestamp_of: GetTimestamp,
-    with_timestamp: WithTimestamp,
-) -> Vec<Vec<T>>
-where
-    GetTimestamp: Fn(&T) -> u64 + Copy,
-    WithTimestamp: Fn(&T, u64) -> T + Copy,
-{
-    let target_us = u128::from(benchmark_duration_ms) * 1000;
-
-    traces
-        .iter()
-        .map(|worker_trace| {
-            if worker_trace.is_empty() {
-                return Vec::new();
-            }
-
-            let max_timestamp_us = worker_trace.last().map(timestamp_of).unwrap_or(1).max(1);
-
-            worker_trace
-                .iter()
-                .map(|entry| {
-                    let scaled_timestamp =
-                        u128::from(timestamp_of(entry)) * target_us / u128::from(max_timestamp_us);
-                    with_timestamp(entry, scaled_timestamp.min(u128::from(u64::MAX)) as u64)
-                })
-                .collect()
-        })
-        .collect()
-}
-
-pub fn compute_benchmark_run(
-    total_ops: usize,
-    total_blocks: usize,
-    benchmark_duration_ms: u64,
-    total_duration: Duration,
-    mut latencies_ns: Vec<u64>,
-) -> BenchmarkRun {
-    let kept_up = total_duration <= Duration::from_millis(benchmark_duration_ms * 11 / 10);
-    let benchmark_duration_secs = (benchmark_duration_ms as f32 / 1000.0).max(1e-6);
-    let total_duration_secs = total_duration.as_secs_f32().max(1e-6);
-    let offered_ops_throughput = total_ops as f32 / benchmark_duration_secs;
-    let ops_throughput = total_ops as f32 / total_duration_secs;
-    let offered_block_throughput = total_blocks as f32 / benchmark_duration_secs;
-    let block_throughput = total_blocks as f32 / total_duration_secs;
-
-    latencies_ns.sort_unstable();
-    let latency_p99_us = if latencies_ns.is_empty() {
-        0.0
-    } else {
-        let p99_idx = latencies_ns.len().saturating_sub(1) * 99 / 100;
-        latencies_ns[p99_idx] as f32 / 1000.0
-    };
-
-    BenchmarkRun {
-        results: BenchmarkResults {
-            offered_ops_throughput,
-            ops_throughput,
-            offered_block_throughput,
-            block_throughput,
-            latency_p99_us,
-        },
-        kept_up,
-    }
-}
-
 /// Build default MockEngineArgs suitable for event generation.
 pub fn default_mock_engine_args(
     num_gpu_blocks: usize,
@@ -153,6 +51,28 @@ pub fn default_mock_engine_args(
         .enable_prefix_caching(true)
         .max_num_batched_tokens(None)
         .max_num_seqs(None)
+        .build()?)
+}
+
+#[cfg(feature = "mocker-kvbm-offload")]
+#[allow(dead_code)]
+pub fn g2_mock_engine_args(
+    num_gpu_blocks: usize,
+    block_size: usize,
+    num_g2_blocks: usize,
+) -> anyhow::Result<MockEngineArgs> {
+    Ok(MockEngineArgs::builder()
+        .num_gpu_blocks(num_gpu_blocks)
+        .block_size(block_size)
+        .speedup_ratio(10.0)
+        .enable_prefix_caching(true)
+        .max_num_batched_tokens(None)
+        .max_num_seqs(None)
+        .num_g2_blocks(Some(num_g2_blocks))
+        .kv_bytes_per_token(Some(1))
+        .offload_batch_size(Some(32))
+        .bandwidth_g1_to_g2_gbps(Some(14.0))
+        .bandwidth_g2_to_g1_gbps(Some(14.0))
         .build()?)
 }
 
@@ -175,14 +95,12 @@ fn replay_worker_trace(
     Ok(artifacts)
 }
 
-pub async fn generate_replay_artifacts(
+pub async fn generate_replay_artifacts_with_args(
     traces: &[Trace],
-    num_gpu_blocks: usize,
-    block_size: u32,
+    sched_args: MockEngineArgs,
     trace_simulation_duration_ms: Option<u64>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     println!("Generating events...");
-    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
     let progress = make_progress_bar(Some(
         traces
             .iter()
@@ -249,4 +167,27 @@ pub async fn generate_replay_artifacts(
     println!("Remove events: {}", num_removed_events);
 
     Ok(artifacts)
+}
+
+pub async fn generate_replay_artifacts(
+    traces: &[Trace],
+    num_gpu_blocks: usize,
+    block_size: u32,
+    trace_simulation_duration_ms: Option<u64>,
+) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
+    let sched_args = default_mock_engine_args(num_gpu_blocks, block_size as usize)?;
+    generate_replay_artifacts_with_args(traces, sched_args, trace_simulation_duration_ms).await
+}
+
+#[cfg(feature = "mocker-kvbm-offload")]
+#[allow(dead_code)]
+pub async fn generate_g2_replay_artifacts_with_capacity(
+    traces: &[Trace],
+    num_gpu_blocks: usize,
+    num_g2_blocks: usize,
+    block_size: u32,
+    trace_simulation_duration_ms: Option<u64>,
+) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
+    let sched_args = g2_mock_engine_args(num_gpu_blocks, block_size as usize, num_g2_blocks)?;
+    generate_replay_artifacts_with_args(traces, sched_args, trace_simulation_duration_ms).await
 }

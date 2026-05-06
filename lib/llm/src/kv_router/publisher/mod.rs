@@ -368,6 +368,21 @@ impl KvEventPublisher {
         }
     }
 
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let placement_event = PlacementEvent::new(
+            Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+            event,
+        );
+        match self.tx.send(placement_event) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+        }
+    }
+
     pub fn next_event_id(&self) -> u64 {
         self.next_event_id.fetch_add(1, Ordering::SeqCst)
     }
