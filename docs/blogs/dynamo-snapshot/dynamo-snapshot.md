@@ -19,11 +19,11 @@ Here is a breakdown of the cold start time of various models for a single-GPU wo
 
 ![Cold start time breakdown across model sizes on a single B200 GPU.](./figures/cold_start_bench.svg)
 
-In our setup, weights are loaded from a very fast (VAST) PVC. For smaller models, the majority of cold-start time is consumed by upstream initialization overheads rather than weight loading itself. Even under so-called "warm start" conditions — where artifacts from mechanisms such as torch.compile and kernel warmup are cached — the observed reduction in startup time is modest. The reason is structural: much of the early-phase initialization work is inherently stateful, context-dependent, and therefore not amenable to straightforward caching.
+In our setup, weights are loaded from a high-bandwidth network-attached storage. For smaller models, the majority of cold-start time is consumed by upstream initialization overheads rather than weight loading itself; with lower-bandwidth storage, the weight-loading contribution grows and dominates. Even under so-called "warm start" conditions — where artifacts from mechanisms such as torch.compile and kernel warmup are cached — the observed reduction in startup time is modest. The reason is structural: much of the early-phase initialization work is inherently stateful, context-dependent, and therefore not amenable to straightforward caching.
 
-Driving cold-start time down means tracking every contributor across every layer of the stack and getting all of them to cooperate. Even then, maintaining low cold start times while new features are constantly added to each inference engine is an uphill battle, not to mention that each inference engine needs to be optimized individually.
+Driving cold-start time down means chasing every contributor across the stack and getting them to cooperate — and keeping it down is an uphill battle as each inference engine adds features and has to be optimized individually.
 
-The well-known solution to this problem is *process-level* checkpoint/restore, which reduces the optimization surface to the process checkpoint image size and storage bandwidth. Operating at the OS process level keeps many of our optimizations *generic*, allowing them to transfer nicely across different workloads as well.
+The well-known alternative is *process-level* checkpoint/restore, which reduces the optimization surface to the checkpoint image size and storage bandwidth. Operating at the OS process level also keeps these optimizations *generic*, so they transfer across workloads.
 
 In this post, we introduce **Dynamo Snapshot** — our solution for checkpoint/restore of AI inference workloads on Kubernetes — along with the design choices and optimizations that get us to start times of **6 seconds or less**.
 
@@ -45,30 +45,29 @@ When restoring (same or different node):
 
 ![How GPU, CPU, and disk contents change at each step of cuda-checkpoint and CRIU, then in reverse on restore.](./figures/checkpoint_restore_state_panels.svg)
 
-Since CRIU is run via an external process, **the restored workload process picks up at exactly the instruction it was at when it dumped.** This has a few implications:
-
-- There is no clean way to override/replace in-memory process state. For instance, environment variables are not re-read after restore, so any stale checkpointed environment variables still remain in the restored process.
-- There are no synchronization barriers between the workload and CRIU. If the workload needs to prevent being checkpointed until it is quiescent, or needs to be aware that it has been restored, these signals need to be managed by an orchestrator that calls CRIU/cuda-checkpoint and/or the workload itself.
+Since CRIU is run via an external process, **the restored workload process picks up at exactly the instruction it was at when it dumped.** This means there are no synchronization barriers between the workload and CRIU: if the workload needs to prevent being checkpointed until it is quiescent, or needs to be aware that it has been restored, those signals must be managed by an orchestrator that calls CRIU/cuda-checkpoint and/or the workload itself. We address this in the next two sections, which describe the orchestrator and the workload-side hooks respectively.
 
 ## Dynamo Snapshot: Kubernetes
-In Kubernetes, all workloads run inside containers, inside of pods. These containers abide by the OCI runtime specification which gives us a stable scaffold to design a checkpoint/restore solution around. Typically CRIU checkpoints will also have references to mounts/files in the overlay that need to be restored in tandem with the process as well. Therefore, we perform checkpoints at the container level.
+In Kubernetes, workloads run inside containers, inside of pods. CRIU checkpoints typically contain references to mounts and files in the container's writable filesystem layer, so we checkpoint at the container level — the process tree state and the writable layer travel together.
 
-Some OCI runtimes — namely `runc` and `runsc` — already have built-in container-level checkpoint/restore capabilities, and `runc` in particular delegates to CRIU. Higher-level container managers like `podman` and `docker` expose checkpoint/restore by going through the underlying runtime. The checkpoints produced are full OCI images with the checkpointed process tree state baked in. However, we had a few requirements that prevented us from using these native checkpoint/restore capabilities.
+Our solution is a privileged DaemonSet called `snapshot-agent`, easily installable via a Helm chart. The agent runs on every node and handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. for `runc`-managed containers (the OCI runtime we currently target). When the agent observes a workload pod marked as a checkpoint source, it reaches in from the host and performs the checkpoint without entering the container. On restore, the agent restores the workload from inside a placeholder pod that sets up the namespaces.
 
-- We needed to perform heavy customization/optimization of both CRIU and cuda-checkpoint.
-- We couldn't rely on whether or not checkpoint/restore feature gates were exposed, even at the CRI level, because some cloud service providers do not offer control of kubelet at all. Moreover, this would also require installing CRIU on the host, which isn't always possible.
-- We wanted flexibility to configure different storage backends for different parts of the checkpoint artifacts, instead of baking the checkpoint into an OCI image. Only the upperdir overlay and CRIU artifacts should be sufficient given a fixed "base" image.
+To keep terminology consistent for the rest of this section:
 
-The only portable, robust option was to spin up our own privileged DaemonSet (we call this `snapshot-agent`), easily installable via a Helm chart. The agent handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. for `runc`-managed containers (the OCI runtime we currently target).
+- **Workload pod** — the pod whose process tree is being checkpointed or restored.
+- **Snapshot agent** — the privileged DaemonSet pod, one per node, that performs the checkpoint or restore on the workload pod.
+- **Checkpoint Job** — an ordinary Kubernetes Job whose pod runs the workload, marked as a checkpoint source.
+- **Placeholder pod** — a pod created on restore that sets up the namespaces the restored workload runs inside.
+- **Checkpoint node** / **restore node** — the K8s nodes where the workload is checkpointed and where it is later restored, respectively.
 
-At a high level, the lifecycle of a checkpoint and a restore goes pod-by-pod, with the snapshot agent reaching in from outside the workload's container.
+For each workload pod, the snapshot agent on its node performs the checkpoint or restore independently from the host side.
 
 ![On the checkpoint node, the snapshot-agent DaemonSet observes the workload pod from the host and writes the artifact to a shared PVC. On the restore node, the agent enters a placeholder pod's namespaces and restores the workload inside.](./figures/k8s_checkpoint_restore_lifecycle.svg)
 
 **Checkpoint:**
 
 1. The user creates a checkpoint Job. This is an ordinary Kubernetes Job whose pod runs the workload, marked as a checkpoint source.
-2. The snapshot agent on the same node sees the pod via its checkpoint marker.
+2. The snapshot agent on the same node sees the workload pod via its checkpoint marker.
 3. Once the workload's readiness probe passes (we use it as a configurable signal that determines the workload is ready to be checkpointed), the snapshot agent begins the checkpointing process.
    1. The agent inspects the running container from the host side (PIDs, namespaces, mounts, overlays, etc.) without entering it.
    2. It runs cuda-checkpoint and CRIU against the container's process tree, and captures the container's overlay-filesystem diff.
@@ -84,6 +83,13 @@ At a high level, the lifecycle of a checkpoint and a restore goes pod-by-pod, wi
 
 Note: running CRIU restore inside of the placeholder's namespace allows the restored workload pod to not need a privileged security context, which means we don't compromise on Kubernetes isolation/security best practices.
 
+### Why not native Kubernetes checkpoint?
+Some OCI runtimes — namely `runc` and `runsc` — already have built-in container-level checkpoint/restore capabilities, and `runc` in particular delegates to CRIU. Higher-level container managers like `podman` and `docker` expose checkpoint/restore by going through the underlying runtime. The checkpoints produced are full OCI images with the checkpointed process tree state baked in. However, we had a few requirements that prevented us from using these native checkpoint/restore capabilities:
+
+- We needed to perform heavy customization and optimization of both CRIU and cuda-checkpoint (more on this in Optimizations #2 and #3).
+- We couldn't rely on whether or not checkpoint/restore feature gates were exposed, even at the CRI level, because some cloud service providers do not offer control of kubelet at all. Moreover, this would also require installing CRIU on the host, which isn't always possible.
+- We wanted flexibility to configure different storage backends for different parts of the checkpoint artifacts, instead of baking the checkpoint into an OCI image. Only the container's writable filesystem layer (the upperdir of the OCI overlay) and CRIU artifacts should be sufficient given a fixed "base" image.
+
 ## Dynamo Snapshot: The Workload
 A Dynamo inference worker comes up in two phases:
 
@@ -92,14 +98,14 @@ A Dynamo inference worker comes up in two phases:
 
 If we were to implement checkpoint/restore naively, without the workload knowing it was being checkpointed, the readiness probe of the checkpoint job would correspond to a fully initialized distributed runtime that is registered to the discovery plane, which means there are active TCP connections that cannot be captured by CRIU.
 
-We remedy this by configuring the readiness probe to be the presence of a "ready for checkpoint" signal file that is written after the engine initializes but *before* distributed runtime startup. At this point, the worker polls for another "restore complete" signal file while the snapshot agent is checkpointing it from outside — the checkpointed state of the worker could be at any arbitrary point inside the polling loop. On restore, the workload resumes inside of the polling loop, detects the signal file, and starts distributed runtime setup.
+The general pattern that solves this is **quiesce/resume hooks**: the workload ensures it is in a quiescent state and blocks on an external signal that fires when the restore is complete. This is a powerful abstraction for checkpoint/restore because:
+
+1. It lets the workload clean up its resources before being checkpointed, which optimizes the final checkpoint size (and thereby decreases restore time).
+2. It allows the workload to recreate resources that aren't checkpointable post-resume. This is especially important for multi-GPU and multi-node checkpoints (planned for a future release): outbound TCP connections used for RPC cannot be checkpointed in an established state since the pod IP changes between checkpoint and restore, and RDMA registrations and NIC state also need to be recreated post-restore.
+
+In Dynamo Snapshot, we implement these hooks by configuring the readiness probe to be the presence of a "ready for checkpoint" signal file that the worker writes after the engine initializes but *before* distributed runtime startup. At this point, the worker polls for another "restore complete" signal file while the snapshot agent is checkpointing it from outside — the checkpointed state of the worker could be at any arbitrary point inside the polling loop. Because CRIU restores execution at exactly the instruction it was checkpointed at, the worker resumes inside the polling loop wherever it was, detects the signal file, and starts distributed runtime setup with no additional synchronization needed.
 
 ![Worker initializes, signals readiness, and quiesces while the snapshot-agent dumps state; on restore, the agent signals the worker to start the distributed runtime.](./figures/worker_agent_quiesce_resume_sequence.svg)
-
-The general concept of "quiesce" and "resume" hooks — where the workload ensures it is in a quiescent state and blocks on an external signal for when the restore is complete — is a powerful abstraction for checkpoint/restore. It allows the workload to clean up its resources prior to being checkpointed for:
-
-1. Optimizing the final checkpoint size (and thereby decreasing restore time).
-2. Cleaning up resources that aren't checkpointable, which can be re-established post-resume. This is especially important for multi-GPU and multi-node checkpoints (which we are still working on enabling). Specifically, outbound TCP connections that are used for RPC cannot be checkpointed in an established state since the pod IP changes between checkpoint/restore. RDMA registrations and NIC state also cannot be checkpointed and need to be recreated post-restore.
 
 ## Optimization #1: KV Cache Unmap and Release
 One optimization to reduce the checkpoint size is to deallocate the KV cache memory before checkpointing. After measuring the peak GPU memory usage while weights, CUDA graphs, and other buffers/activations are allocated, inference engines allocate the remainder of the GPU memory as a large KV cache buffer.
@@ -116,6 +122,7 @@ Unmap and release of the KV cache reduces the checkpoint size of Qwen3 0.6B for 
 So, what do the restore times look like? Surprisingly, really bad. For larger models, the restore time actually exceeds that of a cold start, defeating the entire purpose of checkpoint/restore.
 
 ![Baseline snapshot restore time across model sizes — for larger models the restore exceeds cold start.](./figures/regular_restore_criudev.svg)
+<!-- TODO(figure): update regular_restore_criudev.svg to overlay the cold-start times alongside baseline restore times so the reader can read both off the same chart instead of flipping back to the cold_start_bench figure. -->
 
 The main reason behind this is that CRIU and `cuda-checkpoint` do not copy memory at speed-of-light (SOL) speeds. In a Linux process, there are two types of memory: anonymous memory (the heap, stack, etc. of a process) and shared memory (shared between processes). For larger models, the restore bottleneck encompasses both types of memory, so we optimize both restore paths to bring the CRIU restore time down from minutes to seconds.
 
@@ -130,6 +137,13 @@ We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read 
 
 ![Native AIO pipeline: up to 128 reads in flight via io_submit and io_getevents, storage device runs them concurrently.](./figures/aio_pipeline_after.svg)
 
+On its own, AIO already accounts for the bulk of the gain — for instance, AIO alone brings CRIU restore time from ~82s to ~50s on Llama 3.3 70B FP8 and from ~119s to ~73s on GPT-OSS 120B. The remaining gap to single-digit seconds comes from the parallel memfd restore described next.
+
+#### Direct I/O and the Page Cache
+Where the storage backend supports it, both anonymous and shared memory reads use `O_DIRECT`. Restore is mostly a one-pass stream from checkpoint files into destination memory, so caching the input pages in the kernel page cache is usually wasteful. Without direct I/O, a large restore can temporarily fill the page cache with checkpoint data while also allocating the destination shmem pages, increasing memory pressure and evicting useful data for other workloads.
+
+Even more importantly, Linux native AIO is only truly asynchronous on files opened with `O_DIRECT`. On filesystems where `O_DIRECT` is unavailable or unreliable, such as some NFS deployments, restore falls back to buffered I/O with sequential readahead so the kernel still sees a predictable streaming access pattern, but the gains from AIO are significantly reduced.
+
 ### Optimization #2.2: Parallel memfd Restore
 vLLM's sleep mode reduces GPU memory pressure by moving tagged GPU allocations into pinned CPU shadow buffers. Those buffers are not ordinary Python heap memory. vLLM asks PyTorch for pinned CPU tensors, PyTorch allocates them through CUDA's pinned-memory allocator, and CUDA backs them with shared anonymous memory that is then pinned through the NVIDIA driver. Inside the Linux kernel, these are memfds — anonymous, RAM-backed files that can be mapped with `MAP_SHARED`.
 
@@ -137,14 +151,10 @@ For GPT-OSS 120B, we saw these buffers consume more than 120 GiB, but split up i
 
 The solution was to modify CRIU to first enumerate all the unique shmem-backed objects, then launch a thread pool to parallelize the restore. Each worker allocates its buffer and reads from the checkpoint independently, allowing them to use the available storage bandwidth and CPU parallelism instead of processing buffers one at a time.
 
-#### The Page Cache
-Where the storage backend supports it, both anonymous and shared memory reads use `O_DIRECT`. Restore is mostly a one-pass stream from checkpoint files into destination memory, so caching the input pages in the kernel page cache is usually wasteful. Without direct I/O, a large restore can temporarily fill the page cache with checkpoint data while also allocating the destination shmem pages, increasing memory pressure and evicting useful data for other workloads.
-
-Even more importantly, Linux native AIO is only truly asynchronous on files opened with `O_DIRECT`. On filesystems where `O_DIRECT` is unavailable or unreliable, such as some NFS deployments, restore falls back to buffered I/O with sequential readahead so the kernel still sees a predictable streaming access pattern, but the gains from AIO are significantly reduced.
-
 ### Results
 On the same setup, we saw a massive improvement in CRIU restore time, and it is now significantly faster to restore from checkpoint than to cold start an inference worker:
 
+<!-- TODO(itay-feedback): add an SOL column (checkpoint size / NFS bandwidth) once we confirm the PVC bandwidth used in this benchmark, so the reader can see how close optimized CRIU is to the storage limit. -->
 | Model | Checkpoint size | CRIU Restore (baseline) | CRIU Restore (optimized) | Speedup |
 | --- | --- | --- | --- | --- |
 | Qwen3 0.6B | 6.2 GiB | 6.8 s | 2.4 s | 2.8x |
@@ -180,6 +190,7 @@ To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore wi
 
 This setup isolates the parallel-restore claim from network storage variability and shows what the rest of the system can do when the weight source isn't the bottleneck. The loader pipelines reads with GPU copies (a pool of threads issuing `cudaMemcpyAsync` over multiple CUDA streams) so storage→host and host→GPU run continuously rather than fully materializing the weights in host memory.
 
+<!-- TODO(itay-feedback): before showing the optimized sharded-SSD result, add an intermediate benchmark of Snapshot+GMS with the PVC backing the weights (same NFS channel as the CRIU baseline) so the comparison stays apples-to-apples. Reference: Qwen2.5-72B with PVC-backed GMS restores in ~20s vs ~40s for CRIU-only on PVC. Then frame the sharded-SSD case as the "now upgrade the channel" follow-up that hits 5–6s. -->
 We saw that parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve under 6s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is well under 5 seconds.
 
 ![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 6 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
@@ -197,6 +208,7 @@ The CRIU checkpoint now only contains the host-side state of the container's pro
 | Qwen2.5 72B | 164 GiB | 5.8 GiB | 135 GiB |
 
 ## Looking Forward
+<!-- TODO: need @athreesh's input on phrasing of these roadmap bullets, especially the unreleased CUDA driver patch one. -->
 Not everything in this blog post is generally available in Dynamo yet:
 
 - **Support for Other Frameworks:** Dynamo Snapshot currently works for vLLM and SGLang. TensorRT-LLM support is work in progress.
