@@ -820,6 +820,30 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_compressed_approx_records_precomputed_hashes() {
+        let index = ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            4,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        );
+        let tokens = vec![1, 2, 3, 4];
+        let worker = WorkerWithDpRank::new(7, 0);
+        let block_hashes = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        index
+            .process_routing_decision_with_hashes(worker, block_hashes, sequence_hashes)
+            .await
+            .unwrap();
+        flush_and_settle(&index).await;
+
+        assert_request_score(&index, &tokens, worker, 1).await;
+    }
+
+    #[tokio::test]
     #[apply(approx_indexer_template)]
     async fn test_approx_ttl_expiry_removes_match(variant: &str) {
         let ttl = Duration::from_millis(25);

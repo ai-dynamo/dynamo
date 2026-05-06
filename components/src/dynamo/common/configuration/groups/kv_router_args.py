@@ -253,8 +253,8 @@ class KvRouterArgGroup(ArgGroup):
             default=4,
             help=(
                 "KV Router: Number of event processing threads. When > 1, uses a concurrent "
-                "radix tree with a thread pool for higher throughput. Ignored when "
-                "--no-router-kv-events is set."
+                "radix tree with a thread pool for higher throughput. Also applies to "
+                "approximate routing when --no-router-kv-events is set."
             ),
             arg_type=int,
         )
