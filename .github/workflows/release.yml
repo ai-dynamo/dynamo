@@ -303,54 +303,64 @@ jobs:
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
           done
 
-          # ---- EFA runtime images ----
-          # All EFA runtime images are multi-arch (amd64+arm64).
-          # crane copy preserves multi-arch manifests automatically.
-          # Nightly publishes EFA under the `-efa-amd64` suffix; releases use `-efa`.
-          echo ""
-          echo "=== EFA Runtime Images ==="
+          # Nightly builds only the runtime images above (vllm/sglang/trtllm
+          # cuda12+cuda13). EFA/frontend/operator/planner/snapshot are built
+          # by post-merge and other workflows on release branches; for nightly
+          # we skip them entirely so we don't try to copy ECR tags that don't
+          # exist for the resolved SHA.
+          if [[ "${NIGHTLY}" != "true" ]]; then
+            # ---- EFA runtime images ----
+            # All EFA runtime images are multi-arch (amd64+arm64).
+            # crane copy preserves multi-arch manifests automatically.
+            echo ""
+            echo "=== EFA Runtime Images ==="
 
-          # vllm EFA (CUDA 12)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+            # vllm EFA (CUDA 12)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # sglang EFA (CUDA 12)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
+            # sglang EFA (CUDA 12)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
 
-          # trtllm EFA (CUDA 13)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+            # trtllm EFA (CUDA 13)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
-          echo ""
-          echo "=== Frontend Image ==="
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
-          copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
+            # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
+            echo ""
+            echo "=== Frontend Image ==="
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
 
-          # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
-          echo ""
-          echo "=== Operator Image ==="
-          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
-          OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
-          copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+            # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
+            echo ""
+            echo "=== Operator Image ==="
+            OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
+            OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
+            copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
-          # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
-          echo ""
-          echo "=== Planner Image ==="
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
-          copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
-          # ---- Snapshot image ----
-          echo ""
-          echo "=== Snapshot Image ==="
-          SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
-          SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
-          copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+            # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
+            echo ""
+            echo "=== Planner Image ==="
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
+
+            # ---- Snapshot image ----
+            echo ""
+            echo "=== Snapshot Image ==="
+            SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+            SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
+            copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+          else
+            echo ""
+            echo "=== Skipping EFA / frontend / operator / planner / snapshot (not built by nightly) ==="
+          fi
 
           # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
@@ -449,21 +459,21 @@ jobs:
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Operator image:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Planner image:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           if [[ "${NIGHTLY}" != "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Operator image:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Planner image:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
