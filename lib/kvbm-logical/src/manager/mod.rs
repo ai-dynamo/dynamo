@@ -43,6 +43,18 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         BlockManagerConfigBuilder::default()
     }
 
+    /// Stable, process-unique identifier for this manager's underlying
+    /// [`BlockStore`](crate::pools::BlockStore). See [`crate::ManagerId`].
+    /// Cheap (one field load via the store).
+    ///
+    /// Together with a [`BlockId`](crate::BlockId) this names a specific
+    /// physical pool slot — the disambiguating runtime address that
+    /// downstream consumers need after the policy parameter `T` has been
+    /// type-erased through [`crate::LifecyclePinRef`].
+    pub fn id(&self) -> crate::ManagerId {
+        self.store.id()
+    }
+
     /// Allocate `count` mutable blocks, drawing first from the reset pool
     /// and then evicting from the inactive pool if needed.
     ///
@@ -98,6 +110,10 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     /// Linear prefix match: walks `seq_hash` left-to-right, stopping on
     /// first miss. Checks the active pool first (via the registry's weak
     /// refs), then the inactive pool for the remaining hashes.
+    ///
+    /// Single-hash fast path: probes the first hash against active and
+    /// then inactive, only allocating the result `Vec` once at least
+    /// one hit is confirmed. The all-miss path is allocation-free.
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         self.metrics
             .inc_match_hashes_requested(seq_hash.len() as u64);
@@ -108,29 +124,67 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
             "match_blocks called"
         );
 
-        let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
-        matched.extend(
-            self.find_active_matches(seq_hash, true)
-                .into_iter()
-                .map(ImmutableBlock::from_inner),
-        );
+        let Some((&first_hash, rest)) = seq_hash.split_first() else {
+            self.metrics.inc_match_blocks_returned(0);
+            tracing::debug!(total_matched = 0, "match_blocks result");
+            return Vec::new();
+        };
 
-        tracing::debug!(active_matched, "Matched from active pool");
+        // Active path: single-hash probe before allocating the Vec.
+        if let Some(first_active) = self.find_active_match(first_hash, true) {
+            let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
+            matched.push(ImmutableBlock::from_inner(first_active));
+            if !rest.is_empty() {
+                matched.extend(
+                    self.find_active_matches(rest, true)
+                        .into_iter()
+                        .map(ImmutableBlock::from_inner),
+                );
+            }
+            let active_matched = matched.len();
+            tracing::debug!(active_matched, "Matched from active pool");
 
-        let remaining_hashes = &seq_hash[matched.len()..];
-        if !remaining_hashes.is_empty() {
-            let inactive_found = self.store.find_inactive_primaries(remaining_hashes, true);
-            let inactive_matched = inactive_found.len();
-            tracing::debug!(
-                remaining_to_check = remaining_hashes.len(),
-                inactive_matched,
-                "Matched from inactive pool"
-            );
-            matched.extend(inactive_found.into_iter().map(ImmutableBlock::from_inner));
+            let remaining_hashes = &seq_hash[matched.len()..];
+            if !remaining_hashes.is_empty() {
+                let inactive_found = self.store.find_inactive_primaries(remaining_hashes, true);
+                let inactive_matched = inactive_found.len();
+                tracing::debug!(
+                    remaining_to_check = remaining_hashes.len(),
+                    inactive_matched,
+                    "Matched from inactive pool"
+                );
+                matched.extend(inactive_found.into_iter().map(ImmutableBlock::from_inner));
+            }
+
+            self.metrics.inc_match_blocks_returned(matched.len() as u64);
+            tracing::debug!(total_matched = matched.len(), "match_blocks result");
+            tracing::trace!(matched = ?matched, "matched blocks");
+            return matched;
         }
 
-        self.metrics.inc_match_blocks_returned(matched.len() as u64);
+        // Active missed on the first hash. Try inactive for the full
+        // slice; `find_inactive_primaries` has its own first-hash
+        // fast-path that returns empty without allocating when the
+        // head misses.
+        let inactive_found = self.store.find_inactive_primaries(seq_hash, true);
+        if inactive_found.is_empty() {
+            self.metrics.inc_match_blocks_returned(0);
+            tracing::debug!(active_matched = 0, "Matched from active pool");
+            tracing::debug!(total_matched = 0, "match_blocks result");
+            return Vec::new();
+        }
 
+        let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
+        let inactive_matched = inactive_found.len();
+        matched.extend(inactive_found.into_iter().map(ImmutableBlock::from_inner));
+        tracing::debug!(active_matched = 0, "Matched from active pool");
+        tracing::debug!(
+            remaining_to_check = seq_hash.len(),
+            inactive_matched,
+            "Matched from inactive pool"
+        );
+
+        self.metrics.inc_match_blocks_returned(matched.len() as u64);
         tracing::debug!(total_matched = matched.len(), "match_blocks result");
         tracing::trace!(matched = ?matched, "matched blocks");
         matched
@@ -180,17 +234,25 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     ) -> Vec<Arc<crate::blocks::ImmutableBlockInner<T>>> {
         let mut matches = Vec::with_capacity(hashes.len());
         for hash in hashes {
-            if let Some(handle) = self.block_registry.match_sequence_hash(*hash, touch) {
-                if let Some(inner) = handle.try_get_inner::<T>(&self.store, touch) {
-                    matches.push(inner);
-                } else {
-                    break;
-                }
+            if let Some(inner) = self.find_active_match(*hash, touch) {
+                matches.push(inner);
             } else {
                 break;
             }
         }
         matches
+    }
+
+    /// Single-hash variant of [`find_active_matches`] used by the
+    /// `match_blocks` first-hash fast path to avoid allocating a
+    /// one-element slice and result Vec.
+    fn find_active_match(
+        &self,
+        hash: SequenceHash,
+        touch: bool,
+    ) -> Option<Arc<crate::blocks::ImmutableBlockInner<T>>> {
+        let handle = self.block_registry.match_sequence_hash(hash, touch)?;
+        handle.try_get_inner::<T>(&self.store, touch)
     }
 
     /// Scan-style version of `find_active_matches` — does not stop on miss.
