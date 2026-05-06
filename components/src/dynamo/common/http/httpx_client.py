@@ -12,11 +12,11 @@ Behavior notes (operator-tunable knobs live in :mod:`.args`):
   - ``max_keepalive_connections`` is sized to match ``max_connections``
     so idle connections get reused under fan-out instead of churning
     TLS handshakes.
-  - A process-wide semaphore (``DYN_MM_HTTP_CONCURRENCY``) wraps every
+  - A process-wide semaphore (``DYN_HTTP_CONCURRENCY``) wraps every
     fetch so a burst can't push ``PoolTimeout`` up the stack. aiohttp
     has no equivalent because its connector queues natively.
 
-An operator who flips ``DYN_MM_HTTP_BACKEND=httpx`` gets a working backend,
+An operator who flips ``DYN_HTTP_BACKEND=httpx`` gets a working backend,
 not the original PoolTimeout bug.
 """
 
@@ -44,7 +44,7 @@ class HttpxClient(HttpClient):
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Process-wide concurrency cap on in-flight httpx fetches.
 
-        Lazy-init so the bound (``DYN_MM_HTTP_CONCURRENCY``) is read once
+        Lazy-init so the bound (``DYN_HTTP_CONCURRENCY``) is read once
         and the ``asyncio.Semaphore`` binds to whichever loop first
         awaits it.
         """

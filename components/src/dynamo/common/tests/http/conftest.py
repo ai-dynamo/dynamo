@@ -4,7 +4,7 @@
 """Shared fixtures for HTTP facade tests.
 
 Autouse fixture ensures the shared HTTP client singleton is closed after
-each test so ``DYN_MM_HTTP_BACKEND`` changes take effect between runs and
+each test so ``DYN_HTTP_BACKEND`` changes take effect between runs and
 no "Unclosed client session" warning bleeds across tests.
 """
 

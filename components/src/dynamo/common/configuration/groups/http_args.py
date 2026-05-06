@@ -1,72 +1,72 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single source of truth for ``DYN_MM_HTTP_*`` configuration.
+"""Configuration for the ``dynamo.common.http`` client.
 
-Both backends import :class:`HttpConfigBase` and call :func:`from_env`;
-each consumes the fields that apply to it. The class extends the shared
-:class:`dynamo.common.configuration.config_base.ConfigBase`, and
-:class:`HttpArgGroup` registers the matching CLI flags + ``DYN_MM_HTTP_*``
-env vars via :func:`dynamo.common.configuration.utils.add_argument` so
-this group plays nicely with components that build their own argparse
-surface (frontend, planner, etc.).
+:class:`HttpConfigBase` carries the operator-tunable knobs;
+:class:`HttpArgGroup` registers the matching ``--http-*`` CLI flags
+and ``DYN_HTTP_*`` env vars. :func:`from_env` is an env-only
+construction path used by the singleton client in
+``dynamo.common.http`` (whose primary callers don't own an argparse).
 
-Why this group ships :func:`from_env` while sibling groups don't:
-the HTTP client's primary callers — ``image_loader.py`` /
-``audio_loader.py`` / ``video_loader.py`` — don't own an argparse,
-so they need an env-only construction path. The
-``dynamo.common.http`` singleton boots through this entry point. Other
-groups (router, kv-router, runtime) are always materialized off a
-parent component's parsed CLI args, so an env-only helper would be
-redundant there.
-
-Operator-tunable env vars
--------------------------
-
-Shared (consumed by both backends):
-
-  - ``DYN_MM_HTTP_MAX_CONNECTIONS`` (default 100) — total pool size cap.
-  - ``DYN_MM_HTTP_TIMEOUT`` (unset by default) — when set, replaces the
-    caller's per-call ``timeout`` arg on every fetch. Useful as a global
-    ceiling without editing call sites. Per-backend semantics differ:
-    on httpx it caps the ``read`` component only (``connect`` / ``pool``
-    keep their independent budgets so a stuck handshake or saturated
-    pool still fast-fails); on aiohttp it caps ``total`` because aiohttp
-    doesn't expose separate connect/read components.
-    ``DYN_MM_HTTP_READ_TIMEOUT`` is accepted as a deprecated alias.
-  - ``DYN_MM_HTTP_CONNECT_TIMEOUT`` (default 5.0s) — TCP+TLS-handshake
-    budget. Independent of ``DYN_MM_HTTP_TIMEOUT`` so a stuck origin
-    fast-fails on its own. httpx → ``Timeout.connect``;
-    aiohttp → ``ClientTimeout.sock_connect``.
-
-httpx-only:
-
-  - ``DYN_MM_HTTP_MAX_KEEPALIVE`` (default = ``MAX_CONNECTIONS``) — cap
-    on idle keepalive connections kept warm.
-  - ``DYN_MM_HTTP_POOL_TIMEOUT`` (default 60.0s) — wait-for-free-slot
-    budget. Decoupled from read so a saturated pool surfaces fast.
-    aiohttp has no equivalent because its connector queues natively.
-  - ``DYN_MM_HTTP_CONCURRENCY`` (default 50) — process-wide cap on
-    concurrent in-flight HTTP fetches. Acts as backpressure in front
-    of the httpx pool so a burst can't push ``PoolTimeout`` up the
-    stack. aiohttp has no equivalent because its connector queues
-    natively.
-
-aiohttp-only:
-
-  - ``DYN_MM_HTTP_KEEPALIVE_TIMEOUT`` (default 15.0s) — how long an
-    idle connection stays warm in the pool.
+Legacy ``DYN_MM_HTTP_*`` env vars are still honored for backward
+compatibility with deployments that predate the rename — see
+:func:`_apply_legacy_env_aliases`. See per-field comments below for
+behavior details.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from typing import Optional, Self
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument
+
+logger = logging.getLogger(__name__)
+
+
+# Map of canonical env var → list of legacy aliases (priority order).
+# Legacy ``DYN_MM_HTTP_*`` names predate the rename to ``DYN_HTTP_*``.
+# ``DYN_HTTP_TIMEOUT`` also accepts ``DYN_MM_HTTP_READ_TIMEOUT`` because
+# the read-vs-total semantic was clarified at the same time.
+_LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "DYN_HTTP_BACKEND": ("DYN_MM_HTTP_BACKEND",),
+    "DYN_HTTP_MAX_CONNECTIONS": ("DYN_MM_HTTP_MAX_CONNECTIONS",),
+    "DYN_HTTP_TIMEOUT": ("DYN_MM_HTTP_TIMEOUT", "DYN_MM_HTTP_READ_TIMEOUT"),
+    "DYN_HTTP_CONNECT_TIMEOUT": ("DYN_MM_HTTP_CONNECT_TIMEOUT",),
+    "DYN_HTTP_MAX_KEEPALIVE": ("DYN_MM_HTTP_MAX_KEEPALIVE",),
+    "DYN_HTTP_POOL_TIMEOUT": ("DYN_MM_HTTP_POOL_TIMEOUT",),
+    "DYN_HTTP_CONCURRENCY": ("DYN_MM_HTTP_CONCURRENCY",),
+    "DYN_HTTP_KEEPALIVE_TIMEOUT": ("DYN_MM_HTTP_KEEPALIVE_TIMEOUT",),
+}
+
+_legacy_warned: set[str] = set()
+
+
+def _apply_legacy_env_aliases() -> None:
+    """Mirror legacy ``DYN_MM_HTTP_*`` env vars to ``DYN_HTTP_*``.
+
+    If the canonical ``DYN_HTTP_*`` name isn't set but a legacy alias
+    is, copy the value across so downstream ``env_or_default`` lookups
+    see it. Idempotent. Emits a one-time deprecation warning per
+    legacy name observed.
+    """
+    for canonical, legacy_names in _LEGACY_ENV_ALIASES.items():
+        if os.environ.get(canonical) is not None:
+            continue
+        for legacy in legacy_names:
+            value = os.environ.get(legacy)
+            if value is None:
+                continue
+            os.environ[canonical] = value
+            if legacy not in _legacy_warned:
+                _legacy_warned.add(legacy)
+                logger.warning("%s is deprecated; use %s instead.", legacy, canonical)
+            break
 
 
 def _nullable_float(value: str) -> Optional[float]:
@@ -77,7 +77,7 @@ def _nullable_float(value: str) -> Optional[float]:
 
 
 class HttpConfigBase(ConfigBase):
-    """Operator-tunable knobs for the multimodal HTTP backends.
+    """Operator-tunable knobs for the HTTP fetch client.
 
     Field accesses (e.g. ``self._config.max_connections``) are how
     backends read their tunables. Per-backend semantics for each field
@@ -134,7 +134,7 @@ class HttpConfigBase(ConfigBase):
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> Self:
         config = super().from_cli_args(args)
-        # ``--mm-http-max-keepalive 0`` is the documented sentinel for
+        # ``--http-max-keepalive 0`` is the documented sentinel for
         # "match max_connections" — resolve here so the httpx backend
         # always gets a non-zero keepalive cap regardless of which
         # construction path the operator used.
@@ -144,15 +144,15 @@ class HttpConfigBase(ConfigBase):
 
 
 class HttpArgGroup(ArgGroup):
-    """CLI / env-var registration for the multimodal HTTP backends."""
+    """CLI / env-var registration for the HTTP fetch client."""
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        g = parser.add_argument_group("Multimodal HTTP Options")
+        g = parser.add_argument_group("HTTP Fetch Options")
 
         add_argument(
             g,
-            flag_name="--mm-http-max-connections",
-            env_var="DYN_MM_HTTP_MAX_CONNECTIONS",
+            flag_name="--http-max-connections",
+            env_var="DYN_HTTP_MAX_CONNECTIONS",
             default=100,
             arg_type=int,
             dest="max_connections",
@@ -160,8 +160,8 @@ class HttpArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--mm-http-timeout",
-            env_var="DYN_MM_HTTP_TIMEOUT",
+            flag_name="--http-timeout",
+            env_var="DYN_HTTP_TIMEOUT",
             default=None,
             arg_type=_nullable_float,
             dest="per_call_timeout_override",
@@ -173,8 +173,8 @@ class HttpArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--mm-http-connect-timeout",
-            env_var="DYN_MM_HTTP_CONNECT_TIMEOUT",
+            flag_name="--http-connect-timeout",
+            env_var="DYN_HTTP_CONNECT_TIMEOUT",
             default=5.0,
             arg_type=float,
             dest="connect_timeout",
@@ -185,20 +185,20 @@ class HttpArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--mm-http-max-keepalive",
-            env_var="DYN_MM_HTTP_MAX_KEEPALIVE",
+            flag_name="--http-max-keepalive",
+            env_var="DYN_HTTP_MAX_KEEPALIVE",
             default=0,  # 0 → match max_connections; resolved in from_env.
             arg_type=int,
             dest="max_keepalive",
             help=(
                 "[httpx-only] Cap on idle keepalive connections in the pool. "
-                "0 → match --mm-http-max-connections."
+                "0 → match --http-max-connections."
             ),
         )
         add_argument(
             g,
-            flag_name="--mm-http-pool-timeout",
-            env_var="DYN_MM_HTTP_POOL_TIMEOUT",
+            flag_name="--http-pool-timeout",
+            env_var="DYN_HTTP_POOL_TIMEOUT",
             default=60.0,
             arg_type=float,
             dest="pool_timeout",
@@ -206,8 +206,8 @@ class HttpArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--mm-http-concurrency",
-            env_var="DYN_MM_HTTP_CONCURRENCY",
+            flag_name="--http-concurrency",
+            env_var="DYN_HTTP_CONCURRENCY",
             default=50,
             arg_type=int,
             dest="concurrency",
@@ -218,8 +218,8 @@ class HttpArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--mm-http-keepalive-timeout",
-            env_var="DYN_MM_HTTP_KEEPALIVE_TIMEOUT",
+            flag_name="--http-keepalive-timeout",
+            env_var="DYN_HTTP_KEEPALIVE_TIMEOUT",
             default=15.0,
             arg_type=float,
             dest="keepalive_timeout",
@@ -232,20 +232,13 @@ def from_env() -> HttpConfigBase:
 
     Spins up an internal parser, registers :class:`HttpArgGroup`, and
     materializes the config from an empty argv. Defaults flow through
-    ``DYN_MM_HTTP_*`` env vars via :func:`add_argument`'s
+    ``DYN_HTTP_*`` env vars via :func:`add_argument`'s
     ``env_or_default`` plumbing — same code path as a component that
-    embeds the group in its CLI surface.
-
-    Backwards compat: ``DYN_MM_HTTP_READ_TIMEOUT`` is honored as a
-    deprecated alias for ``DYN_MM_HTTP_TIMEOUT`` (which wins if both
-    are set).
+    embeds the group in its CLI surface. Legacy ``DYN_MM_HTTP_*`` names
+    are mirrored to their canonical ``DYN_HTTP_*`` form first via
+    :func:`_apply_legacy_env_aliases`.
     """
-    if (
-        os.environ.get("DYN_MM_HTTP_TIMEOUT") is None
-        and os.environ.get("DYN_MM_HTTP_READ_TIMEOUT") is not None
-    ):
-        os.environ["DYN_MM_HTTP_TIMEOUT"] = os.environ["DYN_MM_HTTP_READ_TIMEOUT"]
-
+    _apply_legacy_env_aliases()
     parser = argparse.ArgumentParser(add_help=False)
     HttpArgGroup().add_arguments(parser)
     return HttpConfigBase.from_cli_args(parser.parse_args([]))

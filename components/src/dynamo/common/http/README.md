@@ -1,9 +1,10 @@
 # `dynamo.common.http`
 
-Multimodal HTTP client. Backend-neutral facade
-(`fetch_bytes` / `close_http_client`) over an `MmHttpClient` ABC with
+HTTP fetch client. Backend-neutral facade
+(`fetch_bytes` / `close_http_client`) over an `HttpClient` ABC with
 two concrete subclasses: `AiohttpClient` (default) and `HttpxClient`.
-Backend selection: `DYN_MM_HTTP_BACKEND={aiohttp,httpx}`.
+Backend selection: `DYN_HTTP_BACKEND={aiohttp,httpx}` (legacy
+`DYN_MM_HTTP_BACKEND` is honored).
 
 ## Why aiohttp is the default
 
@@ -19,7 +20,7 @@ runs *"whenever a new request is added or removed from the pool"* and
 is `O(queue_size × pool_size)` per call, so cost grows quadratically
 with backlog. aiohttp's connector queues natively in `O(1)`, which is
 why our httpx backend needed a process-wide semaphore
-(`DYN_MM_HTTP_CONCURRENCY`) in front of the pool to keep
+(`DYN_HTTP_CONCURRENCY`) in front of the pool to keep
 `PoolTimeout` from leaking up the stack. That semaphore is redundant
 under aiohttp.
 
@@ -65,6 +66,8 @@ python -m benchmarks.multimodal.http.sweep \
 
 ## Operator-tunable knobs
 
-See [`args.py`](./args.py) for the full `DYN_MM_HTTP_*` env-var
-reference (pool size, per-call timeout override, httpx-only
-semaphore concurrency, aiohttp keepalive, etc.).
+See
+[`http_args.py`](../configuration/groups/http_args.py) for the full
+`DYN_HTTP_*` env-var / `--http-*` CLI-flag reference (pool size,
+per-call timeout override, httpx-only semaphore concurrency, aiohttp
+keepalive, etc.). Legacy `DYN_MM_HTTP_*` env vars are still honored.

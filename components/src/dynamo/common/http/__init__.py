@@ -3,8 +3,9 @@
 
 """Backend-neutral facade for Dynamo's HTTP fetch client.
 
-Env var ``DYN_MM_HTTP_BACKEND`` selects the implementation behind the
-process-wide singleton used by :func:`fetch_bytes`:
+Env var ``DYN_HTTP_BACKEND`` selects the implementation behind the
+process-wide singleton used by :func:`fetch_bytes` (legacy
+``DYN_MM_HTTP_BACKEND`` is honored for backward compat):
 
   - ``aiohttp`` (default) — :class:`AiohttpClient` over an
     ``aiohttp.ClientSession``.
@@ -31,6 +32,7 @@ from typing import Optional
 from dynamo.common.configuration.groups.http_args import (
     HttpArgGroup,
     HttpConfigBase,
+    _apply_legacy_env_aliases,
     from_env,
 )
 
@@ -52,14 +54,18 @@ _default: Optional[HttpClient] = None
 
 
 def _create_client() -> HttpClient:
-    """Pick a concrete client class based on ``DYN_MM_HTTP_BACKEND``."""
-    name = os.environ.get("DYN_MM_HTTP_BACKEND", "aiohttp").lower()
+    """Pick a concrete client class based on ``DYN_HTTP_BACKEND``.
+
+    Honors legacy ``DYN_MM_HTTP_BACKEND`` via the alias mirror.
+    """
+    _apply_legacy_env_aliases()
+    name = os.environ.get("DYN_HTTP_BACKEND", "aiohttp").lower()
     if name == "aiohttp":
         return AiohttpClient()
     if name == "httpx":
         return HttpxClient()
     raise ValueError(
-        f"DYN_MM_HTTP_BACKEND={name!r} is invalid; must be one of {_VALID_BACKENDS}"
+        f"DYN_HTTP_BACKEND={name!r} is invalid; must be one of {_VALID_BACKENDS}"
     )
 
 
@@ -82,7 +88,7 @@ async def close_http_client() -> None:
 
     Clears the resolved client so a fresh env-var reading happens on
     the next call (primarily useful in tests that vary
-    ``DYN_MM_HTTP_BACKEND``).
+    ``DYN_HTTP_BACKEND``).
     """
     global _default
     if _default is None:

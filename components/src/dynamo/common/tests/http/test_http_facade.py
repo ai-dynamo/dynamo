@@ -43,19 +43,26 @@ def _reset_backend_cache():
 
 
 async def test_default_backend_is_aiohttp(monkeypatch) -> None:
-    monkeypatch.delenv("DYN_MM_HTTP_BACKEND", raising=False)
+    monkeypatch.delenv("DYN_HTTP_BACKEND", raising=False)
     assert isinstance(mm_http.get_default_client(), AiohttpClient)
 
 
 async def test_httpx_backend_selected(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
+    monkeypatch.setenv("DYN_HTTP_BACKEND", "httpx")
     assert isinstance(mm_http.get_default_client(), HttpxClient)
 
 
 async def test_invalid_backend_raises(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "requests")
-    with pytest.raises(ValueError, match="DYN_MM_HTTP_BACKEND"):
+    monkeypatch.setenv("DYN_HTTP_BACKEND", "requests")
+    with pytest.raises(ValueError, match="DYN_HTTP_BACKEND"):
         mm_http.get_default_client()
+
+
+async def test_legacy_mm_http_backend_env_var_still_honored(monkeypatch) -> None:
+    """Legacy ``DYN_MM_HTTP_BACKEND`` from before the rename still works."""
+    monkeypatch.delenv("DYN_HTTP_BACKEND", raising=False)
+    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", "httpx")
+    assert isinstance(mm_http.get_default_client(), HttpxClient)
 
 
 # --- Backend-neutral SSRF revalidation via fetch_bytes(policy=...) ---
@@ -78,7 +85,7 @@ def _client_for(name: str):
 async def test_fetch_with_policy_returns_first_response(
     monkeypatch, backend_name
 ) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", backend_name)
+    monkeypatch.setenv("DYN_HTTP_BACKEND", backend_name)
     client = mm_http.get_default_client()
     assert isinstance(client, _client_for(backend_name))
 
@@ -100,7 +107,7 @@ async def test_fetch_with_policy_returns_first_response(
 async def test_fetch_with_policy_follows_safe_redirect(
     monkeypatch, backend_name
 ) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", backend_name)
+    monkeypatch.setenv("DYN_HTTP_BACKEND", backend_name)
     client = mm_http.get_default_client()
 
     hops: list[str] = []
@@ -123,7 +130,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
 async def test_fetch_with_policy_blocks_redirect_to_private_ip(
     monkeypatch, backend_name
 ) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", backend_name)
+    monkeypatch.setenv("DYN_HTTP_BACKEND", backend_name)
     client = mm_http.get_default_client()
 
     strict = UrlValidationPolicy(allow_private_ips=False)
@@ -140,7 +147,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
 async def test_fetch_with_policy_enforces_redirect_limit(
     monkeypatch, backend_name
 ) -> None:
-    monkeypatch.setenv("DYN_MM_HTTP_BACKEND", backend_name)
+    monkeypatch.setenv("DYN_HTTP_BACKEND", backend_name)
     client = mm_http.get_default_client()
 
     # _MAX_REDIRECTS=3 → 4 hops trip the cap.

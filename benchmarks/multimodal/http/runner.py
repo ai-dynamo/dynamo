@@ -3,7 +3,7 @@
 
 """Async fetch loop with per-request latency capture.
 
-Sets ``DYN_MM_HTTP_BACKEND`` for the chosen backend, calls
+Sets ``DYN_HTTP_BACKEND`` for the chosen backend, calls
 ``close_http_client()`` before+after to defend against stale singletons
 across runs in the same process. Returns raw samples; aggregation is in
 ``stats.py``.
@@ -44,7 +44,7 @@ async def _timed_fetch(url: str, timeout: float) -> tuple[float, str]:
 async def run_one(
     backend: str, urls: list[str], timeout: float, request_rate: float
 ) -> RunResult:
-    os.environ["DYN_MM_HTTP_BACKEND"] = backend
+    os.environ["DYN_HTTP_BACKEND"] = backend
     await close_http_client()
     interval = 1.0 / request_rate
     t0 = time.perf_counter()
