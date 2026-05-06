@@ -19,13 +19,13 @@ Here is a breakdown of the cold start time of various models for a single-GPU wo
 
 ![Cold start time breakdown across model sizes on a single B200 GPU.](./figures/cold_start_bench.svg)
 
-In our setup, weights are loaded from a high-bandwidth network-attached storage. For smaller models, the majority of cold-start time is consumed by upstream initialization overheads rather than weight loading itself; with lower-bandwidth storage, the weight-loading contribution grows and dominates. Even under so-called "warm start" conditions — where artifacts from mechanisms such as torch.compile and kernel warmup are cached — the observed reduction in startup time is modest. The reason is structural: much of the early-phase initialization work is inherently stateful, context-dependent, and therefore not amenable to straightforward caching.
+In our setup, weights are loaded from high-bandwidth network-attached storage. For smaller models, the majority of cold-start time is consumed by initialization overhead rather than weight loading itself; with lower-bandwidth storage, the weight-loading contribution grows and dominates. Even under "warm start" conditions — where artifacts from torch.compile, kernel warmup etc are cached — the observed reduction in startup time is modest.
 
-Driving cold-start time down means chasing every contributor across the stack and getting them to cooperate — and keeping it down is an uphill battle as each inference engine adds features and has to be optimized individually.
+Driving cold-start time down means chasing every contributor across the stack and getting them to cooperate, and keeping it down is an uphill battle as each inference engine adds features and has to be optimized individually.
 
 The well-known alternative is *process-level* checkpoint/restore, which reduces the optimization surface to the checkpoint image size and storage bandwidth. Operating at the OS process level also keeps these optimizations *generic*, so they transfer across workloads.
 
-In this post, we introduce **Dynamo Snapshot** — our solution for checkpoint/restore of AI inference workloads on Kubernetes — along with the design choices and optimizations that get us to start times of **6 seconds or less**.
+In this post, we introduce **Dynamo Snapshot**, our solution for checkpoint/restore of AI inference workloads on Kubernetes, along with the design choices and optimizations that get us to start times of **6 seconds or less**.
 
 ## CRIU and cuda-checkpoint
 A running inference worker's checkpointable state has two components:
@@ -48,25 +48,18 @@ When restoring (same or different node):
 Since CRIU is run via an external process, **the restored workload process picks up at exactly the instruction it was at when it dumped.** This means there are no synchronization barriers between the workload and CRIU: if the workload needs to prevent being checkpointed until it is quiescent, or needs to be aware that it has been restored, those signals must be managed by an orchestrator that calls CRIU/cuda-checkpoint and/or the workload itself. We address this in the next two sections, which describe the orchestrator and the workload-side hooks respectively.
 
 ## Dynamo Snapshot: Kubernetes
-In Kubernetes, workloads run inside containers, inside of pods. CRIU checkpoints typically contain references to mounts and files in the container's writable filesystem layer, so we checkpoint at the container level — the process tree state and the writable layer travel together.
+In Kubernetes, workloads run inside containers, inside of pods. CRIU checkpoints typically contain references to mounts and files in the container's writable filesystem layer (i.e. the upperdir overlay), so we checkpoint at the container level — the process tree state and the writable layer travel together.
 
-Our solution is a privileged DaemonSet called `snapshot-agent`, easily installable via a Helm chart. The agent runs on every node and handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. for `runc`-managed containers (the OCI runtime we currently target). When the agent observes a workload pod marked as a checkpoint source, it reaches in from the host and performs the checkpoint without entering the container. On restore, the agent restores the workload from inside a placeholder pod that sets up the namespaces.
+Our solution is a privileged DaemonSet called `snapshot-agent`, easily installable via a Helm chart. An agent pod runs on every node and handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. for `runc`-managed containers (the OCI runtime we currently target). When an agent observes a *workload pod* — the pod running the inference worker — that has been marked as a checkpoint source, it reaches in from the host and performs the checkpoint without entering the container. On restore, the agent restores the workload into a sleeping *placeholder pod* whose only purpose is to provide the right namespaces.
 
-To keep terminology consistent for the rest of this section:
+Each agent operates on the workload pods on its own node independently, so checkpoints and restores happen in parallel across the cluster with no central coordinator.
 
-- **Workload pod** — the pod whose process tree is being checkpointed or restored.
-- **Snapshot agent** — the privileged DaemonSet pod, one per node, that performs the checkpoint or restore on the workload pod.
-- **Checkpoint Job** — an ordinary Kubernetes Job whose pod runs the workload, marked as a checkpoint source.
-- **Placeholder pod** — a pod created on restore that sets up the namespaces the restored workload runs inside.
-- **Checkpoint node** / **restore node** — the K8s nodes where the workload is checkpointed and where it is later restored, respectively.
-
-For each workload pod, the snapshot agent on its node performs the checkpoint or restore independently from the host side.
-
-![On the checkpoint node, the snapshot-agent DaemonSet observes the workload pod from the host and writes the artifact to a shared PVC. On the restore node, the agent enters a placeholder pod's namespaces and restores the workload inside.](./figures/k8s_checkpoint_restore_lifecycle.svg)
+![At checkpoint time, the snapshot agent on the workload's node observes the pod from the host and writes the artifact to a shared PVC. At restore time, on any node, the agent there enters a placeholder pod's namespaces and restores the workload inside.](./figures/k8s_checkpoint_restore_lifecycle.svg)
+<!-- TODO(figure): k8s_checkpoint_restore_lifecycle.svg labels read "Checkpoint node" / "Restore node" / "Checkpoint Job pod" — relabel to "Source node" / "Target node" / "Workload pod" so the figure no longer hinges on the ambiguous "checkpoint X" naming. -->
 
 **Checkpoint:**
 
-1. The user creates a checkpoint Job. This is an ordinary Kubernetes Job whose pod runs the workload, marked as a checkpoint source.
+1. The user creates a Kubernetes Job whose pod runs the workload, marked as a checkpoint source.
 2. The snapshot agent on the same node sees the workload pod via its checkpoint marker.
 3. Once the workload's readiness probe passes (we use it as a configurable signal that determines the workload is ready to be checkpointed), the snapshot agent begins the checkpointing process.
    1. The agent inspects the running container from the host side (PIDs, namespaces, mounts, overlays, etc.) without entering it.
