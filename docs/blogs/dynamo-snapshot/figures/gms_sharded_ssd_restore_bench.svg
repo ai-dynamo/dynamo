@@ -12,7 +12,7 @@
 <rect width="100%" height="100%" fill="#f8fafc"/>
 <rect x="228" y="280" width="1666" height="1680" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
 <text class="title" x="240" y="64">Dynamo vLLM Snapshot Restore with GMS</text>
-<text class="subtitle" x="240" y="110">Single-GPU B200 (Local SSD), TP=1</text>
+<text class="subtitle" x="240" y="110">Single-GPU B200 (weights sharded across 8 NVMe SSDs), TP = 1</text>
 <line x1="240.0" y1="302" x2="240.0" y2="1972" stroke="#e5e7eb"/>
 <line x1="240.0" y1="296" x2="240.0" y2="302" stroke="#64748b"/>
 <text class="axis-label" x="240.0" y="292" text-anchor="middle">0s</text>
