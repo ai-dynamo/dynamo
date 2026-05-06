@@ -235,6 +235,11 @@ pub struct Worker {
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     config: RsWorkerConfig,
+    /// `true` if this `Worker` instance constructed the dynamo runtime
+    /// itself (no `DistributedRuntime` already existed in this process).
+    /// Determines whether `run()` should call `runtime.shutdown()` at the
+    /// end — we only want to tear down a runtime we own.
+    owns_runtime: bool,
 }
 
 #[pymethods]
@@ -245,24 +250,44 @@ impl Worker {
         config: WorkerConfig,
         event_loop: PyObject,
     ) -> PyResult<Self> {
-        // Ensure the dynamo Runtime + pyo3-async-runtimes bridge are
-        // initialized exactly once per process. Mirrors what
-        // `DistributedRuntime.__new__` does in `lib.rs`.
-        rs::Worker::runtime_from_existing()
-            .or_else(|_| {
-                let worker = rs::Worker::from_settings()?;
-                let primary = worker.tokio_runtime()?;
-                // `init_with_runtime` is idempotent across pyo3-async-runtimes
-                // versions — ignore the "already initialized" error.
-                let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-                Ok::<_, anyhow::Error>(worker.runtime().clone())
-            })
-            .map_err(to_pyerr)?;
+        // Determine whether this is the first runtime in the process. If
+        // `runtime_from_existing` succeeds, someone else (typically a
+        // `DistributedRuntime`) already constructed it and owns shutdown.
+        let owns_runtime = rs::Worker::runtime_from_existing().is_err();
+
+        if owns_runtime {
+            // Apply RuntimeConfig env overrides synchronously, on the
+            // calling thread, before any tokio worker threads spawn.
+            // Setting env vars from inside the future-into-py block would
+            // race with concurrent env reads in already-running tokio
+            // tasks (NATS / etcd setup).
+            config.inner.runtime.apply_to_env();
+
+            let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
+            let primary = worker.tokio_runtime().map_err(to_pyerr)?;
+            // `init_with_runtime` errors if already initialized; that case
+            // means someone called us in a process where the OnceCell was
+            // populated between our check and now. Idempotent — ignore.
+            let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+        } else if config.inner.runtime.has_overrides() {
+            // The shared runtime was constructed before our caller, so its
+            // env-driven config (`DYN_DISCOVERY_BACKEND` etc.) is already
+            // baked in. Setting env vars now wouldn't change the runtime
+            // — surface the silent-drop loudly so operators don't assume
+            // their override took effect.
+            tracing::warn!(
+                "Worker received RuntimeConfig overrides but the dynamo \
+                 runtime was already constructed elsewhere; overrides ignored. \
+                 Set DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE / DYN_EVENT_PLANE \
+                 in the environment instead."
+            );
+        }
 
         Ok(Self {
             engine: Arc::new(engine),
             event_loop: Arc::new(event_loop),
             config: config.inner,
+            owns_runtime,
         })
     }
 
@@ -272,12 +297,9 @@ impl Worker {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();
+        let owns_runtime = self.owns_runtime;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Apply runtime overrides before constructing the runtime
-            // (matches the sync `apply_to_env` call in `run.rs`).
-            config.runtime.apply_to_env();
-
             let runtime = rs::Worker::runtime_from_existing()
                 .or_else(|_| {
                     let worker = rs::Worker::from_settings()?;
@@ -290,12 +312,18 @@ impl Worker {
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
-            // Phase 1/2/3 token-cancellation + NATS/etcd disconnect.
-            // `Worker::run` already did discovery unregister, drain, and
-            // engine.cleanup() at this point — this is purely transport
-            // teardown. Skipped on shared-runtime processes that own
-            // shutdown elsewhere (e.g. tests using DistributedRuntime).
-            runtime.shutdown();
+            // Only tear the runtime down if we constructed it. When a
+            // `DistributedRuntime` was already in scope (HTTP frontend,
+            // tests, etc.) it owns the shutdown lifecycle and we'd be
+            // pulling the rug out from other tasks if we called shutdown.
+            if owns_runtime {
+                runtime.shutdown();
+            } else {
+                tracing::debug!(
+                    "Worker.run skipping runtime.shutdown(); runtime is \
+                     shared with another caller"
+                );
+            }
 
             result
         })
@@ -307,6 +335,10 @@ impl Worker {
 // ---------------------------------------------------------------------------
 
 struct PyLLMEngine {
+    // Wrapped in `Arc` so we can clone refcount-style without acquiring
+    // the GIL — `PyObject::clone` would otherwise need to bump Python's
+    // own refcount, which requires the GIL. Same pattern as
+    // `PythonAsyncEngine` in `engine.rs`.
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
 }
@@ -360,12 +392,12 @@ impl LLMEngine for PyLLMEngine {
             }
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
-                served_model_name: opt_attr::<String>(bound, "served_model_name"),
-                context_length: opt_attr::<u32>(bound, "context_length"),
-                kv_cache_block_size: opt_attr::<u32>(bound, "kv_cache_block_size"),
-                total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks"),
-                max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs"),
-                max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens"),
+                served_model_name: opt_attr::<String>(bound, "served_model_name")?,
+                context_length: opt_attr::<u32>(bound, "context_length")?,
+                kv_cache_block_size: opt_attr::<u32>(bound, "kv_cache_block_size")?,
+                total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks")?,
+                max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
+                max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
             })
         })
         .map_err(py_err_to_dynamo)
@@ -526,14 +558,26 @@ impl LLMEngine for PyLLMEngine {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn opt_attr<T>(bound: &Bound<'_, PyAny>, name: &str) -> Option<T>
+/// Extract an optional attribute from a Python object.
+///
+/// Returns:
+///   * `Ok(None)` when the attribute is missing or set to `None`.
+///   * `Ok(Some(v))` when present and convertible.
+///   * `Err(PyErr)` when present and non-`None` but the conversion fails
+///     — surfaces engine-author bugs (e.g. `context_length="not-a-int"`)
+///     rather than silently dropping them.
+fn opt_attr<T>(bound: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<T>>
 where
     T: for<'py> FromPyObject<'py>,
 {
-    bound
-        .getattr(name)
-        .ok()
-        .and_then(|v| if v.is_none() { None } else { v.extract().ok() })
+    let attr = match bound.getattr(name) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if attr.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(attr.extract()?))
 }
 
 /// Map a Python exception class to the closest `BackendError` variant.

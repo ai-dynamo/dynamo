@@ -19,6 +19,7 @@ use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapter::EngineAdapter;
 use crate::engine::{EngineConfig, LLMEngine};
@@ -54,6 +55,15 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// `true` if any field is set. Used by the PyO3 binding to decide
+    /// whether to warn that overrides will be dropped when reusing a
+    /// runtime constructed by another caller.
+    pub fn has_overrides(&self) -> bool {
+        self.discovery_backend.is_some()
+            || self.request_plane.is_some()
+            || self.event_plane.is_some()
+    }
+
     /// Apply each set field to the corresponding environment variable.
     /// Unset fields leave the existing environment value untouched.
     pub fn apply_to_env(&self) {
@@ -137,20 +147,20 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Lifecycle state for [`Worker`]. Mirrors the Python `_LifecycleState`
-/// in `components/src/dynamo/common/backend/worker.py` so SIGTERM during
-/// `engine.start()` cleanly skips `engine.cleanup()`.
+/// Lifecycle state for [`Worker`].
+///
+/// Only three states are observable to callers because the lifecycle
+/// `tokio::Mutex` serializes start and cleanup — `Starting` / `Stopping`
+/// transitions live entirely inside the lock holder and never escape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LifecycleState {
-    /// `start_engine` has not been called.
+    /// `start_engine` has not been called (or shutdown arrived first and
+    /// flipped us straight to `Stopped`).
     Init,
-    /// `engine.start()` is in flight (lock held).
-    Starting,
-    /// `engine.start()` returned successfully.
+    /// `engine.start()` returned successfully; `engine.cleanup()` is owed.
     Running,
-    /// `engine.cleanup()` is in flight (lock held).
-    Stopping,
-    /// Cleanup done, never started, or start failed.
+    /// Cleanup done, never started, or start failed. `engine.cleanup()`
+    /// will not be called again.
     Stopped,
 }
 
@@ -188,10 +198,49 @@ impl Worker {
     ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
     ///      Phase 1/2/3 token-cancellation teardown.
     ///
-    /// `engine.cleanup()` is guaranteed to run if `engine.start()` succeeded,
-    /// regardless of whether the serve loop exits normally, errors, or is
-    /// cut short by a shutdown signal.
+    /// A SIGTERM/SIGINT listener is installed at the top of `run` and
+    /// shared via a [`CancellationToken`]:
+    ///   * Pre-start signal (during `DistributedRuntime` construction):
+    ///     the post-DRT cancellation check returns `EngineShutdown` and
+    ///     `engine.start()` is never called.
+    ///   * Mid-start signal: `engine.start()` is allowed to complete (we
+    ///     never cancel a partially-initialized engine mid-flight); the
+    ///     post-start cancellation check then runs the orchestrator
+    ///     directly without entering the serve loop.
+    ///   * Mid-serve signal: the serve loop's [`tokio::select`] picks up
+    ///     the same token and runs the orchestrator.
+    ///
+    /// `engine.cleanup()` is guaranteed to run exactly once if
+    /// `engine.start()` succeeded, regardless of which path led to shutdown.
     pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
+        // Single shared shutdown signal observed across all phases. The
+        // background task only flips the token — it intentionally does
+        // not touch the lifecycle mutex, so `start_engine` cannot deadlock
+        // on a signal-handler holding the lock.
+        let shutdown_token = CancellationToken::new();
+        let signal_token = shutdown_token.clone();
+        let signal_handle = tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            signal_token.cancel();
+        });
+
+        let outcome = self.run_inner(runtime, &shutdown_token).await;
+
+        signal_handle.abort();
+        let _ = signal_handle.await;
+
+        // Final safety net: guarantee engine.cleanup() runs if start()
+        // succeeded. No-op if cleanup already ran via the orchestrator.
+        self.cleanup_once().await;
+
+        outcome
+    }
+
+    async fn run_inner(
+        &self,
+        runtime: Runtime,
+        shutdown: &CancellationToken,
+    ) -> Result<(), DynamoError> {
         let drt = DistributedRuntime::from_settings(runtime)
             .await
             .map_err(|e| {
@@ -219,38 +268,61 @@ impl Worker {
             "component and endpoint resolved"
         );
 
-        let engine_config = self.start_engine().await?;
-        tracing::debug!(model = %engine_config.model, "engine.start() complete");
-
-        // Run serve concurrently with the shutdown-signal listener. Cleanup
-        // is guaranteed via cleanup_once() in the finally block, even if
-        // serve errors before the orchestrator runs.
-        let serve_result = self.serve_with_orchestrator(&engine_config, endpoint).await;
-
-        self.cleanup_once().await;
-
-        serve_result
-    }
-
-    /// Mutex-guarded start. Mirrors Python `Worker._start_engine`.
-    async fn start_engine(&self) -> Result<EngineConfig, DynamoError> {
-        let mut guard = self.state.lock().await;
-        if *guard == LifecycleState::Stopped {
-            // Shutdown signal arrived before start; abort cleanly.
+        // Pre-start: bail before doing real engine work if shutdown already
+        // arrived during DRT construction.
+        if shutdown.is_cancelled() {
             return Err(err(
                 ErrorType::Backend(BackendError::EngineShutdown),
                 "shutdown requested before engine start",
             ));
         }
-        debug_assert_eq!(
+
+        let engine_config = self.start_engine().await?;
+        tracing::debug!(model = %engine_config.model, "engine.start() complete");
+
+        // Mid-start signal: engine.start() ran to completion but a signal
+        // arrived during it. Skip the serve loop and run the orchestrator
+        // directly so `engine.cleanup()` still runs while the runtime is
+        // alive.
+        if shutdown.is_cancelled() {
+            tracing::info!("Shutdown signal observed during engine.start(); running orchestrator");
+            return self.run_post_start_shutdown(endpoint).await;
+        }
+
+        self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
+            .await
+    }
+
+    /// Discovery unregister + grace period + drain + cleanup. Used when a
+    /// signal arrives between `engine.start()` and the serve loop, so we
+    /// short-circuit serving entirely.
+    async fn run_post_start_shutdown(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        if let Err(e) = endpoint.unregister_endpoint_instance().await {
+            tracing::warn!(error = %e, "discovery unregister failed");
+        } else {
+            tracing::info!("Endpoint unregistered from discovery");
+        }
+        self.run_engine_shutdown_steps().await;
+        Ok(())
+    }
+
+    /// Mutex-guarded start. The lock is held through `engine.start()` so a
+    /// concurrent `cleanup_once` waits for start to finish before deciding
+    /// what to do.
+    async fn start_engine(&self) -> Result<EngineConfig, DynamoError> {
+        let mut guard = self.state.lock().await;
+        // `start_engine` is called once from `run_inner`, which consumes
+        // `self`. Hitting any other state is a programmer error worth
+        // panicking over in release as well as debug builds.
+        assert_eq!(
             *guard,
             LifecycleState::Init,
             "start_engine called in unexpected state {:?}",
             *guard
         );
-        *guard = LifecycleState::Starting;
-        // Hold the lock through engine.start() so a concurrent cleanup
-        // path waits for start to finish before deciding what to do.
         match self.engine.start().await {
             Ok(cfg) => {
                 *guard = LifecycleState::Running;
@@ -263,27 +335,18 @@ impl Worker {
         }
     }
 
-    /// Mutex-guarded, idempotent cleanup. Mirrors Python `Worker._cleanup_once`.
+    /// Mutex-guarded, idempotent cleanup.
     async fn cleanup_once(&self) {
         let mut guard = self.state.lock().await;
         match *guard {
             LifecycleState::Init | LifecycleState::Stopped => {
-                // Pre-start shutdown or already cleaned up — nothing to do.
+                // Pre-start shutdown, already cleaned up, or start failed —
+                // nothing engine-side to do.
                 *guard = LifecycleState::Stopped;
                 return;
             }
             LifecycleState::Running => {}
-            other => {
-                // Starting / Stopping should not be observable to a second
-                // caller because the lock serializes start and cleanup.
-                debug_assert!(
-                    false,
-                    "cleanup_once invoked in unexpected state {other:?}"
-                );
-                return;
-            }
         }
-        *guard = LifecycleState::Stopping;
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
@@ -295,11 +358,12 @@ impl Worker {
     }
 
     /// Drive the serve loop and the shutdown orchestrator. Returns when
-    /// either the serve loop exits or the orchestrator finishes draining.
+    /// either the serve loop exits or `shutdown` is cancelled.
     async fn serve_with_orchestrator(
         &self,
         engine_config: &EngineConfig,
         endpoint: dynamo_runtime::component::Endpoint,
+        shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let model_type = parse_endpoint_types(&self.config.endpoint_types)?;
 
@@ -348,9 +412,6 @@ impl Worker {
             .start();
         tokio::pin!(serve_fut);
 
-        let shutdown_signal = wait_for_shutdown_signal();
-        tokio::pin!(shutdown_signal);
-
         tokio::select! {
             biased;
             result = &mut serve_fut => {
@@ -363,13 +424,10 @@ impl Worker {
                     )
                 });
             }
-            _ = &mut shutdown_signal => {
+            _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
             }
         }
-
-        // Orchestrator. Each step is best-effort and logs on failure;
-        // shutdown proceeds regardless so the worker can exit cleanly.
 
         // Step 1: discovery unregister — router stops routing here.
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
@@ -390,7 +448,15 @@ impl Worker {
     /// → `cleanup_once()`. Each step swallows non-fatal failures so a
     /// misbehaving engine can't block the worker from exiting.
     async fn run_engine_shutdown_steps(&self) {
-        let grace = grace_period_secs();
+        self.run_engine_shutdown_steps_with_grace(grace_period_secs())
+            .await
+    }
+
+    /// Same as [`run_engine_shutdown_steps`] but with an explicit grace
+    /// period. Lets unit tests assert on call ordering without setting
+    /// `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (which is process-global
+    /// and would race other parallel tests).
+    async fn run_engine_shutdown_steps_with_grace(&self, grace: f64) {
         if grace > 0.0 {
             tracing::info!("Grace period {:.2}s before drain", grace);
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
@@ -731,23 +797,12 @@ mod tests {
         assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
     }
 
-    #[tokio::test]
-    async fn start_engine_after_pre_start_shutdown_returns_engine_shutdown() {
-        let (engine, cleanup_calls) = StateMockEngine::new(false);
-        let worker = worker_with(engine);
-
-        // Simulate the signal path that flips state to Stopped before the
-        // engine ever starts (e.g. SIGTERM during runtime construction).
-        *worker.state.lock().await = LifecycleState::Stopped;
-
-        let err = worker.start_engine().await.expect_err("must fail");
-        assert_eq!(
-            err.error_type(),
-            ErrorType::Backend(BackendError::EngineShutdown)
-        );
-        // engine.cleanup() never runs in this path.
-        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
-    }
+    // The pre-start shutdown path is handled in `run_inner` via a
+    // `CancellationToken` cancellation check before `start_engine` is
+    // called — not by flipping state to `Stopped` first. There is no
+    // public path in the Worker that calls `start_engine` after state
+    // was independently flipped to `Stopped`, so we don't test that
+    // scenario at the state-machine level.
 
     // -------------------------------------------------------------------
     // Orchestrator step-ordering tests
@@ -811,16 +866,13 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_steps_run_drain_before_cleanup() {
-        // Force grace period to 0 so the test doesn't sleep 5 seconds.
-        with_env(GRACE_PERIOD_ENV, Some("0"), || {});
-        let prev = std::env::var(GRACE_PERIOD_ENV).ok();
-        unsafe { std::env::set_var(GRACE_PERIOD_ENV, "0") };
-
+        // Use the explicit-grace helper so we don't have to mutate the
+        // process-global env var (which would race other parallel tests).
         let (engine, log) = OrderingMockEngine::new(false);
         let worker = worker_with(engine);
         worker.start_engine().await.unwrap();
 
-        worker.run_engine_shutdown_steps().await;
+        worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
@@ -828,68 +880,27 @@ mod tests {
             vec!["start", "drain", "cleanup"],
             "drain must run before cleanup"
         );
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(GRACE_PERIOD_ENV, v),
-                None => std::env::remove_var(GRACE_PERIOD_ENV),
-            }
-        }
     }
 
     #[tokio::test]
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
-        let prev = std::env::var(GRACE_PERIOD_ENV).ok();
-        unsafe { std::env::set_var(GRACE_PERIOD_ENV, "0") };
-
         let (engine, log) = OrderingMockEngine::new(true); // drain fails
         let worker = worker_with(engine);
         worker.start_engine().await.unwrap();
 
-        worker.run_engine_shutdown_steps().await;
+        worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
         // Drain ran (and failed), but cleanup still ran exactly once.
         let recorded = log.lock().unwrap().clone();
         assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
         assert_eq!(*worker.state.lock().await, LifecycleState::Stopped);
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(GRACE_PERIOD_ENV, v),
-                None => std::env::remove_var(GRACE_PERIOD_ENV),
-            }
-        }
     }
 
-    #[tokio::test]
-    async fn shutdown_steps_drain_skipped_when_engine_never_started() {
-        let prev = std::env::var(GRACE_PERIOD_ENV).ok();
-        unsafe { std::env::set_var(GRACE_PERIOD_ENV, "0") };
-
-        // Pre-start signal path: state transitions Init → Stopped without
-        // engine.start() ever running. drain still runs (default no-op for
-        // most engines) but cleanup must skip engine.cleanup() since no
-        // engine resources exist.
-        let (engine, log) = OrderingMockEngine::new(false);
-        let worker = worker_with(engine);
-        *worker.state.lock().await = LifecycleState::Stopped;
-
-        worker.run_engine_shutdown_steps().await;
-
-        // drain was called (orchestrator doesn't gate it on state — engines
-        // can decide internally whether they have anything to drain).
-        // cleanup was NOT called because the state machine short-circuits
-        // engine.cleanup when state is Init/Stopped.
-        let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["drain"], "cleanup must be skipped pre-start");
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(GRACE_PERIOD_ENV, v),
-                None => std::env::remove_var(GRACE_PERIOD_ENV),
-            }
-        }
-    }
+    // The "drain skipped when engine never started" scenario isn't
+    // reachable through the public `Worker::run` flow — pre-start
+    // shutdown returns from `run_inner` before `serve_with_orchestrator`
+    // (and therefore `run_engine_shutdown_steps`) ever runs. So we don't
+    // pin a contract for run_engine_shutdown_steps in the Stopped state.
 
     // -------------------------------------------------------------------
     // grace_period_secs env-var parsing

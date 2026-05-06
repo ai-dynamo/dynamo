@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -103,6 +104,19 @@ class Worker:
 
     async def run(self) -> None:
         configure_dynamo_logging()
+
+        if self.config.use_kv_events:
+            # The runtime auto-detects NATS now; the field is preserved on
+            # the dataclass for source-compat with existing callers but no
+            # longer plumbed anywhere. Surface the silent-drop loudly so
+            # operators don't assume their setting took effect.
+            warnings.warn(
+                "WorkerConfig.use_kv_events is deprecated and ignored. NATS "
+                "enablement is determined automatically from the event-plane "
+                "configuration; remove this argument.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,

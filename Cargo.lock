@@ -2312,6 +2312,7 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
