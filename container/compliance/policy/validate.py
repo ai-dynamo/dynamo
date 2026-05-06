@@ -250,7 +250,15 @@ def validate_row(
         return None
 
     extra_allow = _exception_allow_set(policy, ecosystem, name, version)
+    # Exceptions override BOTH the deny list and the not-in-allow case for
+    # this specific (ecosystem, name): "denied unless explicitly excepted".
+    # An auditor who has reviewed bash@5.2 and confirmed it's GPL-3.0-or-later
+    # adds an exception with allow=["GPL-3.0-or-later"]; bash continues to
+    # build. If bash's actual license changes (e.g., a new compound expression
+    # introducing a license token not in the exception), the build breaks
+    # and the auditor reviews the change.
     effective_allow = policy.allow | extra_allow
+    effective_deny = policy.deny - extra_allow
 
     try:
         tree = parse_spdx(spdx)
@@ -260,13 +268,13 @@ def validate_row(
             f"could not parse SPDX expression: {exc}",
         )
 
-    if _node_is_allowed(tree, effective_allow, policy.deny):
+    if _node_is_allowed(tree, effective_allow, effective_deny):
         return None
 
     # Diagnose the failure: list every leaf and its allow/deny status.
     leaves = _collect_leaves(tree)
-    denied = [n for n in leaves if n in policy.deny]
-    not_allowed = [n for n in leaves if n not in effective_allow and n not in policy.deny]
+    denied = [n for n in leaves if n in effective_deny]
+    not_allowed = [n for n in leaves if n not in effective_allow and n not in effective_deny]
     if denied:
         reason = f"contains denied license(s): {sorted(set(denied))}"
     elif not_allowed:
