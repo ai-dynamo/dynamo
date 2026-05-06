@@ -260,7 +260,12 @@ class ServiceSpec:
                 ["-m", "dynamo.frontend"] if self.component_type == "frontend" else []
             )
 
-        full_command = " ".join(original_command + original_args)
+        # shlex.join shell-quotes each arg so e.g. JSON literals like
+        # --kv-transfer-config '{"kv_connector":"NixlConnector",...}'
+        # survive being pasted into the bash -c heredoc; a naive
+        # " ".join would let bash interpret the braces as brace-
+        # expansion and the inner quotes would be stripped.
+        full_command = shlex.join(original_command + original_args)
         service_log_dir = f"{log_dir}/service_logs/{self._name.lower()}"
 
         template_path = os.path.join(

@@ -31,11 +31,11 @@ spec:
       componentType: worker
       subComponentType: decode
       replicas: 1
-      envs:
-        # Distinct system_port per worker so the two prometheus servers
-        # don't collide when co-resident on the same node.
-        - name: DYN_SYSTEM_PORT
-          value: "8081"
+      # Note: each worker runs in its own pod with its own pod IP, so
+      # port 9090 (the default DYN_SYSTEM_PORT, also the operator's
+      # readiness/liveness probe target) doesn't collide between
+      # workers — unlike the standalone-process disagg_same_gpu.sh
+      # which needed 8081/8082.
       resources:
         limits:
           gpu: "1"
@@ -75,12 +75,10 @@ spec:
       componentType: worker
       subComponentType: prefill
       replicas: 1
-      envs:
-        - name: DYN_SYSTEM_PORT
-          value: "8082"
-        # Avoid NIXL side-channel port conflict with decode (default 20096).
-        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
-          value: "20097"
+      # Same reasoning as VllmDecodeWorker: separate pods + separate
+      # pod IPs let both workers use the default ports without
+      # collision. VLLM_NIXL_SIDE_CHANNEL_PORT default (20096) is also
+      # fine since prefill and decode pods have different IPs.
       resources:
         limits:
           gpu: "1"
