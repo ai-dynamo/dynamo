@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
 subtitle: "Schwinn Saereesitthipitak, Dan Feigin, Vikram Sharma Mailthody — May 2026"
-description: "Dynamo Snapshot uses CRIU, cuda-checkpoint, and a per-GPU memory service to bring inference worker startup down to 5 seconds or less."
+description: "Dynamo Snapshot uses CRIU, cuda-checkpoint, and a per-GPU memory service to bring inference worker startup down to 6 seconds or less."
 keywords: checkpoint restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
 last-updated: May 4, 2026
 ---
@@ -25,7 +25,7 @@ Driving cold-start time down means tracking every contributor across every layer
 
 The well-known solution to this problem is *process-level* checkpoint/restore, which reduces the optimization surface to the process checkpoint image size and storage bandwidth. Operating at the OS process level keeps many of our optimizations *generic*, allowing them to transfer nicely across different workloads as well.
 
-In this post, we introduce **Dynamo Snapshot** — our solution for checkpoint/restore of AI inference workloads on Kubernetes — along with the design choices and optimizations that get us to start times of **5 seconds or less**.
+In this post, we introduce **Dynamo Snapshot** — our solution for checkpoint/restore of AI inference workloads on Kubernetes — along with the design choices and optimizations that get us to start times of **6 seconds or less**.
 
 ## CRIU and cuda-checkpoint
 A running inference worker's checkpointable state has two components:
@@ -160,13 +160,9 @@ On the same setup, we saw a massive improvement in CRIU restore time, and it is 
 At this point CRIU is no longer the bottleneck on its own, but the wall-clock time is still dominated by moving the model weights from PVC, through host memory, onto the GPU. That part is fundamentally serial: cuda-checkpoint cannot start copying weights to the GPU until CRIU has materialized them in host memory, and both halves are constrained by NFS bandwidth on one end and a single sequential `cudaMemcpy` on the other. The weights also dominate checkpoint size by a wide margin, which puts a hard ceiling on how fast restore can ever get if the weights stay inside the CRIU image.
 
 ## Optimization #3: GPU Memory Service
-A central limitation of today's checkpoint/restore mechanisms is that they treat GPU memory as an artifact of a process, rather than as a first-class system resource. In large-scale inference systems, this coupling is fundamentally misaligned with how modern GPU clusters operate: memory is expensive to construct, expensive to move, and yet unnecessarily tied to short-lived compute lifecycles. A more principled approach is to decouple memory ownership from process lifetime, allowing long-lived state — such as model weights — to persist independently and be reattached to compute on demand. This is precisely the role of a GPU Memory Service (GMS): to externalize memory as a managed, shareable, and location-agnostic resource.
+The idea behind the **GPU Memory Service (GMS)** is to take the weights out of the CRIU image entirely, and let weight restoration happen on its own path. This makes restore faster for three reasons that compound. First, the CRIU artifact shrinks dramatically once weights are no longer part of process memory, so CRIU restore itself completes in seconds. Second, weight restoration runs *concurrently* with CRIU rather than serially after it, so total restore time is bounded by the slower of the two paths instead of their sum. Third, the weights no longer have to follow the path of NFS → host memory → single sequential `cudaMemcpy`, and can instead use whatever channel is fastest for the cluster — sharded local SSDs, GPUDirect Storage, or peer-GPU RDMA from a node that already has the weights resident.
 
-With this perspective, we would like to take the weights out of the CRIU image entirely. If they are not embedded within the checkpoint, then their restoration is no longer serialized with CRIU's timeline. Instead, weight reconstruction becomes an independent, parallelizable operation. Moreover, the source of these weights need not be tied to the checkpoint itself — they may be retrieved from local NVMe, reconstructed from peer GPUs that already hold them resident (e.g. during scale-out of a DynamoGraphDeployment), or streamed over any available high-bandwidth channel. This decoupling allows weight restoration to proceed in parallel with CRIU, and along data paths capable of saturating bandwidths far beyond what a traditional NFS-based restore can achieve.
-
-The subtle constraint, however, lies in preserving execution correctness. The restored worker must observe its weight tensors at precisely the same virtual addresses as before, since these addresses are embedded within CUDA graphs captured during initialization. Consequently, any external restoration mechanism must materialize the weight bytes directly at those original virtual addresses, without introducing a copy at resume time. This requirement mirrors the KV-cache virtualization strategy discussed in Optimization #1, except this time we actually *care* about the contents of the tensors post-restore.
-
-The **GPU Memory Service (GMS)** is what makes this possible.
+The subtle constraint lies in preserving execution correctness. The restored worker must observe its weight tensors at precisely the same virtual addresses as before, since these addresses are embedded within CUDA graphs captured during initialization. Consequently, any external restoration mechanism must materialize the weight bytes directly at those original virtual addresses, without introducing a copy at resume time. This requirement mirrors the KV-cache virtualization strategy discussed in Optimization #1, except this time we actually *care* about the contents of the tensors post-restore.
 
 ### Parallelizing Weight Restore
 GMS is a per-GPU sidecar process (deployed as a separate container/pod) that owns physical GPU memory on behalf of inference workers, built on top of the CUDA Virtual Memory Management API. At a high level, it lets the worker hand off ownership of its weight allocations to a separate process that outlives any individual worker, so that when the worker is checkpointed, the weights are not part of its checkpointed state — and when it is restored, it can reattach to the same physical memory on the new node without copying.
@@ -184,9 +180,9 @@ To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore wi
 
 This setup isolates the parallel-restore claim from network storage variability and shows what the rest of the system can do when the weight source isn't the bottleneck. The loader pipelines reads with GPU copies (a pool of threads issuing `cudaMemcpyAsync` over multiple CUDA streams) so storage→host and host→GPU run continuously rather than fully materializing the weights in host memory.
 
-We saw that parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve ~5s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is now under 5 seconds.
+We saw that parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve under 6s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is well under 5 seconds.
 
-![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 5 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
+![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 6 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
 
 The CRIU checkpoint now only contains the host-side state of the container's process tree and a few miscellaneous buffers that are still double-buffered. The GMS weight artifact now holds the majority of process memory.
 
