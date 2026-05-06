@@ -30,25 +30,26 @@ USER dynamo
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 
-FROM busybox:1.36.1 AS github_runner_tools
-FROM debian:bookworm-slim AS github_runner_bash
+FROM debian:bookworm-slim AS github_runner_tools
 
 RUN set -eux; \
-    mkdir -p /github-runner-tools/bin; \
-    cp /bin/bash /github-runner-tools/bin/bash; \
-    ldd /bin/bash \
-        | awk '$1 ~ /^libtinfo/ { print $3 }' \
-        | xargs -r -I '{}' cp --parents '{}' /github-runner-tools
+    tools="bash tail tar cat grep env tr head mkdir chmod mv sleep"; \
+    mkdir -p /github-runner-tools/usr/local/bin /github-runner-tools/opt/dynamo/lib; \
+    for tool in ${tools}; do \
+        tool_path="$(command -v "${tool}")"; \
+        cp -L "${tool_path}" "/github-runner-tools/usr/local/bin/${tool}"; \
+        ldd "${tool_path}" \
+            | awk '/=> \// { print $3 } /^\// { print $1 }' \
+            | grep -Ev '/(ld-linux|libc\.so)' \
+            | while read -r lib_path; do \
+                cp -L "${lib_path}" "/github-runner-tools/opt/dynamo/lib/$(basename "${lib_path}")"; \
+            done; \
+    done
 
 FROM test_image AS test_planner
 
 # The planner runtime is distroless, so add supporting software for GitHub Actions.
 USER root
-COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/tail
-COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/tar
-COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/cat
-COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/grep
-COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/env
-COPY --from=github_runner_bash /github-runner-tools/ /
+COPY --from=github_runner_tools /github-runner-tools/ /
 
 USER dynamo
