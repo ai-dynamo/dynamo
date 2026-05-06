@@ -12,15 +12,76 @@
 # TODO: Change to DynamoGraphDeployment once supported. The Dynamo Operator
 # currently only accepts `backendFramework` values `vllm`, `sglang`, `trtllm`
 # (see deploy/operator/api/v1beta1/common.go). Until tokenspeed is added to
-# that enum, this recipe wires the three processes the operator would otherwise
-# generate (nats event-plane + frontend HTTP router + worker engine) as plain
-# Deployments and Services, plus the in-cluster Kubernetes API for discovery
-# (`--discovery-backend kubernetes` — no separate etcd needed). The Service
-# names mirror the operator-generated naming so port-forward instructions
-# stay stable across the migration.
+# that enum, this recipe wires the four processes the operator would otherwise
+# generate (etcd discovery + nats event-plane + frontend HTTP router + worker
+# engine) as plain Deployments and Services. The Service names mirror the
+# operator-generated naming so port-forward instructions stay stable across
+# the migration.
+#
+# Why a self-contained etcd sidecar instead of `--discovery-backend kubernetes`:
+# the K8s-native discovery client requires operator-stamped scaffolding
+# (downward-API env, the `dynamoworkermetadatas.nvidia.com` CRD, RBAC for
+# DynamoWorkerMetadata + EndpointSlices, labeled worker Service/EndpointSlice).
+# Replicating that scaffolding by hand defeats the "no operator required"
+# stance of this recipe, so we keep etcd here and let the eventual DGD
+# migration delegate all of it to the operator.
 
 # ---------------------------------------------------------------------------
-# 1. nats — event-plane (with JetStream)
+# 1. etcd — discovery backend
+# ---------------------------------------------------------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kimi-k25-tokenspeed-etcd
+  labels:
+    app: kimi-k25-tokenspeed
+    component: etcd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kimi-k25-tokenspeed
+      component: etcd
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-tokenspeed
+        component: etcd
+    spec:
+      containers:
+        - name: etcd
+          image: gcr.io/etcd-development/etcd:v3.6.7
+          command:
+            - /usr/local/bin/etcd
+          args:
+            - --data-dir=/var/run/etcd/data
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --advertise-client-urls=http://0.0.0.0:2379
+          ports:
+            - containerPort: 2379
+              name: client
+          volumeMounts:
+            - name: data
+              mountPath: /var/run/etcd
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kimi-k25-tokenspeed-etcd
+spec:
+  selector:
+    app: kimi-k25-tokenspeed
+    component: etcd
+  ports:
+    - port: 2379
+      targetPort: 2379
+      name: client
+# ---------------------------------------------------------------------------
+# 2. nats — event-plane (with JetStream)
 # ---------------------------------------------------------------------------
 ---
 apiVersion: apps/v1
@@ -68,7 +129,7 @@ spec:
       targetPort: 4222
       name: client
 # ---------------------------------------------------------------------------
-# 2. Frontend — HTTP router (KV-aware)
+# 3. Frontend — HTTP router (KV-aware)
 # ---------------------------------------------------------------------------
 ---
 apiVersion: apps/v1
@@ -103,6 +164,8 @@ spec:
           args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           env:
+            - name: ETCD_ENDPOINTS
+              value: http://kimi-k25-tokenspeed-etcd:2379
             - name: NATS_SERVER
               value: nats://kimi-k25-tokenspeed-nats:4222
             - name: HF_HOME
@@ -131,7 +194,7 @@ spec:
       targetPort: 8000
       name: http
 # ---------------------------------------------------------------------------
-# 3. Worker — TokenSpeed engine
+# 4. Worker — TokenSpeed engine
 # ---------------------------------------------------------------------------
 ---
 apiVersion: apps/v1
@@ -175,7 +238,7 @@ spec:
           args:
             - |
               python3 -m dynamo.tokenspeed \
-                --discovery-backend kubernetes \
+                --discovery-backend etcd \
                 --request-plane tcp \
                 --event-plane nats \
                 --dyn-reasoning-parser kimi_k25 \
@@ -197,6 +260,8 @@ spec:
             - secretRef:
                 name: hf-token-secret
           env:
+            - name: ETCD_ENDPOINTS
+              value: http://kimi-k25-tokenspeed-etcd:2379
             - name: NATS_SERVER
               value: nats://kimi-k25-tokenspeed-nats:4222
             - name: MODEL_PATH

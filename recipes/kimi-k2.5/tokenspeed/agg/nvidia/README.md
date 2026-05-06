@@ -16,14 +16,21 @@ Kimi K2.5 / K2.6.
 > **Note: raw Kubernetes primitives, not `DynamoGraphDeployment`.** The Dynamo
 > Operator's CRD currently only validates `backendFramework` values `vllm`, `sglang`,
 > `trtllm` (see `deploy/operator/api/v1beta1/common.go`). Until `tokenspeed` is added
-> to that enum, this recipe wires the three processes the operator would otherwise
-> generate (NATS event-plane + frontend HTTP router + worker engine) as plain
-> `Deployment`s and `Service`s, plus the in-cluster Kubernetes API for discovery
-> (`--discovery-backend kubernetes` — no separate etcd needed). The frontend Service
-> is named `kimi-k25-tokenspeed-agg-frontend` to match the operator-generated naming
-> so port-forward instructions stay stable across the migration to
+> to that enum, this recipe wires the four processes the operator would otherwise
+> generate (etcd discovery + NATS event-plane + frontend HTTP router + worker engine)
+> as plain `Deployment`s and `Service`s. The frontend Service is named
+> `kimi-k25-tokenspeed-agg-frontend` to match the operator-generated naming so
+> port-forward instructions stay stable across the migration to
 > `DynamoGraphDeployment` once supported. The `deploy.yaml` carries an inline TODO
 > marking the swap point.
+>
+> **Why etcd and not `--discovery-backend kubernetes`**: the K8s-native discovery
+> client requires operator-stamped scaffolding (downward-API env, the
+> `dynamoworkermetadatas.nvidia.com` CRD, RBAC for `DynamoWorkerMetadata` +
+> `EndpointSlices`, labeled worker `Service`/`EndpointSlice`). Replicating that by
+> hand defeats this recipe's "no operator required" stance, so we keep etcd as a
+> self-contained sidecar; the eventual DGD migration delegates all of it to the
+> operator.
 
 ## Image — local build required
 
@@ -118,17 +125,19 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 kubectl apply -f deploy.yaml -n ${NAMESPACE}
 ```
 
-This creates three Deployments + two Services:
+This creates four Deployments + three Services:
 
 | Resource | Purpose | Image |
 |---|---|---|
+| `kimi-k25-tokenspeed-etcd` (Deployment + Service) | Discovery backend | `gcr.io/etcd-development/etcd:v3.6.7` |
 | `kimi-k25-tokenspeed-nats` (Deployment + Service) | Event plane (JetStream) | `nats:2.12.4` |
 | `kimi-k25-tokenspeed-frontend` (Deployment) | `dynamo.frontend` in KV-router mode on port 8000 | your locally-built `dynamo-tokenspeed` |
 | `kimi-k25-tokenspeed-agg-frontend` (Service) | Stable name for port-forward; selects the frontend Deployment | — |
 | `kimi-k25-tokenspeed-worker` (Deployment) | `dynamo.tokenspeed` against `nvidia/Kimi-K2.5-NVFP4`, TP=4 + EP=4, NVFP4 weights, FP8 KV cache, MLA attention via `trtllm_mla`, MoE via `flashinfer_trtllm`, with `kimi_k25` reasoning + `kimi_k2` tool-call parsers | your locally-built `dynamo-tokenspeed` |
 
-Discovery uses the in-cluster Kubernetes API (`--discovery-backend kubernetes`),
-not a separate etcd; only the NATS event-plane needs a sidecar Deployment.
+Discovery uses the etcd Service (`--discovery-backend etcd`, `ETCD_ENDPOINTS=http://kimi-k25-tokenspeed-etcd:2379`)
+on both the frontend and the worker; the event plane uses the nats Service
+(`NATS_SERVER=nats://kimi-k25-tokenspeed-nats:4222`).
 
 ## Test the deployment
 
@@ -183,10 +192,10 @@ explicit user-side wiring.
 - `--kv-cache-dtype fp8`: paired with `--quantization nvfp4`, halves the KV cache
   footprint vs BF16 KV at no measurable accuracy loss for chat workloads.
 - `--gpu-memory-utilization 0.80`: lower than TokenSpeed's 0.85 default. The Dynamo
-  worker layer (Kubernetes-API discovery client, NATS event-plane subscriber, and
-  TCP request-plane listener) holds additional memory beyond the engine, and the
-  default headroom is too tight for K2.5's MoE weight init. 0.75 is too low — the
-  engine sizes the KV cache pool negative.
+  worker layer (etcd watcher, NATS event-plane subscriber, and TCP request-plane
+  listener) holds additional memory beyond the engine, and the default headroom is
+  too tight for K2.5's MoE weight init. 0.75 is too low — the engine sizes the KV
+  cache pool negative.
 - `--dyn-reasoning-parser kimi_k25 --dyn-tool-call-parser kimi_k2`: the upstream
   TokenSpeed recipe uses `--reasoning-parser kimi_k2 --tool-call-parser kimi_k2`,
   which apply at the engine level. Dynamo intercepts these at the worker layer
