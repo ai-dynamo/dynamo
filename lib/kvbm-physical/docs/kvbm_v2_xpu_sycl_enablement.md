@@ -224,7 +224,7 @@ graph TB
     end
 
     subgraph physical["kvbm-physical"]
-        TM["TransferManager<br/>TransferContext<br/>stream pools × 4"]
+        TM["TransferManager<br/>TransferContext<br/>stream pools × 2"]
         Exec["execute_device_transfer<br/>whole-block vs FC↔LW"]
         DC["DeviceContext"]
         DS["DeviceStream"]

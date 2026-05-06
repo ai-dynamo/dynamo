@@ -173,16 +173,14 @@ still owns.
 # lib/kvbm-engine/Cargo.toml
 nccl       = ["dep:cudarc"]
 oneccl     = ["dep:oneapi-rs"]
-collectives = ["nccl"]          # historical alias; see gotcha below
+collectives = ["nccl"]          # backward-compat alias for nccl
 ```
 
-**Current gotcha**: `collectives = ["nccl"]` still gates
-`worker/physical::replicated` at the source level, which means a
-`--features oneccl` (no `nccl`) build does **not** include
-`ReplicatedDataWorker`. Fix: change the module gate in
-`worker/physical.rs` to `#[cfg(any(feature = "nccl", feature =
-"oneccl"))]` and drop the `collectives = ["nccl"]` indirection, or add
-`collectives` to the `oneccl` feature list. Tracked separately.
+`worker/physical::replicated` (and the re-exported
+`ReplicatedDataWorker`) are gated on `any(feature = "nccl", feature =
+"oneccl")`, so either collective backend pulls the module in. The
+`collectives` alias is kept so existing CUDA callers that pass
+`--features collectives` keep working unchanged.
 
 ## Test layout
 
