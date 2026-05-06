@@ -50,7 +50,7 @@ class WorkerConfig:
     reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
-    metrics_labels: list = field(default_factory=list)
+    metrics_labels: list[tuple[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_runtime_config(
