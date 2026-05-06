@@ -18,10 +18,18 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 
-DEFAULT_ENDPOINT_COMPONENT = "backend"
+DEFAULT_BACKEND_COMPONENT = "backend"
+DEFAULT_PREFILL_COMPONENT = "prefill"
 DEFAULT_ENDPOINT_NAME = "generate"
+
+# TokenSpeed upstream only ships Mooncake-family transports today
+# (`tokenspeed/runtime/utils/server_args.py:1619-1623`). Reject anything else
+# at config-resolution time so prefill/decode workers don't both come up only
+# to fail at the first KV transfer.
+SUPPORTED_DISAGG_TRANSFER_BACKENDS = frozenset({"mooncake", "mooncake_async"})
 
 
 class Config(DynamoRuntimeConfig):
@@ -31,6 +39,7 @@ class Config(DynamoRuntimeConfig):
     model: str
     served_model_name: Optional[str] = None
     server_args: Any
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -83,6 +92,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     config.served_model_name = server_args.served_model_name or server_args.model
     server_args.served_model_name = config.served_model_name
     config.server_args = server_args
+    config.disaggregation_mode = _resolve_disaggregation_mode(server_args)
+    _validate_disagg_transfer_backend(config.disaggregation_mode, server_args)
 
     config.validate()
 
@@ -98,9 +109,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     else:
         config.custom_jinja_template = None
 
+    default_component = (
+        DEFAULT_PREFILL_COMPONENT
+        if config.disaggregation_mode == DisaggregationMode.PREFILL
+        else DEFAULT_BACKEND_COMPONENT
+    )
     endpoint = (
         config.endpoint
-        or f"dyn://{config.namespace}.{DEFAULT_ENDPOINT_COMPONENT}.{DEFAULT_ENDPOINT_NAME}"
+        or f"dyn://{config.namespace}.{default_component}.{DEFAULT_ENDPOINT_NAME}"
     )
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         endpoint
@@ -139,3 +155,33 @@ def kv_events_enabled(kv_events_config: Any) -> bool:
     if publisher is None:
         publisher = "zmq" if enabled else "null"
     return enabled and publisher != "null"
+
+
+def _resolve_disaggregation_mode(server_args: Any) -> DisaggregationMode:
+    """Map TokenSpeed's --disaggregation-mode string to Dynamo's enum.
+
+    TokenSpeed accepts ``null`` (aggregated), ``prefill``, and ``decode``
+    (`tokenspeed/runtime/utils/server_args.py:1593-1623`). ``null`` is the
+    string the parser stores when the flag is unset.
+    """
+    raw = getattr(server_args, "disaggregation_mode", None)
+    if raw == "prefill":
+        return DisaggregationMode.PREFILL
+    if raw == "decode":
+        return DisaggregationMode.DECODE
+    return DisaggregationMode.AGGREGATED
+
+
+def _validate_disagg_transfer_backend(
+    mode: DisaggregationMode, server_args: Any
+) -> None:
+    if mode == DisaggregationMode.AGGREGATED:
+        return
+    backend = getattr(server_args, "disaggregation_transfer_backend", None)
+    if backend not in SUPPORTED_DISAGG_TRANSFER_BACKENDS:
+        raise ValueError(
+            "TokenSpeed Dynamo backend supports "
+            f"--disaggregation-transfer-backend in "
+            f"{sorted(SUPPORTED_DISAGG_TRANSFER_BACKENDS)} for disaggregated "
+            f"mode; got {backend!r}"
+        )

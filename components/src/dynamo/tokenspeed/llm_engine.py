@@ -20,22 +20,33 @@ from dynamo.common.backend.engine import (
     LLMEngine,
 )
 from dynamo.common.backend.worker import WorkerConfig
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, ModelType
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import (
     kv_events_config_dict,
     kv_events_enabled,
     parse_args,
 )
+from dynamo.tokenspeed.disagg import (
+    runtime_disaggregated_endpoint,
+    validate_disagg_compatibility,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class TokenspeedLLMEngine(LLMEngine):
-    def __init__(self, server_args: Any, dynamo_config: Any | None = None):
+    def __init__(
+        self,
+        server_args: Any,
+        dynamo_config: Any | None = None,
+        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+    ):
         self.server_args = server_args
         self.dynamo_config = dynamo_config
+        self.disaggregation_mode = disaggregation_mode
         self.engine = None
         self._model_max_len: int | None = None
         self._active_rids_by_context: dict[str, list[str]] = {}
@@ -46,7 +57,11 @@ class TokenspeedLLMEngine(LLMEngine):
         cls, argv: list[str] | None = None
     ) -> tuple[TokenspeedLLMEngine, WorkerConfig]:
         config = parse_args(argv)
-        engine = cls(config.server_args, config)
+        engine = cls(
+            config.server_args,
+            dynamo_config=config,
+            disaggregation_mode=config.disaggregation_mode,
+        )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -56,6 +71,8 @@ class TokenspeedLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self) -> EngineConfig:
+        validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
+
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
         self.engine = _tokenspeed_engine_cls()(server_args=self.server_args)
@@ -86,6 +103,19 @@ class TokenspeedLLMEngine(LLMEngine):
             or getattr(self.server_args, "max_prefill_tokens", None)
         )
 
+        disagg_kwargs: dict[str, Any] = {}
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            # Prefill workers register on the prefill router and advertise the
+            # Mooncake bootstrap endpoint so the router can synthesize
+            # disaggregated_state into each decode request.
+            disagg_kwargs["model_type"] = ModelType.Prefill
+            disagg_kwargs["disaggregated_endpoint"] = runtime_disaggregated_endpoint(
+                self.server_args
+            )
+            # Prefill workers ship KV out-of-band; a local prefix-match indexer
+            # would just track blocks that are already gone.
+            disagg_kwargs["enable_local_indexer"] = False
+
         return EngineConfig(
             model=self.server_args.model,
             served_model_name=self.server_args.served_model_name,
@@ -97,6 +127,7 @@ class TokenspeedLLMEngine(LLMEngine):
                 or getattr(self.server_args, "max_num_seqs", None)
             ),
             max_num_batched_tokens=max_num_batched_tokens,
+            **disagg_kwargs,
         )
 
     async def start_kv_events(self, endpoint: Any, engine_config: EngineConfig) -> None:
@@ -151,10 +182,15 @@ class TokenspeedLLMEngine(LLMEngine):
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
         token_ids = request.get("token_ids", [])
+
+        bootstrap_kwargs = _bootstrap_kwargs_for_request(
+            self.disaggregation_mode, request
+        )
         obj = _generate_req_input_cls()(
             input_ids=token_ids,
             sampling_params=sampling_params,
             stream=True,
+            **bootstrap_kwargs,
         )
 
         request_id = context.id()
@@ -377,6 +413,41 @@ def _merge_stop_token_ids(*token_id_lists: Any) -> list[int]:
                 seen.add(token_id)
                 merged.append(token_id)
     return merged
+
+
+_BOOTSTRAP_KEYS = ("bootstrap_host", "bootstrap_port", "bootstrap_room")
+
+
+def _bootstrap_kwargs_for_request(
+    mode: DisaggregationMode, request: GenerateRequest
+) -> dict[str, Any]:
+    """Extract Mooncake bootstrap kwargs for ``GenerateReqInput``.
+
+    Both prefill and decode TokenSpeed workers receive the same
+    ``{bootstrap_host, bootstrap_port, bootstrap_room}`` triple from
+    Dynamo's ``PrefillRouter`` (router-resolved bootstrap mode). The room
+    is per-request; the host/port identify the prefill side's Mooncake
+    server. Aggregated workers don't see disaggregated_state at all.
+    """
+    if mode == DisaggregationMode.AGGREGATED:
+        return {}
+
+    state = request.get("disaggregated_state") or {}
+    if not state:
+        raise InvalidArgument(
+            f"TokenSpeed worker in disaggregation_mode={mode.value} requires "
+            "disaggregated_state on the request "
+            "(bootstrap_host/bootstrap_port/bootstrap_room)"
+        )
+
+    missing = [key for key in _BOOTSTRAP_KEYS if state.get(key) is None]
+    if missing:
+        raise InvalidArgument(
+            f"TokenSpeed worker missing bootstrap fields {missing} in "
+            f"disaggregated_state; got keys={sorted(state.keys())}"
+        )
+
+    return {key: state[key] for key in _BOOTSTRAP_KEYS}
 
 
 def _validate_single_choice_sampling(request: GenerateRequest) -> None:
