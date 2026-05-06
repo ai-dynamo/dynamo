@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DYNAMO_SRC_IMAGE=dynamo:latest-sglang-runtime
-ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-grace-blackwell@sha256:7fee20a945cbb6ae26e8544a9e3dc2d50a2adbed851d8c2b02bac9e9e5c734a0
+# based on https://github.com/sgl-project/sglang/pull/23600/changes/1b497c7a0c5a2951ae86f21f4cfebe4678bbc7e4
+ARG DSV4_BASE_IMAGE=lmsysorg/sglang:deepseek-v4-grace-blackwell@sha256:e0a0ebb70572a70d2a90759de96482e7f482d501283c48c3393b1e62198051ef
 
 FROM ${DYNAMO_SRC_IMAGE} AS dynamo_src
 
