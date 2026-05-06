@@ -7,6 +7,7 @@ import pytest
 
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.llm_engine import (
+    _completion_delta_output,
     _validate_single_choice_sampling,
     build_sampling_params,
     convert_output_to_chunk,
@@ -183,3 +184,28 @@ def test_validate_single_choice_sampling_rejects_n_greater_than_one():
         _validate_single_choice_sampling(
             {"token_ids": [1], "sampling_options": {"n": 2}}
         )
+
+
+def test_completion_delta_output_strips_first_chunk_prompt_echo():
+    out = {
+        "output_ids": [10, 11, 12, 99],
+        "meta_info": {"completion_tokens": 1},
+    }
+
+    delta_out, emitted = _completion_delta_output(out, 0)
+
+    assert emitted == 1
+    assert delta_out["output_ids"] == [99]
+    assert out["output_ids"] == [10, 11, 12, 99]
+
+
+def test_completion_delta_output_preserves_later_token_delta():
+    out = {
+        "output_ids": [100],
+        "meta_info": {"completion_tokens": 2},
+    }
+
+    delta_out, emitted = _completion_delta_output(out, 1)
+
+    assert emitted == 2
+    assert delta_out["output_ids"] == [100]

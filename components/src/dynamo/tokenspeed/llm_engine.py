@@ -112,9 +112,13 @@ class TokenspeedLLMEngine(LLMEngine):
             obj.rid = request_id
             self._active_rids_by_context[request_id] = [request_id]
 
+        emitted_completion_tokens = 0
         try:
             async for out in self.engine.tokenizer_manager.generate_request(obj):
-                yield convert_output_to_chunk(out)
+                delta_out, emitted_completion_tokens = _completion_delta_output(
+                    out, emitted_completion_tokens
+                )
+                yield convert_output_to_chunk(delta_out)
         finally:
             if request_id is not None:
                 self._active_rids_by_context.pop(request_id, None)
@@ -212,6 +216,38 @@ def convert_output_to_chunk(out: dict[str, Any]) -> GenerateChunk:
         }
 
     return chunk
+
+
+def _completion_delta_output(
+    out: dict[str, Any],
+    previously_emitted: int,
+) -> tuple[dict[str, Any], int]:
+    meta_info = out.get("meta_info", {}) or {}
+    completion_tokens = meta_info.get("completion_tokens")
+    if completion_tokens is None:
+        return out, previously_emitted
+
+    try:
+        total_emitted = int(completion_tokens)
+    except (TypeError, ValueError):
+        return out, previously_emitted
+
+    delta_count = max(0, total_emitted - previously_emitted)
+    output_ids = out.get("output_ids", []) or []
+    if delta_count == 0:
+        delta_ids: list[int] = []
+    elif len(output_ids) >= delta_count:
+        # TokenSpeed's first streamed output can include echoed prompt/context
+        # tokens even though meta_info.completion_tokens only counts newly
+        # generated tokens. Dynamo expects token deltas, so keep the newest
+        # completion-token suffix.
+        delta_ids = output_ids[-delta_count:]
+    else:
+        delta_ids = output_ids
+
+    delta_out = dict(out)
+    delta_out["output_ids"] = delta_ids
+    return delta_out, total_emitted
 
 
 def _guided_decoding_params(guided_decoding: dict[str, Any]) -> dict[str, Any]:
