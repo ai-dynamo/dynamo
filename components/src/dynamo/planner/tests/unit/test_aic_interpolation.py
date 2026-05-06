@@ -140,7 +140,7 @@ class TestPickedToAicKwargs:
         self._assert_identity(kw)
 
     def test_hybrid_tep_plus_dp(self):
-        # Hybrid: attention TP=2 × DP=4, MoE TP=2 × EP=4, 16 total GPUs.
+        # Hybrid: attention TP=2 x DP=4, MoE TP=2 x EP=4, 8 physical GPUs.
         p = PickedParallelConfig(tp=2, pp=1, dp=4, moe_tp=2, moe_ep=4)
         kw = picked_to_aic_model_config_kwargs(p)
         assert kw["tp_size"] == 2
@@ -159,6 +159,44 @@ class TestPickedToAicKwargs:
         # tp_size in AIC terms equals p.tp (1 here), not derived from p.tp_size
         assert kw["tp_size"] == p.tp == 1
         self._assert_identity(kw)
+
+
+class TestPickedParallelConfigNumGpus:
+    @pytest.mark.parametrize(
+        ("pick", "expected"),
+        [
+            (
+                PickedParallelConfig(tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1),
+                8,
+            ),
+            (
+                PickedParallelConfig(tp=8, pp=2, dp=1, moe_tp=1, moe_ep=1),
+                16,
+            ),
+            (
+                PickedParallelConfig(tp=1, pp=1, dp=8, moe_tp=1, moe_ep=8),
+                8,
+            ),
+            (
+                PickedParallelConfig(tp=1, pp=1, dp=8, moe_tp=2, moe_ep=4),
+                8,
+            ),
+            (
+                PickedParallelConfig(tp=2, pp=1, dp=4, moe_tp=2, moe_ep=4),
+                8,
+            ),
+            (
+                PickedParallelConfig(tp=8, pp=1, dp=8, moe_tp=1, moe_ep=1),
+                8,
+            ),
+            (
+                PickedParallelConfig(tp=8, pp=2, dp=8, moe_tp=1, moe_ep=1),
+                16,
+            ),
+        ],
+    )
+    def test_num_gpus_tracks_physical_engine_width(self, pick, expected):
+        assert pick.num_gpus == expected
 
 
 class TestAICInterpolationSpec:

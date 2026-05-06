@@ -52,7 +52,8 @@ class PlannerConfig(BaseModel):
         "kubernetes", "virtual", "global-planner"
     ] = SLAPlannerDefaults.environment
     namespace: str = Field(
-        default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo")
+        default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
+        exclude=True,
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
@@ -109,7 +110,8 @@ class PlannerConfig(BaseModel):
         default_factory=lambda: os.environ.get(
             "PROMETHEUS_ENDPOINT",
             "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
-        )
+        ),
+        exclude=True,
     )
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
@@ -180,6 +182,9 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
+        if self.ttft <= 0:
+            raise ValueError(f"ttft must be > 0, got {self.ttft}")
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)

@@ -82,13 +82,21 @@ vllm_configs = {
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
+                480
+            ),  # vLLM 0.20.x startup can exceed 360s on contended CI runners
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             chat_payload(
                 "Can you write me a song?",
@@ -113,7 +121,7 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(360),
+            pytest.mark.timeout(480),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -588,7 +596,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            pytest.mark.timeout(180),  # vLLM 0.20.x needs more CI headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -722,6 +730,8 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(9.6)  # same Qwen3-VL-2B agg multimodal profile
+@pytest.mark.requested_vllm_kv_cache_bytes(922_354_000)
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
@@ -823,6 +833,7 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.profiled_vram_gib(4.0)  # actual nvidia-smi peak with kv-bytes cap
 @pytest.mark.requested_vllm_kv_cache_bytes(
     941_712_000
@@ -882,6 +893,7 @@ def test_lora_aggregated(
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)

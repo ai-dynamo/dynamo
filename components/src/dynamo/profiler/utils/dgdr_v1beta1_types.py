@@ -82,6 +82,11 @@ class BackendType(str, Enum):
     Vllm = "vllm"
 
 
+class OptimizationType(str, Enum):
+    Latency = "latency"
+    Throughput = "throughput"
+
+
 class WorkloadSpec(BaseModel):
     """WorkloadSpec defines the workload characteristics for SLA-based profiling."""
 
@@ -120,6 +125,10 @@ class SLASpec(BaseModel):
     e2eLatency: Optional[float] = Field(
         default=None,
         description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.",
+    )
+    optimizationType: Optional[OptimizationType] = Field(
+        default=None,
+        description="OptimizationType is the optimization target for SLA profiling. Valid values: latency, throughput.",
     )
 
     @model_validator(mode="after")
@@ -243,7 +252,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2".',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,

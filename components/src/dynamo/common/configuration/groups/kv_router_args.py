@@ -31,8 +31,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_snapshot_threshold",
     "router_reset_states",
     "router_ttl_secs",
-    "router_max_tree_size",
-    "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
     "router_queue_policy",
@@ -59,8 +57,6 @@ class KvRouterConfigBase(ConfigBase):
     router_snapshot_threshold: int
     router_reset_states: bool
     router_ttl_secs: float
-    router_max_tree_size: int
-    router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
     router_queue_policy: str
@@ -234,28 +230,6 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-max-tree-size",
-            env_var="DYN_ROUTER_MAX_TREE_SIZE",
-            default=2**20,
-            help=(
-                "KV Router: Maximum tree size before pruning when KV events are disabled. "
-                "Only used when --no-router-kv-events is set."
-            ),
-            arg_type=int,
-        )
-        add_argument(
-            g,
-            flag_name="--router-prune-target-ratio",
-            env_var="DYN_ROUTER_PRUNE_TARGET_RATIO",
-            default=0.8,
-            help=(
-                "KV Router: Target size ratio after pruning when KV events are disabled. "
-                "Only used when --no-router-kv-events is set."
-            ),
-            arg_type=float,
-        )
-        add_argument(
-            g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
             default=4.0,
@@ -263,7 +237,12 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue as soon as any tokens are active)."
+                "queueing sensitivity (queue as soon as any tokens are active). "
+                "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
+                "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
+                "cache pool size), not the per-step prefill window, which inflates "
+                "the threshold's effective denominator. Set --max-prefill-tokens "
+                "explicitly for predictable semantics, or use a smaller threshold."
             ),
             arg_type=float,
         )

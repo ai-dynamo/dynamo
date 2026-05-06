@@ -106,21 +106,11 @@ impl DefaultWorkerSelector {
         shared_cache_multiplier: f64,
         formula_name: &'static str,
     ) -> f64 {
-        let isl = request.isl_tokens;
-        let effective_overlap_blocks = request
-            .effective_overlap_blocks
-            .get(&worker)
-            .copied()
-            .unwrap_or(0.0);
+        let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
         // `shared_cache_hits::hits_beyond` expects an integer block count, so
         // round the weighted overlap for this comparison only.
         let device_overlap_blocks = effective_overlap_blocks.round().max(0.0) as u32;
-        let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
-        let prefill_token = request
-            .prefill_tokens
-            .get(&worker)
-            .copied()
-            .unwrap_or(default_prefill_token);
+        let prefill_token = request.prefill_tokens_for(worker);
 
         // Adjust prefill tokens by shared cache hits beyond this worker's device prefix.
         let (adjusted_prefill_token, shared_beyond) =
@@ -176,19 +166,17 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         assert!(request.isl_tokens > 0);
         request.validate_worker_constraints()?;
 
-        let allowed_ids = request.allowed_worker_ids.as_ref();
         let pinned_worker = request.pinned_worker;
 
         if pinned_worker.is_none()
-            && allowed_ids.map_or(workers.is_empty(), |ids| {
-                !workers.keys().any(|wid| ids.contains(wid))
-            })
+            && !workers
+                .keys()
+                .any(|worker_id| request.is_worker_allowed(*worker_id))
         {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        let isl = request.isl_tokens;
-        let request_blocks = isl.div_ceil(block_size as usize);
+        let request_blocks = request.request_blocks(block_size);
 
         let overlap_weight = request
             .router_config_override
@@ -213,16 +201,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 shared_cache_multiplier,
                 "Pinned formula",
             );
-            let effective_overlap_blocks = request
-                .effective_overlap_blocks
-                .get(&worker)
-                .copied()
-                .unwrap_or(0.0);
-            let cached_tokens = request
-                .effective_cached_tokens
-                .get(&worker)
-                .copied()
-                .unwrap_or(0);
+            let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
+            let cached_tokens = request.effective_cached_tokens_for(worker);
 
             tracing::info!(
                 "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
@@ -235,7 +215,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
             return Ok(WorkerSelectionResult {
                 worker,
-                required_blocks: request_blocks as u64,
+                required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
             });
@@ -260,7 +240,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let worker_iter = workers
             .iter()
-            .filter(move |(wid, _)| allowed_ids.is_none_or(|ids| ids.contains(wid)))
+            .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();
                 let data_parallel_start_rank = config.data_parallel_start_rank();
@@ -283,21 +263,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
 
             if min_workers.len() > 1 {
-                tracing::debug!(
-                    "Multiple workers tied with same logit, using tree size as tie-breaker"
-                );
-                let tree_sizes: Vec<(usize, &WorkerWithDpRank)> = min_workers
-                    .iter()
-                    .map(|w| (request.tree_sizes.get(w).copied().unwrap_or(0), w))
-                    .collect();
-
-                if tree_sizes.iter().all(|(s, _)| *s == tree_sizes[0].0) {
-                    let idx = rand::rng().random_range(0..min_workers.len());
-                    (min_workers[idx], min_score)
-                } else {
-                    let (_, worker) = *tree_sizes.iter().min_by_key(|(s, _)| *s).unwrap();
-                    (*worker, min_score)
-                }
+                let idx = rand::rng().random_range(0..min_workers.len());
+                (min_workers[idx], min_score)
             } else {
                 (min_workers[0], min_score)
             }
@@ -334,35 +301,19 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 best_host_pinned_overlap_blocks,
                 best_disk_overlap_blocks,
             );
-            let effective_overlap_blocks = request
-                .effective_overlap_blocks
-                .get(&best_worker)
-                .copied()
-                .unwrap_or(0.0);
-            let cached_tokens = request
-                .effective_cached_tokens
-                .get(&best_worker)
-                .copied()
-                .unwrap_or(0);
+            let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
+            let cached_tokens = request.effective_cached_tokens_for(best_worker);
 
             return Ok(WorkerSelectionResult {
                 worker: best_worker,
-                required_blocks: request_blocks as u64,
+                required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
             });
         }
 
-        let best_overlap = request
-            .effective_overlap_blocks
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0.0);
-        let best_cached_tokens = request
-            .effective_cached_tokens
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
+        let best_overlap = request.effective_overlap_blocks_for(best_worker);
+        let best_cached_tokens = request.effective_cached_tokens_for(best_worker);
 
         let total_blocks_info = workers
             .get(&best_worker.worker_id)
@@ -370,10 +321,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .map(|blocks| format!(", total blocks: {}", blocks))
             .unwrap_or_default();
 
-        let tree_size = request.tree_sizes.get(&best_worker).copied().unwrap_or(0);
-
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}, tree size: {}{}",
+            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}{}",
             self.worker_type,
             best_worker.worker_id,
             best_worker.dp_rank,
@@ -381,13 +330,12 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             best_overlap,
             best_host_pinned_overlap_blocks,
             best_disk_overlap_blocks,
-            tree_size,
             total_blocks_info
         );
 
         Ok(WorkerSelectionResult {
             worker: best_worker,
-            required_blocks: request_blocks as u64,
+            required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
         })
@@ -553,7 +501,6 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,
             effective_cached_tokens: HashMap::new(),
-            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -604,7 +551,6 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,
             effective_cached_tokens: HashMap::new(),
-            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,

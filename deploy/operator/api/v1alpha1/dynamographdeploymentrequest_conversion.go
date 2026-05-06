@@ -169,6 +169,12 @@ const (
 	annDGDRProfilingJobName = "nvidia.com/dgdr-profiling-job-name"
 )
 
+// dgdrDeploymentStatusAnnotation preserves alpha deployment status with its source request state.
+type dgdrDeploymentStatusAnnotation struct {
+	DeploymentStatus
+	RequestState DGDRState `json:"requestState,omitempty"`
+}
+
 // ConvertTo converts this DynamoGraphDeploymentRequest (v1alpha1) to the Hub version (v1beta1).
 func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error {
 	dst, ok := dstRaw.(*v1beta1.DynamoGraphDeploymentRequest)
@@ -176,7 +182,7 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", dstRaw)
 	}
 
-	dst.ObjectMeta = src.ObjectMeta
+	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	if err := convertDGDRSpecTo(&src.Spec, &dst.Spec, dst); err != nil {
 		return err
@@ -194,10 +200,11 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", srcRaw)
 	}
 
-	dst.ObjectMeta = src.ObjectMeta
+	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
 	convertDGDRSpecFrom(&src.Spec, &dst.Spec, src)
 	convertDGDRStatusFrom(&src.Status, &dst.Status, src)
+	delAnnFromObj(&dst.ObjectMeta, annDGDRDeploymentStatus)
 
 	// ProfilingJobName — no v1alpha1 status field; store as annotation for round-trip
 	if src.Status.ProfilingJobName != "" {
@@ -290,6 +297,12 @@ func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.Dynam
 	}
 	if v, ok := slaMap["itl"].(float64); ok {
 		dst.SLA.ITL = &v
+	}
+	if v, ok := slaMap["optimizationType"].(string); ok {
+		ot := v1beta1.OptimizationType(v)
+		if ot == v1beta1.OptimizationTypeLatency || ot == v1beta1.OptimizationTypeThroughput {
+			dst.SLA.OptimizationType = &ot
+		}
 	}
 
 	if v, ok := slaMap["isl"].(float64); ok {
@@ -475,6 +488,9 @@ func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blo
 		if src.SLA.ITL != nil {
 			slaMap["itl"] = *src.SLA.ITL
 		}
+		if src.SLA.OptimizationType != nil {
+			slaMap["optimizationType"] = string(*src.SLA.OptimizationType)
+		}
 	}
 	if src.Workload != nil {
 		if src.Workload.ISL != nil {
@@ -614,7 +630,11 @@ func convertDGDRStatusTo(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.D
 	}
 	if src.Deployment != nil {
 		dst.DGDName = src.Deployment.Name
-		if data, err := json.Marshal(src.Deployment); err == nil {
+		payload := dgdrDeploymentStatusAnnotation{
+			DeploymentStatus: *src.Deployment,
+			RequestState:     src.State,
+		}
+		if data, err := json.Marshal(payload); err == nil {
 			setAnnotation(dstObj, annDGDRDeploymentStatus, string(data))
 		}
 	}
@@ -646,9 +666,11 @@ func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 
 	if srcObj.Annotations != nil {
 		if v, ok := srcObj.Annotations[annDGDRDeploymentStatus]; ok && v != "" {
-			var depStatus DeploymentStatus
-			if err := json.Unmarshal([]byte(v), &depStatus); err == nil {
+			if depStatus, requestState, ok := restoreDGDRDeploymentStatus(v, src); ok {
 				dst.Deployment = &depStatus
+				if requestState != "" {
+					dst.State = requestState
+				}
 			}
 		}
 	}
@@ -659,6 +681,39 @@ func convertDGDRStatusFrom(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 			Name:    src.DGDName,
 			Created: false,
 		}
+	}
+}
+
+// restoreDGDRDeploymentStatus ignores stale deployment-status overlays after hub-side status edits.
+func restoreDGDRDeploymentStatus(raw string, src *v1beta1.DynamoGraphDeploymentRequestStatus) (DeploymentStatus, DGDRState, bool) {
+	var payload dgdrDeploymentStatusAnnotation
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return DeploymentStatus{}, "", false
+	}
+	if !isValidDGDRRequestState(payload.RequestState) {
+		return DeploymentStatus{}, "", false
+	}
+	if payload.Name != src.DGDName {
+		return DeploymentStatus{}, "", false
+	}
+	if dgdrStateToPhase(string(payload.RequestState), &payload.DeploymentStatus) != src.Phase {
+		return DeploymentStatus{}, "", false
+	}
+	return payload.DeploymentStatus, payload.RequestState, true
+}
+
+func isValidDGDRRequestState(state DGDRState) bool {
+	switch state {
+	case DGDRStateInitializing,
+		DGDRStatePending,
+		DGDRStateProfiling,
+		DGDRStateDeploying,
+		DGDRStateReady,
+		DGDRStateDeploymentDeleted,
+		DGDRStateFailed:
+		return true
+	default:
+		return false
 	}
 }
 

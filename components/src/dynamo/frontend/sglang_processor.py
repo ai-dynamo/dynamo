@@ -28,6 +28,7 @@ from dynamo.llm import (
     RouterMode,
     fetch_model,
 )
+from dynamo.llm.exceptions import InvalidArgument, Unknown
 from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
@@ -38,14 +39,7 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import (
-    PreprocessError,
-    extract_mm_urls,
-    handle_engine_error,
-    make_internal_error,
-    random_uuid,
-    worker_warmup,
-)
+from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +55,19 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
-def _unsupported_n_error(n: int) -> dict[str, Any]:
-    return {
-        "error": {
-            "message": (
-                f"Unsupported value: 'n={n}'. "
-                "This endpoint currently supports only n=1."
-            ),
-            "type": "invalid_request_error",
-            "param": "n",
-            "code": "unsupported_value",
-        }
-    }
+def _unsupported_n_message(n: int) -> str:
+    return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
+
+
+def _engine_error_message(
+    engine_response: Any,
+    request_id: str,
+) -> str:
+    """Extract a human-readable message from an invalid engine response."""
+    if isinstance(engine_response, dict) and engine_response.get("status") == "error":
+        backend_msg = engine_response.get("message") or "unknown backend error"
+        return f"Backend error for request {request_id}: {backend_msg}"
+    return f"Invalid engine response for request {request_id}"
 
 
 _FINISH_REASON_MAP: dict[str, str] = {
@@ -154,7 +149,7 @@ def _preprocess_worker(
 
     n = request.get("n", 1)
     if n != 1:
-        raise PreprocessError(_unsupported_n_error(n))
+        raise PreprocessError(_unsupported_n_message(n))
 
     dynamo_preproc = _build_dynamo_preproc(
         request,
@@ -339,8 +334,7 @@ class SglangProcessor:
             n = request.get("n", 1)
             if n != 1:
                 logger.error("Unsupported n=%d, only n=1 is supported", n)
-                yield _unsupported_n_error(n)
-                return
+                raise InvalidArgument(_unsupported_n_message(n))
 
             dynamo_preproc = _build_dynamo_preproc(
                 request,
@@ -350,15 +344,11 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
+        except InvalidArgument:
+            raise
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
-            yield {
-                "error": {
-                    "message": f"Preprocessing error: {exc}",
-                    "type": "internal_error",
-                }
-            }
-            return
+            raise Unknown(f"Preprocessing error: {exc}") from exc
 
         post = SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -397,19 +387,12 @@ class SglangProcessor:
                     await asyncio.wrap_future(future)
                 )
         except PreprocessError as exc:
-            yield exc.error_dict
-            return
+            raise InvalidArgument(str(exc)) from exc
         except Exception as exc:
             logger.exception(
                 "SGLang worker preprocessing failed for request %s", request_id
             )
-            yield {
-                "error": {
-                    "message": f"Worker error: {exc}",
-                    "type": "internal_error",
-                }
-            }
-            return
+            raise Unknown(f"Worker error: {exc}") from exc
 
         # --- Phase 2: Recreate parsers in main process (not picklable) ---
         tool_call_parser, reasoning_parser = create_parsers(
@@ -483,9 +466,17 @@ class SglangProcessor:
                 else:
                     engine_response = dynamo_response
 
-                if engine_response is None or "token_ids" not in engine_response:
-                    yield handle_engine_error(engine_response, request_id, logger)
-                    break
+                if (
+                    not isinstance(engine_response, dict)
+                    or "token_ids" not in engine_response
+                ):
+                    msg = _engine_error_message(engine_response, request_id)
+                    logger.error(
+                        "Engine returned an invalid response for request %s: %s",
+                        request_id,
+                        engine_response,
+                    )
+                    raise Unknown(msg)
 
                 new_ids = engine_response["token_ids"]
                 raw_finish = engine_response.get("finish_reason")
@@ -531,9 +522,13 @@ class SglangProcessor:
                     pending_token_ids = []
                     pending_usage = None
                     first_chunk = False
+        except Unknown:
+            raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
-            yield make_internal_error(request_id, str(e))
+            raise Unknown(
+                f"Error generating response for request {request_id}: {e}"
+            ) from e
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(
