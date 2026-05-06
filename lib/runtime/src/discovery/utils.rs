@@ -177,6 +177,7 @@ mod tests {
             endpoint: "generate".to_string(),
             card_json: serde_json::json!({ "display_name": name }),
             model_suffix: None,
+            priority: 0,
         }
     }
 
@@ -206,6 +207,7 @@ mod tests {
                 "lora": { "name": lora_name },
             }),
             model_suffix: Some(lora_name.to_string()),
+            priority: 0,
         }
     }
 
@@ -295,6 +297,7 @@ mod tests {
                 endpoint: "ep-a".to_string(),
                 card_json: serde_json::json!({ "display_name": "model-on-ep-a" }),
                 model_suffix: None,
+                priority: 0,
             })
             .await
             .unwrap();
@@ -307,6 +310,7 @@ mod tests {
                 endpoint: "ep-b".to_string(),
                 card_json: serde_json::json!({ "display_name": "model-on-ep-b" }),
                 model_suffix: None,
+                priority: 0,
             })
             .await
             .unwrap();
