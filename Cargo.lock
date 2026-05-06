@@ -2809,11 +2809,15 @@ name = "dynamo-vllm-backend"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "clap 4.6.1",
  "dynamo-backend-common",
  "futures",
+ "serde_json",
  "tokio",
+ "tracing",
+ "vllm-engine-core-client",
  "vllm-llm",
  "vllm-managed-engine",
 ]

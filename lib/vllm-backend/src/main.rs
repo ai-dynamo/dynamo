@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+mod convert;
+mod error;
 mod vllm_engine;
 
 fn main() -> anyhow::Result<()> {

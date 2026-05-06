@@ -9,7 +9,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Dynamo Rust backend skeleton for vLLM engine-core integration."
+description = "Dynamo Rust backend for vLLM engine-core integration."
 
 [[bin]]
 name = "dynamo-vllm-backend"
@@ -19,9 +19,13 @@ path = "src/main.rs"
 dynamo-backend-common = { workspace = true }
 
 anyhow = { workspace = true }
+async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
+vllm-engine-core-client = { path = "../../../vllm-frontend-rs/src/engine-core-client" }
 vllm-llm = { path = "../../../vllm-frontend-rs/src/llm" }
 vllm-managed-engine = { path = "../../../vllm-frontend-rs/src/managed-engine" }
