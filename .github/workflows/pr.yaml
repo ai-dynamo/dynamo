@@ -187,19 +187,19 @@ jobs:
 #       build_timeout_minutes: 60
 #     secrets: inherit
 
-#   sglang-build:
-#     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-#     needs: [changed-files]
-#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-#     uses: ./.github/workflows/shared-build-image.yml
-#     with:
-#       framework: sglang
-#       target: runtime
-#       cuda_version: '["12.9", "13.0"]'
-#       platform: 'linux/amd64,linux/arm64'
-#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-#       build_timeout_minutes: 60
-#     secrets: inherit
+  sglang-build:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
 
 #   sglang-dev-build:
 #     name: sglang-dev
@@ -314,39 +314,39 @@ jobs:
 #       gpu_test_timeout_minutes: 60
 #     secrets: inherit
 
-#   sglang-test:
-#     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-#     needs: [changed-files, sglang-build]
-#     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-#     uses: ./.github/workflows/shared-test.yml
-#     with:
-#       test_suite_name: sglang
-#       test_type: Test
-#       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
-#       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-#       cuda_version: '["12.9", "13.0"]'
-#       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-#       run_cpu_only_tests: true
-#       cpu_only_test_markers: pre_merge and sglang and gpu_0
-#       gpu_test_markers: pre_merge and sglang and gpu_1
-#     secrets: inherit
+  sglang-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and sglang and gpu_0
+      gpu_test_markers: pre_merge and sglang and gpu_1
+    secrets: inherit
 
-  # sglang-multi-gpu-test:
-  #   name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-  #   needs: [changed-files, sglang-build]
-  #   if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-  #   uses: ./.github/workflows/shared-test.yml
-  #   with:
-  #     test_suite_name: sglang
-  #     test_type: Multi-GPU Test
-  #     amd_runner: prod-tester-amd-gpu-4-v1
-  #     target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-  #     cuda_version: '["12.9", "13.0"]'
-  #     platform: '["amd64"]' # No ARM GPUs available
-  #     run_sanity_check: false
-  #     gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
-  #     gpu_test_timeout_minutes: 60
-  #   secrets: inherit
+  sglang-multi-gpu-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
 
 #   trtllm-test:
 #     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
