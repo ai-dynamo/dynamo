@@ -100,6 +100,14 @@ pub struct WorkerConfig {
     /// Optional path to a custom Jinja chat template. When `None`, the
     /// template shipped with `model_name` is used.
     pub custom_jinja_template: Option<PathBuf>,
+    /// Optional tool-call parser name written to model runtime metadata.
+    pub tool_call_parser: Option<String>,
+    /// Optional reasoning parser name written to model runtime metadata.
+    pub reasoning_parser: Option<String>,
+    /// Whether templates should omit tools when `tool_choice` is `none`.
+    pub exclude_tools_when_tool_choice_none: bool,
+    /// Whether this worker should keep an in-process KV indexer.
+    pub enable_local_indexer: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
     pub metrics_labels: Vec<(String, String)>,
@@ -119,6 +127,10 @@ impl Default for WorkerConfig {
             model_input: ModelInput::Tokens,
             endpoint_types: "chat,completions".to_string(),
             custom_jinja_template: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
+            exclude_tools_when_tool_choice_none: true,
+            enable_local_indexer: true,
             metrics_labels: Vec::new(),
             runtime: RuntimeConfig::default(),
         }
@@ -499,6 +511,10 @@ async fn build_local_model(
         total_kv_blocks: engine_config.total_kv_blocks,
         max_num_seqs: engine_config.max_num_seqs,
         max_num_batched_tokens: engine_config.max_num_batched_tokens,
+        tool_call_parser: config.tool_call_parser.clone(),
+        reasoning_parser: config.reasoning_parser.clone(),
+        exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
+        enable_local_indexer: config.enable_local_indexer,
         ..ModelRuntimeConfig::default()
     };
 

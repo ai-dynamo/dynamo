@@ -124,6 +124,19 @@ class LLMEngine(ABC):
         (KV cache, scheduler slots, etc.).
         """
 
+    async def drain(self) -> None:
+        """Drain in-flight engine work before cleanup (optional, default no-op).
+
+        Called once during graceful shutdown after the discovery unregister
+        + grace-period sleep, but before :meth:`cleanup`.  Use it for
+        backend-side draining that must complete while the distributed
+        runtime (NATS / etcd) is still alive — e.g. waiting for in-flight
+        NIXL KV transfers on prefill workers (issue #7319), so downstream
+        decode workers don't observe a use-after-free on freed GPU memory.
+
+        Failures are logged and swallowed; shutdown proceeds regardless.
+        """
+
     @abstractmethod
     async def cleanup(self) -> None:
         """Release all engine resources.
