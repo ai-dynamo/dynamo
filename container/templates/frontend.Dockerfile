@@ -8,7 +8,7 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
-FROM ${FRONTEND_IMAGE} AS frontend
+FROM ${FRONTEND_IMAGE} AS frontend_pre
 
 ARG PYTHON_VERSION
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
@@ -120,5 +120,44 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 
 USER dynamo
 
+ENTRYPOINT ["/epp"]
+CMD ["/bin/bash"]
+
+
+#######################################
+########## Compliance: licenses #######
+#######################################
+#
+# frontend uses /opt/dynamo/venv created earlier in this same stage.
+
+FROM frontend_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+RUN python3 -m compliance.generators \
+    --ecosystem python,rust,dpkg \
+    --venv ${VIRTUAL_ENV} \
+    --output-dir /legal \
+    -v
+RUN find /legal -name '*-deps.csv' -print0 | \
+    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input {}
+RUN find /legal -name '*-deps.csv' -print -exec sh -c \
+    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+
+
+FROM scratch AS sboms
+COPY --from=licenses /sboms/ /
+
+
+FROM scratch AS legal
+COPY --from=licenses /legal/ /
+
+
+FROM frontend_pre AS frontend
+COPY --from=licenses /legal /legal
 ENTRYPOINT ["/epp"]
 CMD ["/bin/bash"]

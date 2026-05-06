@@ -7,7 +7,7 @@
 ########## Runtime Image #########
 ##################################
 
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_pre
 
 WORKDIR /workspace
 
@@ -115,5 +115,62 @@ USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+
+#######################################
+########## Compliance: licenses #######
+#######################################
+#
+# SGLang inherits the upstream lmsysorg/sglang base, which uses the system
+# Python with `pip install --break-system-packages` rather than a venv.
+# So we resolve site-packages from sysconfig and pass --site-packages
+# explicitly. Same generator code path as the dynamo_runtime template
+# uses with --venv.
+
+FROM runtime_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+# Invoked ecosystems (rust today; python/dpkg are stubs that warn-but-don't-fail).
+# Excluded: go (no Go binaries), native (native_packages.yaml not yet on this branch).
+RUN python3 -m compliance.generators \
+    --ecosystem python,rust,dpkg \
+    --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    --output-dir /legal \
+    -v
+RUN find /legal -name '*-deps.csv' -print0 | \
+    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input {}
+RUN find /legal -name '*-deps.csv' -print -exec sh -c \
+    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+
+
+#######################################
+########## Compliance: sboms ##########
+#######################################
+
+FROM scratch AS sboms
+COPY --from=licenses /sboms/ /
+
+
+#######################################
+########## Compliance: legal ##########
+#######################################
+
+FROM scratch AS legal
+COPY --from=licenses /legal/ /
+
+
+#######################################
+########## Final runtime image ########
+#######################################
+
+FROM runtime_pre AS runtime
+COPY --from=licenses /legal /legal
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

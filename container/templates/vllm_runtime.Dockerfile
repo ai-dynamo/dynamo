@@ -22,7 +22,7 @@
 # - Base for custom application containers
 #
 
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_pre
 
 ARG DEVICE
 WORKDIR /workspace
@@ -439,3 +439,41 @@ ENV VLLM_USE_FLASHINFER_SAMPLER=1
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}
+
+
+#######################################
+########## Compliance: licenses #######
+#######################################
+#
+# vLLM-runtime keeps the dynamo venv at /opt/dynamo/venv (inherited from
+# RUNTIME_IMAGE = dynamo-runtime). Same pattern as dynamo_runtime.
+
+FROM runtime_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+RUN python3 -m compliance.generators \
+    --ecosystem python,rust,dpkg \
+    --venv ${VIRTUAL_ENV} \
+    --output-dir /legal \
+    -v
+RUN find /legal -name '*-deps.csv' -print0 | \
+    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input {}
+RUN find /legal -name '*-deps.csv' -print -exec sh -c \
+    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+
+
+FROM scratch AS sboms
+COPY --from=licenses /sboms/ /
+
+
+FROM scratch AS legal
+COPY --from=licenses /legal/ /
+
+
+FROM runtime_pre AS runtime
+COPY --from=licenses /legal /legal
