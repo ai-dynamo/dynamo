@@ -66,17 +66,14 @@ impl SchedulingPolicy for LcfsPolicy {
 /// Optimizes for average TTFT — minimizes total weighted completion time
 /// (Smith 1956). Short or high-priority requests are scheduled before
 /// long low-priority ones, reducing mean latency across the batch.
-pub struct WsptPolicy {
-    pub block_size: usize,
-}
+pub struct WsptPolicy;
 
 impl SchedulingPolicy for WsptPolicy {
     type Key = OrderedFloat<f64>;
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let cached_tokens = request.overlap_blocks() as usize * self.block_size;
-        let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
+        let new_tokens = request.best_effective_prefill_tokens().max(1);
         OrderedFloat(weight / new_tokens as f64)
     }
 }
@@ -91,11 +88,11 @@ pub enum RouterSchedulingPolicy {
 }
 
 impl RouterSchedulingPolicy {
-    pub fn new(kind: RouterQueuePolicy, block_size: usize) -> Self {
+    pub fn new(kind: RouterQueuePolicy) -> Self {
         match kind {
             RouterQueuePolicy::Fcfs => Self::Fcfs(FcfsPolicy),
             RouterQueuePolicy::Lcfs => Self::Lcfs(LcfsPolicy),
-            RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy { block_size }),
+            RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy),
         }
     }
 }
@@ -124,11 +121,23 @@ mod tests {
         priority_jump: f64,
         overlaps: OverlapScores,
     ) -> SchedulingRequest {
+        let effective_overlap_blocks = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as f64))
+            .collect();
+        let effective_cached_tokens = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as usize * 16))
+            .collect();
         SchedulingRequest {
             maybe_request_id: None,
             token_seq: None,
             isl_tokens,
-            overlaps,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks,
+            effective_cached_tokens,
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -139,6 +148,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: None,
         }
     }
@@ -151,7 +161,6 @@ mod tests {
         OverlapScores {
             scores: map,
             frequencies: vec![],
-            tree_sizes: FxHashMap::default(),
         }
     }
 
@@ -223,10 +232,10 @@ mod tests {
         let early = Duration::from_secs(1);
         let late = Duration::from_secs(10);
 
-        let fcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Fcfs, 16);
+        let fcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Fcfs);
         assert!(fcfs.enqueue_key(early, &req) > fcfs.enqueue_key(late, &req));
 
-        let lcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Lcfs, 16);
+        let lcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Lcfs);
         assert!(lcfs.enqueue_key(late, &req) > lcfs.enqueue_key(early, &req));
     }
 
@@ -234,7 +243,7 @@ mod tests {
 
     #[test]
     fn wspt_shorter_request_scheduled_first() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         let short = request_with(100, 0.0, OverlapScores::default());
         let long = request_with(1000, 0.0, OverlapScores::default());
         let t = Duration::ZERO;
@@ -246,7 +255,7 @@ mod tests {
 
     #[test]
     fn wspt_overlap_reduces_effective_cost() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         // Both 1024 ISL tokens, but one has 60 blocks cached (960 tokens).
         let no_cache = request_with(1024, 0.0, OverlapScores::default());
         let cached = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
@@ -260,8 +269,19 @@ mod tests {
     }
 
     #[test]
+    fn wspt_overlap_applies_when_prefill_tracking_disabled() {
+        let policy = WsptPolicy;
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
+        req.track_prefill_tokens = false;
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 64.0);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
     fn wspt_priority_promotes() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         let normal = request_with(512, 0.0, OverlapScores::default());
         let boosted = request_with(512, 5.0, OverlapScores::default());
         let t = Duration::ZERO;
@@ -273,7 +293,7 @@ mod tests {
 
     #[test]
     fn wspt_uses_max_overlap() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         // 4 workers with overlaps [10, 20, 50, 60]. max = 60.
         // new_tokens = 1024 - 60*16 = 64
         let req = request_with(
@@ -288,7 +308,7 @@ mod tests {
 
     #[test]
     fn wspt_uses_pinned_worker_overlap_when_present() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60), (1, 1)]));
         req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
 
@@ -299,7 +319,7 @@ mod tests {
 
     #[test]
     fn wspt_missing_pinned_overlap_uses_zero() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
         req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
 
@@ -310,7 +330,7 @@ mod tests {
 
     #[test]
     fn wspt_no_overlap_falls_back_to_isl() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         let req = request_with(512, 0.0, OverlapScores::default());
         let key = policy.enqueue_key(Duration::ZERO, &req);
         let expected = OrderedFloat(1.0 / 512.0);
@@ -319,7 +339,7 @@ mod tests {
 
     #[test]
     fn wspt_full_overlap_clamps_to_one() {
-        let policy = WsptPolicy { block_size: 16 };
+        let policy = WsptPolicy;
         // 512 tokens, 64 blocks cached = 1024 cached tokens > ISL → saturating_sub → 0 → max(1)
         let req = request_with(512, 0.0, overlaps_from(&[(0, 64)]));
         let key = policy.enqueue_key(Duration::ZERO, &req);

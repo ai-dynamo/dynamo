@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
@@ -32,9 +34,18 @@ impl PromptTrieNode {
         }
     }
 
-    #[cfg(any(test, feature = "bench"))]
-    fn has_any_workers(&self) -> bool {
-        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    fn edge_index_for(edge: &[SequenceHash]) -> FxHashMap<SequenceHash, usize> {
+        let mut edge_index = FxHashMap::with_capacity_and_hasher(edge.len(), FxBuildHasher);
+        for (i, &hash) in edge.iter().enumerate() {
+            edge_index.insert(hash, i);
+        }
+        edge_index
+    }
+
+    fn full_edge_workers_for(worker: WorkerWithDpRank) -> FxHashSet<WorkerWithDpRank> {
+        let mut full_edge_workers = FxHashSet::with_capacity_and_hasher(1, FxBuildHasher);
+        full_edge_workers.insert(worker);
+        full_edge_workers
     }
 
     fn current_cutoff(&self, worker: WorkerWithDpRank) -> usize {
@@ -59,6 +70,31 @@ impl PromptTrieNode {
     fn uncovered_suffix_hashes(&self, cutoff: usize) -> Vec<SequenceHash> {
         debug_assert!(cutoff <= self.edge.len());
         self.edge[cutoff..].to_vec()
+    }
+
+    fn lookup_hashes_for_worker_repair(
+        &self,
+        worker: WorkerWithDpRank,
+        hash: SequenceHash,
+        direction: LookupRepairDirection,
+    ) -> Vec<SequenceHash> {
+        let Some(&pos) = self.edge_index.get(&hash) else {
+            return Vec::new();
+        };
+
+        let cutoff = self.current_cutoff(worker).min(self.edge.len());
+        let range = match direction {
+            LookupRepairDirection::TowardTail => {
+                if pos < cutoff {
+                    pos..cutoff
+                } else {
+                    0..0
+                }
+            }
+            LookupRepairDirection::TowardHead => 0..pos.min(cutoff),
+        };
+
+        self.edge[range].to_vec()
     }
 
     fn drop_worker(&mut self, worker: WorkerWithDpRank) {
@@ -114,12 +150,35 @@ impl PromptTrieNode {
     }
 }
 
+impl CleanableNode for PromptTrieNode {
+    type ChildKey = SequenceHash;
+
+    fn has_any_workers(&self) -> bool {
+        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+
+    fn children(&self) -> &FxHashMap<SequenceHash, SharedNode> {
+        &self.children
+    }
+
+    fn remove_child(&mut self, key: &SequenceHash) {
+        self.children.remove(key);
+    }
+}
+
 struct RemoveOutcome {
     stale_hashes: Vec<SequenceHash>,
 }
 
+#[derive(Clone, Copy)]
+enum LookupRepairDirection {
+    TowardTail,
+    TowardHead,
+}
+
 pub(super) struct PromptMembershipTrie {
     root: SharedNode,
+    cleanup: CleanupState,
 }
 
 impl Default for PromptMembershipTrie {
@@ -149,29 +208,77 @@ impl PromptMembershipTrie {
     pub(super) fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(PromptTrieNode::new())),
+            cleanup: CleanupState::new(),
         }
     }
 
-    fn find_in_subtree(start: &SharedNode, hash: SequenceHash) -> Option<SharedNode> {
-        let mut stack = Vec::new();
-        {
-            let guard = start.read();
-            stack.extend(guard.children.values().cloned());
+    /// Run the stale-child sweep if the throttle interval has elapsed.
+    ///
+    /// Safe to call from any write path; the sweep is a no-op until
+    /// [`CLEANUP_INTERVAL_MS`](crate::cleanup::CLEANUP_INTERVAL_MS) has passed
+    /// since the last completion, and only one sweep runs at a time.
+    pub(super) fn maybe_cleanup(&self) {
+        if !self.cleanup.try_schedule() {
+            return;
         }
+        let mut guard = CleanupGuard::new(&self.cleanup);
+        cleanup::sweep_stale_children(&self.root);
+        guard.mark_completed();
+    }
 
-        while let Some(node) = stack.pop() {
+    fn children_snapshot(node: &SharedNode) -> Vec<SharedNode> {
+        let guard = node.read();
+        guard.children.values().cloned().collect()
+    }
+
+    fn find_in_subtree(start: &SharedNode, hash: SequenceHash) -> Option<SharedNode> {
+        let mut queue = VecDeque::from(Self::children_snapshot(start));
+        while let Some(node) = queue.pop_front() {
             let guard = node.read();
             if guard.edge_index.contains_key(&hash) {
                 drop(guard);
                 return Some(node);
             }
-            stack.extend(guard.children.values().cloned());
+            queue.extend(guard.children.values().cloned());
         }
 
         None
     }
 
-    fn resolve_lookup(worker_lookup: &mut WorkerLookup, hash: SequenceHash) -> Option<SharedNode> {
+    fn repair_lookup_for_resolved_node(
+        worker_lookup: &mut WorkerLookup,
+        worker: WorkerWithDpRank,
+        hash: SequenceHash,
+        resolved: &SharedNode,
+        direction: LookupRepairDirection,
+    ) {
+        let repair_hashes = {
+            let guard = resolved.read();
+            guard.lookup_hashes_for_worker_repair(worker, hash, direction)
+        };
+        for repair_hash in repair_hashes {
+            worker_lookup.insert(repair_hash, resolved.clone());
+        }
+    }
+
+    fn repair_stale_lookup_from_node(
+        worker_lookup: &mut WorkerLookup,
+        worker: WorkerWithDpRank,
+        node: &SharedNode,
+        hash: SequenceHash,
+        direction: LookupRepairDirection,
+    ) -> Option<SharedNode> {
+        let resolved = Self::find_in_subtree(node, hash)?;
+        Self::repair_lookup_for_resolved_node(worker_lookup, worker, hash, &resolved, direction);
+        Some(resolved)
+    }
+
+    fn resolve_lookup(
+        worker_lookup: &mut WorkerLookup,
+        worker: WorkerWithDpRank,
+        hash: SequenceHash,
+        direction: LookupRepairDirection,
+    ) -> Option<SharedNode> {
         let node = worker_lookup.get(&hash)?.clone();
         let found = {
             let guard = node.read();
@@ -181,9 +288,7 @@ impl PromptMembershipTrie {
             return Some(node);
         }
 
-        let resolved = Self::find_in_subtree(&node, hash)?;
-        worker_lookup.insert(hash, resolved.clone());
-        Some(resolved)
+        Self::repair_stale_lookup_from_node(worker_lookup, worker, &node, hash, direction)
     }
 
     fn split_node(node: &mut PromptTrieNode, pos: usize) -> SharedNode {
@@ -192,17 +297,16 @@ impl PromptMembershipTrie {
         let suffix_edge = node.edge.split_off(pos);
         let suffix_first_hash = suffix_edge[0];
 
-        let mut suffix_edge_index = FxHashMap::default();
-        for (i, &hash) in suffix_edge.iter().enumerate() {
-            suffix_edge_index.insert(hash, i);
-        }
+        let suffix_edge_index = PromptTrieNode::edge_index_for(&suffix_edge);
         for &hash in &suffix_edge {
             node.edge_index.remove(&hash);
         }
 
-        let mut suffix_full = FxHashSet::default();
-        let mut suffix_cutoffs = FxHashMap::default();
-        let mut to_promote = Vec::new();
+        let mut suffix_full =
+            FxHashSet::with_capacity_and_hasher(node.full_edge_workers.len(), FxBuildHasher);
+        let mut suffix_cutoffs =
+            FxHashMap::with_capacity_and_hasher(node.worker_cutoffs.len(), FxBuildHasher);
+        let mut to_promote = Vec::with_capacity(node.worker_cutoffs.len());
 
         for &worker in &node.full_edge_workers {
             suffix_full.insert(worker);
@@ -249,7 +353,12 @@ impl PromptMembershipTrie {
         let mut worker_lookup = lookup.write();
         let parent = match parent {
             Some(parent_hash) => loop {
-                let Some(node) = Self::resolve_lookup(&mut worker_lookup, parent_hash) else {
+                let Some(node) = Self::resolve_lookup(
+                    &mut worker_lookup,
+                    worker,
+                    parent_hash,
+                    LookupRepairDirection::TowardTail,
+                ) else {
                     tracing::warn!(?worker, ?parent_hash, "prompt parent hash not found");
                     return;
                 };
@@ -320,7 +429,12 @@ impl PromptMembershipTrie {
                     && !parent_guard.edge_index.contains_key(&last_hash)
                 {
                     drop(parent_guard);
-                    if let Some(resolved) = Self::resolve_lookup(worker_lookup, last_hash) {
+                    if let Some(resolved) = Self::resolve_lookup(
+                        worker_lookup,
+                        worker,
+                        last_hash,
+                        LookupRepairDirection::TowardTail,
+                    ) {
                         current_parent = resolved;
                     }
                     continue;
@@ -330,12 +444,8 @@ impl PromptMembershipTrie {
                     Some(existing) => existing,
                     None => {
                         let edge = remaining.to_vec();
-                        let mut edge_index = FxHashMap::default();
-                        for (i, &hash) in edge.iter().enumerate() {
-                            edge_index.insert(hash, i);
-                        }
-                        let mut full_edge_workers = FxHashSet::default();
-                        full_edge_workers.insert(worker);
+                        let edge_index = PromptTrieNode::edge_index_for(&edge);
+                        let full_edge_workers = PromptTrieNode::full_edge_workers_for(worker);
 
                         let new_node = Arc::new(RwLock::new(PromptTrieNode {
                             edge,
@@ -376,12 +486,8 @@ impl PromptMembershipTrie {
                     let tail = &remaining[match_len..];
                     if !tail.is_empty() {
                         let edge = tail.to_vec();
-                        let mut edge_index = FxHashMap::default();
-                        for (i, &hash) in edge.iter().enumerate() {
-                            edge_index.insert(hash, i);
-                        }
-                        let mut full_edge_workers = FxHashSet::default();
-                        full_edge_workers.insert(worker);
+                        let edge_index = PromptTrieNode::edge_index_for(&edge);
+                        let full_edge_workers = PromptTrieNode::full_edge_workers_for(worker);
                         let tail_first_hash = tail[0];
 
                         let new_node = Arc::new(RwLock::new(PromptTrieNode {
@@ -437,7 +543,12 @@ impl PromptMembershipTrie {
         }
 
         'outer: for &hash in hashes {
-            let mut current_node = match Self::resolve_lookup(&mut worker_lookup, hash) {
+            let mut current_node = match Self::resolve_lookup(
+                &mut worker_lookup,
+                worker,
+                hash,
+                LookupRepairDirection::TowardHead,
+            ) {
                 Some(node) => node,
                 None => continue,
             };
@@ -459,9 +570,14 @@ impl PromptMembershipTrie {
                         }
                         continue 'outer;
                     }
-                    None => match Self::find_in_subtree(&current_node, hash) {
+                    None => match Self::repair_stale_lookup_from_node(
+                        &mut worker_lookup,
+                        worker,
+                        &current_node,
+                        hash,
+                        LookupRepairDirection::TowardHead,
+                    ) {
                         Some(resolved) => {
-                            worker_lookup.insert(hash, resolved.clone());
                             current_node = resolved;
                         }
                         None => {
@@ -486,9 +602,14 @@ impl PromptMembershipTrie {
 
         let hashes: Vec<_> = worker_lookup.keys().copied().collect();
         let mut nodes = Vec::new();
-        let mut seen = FxHashSet::<usize>::default();
+        let mut seen = FxHashSet::<usize>::with_capacity_and_hasher(hashes.len(), FxBuildHasher);
         for hash in hashes {
-            let Some(node) = Self::resolve_lookup(&mut worker_lookup, hash) else {
+            let Some(node) = Self::resolve_lookup(
+                &mut worker_lookup,
+                worker,
+                hash,
+                LookupRepairDirection::TowardTail,
+            ) else {
                 worker_lookup.remove(&hash);
                 continue;
             };
@@ -656,6 +777,15 @@ impl PromptMembershipTrie {
     }
 }
 
+#[cfg(any(test, feature = "bench"))]
+pub(super) fn lookup_live_hashes(lookup: &Arc<RwLock<WorkerLookup>>) -> Vec<SequenceHash> {
+    let worker_lookup = lookup.read();
+    worker_lookup
+        .iter()
+        .filter_map(|(&hash, node)| node.read().has_any_workers().then_some(hash))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +796,18 @@ mod tests {
 
     fn lookup() -> Arc<RwLock<WorkerLookup>> {
         Arc::new(RwLock::new(WorkerLookup::default()))
+    }
+
+    fn lookup_node(lookup: &Arc<RwLock<WorkerLookup>>, hash: SequenceHash) -> SharedNode {
+        lookup
+            .read()
+            .get(&hash)
+            .cloned()
+            .expect("hash should exist in worker lookup")
+    }
+
+    fn node_contains_hash(node: &SharedNode, hash: SequenceHash) -> bool {
+        node.read().edge_index.contains_key(&hash)
     }
 
     #[test]
@@ -792,5 +934,79 @@ mod tests {
             trie.compute_overlap_depths(Some(&[1, 2, 3, 4])),
             FxHashMap::from_iter([(worker, 1)]),
         );
+    }
+
+    #[test]
+    fn stale_lookup_repair_batches_toward_tail() {
+        let trie = PromptMembershipTrie::new();
+        let worker_a = worker(1, 0);
+        let worker_b = worker(2, 0);
+        let lookup_a = lookup();
+        let lookup_b = lookup();
+
+        trie.store_chain(worker_a, &lookup_a, None, &[1, 2, 3, 4]);
+        trie.store_chain(worker_b, &lookup_b, None, &[1, 2, 5]);
+
+        let stale_node = lookup_node(&lookup_a, 3);
+        assert!(!node_contains_hash(&stale_node, 3));
+        assert!(!node_contains_hash(&stale_node, 4));
+
+        let mut worker_lookup = lookup_a.write();
+        let resolved = PromptMembershipTrie::resolve_lookup(
+            &mut worker_lookup,
+            worker_a,
+            3,
+            LookupRepairDirection::TowardTail,
+        )
+        .expect("stale suffix should resolve");
+
+        assert!(Arc::ptr_eq(
+            worker_lookup.get(&3).expect("hash 3 should be repaired"),
+            &resolved,
+        ));
+        assert!(Arc::ptr_eq(
+            worker_lookup
+                .get(&4)
+                .expect("hash 4 should be batch repaired"),
+            &resolved,
+        ));
+    }
+
+    #[test]
+    fn stale_lookup_repair_batches_toward_head() {
+        let trie = PromptMembershipTrie::new();
+        let worker_a = worker(1, 0);
+        let worker_b = worker(2, 0);
+        let lookup_a = lookup();
+        let lookup_b = lookup();
+
+        trie.store_chain(worker_a, &lookup_a, None, &[1, 2, 3, 4]);
+        trie.store_chain(worker_b, &lookup_b, None, &[1, 2, 5]);
+
+        let stale_node = lookup_node(&lookup_a, 4);
+        assert!(!node_contains_hash(&stale_node, 3));
+        assert!(!node_contains_hash(&stale_node, 4));
+
+        let mut worker_lookup = lookup_a.write();
+        let resolved = PromptMembershipTrie::resolve_lookup(
+            &mut worker_lookup,
+            worker_a,
+            4,
+            LookupRepairDirection::TowardHead,
+        )
+        .expect("stale suffix should resolve");
+
+        assert!(Arc::ptr_eq(
+            worker_lookup
+                .get(&3)
+                .expect("hash 3 should be batch repaired"),
+            &resolved,
+        ));
+        assert!(!Arc::ptr_eq(
+            worker_lookup
+                .get(&4)
+                .expect("current remove hash is not pre-repaired"),
+            &resolved,
+        ));
     }
 }

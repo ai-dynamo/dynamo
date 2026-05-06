@@ -15,7 +15,11 @@
 //! Further post-processing can happen in the response stream. One example is the jailing mechanism for partial
 //! hidden stop condition matches, which can be handled in the response stream rather than the backend.
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
@@ -59,13 +63,49 @@ pub struct Backend {
 }
 
 /// Internal state for managing token decoding and stream processing
+/// Supports n>1 (multiple choices) by maintaining per-choice decoders.
 #[allow(dead_code)]
 struct DecoderUnfoldState {
     stream: ManyOut<ExecutionOutputStream>,
-    decoder: Decoder,
+    decoders: HashMap<u32, Decoder>,
+    finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
-    /// Set to true when a local stop condition is detected, causing the stream to end
+    /// Set to true when all expected choices are finished locally, causing the stream to end
     finished: bool,
+    /// Tokenizer used to decode top-logprob token_ids when the backend omits text
+    /// (e.g. SGLang with --skip-tokenizer-init forcibly drops it).
+    tokenizer: Tokenizer,
+    skip_special_tokens: bool,
+}
+
+struct DecoderParams {
+    prompt_token_ids: Vec<TokenIdType>,
+    stop_conditions: StopConditions,
+    skip_special_tokens: bool,
+    include_stop_str_in_output: bool,
+    tracker: Option<Arc<RequestTracker>>,
+    n: u32,
+}
+
+impl DecoderParams {
+    fn from_request(request: &PreprocessedRequest) -> Self {
+        Self {
+            prompt_token_ids: request.token_ids.clone(),
+            stop_conditions: request.stop_conditions.clone(),
+            // Default to true to match upstream framework behavior:
+            //   vLLM/sgLang/TRT-LLM: SamplingParams.skip_special_tokens defaults True
+            // Without this, models that occasionally emit a special token id
+            // (e.g. DeepSeek-V4 producing token id 0 = `<｜begin▁of▁sentence｜>`
+            // mid-output) leak the token's text into `content` / `reasoning_content`.
+            skip_special_tokens: request.output_options.skip_special_tokens.unwrap_or(true),
+            include_stop_str_in_output: request
+                .sampling_options
+                .include_stop_str_in_output
+                .unwrap_or(false),
+            tracker: request.tracker.clone(),
+            n: request.sampling_options.n.unwrap_or(1) as u32,
+        }
+    }
 }
 
 impl Backend {
@@ -92,27 +132,34 @@ impl Backend {
     fn decoder(
         &self,
         stream: ManyOut<ExecutionOutputStream>,
-        prompt_token_ids: &[TokenIdType],
-        stop_conditions: StopConditions,
-        skip_special_tokens: bool,
-        include_stop_str_in_output: bool,
-        tracker: Option<Arc<RequestTracker>>,
+        params: DecoderParams,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
-        let decoder = Decoder::new(
-            tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
-            stop_conditions,
-            include_stop_str_in_output,
-            tracker,
-        );
+
+        // Pre-create one decoder per expected choice so interleaved n>1
+        // responses do not share tokenizer state.
+        let n = params.n.max(1);
+        let mut decoders = HashMap::with_capacity(n as usize);
+        for idx in 0..n {
+            let decoder = Decoder::new(
+                tokenizer.decode_stream(&params.prompt_token_ids, params.skip_special_tokens),
+                params.stop_conditions.clone(),
+                params.include_stop_str_in_output,
+                params.tracker.clone(),
+            );
+            decoders.insert(idx, decoder);
+        }
 
         Ok(DecoderUnfoldState {
             stream,
-            decoder,
+            decoders,
+            finished_choices: HashSet::new(),
             validate_engine_decode: self.validate_engine_decode,
             finished: false,
+            tokenizer: tokenizer.clone(),
+            skip_special_tokens: params.skip_special_tokens,
         })
     }
 }
@@ -131,31 +178,12 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        let stop_conditions = request.stop_conditions.clone();
-
-        let prompt_token_ids = request.token_ids.clone();
-
-        // TODO: Consider updating default to true to match behavior of other frameworks
-        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
-
-        // Extract include_stop_str_in_output from sampling_options (defaults to false)
-        let include_stop_str_in_output = request
-            .sampling_options
-            .include_stop_str_in_output
-            .unwrap_or(false);
-        let tracker = request.tracker.clone();
+        let decoder_params = DecoderParams::from_request(&request);
 
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(
-            next_stream,
-            &prompt_token_ids,
-            stop_conditions,
-            skip_special_tokens,
-            include_stop_str_in_output,
-            tracker,
-        )?;
+        let state = self.decoder(next_stream, decoder_params)?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             // If we've already detected a local stop condition, end the stream
@@ -178,17 +206,40 @@ impl
                         && data.text.is_some()
                         && !state.validate_engine_decode
                     {
+                        // Text already decoded; track finish for this choice
+                        if data.finish_reason.is_some() {
+                            let choice_idx = data.index.unwrap_or(0);
+                            state.finished_choices.insert(choice_idx);
+                        }
                         return Some((output, state));
                     }
 
                     let data = output.data.as_ref().unwrap();
+                    let choice_idx = data.index.unwrap_or(0);
 
-                    let result = match state.decoder.process_token_ids(&data.token_ids) {
+                    let Some(decoder) = state.decoders.get_mut(&choice_idx) else {
+                        tracing::error!(
+                            "engine emitted choice index {choice_idx}, but only {} choices were requested",
+                            state.decoders.len()
+                        );
+                        let mut output = output;
+                        if let Some(data) = &mut output.data {
+                            data.finish_reason = Some(FinishReason::Error(format!(
+                                "invalid choice index {choice_idx}"
+                            )));
+                        }
+                        return Some((output, state));
+                    };
+
+                    let result = match decoder.process_token_ids(&data.token_ids) {
                         Ok(result) => result,
                         Err(e) => {
-                            tracing::error!("Failed to process token_ids: {e}");
-                            state.stream.context().stop_generating();
-                            state.finished = true;
+                            tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
+                            state.finished_choices.insert(choice_idx);
+                            if state.finished_choices.len() >= state.decoders.len() {
+                                state.stream.context().stop_generating();
+                                state.finished = true;
+                            }
                             let mut output = output;
                             if let Some(data) = &mut output.data {
                                 data.finish_reason =
@@ -228,11 +279,14 @@ impl
                         None => (None, None),
                     };
 
-                    // If we detected a local stop condition, mark stream as finished
-                    // so we stop iterating (upstream may keep generating, but we ignore it)
+                    // If we detected a local stop condition, mark this choice as finished.
+                    // Once all expected choices are finished, stop the upstream generator.
                     if finish_reason.is_some() && data.finish_reason.is_none() {
-                        state.stream.context().stop_generating();
-                        state.finished = true;
+                        state.finished_choices.insert(choice_idx);
+                        if state.finished_choices.len() >= state.decoders.len() {
+                            state.stream.context().stop_generating();
+                            state.finished = true;
+                        }
                     }
 
                     let text = result.text;
@@ -273,6 +327,33 @@ impl
                     data.text = text;
                     data.tokens = Some(tokens);
 
+                    // Per-entry decode is O(positions * top_k) per delta. Bounded in
+                    // practice (streaming: 1 * top_k <= 20) and dwarfed by serialization
+                    // on the same path, so we ship the simple version. Revisit if a
+                    // streaming flamegraph with top_logprobs=20 puts this above ~1%:
+                    // the cheapest win is a shared LRU on the Tokenizer keyed by
+                    // (token_id, skip_special_tokens) — top-k entries repeat heavily
+                    // across positions and requests. Do NOT batch as a single
+                    // decode(&[ids..]) call: BPE merge / leading-space rules differ
+                    // between single-token and sequence decode and will corrupt strings.
+                    if let Some(top_logprobs) = data.top_logprobs.as_mut() {
+                        for position in top_logprobs.iter_mut() {
+                            for entry in position.iter_mut() {
+                                if entry.token.is_none()
+                                    && let Ok(decoded) = state
+                                        .tokenizer
+                                        .decode(&[entry.token_id], state.skip_special_tokens)
+                                {
+                                    let s: String = decoded.into();
+                                    if entry.bytes.is_none() && !s.is_empty() {
+                                        entry.bytes = Some(s.as_bytes().to_vec());
+                                    }
+                                    entry.token = Some(s);
+                                }
+                            }
+                        }
+                    }
+
                     output.data = Some(data);
 
                     Some((output, state))
@@ -300,6 +381,7 @@ impl
                     index: data.index,
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
+                    engine_data: data.engine_data,
                 })
             })
         });

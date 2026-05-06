@@ -6,6 +6,7 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
+    "lib/tokenizers",
     "lib/tokens",
     "lib/mocker",
     "lib/kv-router",
@@ -19,13 +20,15 @@ members = [
     "lib/protocols",
     "lib/parsers",
     "lib/bench",
+    "lib/backend-common",
+    "lib/backend-common/examples/mocker",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -36,31 +39,34 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "1.1.0" }
-dynamo-llm = { path = "lib/llm", version = "1.1.0" }
-dynamo-config = { path = "lib/config", version = "1.1.0" }
-dynamo-tokens = { path = "lib/tokens", version = "1.1.0" }
-dynamo-memory = { path = "lib/memory", version = "1.1.0" }
-dynamo-mocker = { path = "lib/mocker", version = "1.1.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.1.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.1.0" }
-dynamo-parsers = { path = "lib/parsers", version = "1.1.0" }
+dynamo-runtime = { path = "lib/runtime", version = "1.2.0" }
+dynamo-llm = { path = "lib/llm", version = "1.2.0" }
+dynamo-config = { path = "lib/config", version = "1.2.0" }
+dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
+dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
+dynamo-memory = { path = "lib/memory", version = "1.2.0" }
+dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["metrics", "runtime-protocols"] }
+dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
+dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
+dynamo-backend-common = { path = "lib/backend-common", version = "1.2.0" }
 fastokens = { version = "0.1.0" }
 
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.1.0" }
-kvbm-config = { path = "lib/kvbm-config", version = "1.1.0" }
-kvbm-engine = { path = "lib/kvbm-engine", version = "1.1.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.1.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.1.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.1.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.2.0" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.2.0" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.2.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.2.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.2.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
 
 # velo
 velo = { version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
+lru = { version = "0.12" }
 async-nats = { version = "0.45.0", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
@@ -88,11 +94,12 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.2.0" }
-modelexpress-common = { version = "0.2.0" }
+modelexpress-client = { version = "0.3.0" }
+modelexpress-common = { version = "0.3.0" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }
+ipnet = { version = "2" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.13", features = ["std", "async"] }
 ordered-float = "4"

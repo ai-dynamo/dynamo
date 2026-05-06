@@ -3,9 +3,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
+
+use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 
 use super::single::RequestId;
+use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefillLoadState {
@@ -51,14 +54,45 @@ impl PrefillLoadSnapshot {
     }
 }
 
-pub(super) fn added_prefill_tokens(block_size: usize, isl: usize, overlap: u32) -> usize {
-    let cached_tokens = (overlap as usize) * block_size;
-    isl.checked_sub(cached_tokens).unwrap_or_else(|| {
-        tracing::error!(
-            "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {block_size}), returning 0",
-        );
-        0
-    })
+/// Per-worker prefill token deltas already projected by the scheduler.
+///
+/// The sequence layer only combines this with active prefill load; it does not know how the
+/// deltas were derived from ISL, cache hits, overlap scores, or shared-cache policy.
+#[derive(Debug, Clone, Default)]
+pub struct PrefillTokenDeltas {
+    default_tokens: usize,
+    by_worker: FxHashMap<WorkerWithDpRank, usize>,
+}
+
+impl PrefillTokenDeltas {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn uniform(tokens: usize) -> Self {
+        Self {
+            default_tokens: tokens,
+            by_worker: FxHashMap::default(),
+        }
+    }
+
+    pub fn new(default_tokens: usize, by_worker: FxHashMap<WorkerWithDpRank, usize>) -> Self {
+        Self {
+            default_tokens,
+            by_worker,
+        }
+    }
+
+    pub fn tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+        self.by_worker
+            .get(&worker)
+            .copied()
+            .unwrap_or(self.default_tokens)
+    }
+
+    pub fn default_tokens(&self) -> usize {
+        self.default_tokens
+    }
 }
 
 #[derive(Debug, Default)]

@@ -30,6 +30,11 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      enable_coverage:
+        description: 'Enable coverage collection (true/false)'
+        required: false
+        type: string
+        default: 'false'
       run_sanity_check:
         description: 'Whether to run sanity check on the runtime image before executing tests'
         required: false
@@ -49,20 +54,35 @@ on:
         required: false
         type: number
         default: 10
+      cpu_parallel_mode:
+        description: 'pytest-xdist mode for CPU-only tests: auto, none/0, or a worker count'
+        required: false
+        type: string
+        default: 'auto'
       run_gpu_tests:
         description: 'Whether to run GPU tests'
         required: false
         type: boolean
         default: true
       gpu_test_markers:
-        description: 'GPU pytest markers'
+        description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
         required: false
         type: string
       gpu_test_timeout_minutes:
-        description: 'Timeout in minutes for GPU tests'
+        description: 'Timeout in minutes for each GPU test stage (parallel and sequential each get this budget)'
         required: false
         type: number
         default: 30
+      run_gpu_parallel_tests:
+        description: 'Whether to run the GPU-parallel stage (VRAM-aware concurrent subprocesses) before the sequential stage. Tests carrying @pytest.mark.profiled_vram_gib(N) within gpu_test_markers run here; the sequential stage runs the rest.'
+        required: false
+        type: boolean
+        default: false
+      gpu_parallel_max_vram_gib:
+        description: 'Per-test VRAM budget in GiB for the parallel stage. Caps which profiled tests are admitted and feeds the orchestrator scheduler (tests/utils/pytest_parallel_gpu.py).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -96,11 +116,12 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
-          CUDA_MAJOR=${CUDA_VERSION%%.*}
-          if [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
-            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
-          else
-            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-cuda${CUDA_MAJOR}
+          TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
+
+          IMAGE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
+          if [ -n "${CUDA_VERSION}" ]; then
+            CUDA_MAJOR=${CUDA_VERSION%%.*}
+            IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
           fi
 
           RUNTIME_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}
@@ -155,18 +176,39 @@ jobs:
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: 'auto'
+          parallel_mode: ${{ inputs.cpu_parallel_mode }}
           dind_as_sidecar: 'true'
-      - name: Run GPU tests (sequential)
+          enable_coverage: ${{ inputs.enable_coverage }}
+      - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu_parallel"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
+          # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
+          parallel_mode: 'auto'
+          max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
+          dind_as_sidecar: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}
+      - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        # !cancelled() so a parallel-stage failure doesn't hide sequential results.
+        if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          # When the parallel stage runs, exclude profiled tests here so they don't run twice.
+          pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}

@@ -5,9 +5,9 @@ use super::json::JsonParserType;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JsonParserConfig {
-    /// Start token for individual tool calls (e.g., "<TOOLCALL>")
+    /// Start token for individual tool calls (e.g., `<TOOLCALL>`)
     pub tool_call_start_tokens: Vec<String>,
-    /// End token for individual tool calls (e.g., "</TOOLCALL>")
+    /// End token for individual tool calls (e.g., `</TOOLCALL>`)
     pub tool_call_end_tokens: Vec<String>,
     /// Separator tokens between function name and arguments
     /// (e.g., "<｜tool▁sep｜>" for DeepSeek v3.1)
@@ -25,6 +25,22 @@ pub struct JsonParserConfig {
     /// The type of JSON parser to use
     #[serde(default)]
     pub parser_type: JsonParserType,
+
+    /// Parse input as bare JSON (a `{...}` object or `[...]` array) with no
+    /// wrapping markers. Intended for guided-decoding paths where the backend
+    /// emits a raw JSON shape. When true, `tool_call_start_tokens` /
+    /// `tool_call_end_tokens` are ignored.
+    #[serde(default)]
+    pub bare_json_mode: bool,
+
+    /// Allow recovery when the outer end-token is missing (max_tokens / EOS
+    /// truncation). Streaming jails MUST leave this `false` — otherwise the
+    /// parser claims "complete tool call" before the end-token has actually
+    /// arrived and `should_exit_jail_early` fires too aggressively. Finalize
+    /// / aggregate paths set it to `true` so a real but unterminated call
+    /// isn't silently dropped.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -36,6 +52,8 @@ impl Default for JsonParserConfig {
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
+            bare_json_mode: false,
+            allow_eof_recovery: false,
         }
     }
 }
@@ -44,16 +62,21 @@ impl Default for JsonParserConfig {
 pub struct XmlParserConfig {
     /// Start token for individual tool calls (e.g., "<tool_call>")
     pub tool_call_start_token: String,
-    /// End token for individual tool calls (e.g., "</tool_call>")
+    /// End token for individual tool calls (e.g., `</tool_call>`)
     pub tool_call_end_token: String,
-    /// Start token for function name (e.g., "<function=")
+    /// Start token for function name (e.g., `<function=`)
     pub function_start_token: String,
-    /// End token for function (e.g., "</function>")
+    /// End token for function (e.g., `</function>`)
     pub function_end_token: String,
-    /// Start token for parameter (e.g., "<parameter=")
+    /// Start token for parameter (e.g., `<parameter=`)
     pub parameter_start_token: String,
-    /// End token for parameter (e.g., "</parameter>")
+    /// End token for parameter (e.g., `</parameter>`)
     pub parameter_end_token: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for XmlParserConfig {
@@ -65,6 +88,7 @@ impl Default for XmlParserConfig {
             function_end_token: "</function>".to_string(),
             parameter_start_token: "<parameter=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -72,10 +96,12 @@ impl Default for XmlParserConfig {
 /// Configuration for DSML-style tool call parser (DeepSeek V3.2+)
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DsmlParserConfig {
-    /// Start token for function_calls block (e.g., "<｜DSML｜function_calls>")
-    pub function_calls_start: String,
-    /// End token for function_calls block (e.g., "</｜DSML｜function_calls>")
-    pub function_calls_end: String,
+    /// Start token for the DSML block (e.g., "<｜DSML｜function_calls>" or "<｜DSML｜tool_calls>")
+    #[serde(alias = "function_calls_start")]
+    pub block_start: String,
+    /// End token for the DSML block (e.g., "</｜DSML｜function_calls>" or "</｜DSML｜tool_calls>")
+    #[serde(alias = "function_calls_end")]
+    pub block_end: String,
     /// Start prefix for invoke (e.g., "<｜DSML｜invoke name=")
     pub invoke_start_prefix: String,
     /// End token for invoke (e.g., "</｜DSML｜invoke>")
@@ -89,8 +115,8 @@ pub struct DsmlParserConfig {
 impl Default for DsmlParserConfig {
     fn default() -> Self {
         Self {
-            function_calls_start: "<｜DSML｜function_calls>".to_string(),
-            function_calls_end: "</｜DSML｜function_calls>".to_string(),
+            block_start: "<｜DSML｜function_calls>".to_string(),
+            block_end: "</｜DSML｜function_calls>".to_string(),
             invoke_start_prefix: "<｜DSML｜invoke name=".to_string(),
             invoke_end: "</｜DSML｜invoke>".to_string(),
             parameter_prefix: "<｜DSML｜parameter name=".to_string(),
@@ -115,6 +141,11 @@ pub struct Glm47ParserConfig {
     pub arg_value_start: String,
     /// End token for argument value (e.g., "</arg_value>")
     pub arg_value_end: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for Glm47ParserConfig {
@@ -126,6 +157,7 @@ impl Default for Glm47ParserConfig {
             arg_key_end: "</arg_key>".to_string(),
             arg_value_start: "<arg_value>".to_string(),
             arg_value_end: "</arg_value>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -193,6 +225,10 @@ pub enum ParserConfig {
     Dsml(DsmlParserConfig),
     KimiK2(KimiK2ParserConfig),
     Glm47(Glm47ParserConfig),
+    /// Gemma 4 uses a custom non-JSON grammar with bare keys, `<|"|>` string
+    /// delimiters, and fixed `<|tool_call>...<tool_call|>` markers. No
+    /// configuration is required at runtime — markers are not user-tunable.
+    Gemma4,
 }
 
 impl ParserConfig {
@@ -205,9 +241,10 @@ impl ParserConfig {
             ParserConfig::Xml(config) => vec![config.tool_call_start_token.clone()],
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
-            ParserConfig::Dsml(config) => vec![config.function_calls_start.clone()],
+            ParserConfig::Dsml(config) => vec![config.block_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
             ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
         }
     }
 
@@ -220,9 +257,10 @@ impl ParserConfig {
             ParserConfig::Xml(config) => vec![config.tool_call_end_token.clone()],
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
-            ParserConfig::Dsml(config) => vec![config.function_calls_end.clone()],
+            ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_END.to_string()],
         }
     }
 }
@@ -371,6 +409,16 @@ impl ToolCallConfig {
         }
     }
 
+    fn deepseek_dsml(block_name: &str) -> Self {
+        Self {
+            parser_config: ParserConfig::Dsml(DsmlParserConfig {
+                block_start: format!("<｜DSML｜{}>", block_name),
+                block_end: format!("</｜DSML｜{}>", block_name),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn deepseek_v3_2() -> Self {
         // DeepSeek V3.2 format (DSML):
         // <｜DSML｜function_calls>
@@ -378,9 +426,17 @@ impl ToolCallConfig {
         // <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
         // </｜DSML｜invoke>
         // </｜DSML｜function_calls>
-        Self {
-            parser_config: ParserConfig::Dsml(DsmlParserConfig::default()),
-        }
+        Self::deepseek_dsml("function_calls")
+    }
+
+    pub fn deepseek_v4() -> Self {
+        // DeepSeek V4 format (DSML):
+        // <｜DSML｜tool_calls>
+        // <｜DSML｜invoke name="function_name">
+        // <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+        // </｜DSML｜invoke>
+        // </｜DSML｜tool_calls>
+        Self::deepseek_dsml("tool_calls")
     }
 
     pub fn minimax_m2() -> Self {
@@ -399,6 +455,7 @@ impl ToolCallConfig {
                 function_end_token: "</invoke>".to_string(),
                 parameter_start_token: "<parameter name=".to_string(),
                 parameter_end_token: "</parameter>".to_string(),
+                allow_eof_recovery: false,
             }),
         }
     }
@@ -421,5 +478,58 @@ impl ToolCallConfig {
         Self {
             parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
         }
+    }
+
+    /// Gemma 4 tool-call format (custom non-JSON grammar):
+    ///
+    /// ```text
+    /// <|tool_call>call:func_name{location:<|"|>Tokyo<|"|>,count:42}<tool_call|>
+    /// ```
+    ///
+    /// Bare unquoted keys, `<|"|>`-delimited strings, supports nested objects /
+    /// arrays. Multiple tool calls are concatenated without separators.
+    pub fn gemma4() -> Self {
+        Self {
+            parser_config: ParserConfig::Gemma4,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dsml_config_deserializes_legacy_function_calls_aliases() {
+        let legacy = serde_json::json!({
+            "function_calls_start": "<｜DSML｜function_calls>",
+            "function_calls_end": "</｜DSML｜function_calls>",
+            "invoke_start_prefix": "<｜DSML｜invoke name=",
+            "invoke_end": "</｜DSML｜invoke>",
+            "parameter_prefix": "<｜DSML｜parameter name=",
+            "parameter_end": "</｜DSML｜parameter>",
+        });
+        let cfg: DsmlParserConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(cfg.block_start, "<｜DSML｜function_calls>");
+        assert_eq!(cfg.block_end, "</｜DSML｜function_calls>");
+        assert_eq!(cfg.invoke_start_prefix, "<｜DSML｜invoke name=");
+    }
+
+    #[test]
+    fn deepseek_dsml_factory_produces_expected_block_tokens() {
+        let v3_2 = ToolCallConfig::deepseek_v3_2();
+        let v4 = ToolCallConfig::deepseek_v4();
+        let v3_2_cfg = match v3_2.parser_config {
+            ParserConfig::Dsml(c) => c,
+            _ => panic!("expected Dsml variant for v3_2"),
+        };
+        let v4_cfg = match v4.parser_config {
+            ParserConfig::Dsml(c) => c,
+            _ => panic!("expected Dsml variant for v4"),
+        };
+        assert_eq!(v3_2_cfg.block_start, "<｜DSML｜function_calls>");
+        assert_eq!(v3_2_cfg.block_end, "</｜DSML｜function_calls>");
+        assert_eq!(v4_cfg.block_start, "<｜DSML｜tool_calls>");
+        assert_eq!(v4_cfg.block_end, "</｜DSML｜tool_calls>");
     }
 }

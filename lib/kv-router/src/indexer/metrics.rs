@@ -5,13 +5,15 @@
 use std::sync::Arc;
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::OnceLock;
+#[cfg(feature = "bench")]
+use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "runtime-protocols")]
 use dynamo_runtime::component::Component;
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 use dynamo_runtime::metrics::MetricsHierarchy;
 #[cfg(feature = "metrics")]
-use prometheus::{IntCounterVec, Opts};
+use prometheus::{IntCounter, IntCounterVec, Opts};
 
 use crate::protocols::{KvCacheEventData, KvCacheEventError};
 
@@ -51,6 +53,76 @@ impl std::fmt::Display for EventKind {
     }
 }
 
+/// Lightweight, `Copy` discriminant for KV event warnings.
+#[derive(Debug, Clone, Copy)]
+pub enum EventWarningKind {
+    DuplicateStore,
+}
+
+impl std::fmt::Display for EventWarningKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateStore => f.write_str(METRIC_WARNING_DUPLICATE_STORE),
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+pub(crate) struct ShardedIndexerCounters {
+    pub(crate) find_match_dispatches: AtomicU64,
+    pub(crate) find_match_early_returns: AtomicU64,
+    pub(crate) anchor_installs: AtomicU64,
+    pub(crate) anchor_reuses: AtomicU64,
+    pub(crate) remove_broadcasts: AtomicU64,
+}
+
+#[cfg(feature = "bench")]
+impl ShardedIndexerCounters {
+    fn new() -> Self {
+        Self {
+            find_match_dispatches: AtomicU64::new(0),
+            find_match_early_returns: AtomicU64::new(0),
+            anchor_installs: AtomicU64::new(0),
+            anchor_reuses: AtomicU64::new(0),
+            remove_broadcasts: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+pub(crate) struct ShardedIndexerTiming {
+    pub(crate) calls: AtomicU64,
+    pub(crate) routing_ns: AtomicU64,
+    pub(crate) shard_ns: AtomicU64,
+}
+
+#[cfg(feature = "bench")]
+impl ShardedIndexerTiming {
+    fn new() -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+            routing_ns: AtomicU64::new(0),
+            shard_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+pub(crate) struct ShardedIndexerMetrics {
+    pub(crate) counters: ShardedIndexerCounters,
+    pub(crate) timing: ShardedIndexerTiming,
+}
+
+#[cfg(feature = "bench")]
+impl ShardedIndexerMetrics {
+    pub(crate) fn new() -> Self {
+        Self {
+            counters: ShardedIndexerCounters::new(),
+            timing: ShardedIndexerTiming::new(),
+        }
+    }
+}
+
 /// Metrics for the KV Indexer.
 #[derive(Clone)]
 #[cfg_attr(not(feature = "metrics"), derive(Default))]
@@ -58,6 +130,9 @@ pub struct KvIndexerMetrics {
     /// Counter of events applied.
     #[cfg(feature = "metrics")]
     pub kv_cache_events_applied: IntCounterVec,
+    /// Counter of suspicious-but-valid KV events.
+    #[cfg(feature = "metrics")]
+    pub kv_cache_event_warnings: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -71,20 +146,28 @@ pub const METRIC_EVENT_STORED: &str = "stored";
 pub const METRIC_EVENT_REMOVED: &str = "removed";
 pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
+/// Metric warning labels.
+pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
+
 /// Metric name for KV cache events applied counter.
-#[cfg(feature = "metrics")]
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 const KV_CACHE_EVENTS_APPLIED_SUFFIX: &str = "kv_cache_events_applied";
 #[cfg(feature = "metrics")]
 const KV_CACHE_EVENTS_APPLIED_NAME: &str = "dynamo_kvrouter_kv_cache_events_applied";
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+const KV_CACHE_EVENT_WARNINGS_SUFFIX: &str = "kv_cache_event_warnings";
+#[cfg(feature = "metrics")]
+const KV_CACHE_EVENT_WARNINGS_NAME: &str = "dynamo_kvrouter_kv_cache_event_warnings";
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
 impl KvIndexerMetrics {
-    #[cfg(feature = "metrics")]
-    fn new(kv_cache_events_applied: IntCounterVec) -> Self {
+    #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+    fn new(kv_cache_events_applied: IntCounterVec, kv_cache_event_warnings: IntCounterVec) -> Self {
         Self {
             kv_cache_events_applied,
+            kv_cache_event_warnings,
         }
     }
 
@@ -96,16 +179,24 @@ impl KvIndexerMetrics {
         {
             KV_INDEXER_METRICS
                 .get_or_init(|| {
-                    match component.metrics().create_intcountervec(
-                        KV_CACHE_EVENTS_APPLIED_SUFFIX,
-                        "Total number of KV cache events applied to index",
-                        &["event_type", "status"],
-                        &[],
+                    match (
+                        component.metrics().create_intcountervec(
+                            KV_CACHE_EVENTS_APPLIED_SUFFIX,
+                            "Total number of KV cache events applied to index",
+                            &["event_type", "status"],
+                            &[],
+                        ),
+                        component.metrics().create_intcountervec(
+                            KV_CACHE_EVENT_WARNINGS_SUFFIX,
+                            "Total number of suspicious KV cache events seen by the router indexer",
+                            &["warning_kind"],
+                            &[],
+                        ),
                     ) {
-                        Ok(kv_cache_events_applied) => {
-                            Arc::new(Self::new(kv_cache_events_applied))
-                        }
-                        Err(e) => {
+                        (Ok(kv_cache_events_applied), Ok(kv_cache_event_warnings)) => Arc::new(
+                            Self::new(kv_cache_events_applied, kv_cache_event_warnings),
+                        ),
+                        (Err(e), _) | (_, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -132,6 +223,14 @@ impl KvIndexerMetrics {
                     "Total number of KV cache events applied to index",
                 ),
                 &["event_type", "status"],
+            )
+            .unwrap(),
+            kv_cache_event_warnings: IntCounterVec::new(
+                Opts::new(
+                    KV_CACHE_EVENT_WARNINGS_NAME,
+                    "Total number of suspicious KV cache events seen by the router indexer",
+                ),
+                &["warning_kind"],
             )
             .unwrap(),
         }
@@ -172,6 +271,17 @@ impl KvIndexerMetrics {
         let _ = (self, event_type, result);
     }
 
+    pub fn increment_event_warning(&self, warning_kind: &'static str) {
+        #[cfg(feature = "metrics")]
+        {
+            self.kv_cache_event_warnings
+                .with_label_values(&[warning_kind])
+                .inc_by(1);
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (self, warning_kind);
+    }
+
     /// Pre-resolve all `IntCounter` handles for the finite (event_type, status) label space.
     /// Call this once per worker thread at startup, then use
     /// [`PreBoundEventCounters::inc`] in the hot loop to avoid the
@@ -188,29 +298,46 @@ impl KvIndexerMetrics {
 /// `IntCounterVec::with_label_values()` hashmap lookup.
 pub struct PreBoundEventCounters {
     #[cfg(feature = "metrics")]
-    stored_ok: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    stored_parent_not_found: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    stored_block_not_found: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    stored_invalid_block: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    removed_ok: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    removed_parent_not_found: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    removed_block_not_found: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    removed_invalid_block: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    cleared_ok: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    cleared_parent_not_found: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    cleared_block_not_found: prometheus::IntCounter,
-    #[cfg(feature = "metrics")]
-    cleared_invalid_block: prometheus::IntCounter,
+    inner: PreBoundMetricCounters,
+}
+
+#[cfg(feature = "metrics")]
+struct PreBoundMetricCounters {
+    stored: ResultCounters,
+    removed: ResultCounters,
+    cleared: ResultCounters,
+    duplicate_store_warning: IntCounter,
+}
+
+#[cfg(feature = "metrics")]
+struct ResultCounters {
+    ok: IntCounter,
+    parent_not_found: IntCounter,
+    block_not_found: IntCounter,
+    invalid_block: IntCounter,
+}
+
+#[cfg(feature = "metrics")]
+impl ResultCounters {
+    fn new(counters: &IntCounterVec, event_type: &'static str) -> Self {
+        Self {
+            ok: counters.with_label_values(&[event_type, METRIC_STATUS_OK]),
+            parent_not_found: counters
+                .with_label_values(&[event_type, METRIC_STATUS_PARENT_NOT_FOUND]),
+            block_not_found: counters
+                .with_label_values(&[event_type, METRIC_STATUS_BLOCK_NOT_FOUND]),
+            invalid_block: counters.with_label_values(&[event_type, METRIC_STATUS_INVALID_BLOCK]),
+        }
+    }
+
+    fn for_result(&self, result: Result<(), KvCacheEventError>) -> &IntCounter {
+        match result {
+            Ok(()) => &self.ok,
+            Err(KvCacheEventError::ParentBlockNotFound) => &self.parent_not_found,
+            Err(KvCacheEventError::BlockNotFound) => &self.block_not_found,
+            Err(KvCacheEventError::InvalidBlockSequence) => &self.invalid_block,
+        }
+    }
 }
 
 impl PreBoundEventCounters {
@@ -218,28 +345,15 @@ impl PreBoundEventCounters {
         #[cfg(feature = "metrics")]
         {
             let cv = &metrics.kv_cache_events_applied;
+            let warnings = &metrics.kv_cache_event_warnings;
             Self {
-                stored_ok: cv.with_label_values(&[METRIC_EVENT_STORED, METRIC_STATUS_OK]),
-                stored_parent_not_found: cv
-                    .with_label_values(&[METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND]),
-                stored_block_not_found: cv
-                    .with_label_values(&[METRIC_EVENT_STORED, METRIC_STATUS_BLOCK_NOT_FOUND]),
-                stored_invalid_block: cv
-                    .with_label_values(&[METRIC_EVENT_STORED, METRIC_STATUS_INVALID_BLOCK]),
-                removed_ok: cv.with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_OK]),
-                removed_parent_not_found: cv
-                    .with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_PARENT_NOT_FOUND]),
-                removed_block_not_found: cv
-                    .with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_BLOCK_NOT_FOUND]),
-                removed_invalid_block: cv
-                    .with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_INVALID_BLOCK]),
-                cleared_ok: cv.with_label_values(&[METRIC_EVENT_CLEARED, METRIC_STATUS_OK]),
-                cleared_parent_not_found: cv
-                    .with_label_values(&[METRIC_EVENT_CLEARED, METRIC_STATUS_PARENT_NOT_FOUND]),
-                cleared_block_not_found: cv
-                    .with_label_values(&[METRIC_EVENT_CLEARED, METRIC_STATUS_BLOCK_NOT_FOUND]),
-                cleared_invalid_block: cv
-                    .with_label_values(&[METRIC_EVENT_CLEARED, METRIC_STATUS_INVALID_BLOCK]),
+                inner: PreBoundMetricCounters {
+                    stored: ResultCounters::new(cv, METRIC_EVENT_STORED),
+                    removed: ResultCounters::new(cv, METRIC_EVENT_REMOVED),
+                    cleared: ResultCounters::new(cv, METRIC_EVENT_CLEARED),
+                    duplicate_store_warning: warnings
+                        .with_label_values(&[METRIC_WARNING_DUPLICATE_STORE]),
+                },
             }
         }
         #[cfg(not(feature = "metrics"))]
@@ -257,41 +371,26 @@ impl PreBoundEventCounters {
     pub fn inc(&self, kind: EventKind, result: Result<(), KvCacheEventError>) {
         #[cfg(feature = "metrics")]
         {
-            let counter = match (kind, result) {
-                (EventKind::Stored, Ok(())) => &self.stored_ok,
-                (EventKind::Stored, Err(KvCacheEventError::ParentBlockNotFound)) => {
-                    &self.stored_parent_not_found
-                }
-                (EventKind::Stored, Err(KvCacheEventError::BlockNotFound)) => {
-                    &self.stored_block_not_found
-                }
-                (EventKind::Stored, Err(KvCacheEventError::InvalidBlockSequence)) => {
-                    &self.stored_invalid_block
-                }
-                (EventKind::Removed, Ok(())) => &self.removed_ok,
-                (EventKind::Removed, Err(KvCacheEventError::ParentBlockNotFound)) => {
-                    &self.removed_parent_not_found
-                }
-                (EventKind::Removed, Err(KvCacheEventError::BlockNotFound)) => {
-                    &self.removed_block_not_found
-                }
-                (EventKind::Removed, Err(KvCacheEventError::InvalidBlockSequence)) => {
-                    &self.removed_invalid_block
-                }
-                (EventKind::Cleared, Ok(())) => &self.cleared_ok,
-                (EventKind::Cleared, Err(KvCacheEventError::ParentBlockNotFound)) => {
-                    &self.cleared_parent_not_found
-                }
-                (EventKind::Cleared, Err(KvCacheEventError::BlockNotFound)) => {
-                    &self.cleared_block_not_found
-                }
-                (EventKind::Cleared, Err(KvCacheEventError::InvalidBlockSequence)) => {
-                    &self.cleared_invalid_block
-                }
+            let counters = match kind {
+                EventKind::Stored => &self.inner.stored,
+                EventKind::Removed => &self.inner.removed,
+                EventKind::Cleared => &self.inner.cleared,
+            };
+            counters.for_result(result).inc();
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (self, kind, result);
+    }
+
+    pub fn inc_warning(&self, kind: EventWarningKind) {
+        #[cfg(feature = "metrics")]
+        {
+            let counter = match kind {
+                EventWarningKind::DuplicateStore => &self.inner.duplicate_store_warning,
             };
             counter.inc();
         }
         #[cfg(not(feature = "metrics"))]
-        let _ = (self, kind, result);
+        let _ = (self, kind);
     }
 }

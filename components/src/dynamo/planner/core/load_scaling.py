@@ -41,6 +41,8 @@ class LoadScalingMixin:
     _diag_estimated_ttft_ms: Optional[float]
     _diag_estimated_itl_ms: Optional[float]
     _diag_load_reason: Optional[str]
+    _diag_load_reason_prefill: Optional[str]
+    _diag_load_reason_decode: Optional[str]
 
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
@@ -122,65 +124,128 @@ class LoadScalingMixin:
         if not p_stats and not d_stats:
             logger.warning("No FPM data for either prefill or decode, skipping")
             self._diag_load_reason = "no_fpm_data"
+            self._diag_load_reason_prefill = "no_fpm_data"
+            self._diag_load_reason_decode = "no_fpm_data"
             return None
         if p_stats and not self._reconcile_fpm_worker_count(
             p_stats, self._num_p_workers, "prefill"
         ):
             self._diag_load_reason = "worker_count_mismatch"
+            self._diag_load_reason_prefill = "worker_count_mismatch"
+            self._diag_load_reason_decode = "worker_count_mismatch"
             return None
         if d_stats and not self._reconcile_fpm_worker_count(
             d_stats, self._num_d_workers, "decode"
         ):
             self._diag_load_reason = "worker_count_mismatch"
+            self._diag_load_reason_prefill = "worker_count_mismatch"
+            self._diag_load_reason_decode = "worker_count_mismatch"
             return None
 
         easy = self._config.optimization_target != "sla"
-        p_desired = (
-            (
+
+        # Sub-decisions may set self._diag_load_reason to an informative
+        # value (e.g. "insufficient_data") before returning None. The
+        # per-component aggregation below only emits {scale_up,
+        # scale_down, scale_down_capped_by_throughput, no_change}, which
+        # would silently overwrite them. Isolate each component's
+        # contribution so both can be restored in the no-scaling-needed
+        # branch; otherwise sequential sub-decision calls would clobber
+        # each other on the shared field.
+        p_reason: Optional[str] = None
+        p_desired: Optional[int] = None
+        if p_stats:
+            self._diag_load_reason = None
+            p_desired = (
                 self._prefill_easy_decision(p_stats, self._num_p_workers)
                 if easy
                 else self._prefill_load_decision(p_stats, self._num_p_workers)
             )
-            if p_stats
-            else None
-        )
-        d_desired = (
-            (
+            p_reason = self._diag_load_reason
+
+        d_reason: Optional[str] = None
+        d_desired: Optional[int] = None
+        if d_stats:
+            self._diag_load_reason = None
+            d_desired = (
                 self._decode_easy_decision(d_stats, self._num_d_workers)
                 if easy
                 else self._decode_load_decision(d_stats, self._num_d_workers)
             )
-            if d_stats
-            else None
-        )
+            d_reason = self._diag_load_reason
 
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
 
-        if final_p == self._num_p_workers and final_d == self._num_d_workers:
-            logger.info("Load-based scaling: no scaling needed")
-            self._diag_load_reason = "no_change"
-            return None
-
+        # Enforce bounds first so "no change" comparison is against the
+        # post-floor target, not the raw load decision.  Otherwise a load
+        # decision of "no change" would skip the floor and let replicas
+        # stay below a throughput-scaling lower bound that was raised on
+        # a previous (or same) tick.
         original_p, original_d = final_p, final_d
+        # Apply throughput floor first and track the post-floor value so we
+        # can attribute later lifts to their real source -- throughput
+        # capping is a distinct diagnostic from min_endpoint / global-budget
+        # lifts, which should not be labelled "scale_down_capped_by_throughput".
         if self._config.enable_throughput_scaling:
             final_p = max(final_p, self._throughput_lower_bound_p)
             final_d = max(final_d, self._throughput_lower_bound_d)
+        post_floor_p, post_floor_d = final_p, final_d
 
         final_p = max(final_p, self._config.min_endpoint)
         final_d = max(final_d, self._config.min_endpoint)
         final_p, final_d = self._apply_global_budget(final_p, final_d)
 
-        if (final_p > original_p or final_d > original_d) and (
-            original_p < self._num_p_workers or original_d < self._num_d_workers
-        ):
-            self._diag_load_reason = "scale_down_capped_by_throughput"
-        elif final_p > self._num_p_workers or final_d > self._num_d_workers:
-            self._diag_load_reason = "scale_up"
-        elif final_p < self._num_p_workers or final_d < self._num_d_workers:
-            self._diag_load_reason = "scale_down"
-        else:
-            self._diag_load_reason = "no_change"
+        # Per-component reasons
+        def _reason(final: int, original: int, post_floor: int, current: int) -> str:
+            # Only classify as throughput-capped when the throughput floor
+            # itself lifted the load decision; later min_endpoint / budget
+            # adjustments don't count.
+            floor_capped = post_floor > original and original < current
+            if final > current:
+                return "scale_up"
+            if final < current:
+                return (
+                    "scale_down_capped_by_throughput" if floor_capped else "scale_down"
+                )
+            return "scale_down_capped_by_throughput" if floor_capped else "no_change"
+
+        self._diag_load_reason_prefill = _reason(
+            final_p, original_p, post_floor_p, self._num_p_workers
+        )
+        self._diag_load_reason_decode = _reason(
+            final_d, original_d, post_floor_d, self._num_d_workers
+        )
+
+        # Aggregate reason: prioritise "most interesting" across components.
+        _PRIORITY = {
+            "scale_up": 4,
+            "scale_down_capped_by_throughput": 3,
+            "scale_down": 2,
+            "no_change": 1,
+        }
+        self._diag_load_reason = max(
+            (self._diag_load_reason_prefill, self._diag_load_reason_decode),
+            key=lambda r: _PRIORITY.get(r or "", 0),
+        )
+
+        if final_p == self._num_p_workers and final_d == self._num_d_workers:
+            logger.info("Load-based scaling: no scaling needed")
+            # Restore per-component sub-decision reasons that the
+            # aggregation step overwrote with "no_change", so operators
+            # can tell which side is stalled (e.g. prefill
+            # insufficient_data while decode is fine).
+            if p_reason is not None and p_reason != "no_change":
+                self._diag_load_reason_prefill = p_reason
+            if d_reason is not None and d_reason != "no_change":
+                self._diag_load_reason_decode = d_reason
+            # Aggregate reason: surface the most informative of the two
+            # so the non-per-component Enum/HTML view also reflects it.
+            for candidate in (p_reason, d_reason):
+                if candidate is not None and candidate != "no_change":
+                    self._diag_load_reason = candidate
+                    break
+            return None
 
         logger.info(
             f"Load-based disagg scaling: prefill {self._num_p_workers}->{final_p}, "
@@ -270,9 +335,10 @@ class LoadScalingMixin:
         ):
             desired = max(p_desired, d_desired)
         else:
-            logger.info("Agg scaling: no scaling needed")
-            self._diag_load_reason = "no_change"
-            return None
+            # Load scaling sees "no change" -- but the throughput floor may
+            # still require scaling up, so keep processing rather than
+            # returning early.
+            desired = num_workers
 
         original_desired = desired
         desired = max(desired, self._config.min_endpoint)
@@ -280,15 +346,23 @@ class LoadScalingMixin:
             desired = max(desired, self._throughput_lower_bound_d)
         desired = self._apply_single_budget(desired, "decode")
 
+        # Preserve "load wanted to scale down but floor lifted it" as a
+        # distinct diagnostic reason even when the net result is no change.
+        floor_capped = desired > original_desired and original_desired < num_workers
+
+        if desired == num_workers:
+            logger.info("Agg scaling: no scaling needed")
+            self._diag_load_reason = (
+                "scale_down_capped_by_throughput" if floor_capped else "no_change"
+            )
+            return None
+
         if desired < num_workers:
-            if desired > original_desired:
-                self._diag_load_reason = "scale_down_capped_by_throughput"
-            else:
-                self._diag_load_reason = "scale_down"
-        elif desired > num_workers:
+            self._diag_load_reason = (
+                "scale_down_capped_by_throughput" if floor_capped else "scale_down"
+            )
+        else:  # desired > num_workers (equality returned above)
             self._diag_load_reason = "scale_up"
-        else:
-            self._diag_load_reason = "no_change"
 
         logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
         return ScalingDecision(num_decode=desired)
@@ -320,11 +394,13 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
+        kv_hit_rate = self._last_kv_hit_rate
         estimates: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():
             est = self._prefill_regression.estimate_next_ttft(
                 queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
                 max_num_batched_tokens=max_tokens,
+                kv_hit_rate=kv_hit_rate,
             )
             if est is not None:
                 est_ms = est * 1000
@@ -332,7 +408,8 @@ class LoadScalingMixin:
                 logger.info(
                     f"Prefill engine {wid}:dp{dp}: estimated TTFT {est_ms:.2f}ms "
                     f"(queued={fpm.queued_requests.sum_prefill_tokens}, "
-                    f"avg_isl={self._prefill_regression.avg_isl:.1f})"
+                    f"avg_isl={self._prefill_regression.avg_isl:.1f}, "
+                    f"kv_hit_rate={kv_hit_rate if kv_hit_rate is not None else 'n/a'})"
                 )
 
         if estimates:
@@ -384,12 +461,14 @@ class LoadScalingMixin:
         num_workers: int,
         max_tokens: int,
     ) -> Optional[int]:
+        kv_hit_rate = self._last_kv_hit_rate
         estimates: list[float] = []
         for fpm in fpm_stats.values():
             est = self._agg_regression.estimate_next_ttft(
                 queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
                 max_num_batched_tokens=max_tokens,
                 current_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
+                kv_hit_rate=kv_hit_rate,
             )
             if est is not None:
                 estimates.append(est * 1000)

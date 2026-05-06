@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -76,6 +75,11 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
+	// Checkpoint Jobs always capture exactly the main container. Other
+	// containers in the pod template (e.g. GMS saver sidecars the operator
+	// adds below) are preserved but not checkpointed. The annotation is
+	// the contract the snapshot-agent reads.
+	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{consts.MainContainerName})
 	if podTemplate.Spec.ServiceAccountName == "" {
 		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
@@ -85,31 +89,20 @@ func buildCheckpointJob(
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer := &podTemplate.Spec.Containers[0]
+	mainContainer, err := checkpoint.RequireMainContainer(&podTemplate.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	}
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,
 	)
 	dynamo.AddStandardEnvVars(mainContainer, config)
-	mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-		Name:  consts.EnvReadyForCheckpointFile,
-		Value: config.Checkpoint.ReadyForCheckpointFilePath,
-	})
-	mainContainer.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
-			},
-		},
-		InitialDelaySeconds: 15,
-		PeriodSeconds:       2,
-	}
-	mainContainer.LivenessProbe = nil
-	mainContainer.StartupProbe = nil
 
-	// The snapshot agent sends SIGUSR1 to PID 1 of the main container after
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+	// NewCheckpointJob handles control volume + readiness probe from the
+	// snapshot contract.
 
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
@@ -129,9 +122,6 @@ func buildCheckpointJob(
 		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
 			return nil, err
 		}
-		// Re-acquire pointer: append in EnsureGMSCheckpointJobSidecars may
-		// have reallocated the Containers slice.
-		mainContainer = &podTemplate.Spec.Containers[0]
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
@@ -153,23 +143,13 @@ func buildCheckpointJob(
 	}
 	wrapLaunchJob := tp*pp > 1
 
-	// For single-GPU jobs (no cuda-checkpoint wrapper), unwrap /bin/sh -c so
-	// the actual process is PID 1 and receives SIGUSR1 from the snapshot agent.
-	if !wrapLaunchJob && len(mainContainer.Command) >= 2 &&
-		mainContainer.Command[len(mainContainer.Command)-1] == "-c" &&
-		len(mainContainer.Args) == 1 {
-		parts := strings.Fields(mainContainer.Args[0])
-		mainContainer.Command = parts[:1]
-		mainContainer.Args = parts[1:]
-	}
-
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
