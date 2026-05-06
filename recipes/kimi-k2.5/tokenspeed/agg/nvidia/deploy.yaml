@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated TokenSpeed serving for nvidia/Kimi-K2.5-NVFP4.
+#
+# Note: this recipe expects the Dynamo+TokenSpeed image to be built locally
+# from the sibling Dockerfile and pushed to a registry your cluster can pull
+# from, since NVIDIA does not currently publish a
+# `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image. See ./README.md for
+# the build/push/deploy flow.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k25-tokenspeed-agg
+spec:
+  backendFramework: tokenspeed
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        mainContainer:
+          # Replace with your locally-built dev/runtime image (see ./Dockerfile).
+          image: <your-registry>/dynamo-tokenspeed:dev
+          workingDir: /workspace/dynamo
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+            - /bin/sh
+            - -c
+      envs:
+        - name: HF_HOME
+          value: /opt/models
+      replicas: 1
+    TokenSpeedWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: nvidia.com/gpu.present
+                      operator: In
+                      values:
+                        - "true"
+        mainContainer:
+          # Replace with your locally-built dev/runtime image (see ./Dockerfile).
+          image: <your-registry>/dynamo-tokenspeed:dev
+          workingDir: /workspace/dynamo
+          env:
+            - name: SERVED_MODEL_NAME
+              value: kimi-k2.5
+            - name: MODEL_PATH
+              value: nvidia/Kimi-K2.5-NVFP4
+            - name: HF_HOME
+              value: /opt/models
+          args:
+            - |
+              python3 -m dynamo.tokenspeed \
+                --dyn-reasoning-parser kimi_k25 \
+                --dyn-tool-call-parser kimi_k2 \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --max-model-len 262144 \
+                --kv-cache-dtype fp8 \
+                --quantization nvfp4 \
+                --tensor-parallel-size 4 \
+                --enable-expert-parallel \
+                --chunked-prefill-size 8192 \
+                --max-num-seqs 256 \
+                --attention-backend trtllm_mla \
+                --moe-backend flashinfer_trtllm \
+                --gpu-memory-utilization 0.80
+          command:
+            - /bin/sh
+            - -c
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

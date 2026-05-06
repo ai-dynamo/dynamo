@@ -1,17 +1,17 @@
 # Kimi-K2.5 Recipes
 
-Deployment recipes for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
+Deployment recipes for **Kimi-K2.5** using TensorRT-LLM or TokenSpeed with Dynamo's KV-aware routing.
 
 ## Available Configurations
 
-There are two model weight variants, each with its own model download and deploy manifests:
+| Variant | Model | Engine | Status | Modality | Deploy Configs | Notes |
+|---------|-------|--------|--------|----------|---------------|-------|
+| **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | TRT-LLM | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
+| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | TRT-LLM | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml) and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | All configs are compatible with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional |
+| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | TokenSpeed | Experimental | Text only | [`deploy.yaml`](tokenspeed/agg/nvidia/deploy.yaml) + [`Dockerfile`](tokenspeed/agg/nvidia/Dockerfile) | TP=4 + EP=4 on a single 4×B200 worker. **Requires local image build** (no public `tokenspeed-runtime` image yet) — the Dockerfile layers Dynamo on top of a public TokenSpeed base. See the [recipe README](tokenspeed/agg/nvidia/README.md) |
 
-| Variant | Model | Status | Modality | Deploy Configs | Notes |
-|---------|-------|--------|----------|---------------|-------|
-| **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
-| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml) and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | All configs are compatible with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional |
-
-All configurations use TP8, EP8, aggregated mode with KV-aware routing.
+The TRT-LLM configurations use TP=8 / EP=8; the TokenSpeed configuration uses TP=4 / EP=4. All
+use aggregated serving with KV-aware routing.
 
 ## Prerequisites
 
@@ -23,8 +23,9 @@ All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 
 | Configuration | GPUs |
 |--------------|------|
-| Aggregated | 8x B200 |
-| Aggregated Speculative Decoding | 8x4 GB200 (4 workers, each worker spanning 2 nodes) |
+| Aggregated (TRT-LLM) | 8x B200 |
+| Aggregated (TokenSpeed) | 4x B200 |
+| Aggregated Speculative Decoding (TRT-LLM) | 8x4 GB200 (4 workers, each worker spanning 2 nodes) |
 
 ---
 
