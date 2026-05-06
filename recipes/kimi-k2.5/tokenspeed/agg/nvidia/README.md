@@ -13,6 +13,16 @@ Kimi K2.5 / K2.6.
 |-----------|----------|-------------|----------|
 | **Aggregated (TokenSpeed)** | [`deploy.yaml`](deploy.yaml) | Aggregated serving with KV-aware routing using the TokenSpeed engine | 1× 4×B200 (TP=4, EP=4) |
 
+> **Note: raw Kubernetes primitives, not `DynamoGraphDeployment`.** The Dynamo
+> Operator's CRD currently only validates `backendFramework` values `vllm`, `sglang`,
+> `trtllm` (see `deploy/operator/api/v1beta1/common.go`). Until `tokenspeed` is added
+> to that enum, this recipe wires the four processes the operator would otherwise
+> generate (etcd discovery + NATS event-plane + frontend HTTP router + worker engine)
+> as plain `Deployment`s and `Service`s. The frontend Service is named
+> `kimi-k25-tokenspeed-agg-frontend` to match the operator-generated naming so
+> port-forward instructions stay stable across the migration to `DynamoGraphDeployment`
+> once supported. The `deploy.yaml` carries an inline TODO marking the swap point.
+
 ## Image — local build required
 
 There is **no public `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image** at the time
@@ -81,9 +91,12 @@ the tag you just pushed.
 
 ## Prerequisites
 
-- A Kubernetes cluster with the [Dynamo Operator](https://docs.nvidia.com/dynamo/) installed
+- A Kubernetes cluster (the Dynamo Operator is **not** required for this recipe — see
+  the note above)
 - 4× B200 GPUs (or 8× B200 if you raise `--tensor-parallel-size` to 8)
 - A `hf-token-secret` Secret containing your Hugging Face token
+- An `nvcrimagepullsecret` Secret in the namespace, or update `imagePullSecrets` in
+  [`deploy.yaml`](deploy.yaml) to match your cluster's pull-secret naming
 - A pre-existing `model-cache` PVC with `nvidia/Kimi-K2.5-NVFP4` downloaded (see
   the [`model-cache/nvidia/`](../../../model-cache/nvidia/) sibling job)
 - A registry your cluster's nodes can pull from with the `dynamo-tokenspeed` image
@@ -103,13 +116,15 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 kubectl apply -f deploy.yaml -n ${NAMESPACE}
 ```
 
-This creates a **DynamoGraphDeployment** (`kimi-k25-tokenspeed-agg`) with:
+This creates four Deployments + three Services:
 
-- A **Frontend** running `dynamo.frontend` in KV-router mode on port 8000.
-- A **TokenSpeedWorker** running `dynamo.tokenspeed` against `nvidia/Kimi-K2.5-NVFP4`,
-  TP=4 + expert parallel, NVFP4 weights, FP8 KV cache, MLA attention via
-  `trtllm_mla`, MoE via `flashinfer_trtllm`, and the `kimi_k25` / `kimi_k2`
-  Dynamo reasoning + tool-call parsers.
+| Resource | Purpose | Image |
+|---|---|---|
+| `kimi-k25-tokenspeed-etcd` (Deployment + Service) | Discovery backend | `gcr.io/etcd-development/etcd:v3.6.7` |
+| `kimi-k25-tokenspeed-nats` (Deployment + Service) | Event plane (JetStream) | `nats:2.12.4` |
+| `kimi-k25-tokenspeed-frontend` (Deployment) | `dynamo.frontend` in KV-router mode on port 8000 | your locally-built `dynamo-tokenspeed` |
+| `kimi-k25-tokenspeed-agg-frontend` (Service) | Stable name for port-forward; selects the frontend Deployment | — |
+| `kimi-k25-tokenspeed-worker` (Deployment) | `dynamo.tokenspeed` against `nvidia/Kimi-K2.5-NVFP4`, TP=4 + EP=4, NVFP4 weights, FP8 KV cache, MLA attention via `trtllm_mla`, MoE via `flashinfer_trtllm`, with `kimi_k25` reasoning + `kimi_k2` tool-call parsers | your locally-built `dynamo-tokenspeed` |
 
 ## Test the deployment
 
@@ -154,11 +169,23 @@ final answer in `content`. Send `max_tokens >= 200` to leave room for both phase
 
 ## What's different from the TRT-LLM sibling
 
-The [`../../trtllm/agg/nvidia/`](../../trtllm/agg/nvidia/) deployment uses TP=8 and
-a ConfigMap-based engine YAML. TokenSpeed accepts engine knobs directly as worker
-CLI flags, so this recipe inlines them in `deploy.yaml` (no ConfigMap), matching the
-[`recipes/llama-3-70b/vllm/agg/`](../../../../llama-3-70b/vllm/agg/) layout. The
-TRT-LLM recipe ships against the public
-`nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime` image; this recipe requires you to
-build and push your own Dynamo+TokenSpeed image (see the build steps above) until
-NVIDIA publishes one.
+The [`../../trtllm/agg/nvidia/`](../../trtllm/agg/nvidia/) deployment uses TP=8 and a
+ConfigMap-based engine YAML, and ships as a single `DynamoGraphDeployment` letting
+the Dynamo Operator generate the underlying `Deployment`s/`Service`s. This recipe
+differs on three axes:
+
+1. **Engine knobs are inline CLI flags, not a ConfigMap.** TokenSpeed accepts engine
+   knobs directly on the worker command line, similar to vLLM. Layout therefore
+   mirrors [`recipes/llama-3-70b/vllm/agg/`](../../../../llama-3-70b/vllm/agg/) rather
+   than the TRT-LLM ConfigMap pattern.
+2. **Raw `Deployment` + `Service` resources, not a `DynamoGraphDeployment`.** The
+   operator's `backendFramework` enum currently only validates `vllm`, `sglang`,
+   `trtllm` — `tokenspeed` is rejected by admission validation. Until the operator
+   adds `tokenspeed` support, this recipe lays out the four processes the operator
+   would otherwise generate as plain `Deployment`s. See the inline TODO in
+   `deploy.yaml` — once the operator backend lands, the deploy.yaml collapses to a
+   single `DynamoGraphDeployment` matching the TRT-LLM sibling's shape.
+3. **Local image build.** The TRT-LLM recipe ships against the public
+   `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime` image; this recipe requires you
+   to build and push your own Dynamo+TokenSpeed image (see the build steps above)
+   until NVIDIA publishes one.
