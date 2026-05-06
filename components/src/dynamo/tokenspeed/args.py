@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib
+import json
 import os
 import sys
 from typing import Any, Dict, Optional, Sequence
@@ -33,7 +34,9 @@ class Config(DynamoRuntimeConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
-        self.use_kv_events = False
+        self.use_kv_events = kv_events_enabled(
+            getattr(getattr(self, "server_args", None), "kv_events_config", None)
+        )
 
 
 @register_encoder(Config)
@@ -112,3 +115,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 def _server_args_cls():
     module = importlib.import_module("tokenspeed.runtime.utils.server_args")
     return module.ServerArgs
+
+
+def kv_events_config_dict(kv_events_config: Any) -> dict[str, Any]:
+    if not kv_events_config:
+        return {}
+    if isinstance(kv_events_config, str):
+        return json.loads(kv_events_config)
+    if isinstance(kv_events_config, dict):
+        return dict(kv_events_config)
+    if hasattr(kv_events_config, "model_dump"):
+        return kv_events_config.model_dump()
+    return dict(kv_events_config)
+
+
+def kv_events_enabled(kv_events_config: Any) -> bool:
+    config = kv_events_config_dict(kv_events_config)
+    if not config:
+        return False
+
+    enabled = bool(config.get("enable_kv_cache_events", False))
+    publisher = config.get("publisher")
+    if publisher is None:
+        publisher = "zmq" if enabled else "null"
+    return enabled and publisher != "null"
