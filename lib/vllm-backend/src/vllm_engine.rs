@@ -38,6 +38,10 @@ struct Args {
     #[arg(value_name = "MODEL")]
     model: String,
 
+    /// Public-facing model name advertised to Dynamo clients.
+    #[arg(long)]
+    served_model_name: Option<String>,
+
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     managed_engine: ManagedEngineArgs,
@@ -112,7 +116,7 @@ impl VllmBackend {
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
             model_name: args.model,
-            served_model_name: None, // TODO: support `--served-model-name`
+            served_model_name: args.served_model_name,
             model_input: ModelInput::Tokens,
         };
         Ok((engine, config))
@@ -195,7 +199,7 @@ impl LLMEngine for VllmBackend {
 
         Ok(EngineConfig {
             model: self.model.clone(),
-            served_model_name: Some(self.model.clone()), // TODO: support `--served-model-name`
+            served_model_name: Some(self.model.clone()),
             context_length,
             kv_cache_block_size: self.extra.block_size,
             total_kv_blocks,
@@ -320,6 +324,8 @@ mod tests {
             "Qwen/Qwen3-0.6B".to_string(),
             "--namespace".to_string(),
             "ns".to_string(),
+            "--served-model-name".to_string(),
+            "served-qwen".to_string(),
             "--dtype".to_string(),
             "float16".to_string(),
             "--data-parallel-size".to_string(),
@@ -335,6 +341,7 @@ mod tests {
 
         assert_eq!(config.namespace, "ns");
         assert_eq!(config.model_name, "Qwen/Qwen3-0.6B");
+        assert_eq!(config.served_model_name.as_deref(), Some("served-qwen"));
         assert_eq!(config.model_input, ModelInput::Tokens);
         assert_eq!(engine.managed_engine.data_parallel_size, 2);
         assert_eq!(
