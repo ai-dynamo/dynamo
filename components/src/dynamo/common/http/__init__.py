@@ -28,8 +28,13 @@ import logging
 import os
 from typing import Optional
 
+from dynamo.common.configuration.groups.http_args import (
+    HttpArgGroup,
+    HttpConfigBase,
+    from_env,
+)
+
 from .aiohttp_client import AiohttpClient
-from .args import HttpArgGroup, HttpConfigBase, from_env
 from .base import (
     HttpClient,
     HttpConnectionError,

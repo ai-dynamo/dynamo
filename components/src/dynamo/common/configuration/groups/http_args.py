@@ -11,6 +11,15 @@ env vars via :func:`dynamo.common.configuration.utils.add_argument` so
 this group plays nicely with components that build their own argparse
 surface (frontend, planner, etc.).
 
+Why this group ships :func:`from_env` while sibling groups don't:
+the HTTP client's primary callers — ``image_loader.py`` /
+``audio_loader.py`` / ``video_loader.py`` — don't own an argparse,
+so they need an env-only construction path. The
+``dynamo.common.http`` singleton boots through this entry point. Other
+groups (router, kv-router, runtime) are always materialized off a
+parent component's parsed CLI args, so an env-only helper would be
+redundant there.
+
 Operator-tunable env vars
 -------------------------
 

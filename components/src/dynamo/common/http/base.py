@@ -15,7 +15,8 @@ import abc
 import asyncio
 from typing import Optional
 
-from .args import HttpConfigBase, from_env
+from dynamo.common.configuration.groups.http_args import HttpConfigBase, from_env
+
 from .url_validator import (
     _MAX_REDIRECTS,
     UrlValidationError,
