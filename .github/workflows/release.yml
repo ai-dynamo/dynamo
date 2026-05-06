@@ -46,7 +46,7 @@ on:
 # (e.g. nightly-ci.yml) inherit the caller's ref — the same branch rules apply.
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
