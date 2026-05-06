@@ -165,6 +165,12 @@ impl DeviceContextOps for SyclContext {
             self.cache.alloc_queue
                 .free_raw(ptr as *mut c_void)
                 .map_err(|e| anyhow::anyhow!("SYCL free_device failed: {}", e))?;
+        } else {
+            debug_assert!(
+                false,
+                "SyclContext::free_device: untracked ptr {:#x} (double-free or foreign ptr)",
+                ptr
+            );
         }
         Ok(())
     }
@@ -213,6 +219,12 @@ impl DeviceContextOps for SyclContext {
             self.cache.alloc_queue
                 .free_raw(ptr as *mut c_void)
                 .map_err(|e| anyhow::anyhow!("SYCL free_pinned failed: {}", e))?;
+        } else {
+            debug_assert!(
+                false,
+                "SyclContext::free_pinned: untracked ptr {:#x} (double-free or foreign ptr)",
+                ptr
+            );
         }
         Ok(())
     }

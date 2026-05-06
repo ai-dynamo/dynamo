@@ -468,9 +468,11 @@ pub fn create_transfer_manager(
     agent: NixlAgent,
     capabilities: Option<TransferCapabilities>,
 ) -> Result<TransferManager> {
+    let backend = DeviceBackend::detect_backend()?;
     TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
+        .device_backend(backend)
         .device_id(0)
         .build()
 }
@@ -484,8 +486,10 @@ pub fn create_transfer_manager(
 /// control, use the TransferManager builder directly with a custom event system.
 pub fn create_rdma_transfer_manager(agent_name: &str) -> Result<TransferManager> {
     let agent = create_test_agent_with_backends(agent_name, &["UCX"])?;
+    let backend = DeviceBackend::detect_backend()?;
     TransferManager::builder()
         .nixl_agent(agent)
+        .device_backend(backend)
         .device_id(0)
         .build()
 }
