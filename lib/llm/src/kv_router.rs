@@ -439,9 +439,21 @@ where
         mut tokens_with_hashes: TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        self.indexer
+        let start = Instant::now();
+        let num_tokens = tokens_with_hashes.len();
+        let result = self
+            .indexer
             .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-            .await
+            .await;
+        let elapsed = start.elapsed();
+        tracing::info!(
+            worker_id = worker.worker_id,
+            dp_rank = ?worker.dp_rank,
+            num_tokens,
+            elapsed_us = elapsed.as_micros() as u64,
+            "record_routing_decision completed"
+        );
+        result
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
