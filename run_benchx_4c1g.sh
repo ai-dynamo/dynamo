@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=core_dlfw_ci-benchx.4ctx1gen.convrouter.pr13675
+#SBATCH --job-name=core_dlfw_ci-benchx.4ctx1gen.convrouter.pr13675.4c1g
 #SBATCH --nodes=2
 #SBATCH --partition=gb200
 #SBATCH --account=core_dlfw_ci
@@ -34,7 +34,7 @@ HOSTCACHE="${HOSTCACHE:-0}"
 
 if [ "$HOSTCACHE" = "1" ]; then HCTAG="hcon"; else HCTAG="hcoff"; fi
 
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537.sqsh}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-2.sqsh}"
 EXP_NAME="run_benchx_4ctx1gen_convrouter_pr13675_${HCTAG}_c${CONCURRENCY}"
 
 HF_TOKEN="${HF_TOKEN:-}"
