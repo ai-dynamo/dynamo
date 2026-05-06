@@ -37,27 +37,31 @@ export CUDA_VISIBLE_DEVICES
 echo "Launching TokenSpeed disagg (P/D on single GPU=$CUDA_VISIBLE_DEVICES)"
 echo "  model=$MODEL block=$BLOCK_SIZE seqs=$MAX_NUM_SEQS gpu_mem_util=$MEM_UTIL"
 
+# Common flags. --attention-backend triton avoids the precompiled flashinfer
+# cubin (some GPUs don't have a matching arch). --disable-kvstore turns off
+# the CPU offload tier that defaults to ~2x device memory and can blow past
+# host RAM for small models on big-VRAM GPUs.
+COMMON_FLAGS=(
+    --model "$MODEL"
+    --served-model-name "$MODEL"
+    --disaggregation-transfer-backend mooncake
+    --block-size "$BLOCK_SIZE"
+    --max-num-seqs "$MAX_NUM_SEQS"
+    --gpu-memory-utilization "$MEM_UTIL"
+    --attention-backend triton
+    --disable-kvstore
+    --skip-server-warmup
+)
+
 # Prefill worker — owns the Mooncake bootstrap server.
 DYN_SYSTEM_PORT=$PREFILL_SYSTEM_PORT python3 -m dynamo.tokenspeed \
-    --model "$MODEL" \
-    --served-model-name "$MODEL" \
+    "${COMMON_FLAGS[@]}" \
     --disaggregation-mode prefill \
-    --disaggregation-transfer-backend mooncake \
-    --disaggregation-bootstrap-port "$BOOTSTRAP_PORT_PREFILL" \
-    --block-size "$BLOCK_SIZE" \
-    --max-num-seqs "$MAX_NUM_SEQS" \
-    --gpu-memory-utilization "$MEM_UTIL" \
-    --skip-server-warmup &
+    --disaggregation-bootstrap-port "$BOOTSTRAP_PORT_PREFILL" &
 
 # Decode worker — receives KV from prefill via Mooncake.
 DYN_SYSTEM_PORT=$DECODE_SYSTEM_PORT python3 -m dynamo.tokenspeed \
-    --model "$MODEL" \
-    --served-model-name "$MODEL" \
-    --disaggregation-mode decode \
-    --disaggregation-transfer-backend mooncake \
-    --block-size "$BLOCK_SIZE" \
-    --max-num-seqs "$MAX_NUM_SEQS" \
-    --gpu-memory-utilization "$MEM_UTIL" \
-    --skip-server-warmup &
+    "${COMMON_FLAGS[@]}" \
+    --disaggregation-mode decode &
 
 wait
