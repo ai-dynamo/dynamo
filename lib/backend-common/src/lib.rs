@@ -31,4 +31,4 @@ pub use engine::{
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;
-pub use worker::{Worker, WorkerConfig};
+pub use worker::{RuntimeConfig, Worker, WorkerConfig};

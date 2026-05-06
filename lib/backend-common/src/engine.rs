@@ -117,6 +117,21 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
+    /// Drain in-flight engine work before shutdown (optional, default no-op).
+    ///
+    /// Called once during graceful shutdown after the discovery unregister
+    /// + grace-period sleep, but before [`cleanup`](LLMEngine::cleanup).
+    /// Use it for backend-side draining that must complete while the
+    /// distributed runtime (NATS / etcd) is still alive — e.g. waiting for
+    /// in-flight NIXL KV transfers on prefill workers (issue #7319), so
+    /// downstream decode workers don't observe a use-after-free on freed
+    /// GPU memory.
+    ///
+    /// Failures are logged and swallowed; shutdown proceeds regardless.
+    async fn drain(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Release all engine resources. Called once on shutdown.
     async fn cleanup(&self) -> Result<(), DynamoError>;
 }
