@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-vllm-backend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo Rust backend skeleton for vLLM engine-core integration."
+
+[[bin]]
+name = "dynamo-vllm-backend"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+tokio = { workspace = true }
+vllm-llm = { path = "../../../vllm-frontend-rs/src/llm" }
+vllm-managed-engine = { path = "../../../vllm-frontend-rs/src/managed-engine" }
