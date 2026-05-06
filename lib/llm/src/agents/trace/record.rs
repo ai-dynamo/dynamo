@@ -93,23 +93,6 @@ mod tests {
         emit_request_end, publish_tool_record,
     };
     use crate::agents::trace::{AgentToolEvent, AgentToolStatus, BUS};
-    use tokio::time::{Duration, timeout};
-
-    async fn recv_matching_record(
-        rx: &mut tokio::sync::broadcast::Receiver<AgentTraceRecord>,
-        predicate: impl Fn(&AgentTraceRecord) -> bool,
-    ) -> AgentTraceRecord {
-        timeout(Duration::from_secs(5), async {
-            loop {
-                let record = rx.recv().await.expect("trace bus should remain open");
-                if predicate(&record) {
-                    return record;
-                }
-            }
-        })
-        .await
-        .expect("matching trace record should publish")
-    }
 
     #[tokio::test]
     async fn test_emit_request_end_sanitizes_non_finite_metrics() {
@@ -144,14 +127,7 @@ mod tests {
             },
         );
 
-        let record = recv_matching_record(&mut rx, |record| {
-            record.event_type == TraceEventType::RequestEnd
-                && record
-                    .request
-                    .as_ref()
-                    .is_some_and(|request| request.request_id == "req-non-finite")
-        })
-        .await;
+        let record = rx.recv().await.expect("trace record should publish");
         assert_eq!(record.event_time_unix_ms, 1000);
         let request = record.request.expect("request metrics should be present");
         assert_eq!(request.prefill_wait_time_ms, None);
@@ -194,14 +170,7 @@ mod tests {
             }),
         });
 
-        let record = recv_matching_record(&mut rx, |record| {
-            record.event_type == TraceEventType::ToolEnd
-                && record
-                    .tool
-                    .as_ref()
-                    .is_some_and(|tool| tool.tool_call_id == "tool-123")
-        })
-        .await;
+        let record = rx.recv().await.expect("tool record should publish");
         assert_eq!(record.schema, TraceSchema::V1);
         assert_eq!(record.event_type, TraceEventType::ToolEnd);
         assert_eq!(record.event_source, TraceEventSource::Harness);
