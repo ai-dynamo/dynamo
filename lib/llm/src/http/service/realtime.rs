@@ -48,8 +48,8 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 use super::{RouteDoc, service_v2};
 use crate::engines::EchoBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
-    RealtimeClientEvent, RealtimeServerEvent, RealtimeServerEventSessionCreated, RealtimeSession,
-    Session,
+    RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent, RealtimeServerEventError,
+    RealtimeServerEventSessionCreated, RealtimeSession, Session,
 };
 use uuid::Uuid;
 
@@ -167,10 +167,30 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
     let resp_ctx = response_stream.context();
 
     // Outbound task: drain the engine response stream onto the WebSocket.
+    // Peels off the Dynamo-side `Annotated` envelope so clients receive bare
+    // `RealtimeServerEvent` frames as the OpenAI Realtime spec requires. Engine
+    // errors surfaced via `Annotated::error` are mapped to a synthesized
+    // `RealtimeServerEvent::Error` so they remain visible on the wire.
     let outbound_close_reason = close_reason.clone();
     let outbound = tokio::spawn(async move {
         while let Some(annotated) = response_stream.next().await {
-            let frame_payload = match serde_json::to_string(&annotated) {
+            let event = if let Some(event) = annotated.data {
+                event
+            } else if let Some(err) = annotated.error {
+                RealtimeServerEvent::Error(RealtimeServerEventError {
+                    event_id: format!("event_{}", Uuid::new_v4()),
+                    error: RealtimeAPIError {
+                        r#type: "server_error".to_string(),
+                        code: None,
+                        message: err.to_string(),
+                        param: None,
+                        event_id: None,
+                    },
+                })
+            } else {
+                continue;
+            };
+            let frame_payload = match serde_json::to_string(&event) {
                 Ok(s) => s,
                 Err(err) => {
                     tracing::warn!(%err, "/v1/realtime serializing response chunk failed");
