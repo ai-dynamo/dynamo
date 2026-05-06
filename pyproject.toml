@@ -150,7 +150,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
