@@ -133,25 +133,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
           
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      # - name: Pull relevant images
-      #   shell: bash
-      #   run: |
-      #     source ./.github/scripts/retry_docker.sh
-      #     start_time=$(date +%s)
-      #     retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
-      #     retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
-      #     retry_pull quay.io/minio/minio
-      #     end_time=$(date +%s)
-      #     duration=$((end_time - start_time))
-      #     echo "⏱️ Image pull duration: ${duration}s"
+
       # - name: Run Sanity Check on Runtime Image
       #   if: ${{ inputs.run_sanity_check }}
       #   shell: bash

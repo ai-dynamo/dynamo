@@ -5,7 +5,8 @@
 # Standalone test image — layers test deps on top of a pre-built runtime image.
 # Usage: docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+
+FROM ${BASE_IMAGE} AS test_image
 
 # Install test dependencies on top of runtime image
 USER root
@@ -27,3 +28,15 @@ USER dynamo
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+
+FROM busybox:1.36.1 AS github_runner_tools
+FROM test_image AS test_planner
+
+# GitHub Actions starts job containers with `tail` and several actions expect
+# `tar` to be available for archive extraction. The planner runtime is
+# distroless, so add only those named applets to the test-only stage.
+USER root
+COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/tail
+COPY --chmod=755 --from=github_runner_tools /bin/busybox /usr/local/bin/tar
+
+USER dynamo
