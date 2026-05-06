@@ -3,7 +3,7 @@
 
 pub mod tensor_kernels;
 
-#[cfg(feature = "sycl_kernels")]
+#[cfg(feature = "xpu-sycl")]
 pub mod tensor_kernels_sycl;
 
 
@@ -17,10 +17,10 @@ pub use tensor_kernels::{
 #[cfg(feature = "permute_kernels")]
 pub use tensor_kernels::{TensorDataType, block_from_universal, universal_from_block};
 
-// SYCL core transfer - queue-based vectorized copy (requires sycl_kernels feature)
-#[cfg(feature = "sycl_kernels")]
+// SYCL core transfer - queue-based vectorized copy (requires xpu-sycl feature)
+#[cfg(feature = "xpu-sycl")]
 pub use tensor_kernels_sycl::sycl_vectorized_copy;
 
-// SYCL permute kernels - queue-based layout transforms (requires sycl_permute_kernels feature)
-#[cfg(feature = "sycl_permute_kernels")]
+// SYCL permute kernels - queue-based layout transforms (requires xpu-sycl-permute feature)
+#[cfg(feature = "xpu-sycl-permute")]
 pub use tensor_kernels_sycl::{sycl_block_from_universal, sycl_universal_from_block};

@@ -649,7 +649,7 @@ mod cuda_tests {
 }
 
 
-#[cfg(all(test, feature = "testing-sycl"))]
+#[cfg(all(test, feature = "testing-xpu-sycl"))]
 mod sycl_tests {
     use super::*;
     use oneapi_rs::safe::{SyclDevice, SyclQueue};

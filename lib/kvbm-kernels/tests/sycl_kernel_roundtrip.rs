@@ -12,10 +12,10 @@
 //!
 //! Run with:
 //!   cargo test -p kvbm-kernels \
-//!       --features sycl_permute_kernels,testing-xpu \
-//!       --test xpu_kernel_roundtrip_sycl -- --nocapture
+//!       --features xpu-sycl-permute,testing-xpu \
+//!       --test sycl_kernel_roundtrip -- --nocapture
 
-#![cfg(all(feature = "testing-xpu", feature = "sycl_permute_kernels"))]
+#![cfg(all(feature = "testing-xpu", feature = "xpu-sycl-permute"))]
 
 use std::ffi::c_void;
 use std::fmt::Debug;

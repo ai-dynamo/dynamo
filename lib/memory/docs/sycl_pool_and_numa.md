@@ -236,7 +236,7 @@ cargo run -p kvbm-physical --bin validate_numa_placement -- \
     --size 64 --gpus 0,2
 
 # Intel XPU host — requires the `xpu-sycl` feature (which enables
-# `sycl_kernels` in `kvbm-kernels`, triggering `icpx -fsycl`):
+# `xpu-sycl` in `kvbm-kernels`, triggering `icpx -fsycl`):
     cargo run -p kvbm-physical \
         --no-default-features --features xpu-sycl \
         --bin validate_numa_placement -- \

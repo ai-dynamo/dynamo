@@ -30,7 +30,7 @@
 //!     --size 64 --gpus 0,2
 //!
 //! # Intel XPU host — requires the `xpu-sycl` feature (which enables
-//! # `sycl_kernels` in `kvbm-kernels`, triggering `icpx -fsycl`):
+//! # `xpu-sycl` in `kvbm-kernels`, triggering `icpx -fsycl`):
 //!
 //!     cargo run -p kvbm-physical \
 //!         --no-default-features --features xpu-sycl \
@@ -210,9 +210,9 @@ fn print_rebuild_hint(requested: &str) {
         eprintln!("      Rebuild with that feature to enable the {} backend:",
             if feat == "cuda" { "CUDA" } else { "SYCL/XPU" });
         if feat == "xpu-sycl" {
-            // `xpu-sycl` implies `kvbm-kernels/sycl_kernels`, which triggers
+            // `xpu-sycl` implies `kvbm-kernels/xpu-sycl`, which triggers
             // icpx -fsycl in lib/kvbm-kernels/build.rs to produce
-            // libkvbm_kernels_xpu.so at link time.
+            // libkvbm_kernels_sycl.so at link time.
             eprintln!(
                 "      cargo run -p kvbm-physical --features xpu-sycl \\"
             );
@@ -238,7 +238,7 @@ fn print_rebuild_hint(requested: &str) {
                 );
                 eprintln!("      driver was detected on this host. If this is an Intel");
                 eprintln!("      XPU system, rebuild with the SYCL backend enabled.");
-                eprintln!("      The `xpu-sycl` feature enables `sycl_kernels` in kvbm-kernels,");
+                eprintln!("      The `xpu-sycl` feature enables `xpu-sycl` in kvbm-kernels,");
                 eprintln!("      which triggers `icpx -fsycl` at build time:");
                 eprintln!(
                     "          cargo run -p kvbm-physical \\"

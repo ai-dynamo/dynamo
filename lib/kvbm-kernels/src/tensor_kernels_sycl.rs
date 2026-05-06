@@ -4,7 +4,7 @@
 //! Rust FFI wrappers for the SYCL block/universal permute kernels (XPU).
 //!
 //! This mirrors `tensor_kernels.rs` (CUDA) but links against
-//! `libkvbm_kernels_xpu.so` built from `sycl/tensor_permute_kernel.cpp`.
+//! `libkvbm_kernels_sycl.so` built from `sycl/tensor_permute_kernel.cpp`.
 //!
 //! Key differences from the CUDA version:
 //! * Uses `elem_size` (bytes per element) instead of a dtype enum — the SYCL
@@ -20,7 +20,7 @@ use crate::BlockLayout;
 
 #[allow(dead_code)]
 unsafe extern "C" {
-    fn kvbm_kernels_xpu_launch_universal_from_block(
+    fn kvbm_kernels_sycl_launch_universal_from_block(
         universal_ptrs: *const *mut c_void,
         block_ptrs: *const *const c_void,
         num_blocks: usize,
@@ -34,7 +34,7 @@ unsafe extern "C" {
         queue: *mut c_void,
     ) -> i32;
 
-    fn kvbm_kernels_xpu_launch_block_from_universal(
+    fn kvbm_kernels_sycl_launch_block_from_universal(
         universal_ptrs: *const *const c_void,
         block_ptrs: *const *mut c_void,
         num_blocks: usize,
@@ -48,7 +48,7 @@ unsafe extern "C" {
         queue: *mut c_void,
     ) -> i32;
 
-    fn kvbm_kernels_xpu_launch_vectorized_copy(
+    fn kvbm_kernels_sycl_launch_vectorized_copy(
         src_ptrs: *mut *mut c_void,
         dst_ptrs: *mut *mut c_void,
         copy_size_bytes: usize,
@@ -88,7 +88,7 @@ pub unsafe fn sycl_universal_from_block(
     queue: *mut c_void,
 ) -> i32 {
     unsafe {
-        kvbm_kernels_xpu_launch_universal_from_block(
+        kvbm_kernels_sycl_launch_universal_from_block(
             universal_ptrs,
             block_ptrs,
             num_blocks,
@@ -123,7 +123,7 @@ pub unsafe fn sycl_block_from_universal(
     queue: *mut c_void,
 ) -> i32 {
     unsafe {
-        kvbm_kernels_xpu_launch_block_from_universal(
+        kvbm_kernels_sycl_launch_block_from_universal(
             universal_ptrs,
             block_ptrs,
             num_blocks,
@@ -163,7 +163,7 @@ pub unsafe fn sycl_vectorized_copy(
     queue: *mut c_void,
 ) -> i32 {
     unsafe {
-        kvbm_kernels_xpu_launch_vectorized_copy(
+        kvbm_kernels_sycl_launch_vectorized_copy(
             src_ptrs,
             dst_ptrs,
             copy_size_bytes,

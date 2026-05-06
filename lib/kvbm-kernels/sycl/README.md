@@ -1,6 +1,6 @@
 # SYCL Kernels for XPU
 
-SYCL C++ sources compiled into `libkvbm_kernels_xpu.so` and called from Rust
+SYCL C++ sources compiled into `libkvbm_kernels_sycl.so` and called from Rust
 via `extern "C"` FFI through `tensor_kernels_sycl.rs`.
 
 ## Files
@@ -10,27 +10,27 @@ via `extern "C"` FFI through `tensor_kernels_sycl.rs`.
 
 ## Build
 
-Compiled automatically by `build.rs` when the `sycl_kernels` Cargo feature is
+Compiled automatically by `build.rs` when the `xpu-sycl` Cargo feature is
 enabled. Requires Intel oneAPI DPC++ compiler (`icpx`).
 
 ```bash
 # Automatic (via cargo):
-cargo build --features sycl_kernels
+cargo build --features xpu-sycl
 
 # Manual (equivalent):
 source /opt/intel/oneapi/setvars.sh
-icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_xpu.so \
+icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_sycl.so \
      tensor_permute_kernel.cpp vectorized_copy_kernel.cpp
 ```
 
-The resulting `libkvbm_kernels_xpu.so` is linked dynamically (`-lkvbm_kernels_xpu -lsycl`).
+The resulting `libkvbm_kernels_sycl.so` is linked dynamically (`-lkvbm_kernels_sycl -lsycl`).
 
 ## Extern "C" API
 
 ### vectorized_copy_kernel.cpp
 
 ```c
-int kvbm_kernels_xpu_launch_vectorized_copy(
+int kvbm_kernels_sycl_launch_vectorized_copy(
     void** src_ptrs,          // device pointer array of sources
     void** dst_ptrs,          // device pointer array of destinations
     size_t copy_size_bytes,   // bytes per pair (uniform)
@@ -45,12 +45,12 @@ int kvbm_kernels_xpu_launch_vectorized_copy(
 ### tensor_permute_kernel.cpp
 
 ```c
-int kvbm_kernels_xpu_launch_universal_from_block(
+int kvbm_kernels_sycl_launch_universal_from_block(
     void* const* universal_ptrs, const void* const* block_ptrs,
     size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd,
     size_t elem_size, int layout_value, void* queue_ptr);
 
-int kvbm_kernels_xpu_launch_block_from_universal(
+int kvbm_kernels_sycl_launch_block_from_universal(
     const void* const* universal_ptrs, void* const* block_ptrs,
     size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd,
     size_t elem_size, int layout_value, void* queue_ptr);

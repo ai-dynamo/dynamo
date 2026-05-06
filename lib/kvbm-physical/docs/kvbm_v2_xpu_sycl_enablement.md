@@ -25,7 +25,7 @@ specific framework.
 | `kvbm-config` | Static configuration for caches, discovery, NIXL, object storage, offload, onboard policies, tokio/rayon runtimes, messengers. Pure config structs. | No. |
 | `kvbm-logical` | Logical block lifecycle: registries, pools, sequence tracking, metrics, TinyLFU cache, pub/sub adapters, framework integrations. Works on logical handles; never touches devices directly. | No. |
 | `dynamo-memory` (`lib/memory`) | `MemoryDescriptor`, `DeviceAllocator` / `PinnedAllocator` traits, `DeviceStorage` / `PinnedStorage`, `NumaWorkerPool`, `SyclMemPool`, `CudaMemPool`. Backend-agnostic storage layer — no device-SDK types in the public API. | **Yes** — houses `SyclMemPool`, SYCL-aware NUMA discovery, and the allocator traits that downstream device wrappers implement. |
-| `kvbm-kernels` | CUDA and SYCL kernel launchers: `vectorized_copy`, `memcpy_batch`, `xpu_vectorized_copy`, `xpu_*_from_block`. Built from `.cu` via nvcc and `.cpp` via `icpx -fsycl`. | **Yes** — SYCL kernel sources and FFI wrappers live here. |
+| `kvbm-kernels` | CUDA and SYCL kernel launchers: `vectorized_copy`, `memcpy_batch`, `sycl_vectorized_copy`, `sycl_*_from_block`. Built from `.cu` via nvcc and `.cpp` via `icpx -fsycl`. | **Yes** — SYCL kernel sources and FFI wrappers live here. |
 | `kvbm-physical` | Device abstraction traits (`DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps`), the `DeviceBackend` enum, CUDA and SYCL implementations, and `TransferManager` / `TransferContext` on top of them. | **Yes** — the core of the multi-backend layer; CUDA and SYCL both implement the trait surface here. |
 | `kvbm-engine` | Orchestrator: `InstanceLeader`, `PhysicalWorker`, `ReplicatedDataWorker`, sessions, offload pipeline, object tier (G4), `CollectiveOps` with NCCL and **oneCCL** implementations, `OneCclBootstrap`. | **Yes** — adds the `oneccl` feature and the XPU-aware layer-wise onboard path. |
 | `kvbm-py3` (`lib/bindings/kvbm`) | Python/FFI bindings consumed by external frameworks. Owns the vLLM connector and its backend-specific `event_sync_blocking` (CUDA / SYCL / fallback). | **Yes** — SYCL variant added alongside CUDA, mutually exclusive by feature. |
@@ -63,7 +63,7 @@ graph TB
 
         subgraph physLayer["Device abstraction layer"]
             Physical["kvbm-physical<br/>DeviceBackend enum<br/>Device{Context,Stream,Event,MemPool}Ops<br/>TransferManager, TransferContext"]
-            Kernels["kvbm-kernels<br/>CUDA: vectorized_copy, memcpy_batch<br/>SYCL: xpu_vectorized_copy, xpu_*_from_block"]
+            Kernels["kvbm-kernels<br/>CUDA: vectorized_copy, memcpy_batch<br/>SYCL: sycl_vectorized_copy, sycl_*_from_block"]
         end
 
         subgraph memLayer["Storage layer"]
@@ -154,9 +154,9 @@ graph TB
   `dynamo-memory`; `nccl` / `oneccl` on `kvbm-engine`). `kvbm-py3` enforces
   that `cuda` and `xpu-sycl` are mutually exclusive.
 - **Kernels are optional and FFI-gated.** `kvbm-kernels` produces
-  `libkvbm_kernels.so` (nvcc) and `libkvbm_kernels_xpu.so` (icpx); both are
+  `libkvbm_kernels.so` (nvcc) and `libkvbm_kernels_sycl.so` (icpx); both are
   loaded only when the corresponding backend feature is enabled. SYCL
-  kernels are built automatically when the `sycl_kernels` Cargo feature is
+  kernels are built automatically when the `xpu-sycl` Cargo feature is
   enabled (icpx must be on PATH or `ONEAPI_ROOT` set).
 
 The remaining diagrams and tables zoom in on the **device abstraction** and
@@ -183,7 +183,7 @@ after XPU/SYCL enablement.
 | **Pinned host allocation** | `PinnedStorage` called `cuMemHostAlloc` inline. | A `PinnedAllocator` trait in `dynamo-memory` is called *on a NUMA-pinned worker thread* managed by `NumaWorkerPool` (one thread per NUMA node, global singleton). `CudaPinnedAllocator` / `SyclPinnedAllocator` in `kvbm-physical` provide the backend implementations; the worker first-touches pages after allocation so Linux binds them to the correct node. End-to-end validation via `move_pages(2)` is available for either backend through the `validate_numa_placement` binary — see [`sycl_pool_and_numa.md`](../../memory/docs/sycl_pool_and_numa.md#validating-first-touch-on-real-hardware) for the correct invocation on CUDA vs. XPU hosts (XPU requires the `xpu-sycl` feature at build time). |
 | **NUMA topology / PCI discovery** | CUDA-specific: PCI BDF pulled from `cuDeviceGet*` attributes. | Backend-agnostic. `DeviceContextOps::pci_bdf_address()` returns `"DDDD:BB:DD.F"` — CUDA queries `CU_DEVICE_ATTRIBUTE_PCI_*`; SYCL reads `SyclDevice::info()?.pci_address`. `dynamo_memory::numa` resolves NUMA nodes via sysfs (with `nvidia-smi` / `xpu-smi` fallbacks) and subdivides CPU sets fairly across *all* GPUs of the same vendor, using NVML for CUDA and a sysfs PCI scan for Intel (class `0x03xxxx`, vendor `0x8086`). |
 | **Event reuse** | Single-shot events — `CudaEvent::record(&stream)`. | New `DeviceEventOps::record_on_stream(stream_handle)` lets the same `DeviceEvent` be re-recorded on a later op. Required by `PhysicalWorker::execute_local_layerwise_onboard` in `kvbm-engine`, which records one event per layer on a shared H2D stream. |
-| **Kernels** | CUDA `.cu` sources compiled by nvcc in `kvbm-kernels`: `vectorized_copy`, `memcpy_batch`, optional permute kernels. | Same CUDA kernels, *plus* SYCL `.cpp` sources (`sycl/vectorized_copy_kernel.cpp`, `sycl/tensor_permute_kernel.cpp`) compiled by `icpx -fsycl` into `libkvbm_kernels_xpu.so` when `sycl_kernels` is enabled. FFI wrappers in `src/tensor_kernels_sycl.rs` expose them as `sycl_vectorized_copy`, `sycl_universal_from_block`, `sycl_block_from_universal`. SYCL kernels pass a `sycl::queue*` instead of a `cudaStream_t` and use byte-size element dispatch rather than dtype templates. |
+| **Kernels** | CUDA `.cu` sources compiled by nvcc in `kvbm-kernels`: `vectorized_copy`, `memcpy_batch`, optional permute kernels. | Same CUDA kernels, *plus* SYCL `.cpp` sources (`sycl/vectorized_copy_kernel.cpp`, `sycl/tensor_permute_kernel.cpp`) compiled by `icpx -fsycl` into `libkvbm_kernels_sycl.so` when `xpu-sycl` is enabled. FFI wrappers in `src/tensor_kernels_sycl.rs` expose them as `sycl_vectorized_copy`, `sycl_universal_from_block`, `sycl_block_from_universal`. SYCL kernels pass a `sycl::queue*` instead of a `cudaStream_t` and use byte-size element dispatch rather than dtype templates. |
 | **Collectives (`kvbm-engine`)** | NCCL only (`feature = "nccl"`, `cudarc::nccl`). | `CollectiveOps` trait is now implemented by `NcclCollectives` **and** `OneCclCollectives` (`feature = "oneccl"`, `oneapi-rs::ccl`). oneCCL supports both a from-scratch bootstrap (`OneCclBootstrap` — 8 B world_size + 256 B KVS address rendezvous) and borrowed handles from PyTorch / vLLM. Broadcasts use `ccl_rs_group_start/end` with a single `event_wait` on the last submitted op. |
 | **vLLM connector event sync (`kvbm-py3`)** | `event_sync_blocking(u64)` called `cuEventSynchronize` and asserted on failure. | Three cfg-gated implementations of the same `pub fn event_sync_blocking(u64) -> anyhow::Result<()>`: CUDA (`cuEventSynchronize`), SYCL (`oneapi_rs::sys::sycl_rs_event_wait`), and a "no backend" stub that `bail!`s. The call site now `?`-propagates the error instead of swallowing it. |
 | **Test helpers (`kvbm-physical`)** | Direct `cudaMemcpy` with explicit D2H/H2D kinds in `fill.rs` / `checksum.rs`. | Backend-agnostic `sync_memcpy_dtoh` / `sync_memcpy_htod` helpers on `DeviceContext` that construct a throwaway stream and synchronize. Tests pick a backend via `test_device_backend()` which prefers SYCL when compiled in and available, falling back to CUDA. |
@@ -257,7 +257,7 @@ graph TB
 
     subgraph kernels["kvbm-kernels"]
         CudaKern["vectorized_copy<br/>memcpy_batch<br/>CUDA (.cu)"]
-        SyclKern["xpu_vectorized_copy<br/>xpu_*_from_block<br/>SYCL (.cpp via icpx)"]
+        SyclKern["sycl_vectorized_copy<br/>sycl_*_from_block<br/>SYCL (.cpp via icpx)"]
     end
 
     subgraph memory["dynamo-memory"]
@@ -329,8 +329,8 @@ graph TB
 3. `batch_copy` / `vectorized_copy` go through `DeviceStreamOps`, which
    dispatches to either `CudaStreamWrapper` or `SyclStreamWrapper`.
 4. `vectorized_copy` implementations call into `kvbm-kernels`
-   (`kvbm_kernels::vectorized_copy` for CUDA, `kvbm_kernels::xpu_vectorized_copy`
-   for SYCL — the latter links against `libkvbm_kernels_xpu.so` built by
+   (`kvbm_kernels::vectorized_copy` for CUDA, `kvbm_kernels::sycl_vectorized_copy`
+   for SYCL — the latter links against `libkvbm_kernels_sycl.so` built by
    `icpx -fsycl`).
 5. Allocation flows the other way: `PhysicalLayout::builder().allocate_device(ctx)`
    in `kvbm-physical` hands `DeviceStorage::new` an `Arc<dyn DeviceAllocator>`;
@@ -762,7 +762,7 @@ Three primitives on `DeviceStreamOps`:
   N independent copies executed in parallel by a GPU kernel. Both pointer
   arrays live in device memory (previously uploaded via `memcpy_htod`).
   Implemented by `kvbm-kernels` for CUDA (`kvbm_kernels_launch_vectorized_copy`)
-  and SYCL (`kvbm_kernels_xpu_launch_vectorized_copy` in
+  and SYCL (`kvbm_kernels_sycl_launch_vectorized_copy` in
   `sycl/vectorized_copy_kernel.cpp`). Used for FC↔LW per-chunk transfers.
 
 **Engine selection is no longer explicit.** The executor picks `batch_copy`
@@ -873,10 +873,10 @@ A parallel trait `CollectiveOps` lives in `kvbm-engine`:
 | Crate | Feature | Effect |
 |---|---|---|
 | `dynamo-memory` | `sycl` | Enables `SyclMemPool`, SYCL NUMA enumerators. Requires `oneapi-rs`. |
-| `kvbm-kernels` | `sycl_kernels` | Compiles SYCL `.cpp` sources via icpx and links `libkvbm_kernels_xpu.so`. |
-| `kvbm-kernels` | `sycl_permute_kernels` | Enables SYCL permute kernel re-exports (implies `sycl_kernels`). |
+| `kvbm-kernels` | `xpu-sycl` | Compiles SYCL `.cpp` sources via icpx and links `libkvbm_kernels_sycl.so`. |
+| `kvbm-kernels` | `xpu-sycl-permute` | Enables SYCL permute kernel re-exports (implies `xpu-sycl`). |
 | `kvbm-physical` | `cuda` (default) | Compiles `device/cuda`. Pulls in `kvbm-kernels`. |
-| `kvbm-physical` | `xpu-sycl` | Compiles `device/sycl`. Pulls in `kvbm-kernels/sycl_kernels`, `oneapi-rs`, and `dynamo-memory/sycl`. |
+| `kvbm-physical` | `xpu-sycl` | Compiles `device/sycl`. Pulls in `kvbm-kernels/xpu-sycl`, `oneapi-rs`, and `dynamo-memory/xpu-sycl`. |
 | `kvbm-engine` | `nccl` | Compiles `collectives::nccl`. |
 | `kvbm-engine` | `oneccl` | Compiles `collectives::oneccl` + `oneccl_bootstrap`. |
 | `kvbm-py3` (bindings) | `cuda` / `xpu-sycl` | Selects which `event_sync_blocking` is emitted. Mutually exclusive. |

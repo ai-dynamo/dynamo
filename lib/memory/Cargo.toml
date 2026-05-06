@@ -20,10 +20,10 @@ unsafe-slices = []
 # test features for hardware-specific tests
 testing-cuda = []
 testing-nixl = []
-testing-sycl = ["sycl"]
-testing-all = ["testing-cuda", "testing-nixl", "testing-sycl"]
+testing-xpu-sycl = ["xpu-sycl"]
+testing-all = ["testing-cuda", "testing-nixl", "testing-xpu-sycl"]
 
-sycl = ["dep:oneapi-rs"]
+xpu-sycl = ["dep:oneapi-rs"]
 
 [dependencies]
 anyhow = { workspace = true }

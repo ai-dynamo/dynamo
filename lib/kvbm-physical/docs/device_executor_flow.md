@@ -186,7 +186,7 @@ uploads.
 | 2. `pool.alloc_async` | `CudaMemPool::alloc_async_raw` using `cuMemAllocFromPoolAsync` on the raw `CUstream` | `SyclMemPoolWrapper::alloc_async` draws from a software free-list over `sycl::malloc_device`; tracks ptr→size in `active_allocs` |
 | 3. `stream.memcpy_htod` | `cudarc::driver::result::memcpy_htod_async` | `queue.memcpy_raw_async` |
 | 4. `stream.record_event` | `stream.record_event(None)` | `queue.submit_barrier()` wrapped in `SyclEventWrapper` |
-| 5. `stream.vectorized_copy` | `kvbm_kernels::vectorized_copy` (`.cu` compiled by nvcc) | `kvbm_kernels::xpu_vectorized_copy` (`.cpp` compiled by `icpx -fsycl`) with the `sycl::queue*` handle |
+| 5. `stream.vectorized_copy` | `kvbm_kernels::vectorized_copy` (`.cu` compiled by nvcc) | `kvbm_kernels::sycl_vectorized_copy` (`.cpp` compiled by `icpx -fsycl`) with the `sycl::queue*` handle |
 | 6. `pool.free_async` | `cuMemFreeAsync` stream-ordered | `SyclMemPoolWrapper` records the event and defers the return-to-pool until the event signals (`PendingFree` queue) |
 | 7. `event.synchronize` | `cuEventSynchronize` | `sycl::event::wait` |
 

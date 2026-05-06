@@ -4,15 +4,15 @@
 // SYCL permute kernels for XPU — mirrors cuda/tensor_kernels.cu.
 //
 // This file provides queue-based SYCL kernels for the block/universal permute
-// operations, compiled to a shared library (libkvbm_kernels_xpu.so) and called
+// operations, compiled to a shared library (libkvbm_kernels_sycl.so) and called
 // from Rust via extern "C" FFI — identical to the CUDA path.
 //
 // Two extern "C" launchers:
-//   kvbm_kernels_xpu_launch_universal_from_block()
-//   kvbm_kernels_xpu_launch_block_from_universal()
+//   kvbm_kernels_sycl_launch_universal_from_block()
+//   kvbm_kernels_sycl_launch_block_from_universal()
 //
 // Build:
-//   icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_xpu.so tensor_permute_kernel.cpp
+//   icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_sycl.so tensor_permute_kernel.cpp
 //
 // The queue pointer is passed opaquely from Rust as void*.
 // Element-type dispatch uses elem_size (bytes) instead of C++ templates,
@@ -86,7 +86,7 @@ extern "C" {
 ///   queue_ptr      - opaque sycl::queue* (passed from Rust as *mut c_void)
 ///
 /// Returns 0 on success, non-zero on error.
-int kvbm_kernels_xpu_launch_universal_from_block(
+int kvbm_kernels_sycl_launch_universal_from_block(
     void* const* universal_ptrs,
     const void* const* block_ptrs,
     size_t num_blocks,
@@ -149,7 +149,7 @@ int kvbm_kernels_xpu_launch_universal_from_block(
 }
 
 /// Universal tensors -> Block stacks (inverse).
-int kvbm_kernels_xpu_launch_block_from_universal(
+int kvbm_kernels_sycl_launch_block_from_universal(
     const void* const* universal_ptrs,
     void* const* block_ptrs,
     size_t num_blocks,

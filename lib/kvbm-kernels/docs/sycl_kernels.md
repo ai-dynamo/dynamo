@@ -1,7 +1,7 @@
 # SYCL Kernels
 
 How the SYCL/XPU path of `kvbm-kernels` is organized: the `.cpp` sources,
-how they are compiled into `libkvbm_kernels_xpu.so` by `icpx -fsycl`, the
+how they are compiled into `libkvbm_kernels_sycl.so` by `icpx -fsycl`, the
 `extern "C"` launcher ABI, and how the kernels dispatch work-groups.
 
 For the broader architecture and how these kernels plug into the device
@@ -13,36 +13,36 @@ abstraction in `kvbm-physical`, see
 ```
 lib/kvbm-kernels/
 ├── sycl/
-│   ├── vectorized_copy_kernel.cpp   # xpu_vectorized_copy launcher
-│   └── tensor_permute_kernel.cpp    # xpu_*_from_block launchers
+│   ├── vectorized_copy_kernel.cpp   # sycl_vectorized_copy launcher
+│   └── tensor_permute_kernel.cpp    # sycl_*_from_block launchers
 ├── cuda/
 │   ├── tensor_kernels.cu            # CUDA kernels (unchanged)
 │   └── stubs.c                      # abort-on-call stubs when nvcc is absent
 ├── src/
 │   ├── tensor_kernels.rs            # CUDA FFI (always built)
-│   ├── tensor_kernels_sycl.rs       # SYCL FFI (feature sycl_kernels)
+│   ├── tensor_kernels_sycl.rs       # SYCL FFI (feature xpu-sycl)
 │   └── lib.rs
 └── build.rs                         # two-tier build (CUDA + SYCL)
 ```
 
 ## Build pipeline
 
-The SYCL branch in `build.rs` is driven by the `sycl_kernels` Cargo
+The SYCL branch in `build.rs` is driven by the `xpu-sycl` Cargo
 feature. When enabled, it compiles every
 `.cpp` under `sycl/` into a single shared library.
 
 ```mermaid
 flowchart TD
-    A[cargo build] --> B{sycl_kernels feature enabled?}
+    A[cargo build] --> B{xpu-sycl feature enabled?}
     B -- no --> DONE_CUDA[CUDA-only build<br/>links libkvbm_kernels.so]
     B -- yes --> C{icpx on PATH?}
     C -- yes --> D[icpx]
     C -- no --> E{ONEAPI_ROOT set?}
     E -- yes --> F["$ONEAPI_ROOT/compiler/latest/bin/icpx"]
     E -- no --> PANIC[panic:<br/>icpx not found]
-    D --> G[icpx -fsycl -shared -fPIC -O2<br/>-o libkvbm_kernels_xpu.so<br/>sycl/*.cpp]
+    D --> G[icpx -fsycl -shared -fPIC -O2<br/>-o libkvbm_kernels_sycl.so<br/>sycl/*.cpp]
     F --> G
-    G --> H[rustc-link-search=OUT_DIR<br/>rustc-link-lib=dylib=kvbm_kernels_xpu<br/>rustc-link-lib=sycl<br/>rustc-link-lib=stdc++]
+    G --> H[rustc-link-search=OUT_DIR<br/>rustc-link-lib=dylib=kvbm_kernels_sycl<br/>rustc-link-lib=sycl<br/>rustc-link-lib=stdc++]
     H --> DONE_XPU[XPU-enabled build]
 
     style G fill:#2196f3,stroke:#1565c0,color:#fff
@@ -50,7 +50,7 @@ flowchart TD
 
 Notes:
 
-- The CUDA branch runs regardless of `sycl_kernels` — a pure
+- The CUDA branch runs regardless of `xpu-sycl` — a pure
   XPU build still needs `cc` (or the stubs) for `libkvbm_kernels.so`.
   This is a known rough edge; see the enablement doc for follow-up
   items.
@@ -66,16 +66,23 @@ All three launchers use the same shape: opaque device pointer arrays,
 explicit dimension arguments, a `void*` that Rust supplies as a
 `sycl::queue*`, and an `int` return code.
 
+Naming is aligned end-to-end: the `.so` is `libkvbm_kernels_sycl.so`,
+the C++ symbols are `kvbm_kernels_sycl_launch_*`, the Rust `extern "C"`
+declarations match, and the Rust public wrappers are `sycl_*`. The
+`xpu-sycl` Cargo feature is spelled the same across `kvbm-kernels`,
+`dynamo-memory`, `kvbm-physical`, and `kvbm-py3`, so every KVBM crate
+activates this code path with one consistent flag.
+
 ```cpp
 extern "C" {
 
-int kvbm_kernels_xpu_launch_vectorized_copy(
+int kvbm_kernels_sycl_launch_vectorized_copy(
     void** src_ptrs, void** dst_ptrs,
     size_t copy_size_bytes,
     int    num_pairs,
     void*  queue_ptr);    // sycl::queue* opaque
 
-int kvbm_kernels_xpu_launch_universal_from_block(
+int kvbm_kernels_sycl_launch_universal_from_block(
     void* const*       universal_ptrs,
     const void* const* block_ptrs,
     size_t num_blocks, size_t nh, size_t nl, size_t no,
@@ -83,7 +90,7 @@ int kvbm_kernels_xpu_launch_universal_from_block(
     int    layout_value,  // 0 = NHD, 1 = HND
     void*  queue_ptr);
 
-int kvbm_kernels_xpu_launch_block_from_universal(
+int kvbm_kernels_sycl_launch_block_from_universal(
     const void* const* universal_ptrs,
     void* const*       block_ptrs,
     size_t num_blocks, size_t nh, size_t nl, size_t no,
@@ -106,7 +113,7 @@ in place of the raw `int`. Tests and `kvbm-physical` call
 these functions with the queue pointer obtained via
 `oneapi_rs::safe::SyclQueue::raw_queue_ptr()`.
 
-## Kernel dispatch — `xpu_vectorized_copy`
+## Kernel dispatch — `sycl_vectorized_copy`
 
 This is the hot path for FC↔LW transfers in KVBM v2. Each work-group
 handles one or more `(src, dst)` pointer pairs using a group-strided
@@ -155,7 +162,7 @@ performance cliff on short copies.
 permute-and-copy kernels used by the FC↔LW path when the source and
 destination layouts disagree (NHD vs HND vs universal). The Rust side
 only calls them when the layout metadata requests permutation;
-same-layout transfers reuse `xpu_vectorized_copy`.
+same-layout transfers reuse `sycl_vectorized_copy`.
 
 Both kernels:
 
@@ -196,12 +203,12 @@ formatted by `check_ccl_result` in `kvbm-engine`.
 
 | Feature | Effect |
 |---|---|
-| `sycl_kernels` | Builds `src/tensor_kernels_sycl.rs` and compiles SYCL kernels via icpx. Requires DPC++ compiler. |
-| `sycl_permute_kernels` | Enables SYCL permute kernel re-exports (implies `sycl_kernels`). |
+| `xpu-sycl` | Builds `src/tensor_kernels_sycl.rs` and compiles SYCL kernels via icpx. Requires DPC++ compiler. |
+| `xpu-sycl-permute` | Enables SYCL permute kernel re-exports (implies `xpu-sycl`). |
 | `testing-xpu` | Enables `tests/xpu_kernel_roundtrip_sycl.rs` integration tests; requires a real XPU device |
-| `kvbench-xpu-sycl` | Enables the `kvbench_xpu_sycl.rs` example (pulls in `clap`, `oneapi-rs`, and `sycl_permute_kernels`) |
+| `kvbench-xpu-sycl` | Enables the `kvbench_xpu_sycl.rs` example (pulls in `clap`, `oneapi-rs`, and `xpu-sycl-permute`) |
 
 Kernel dispatch from `kvbm-physical` crosses this FFI boundary only at
-the `kvbm_kernels::xpu_vectorized_copy` / `kvbm_kernels::xpu_*_from_block`
+the `kvbm_kernels::sycl_vectorized_copy` / `kvbm_kernels::sycl_*_from_block`
 call sites in `device/sycl/mod.rs`. See the device executor flow doc
 for the call sequence that wraps these launches.

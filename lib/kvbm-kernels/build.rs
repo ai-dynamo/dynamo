@@ -75,12 +75,12 @@ fn main() {
         }
     }
 
-    // --- SYCL kernels (driven by sycl_kernels Cargo feature) ---
+    // --- SYCL kernels (driven by xpu-sycl Cargo feature) ---
     println!(
         "cargo:rerun-if-changed={}",
         Path::new(&manifest_dir).join("sycl").display()
     );
-    if env::var("CARGO_FEATURE_SYCL_KERNELS").is_ok() {
+    if env::var("CARGO_FEATURE_XPU_SYCL").is_ok() {
         build_sycl_library(&manifest_dir, &out_dir);
     }
 }
@@ -392,7 +392,7 @@ fn add_cuda_library_paths() {
 
 /// Build SYCL XPU kernels from source using icpx.
 ///
-/// Compiles all sycl/*.cpp files into libkvbm_kernels_xpu.so which provides
+/// Compiles all sycl/*.cpp files into libkvbm_kernels_sycl.so which provides
 /// extern "C" launchers called from tensor_kernels_sycl.rs:
 ///   - tensor_permute_kernel.cpp  (block/universal permute)
 ///   - vectorized_copy_kernel.cpp (vectorized copy)
@@ -425,20 +425,20 @@ fn build_sycl_library(manifest_dir: &str, out_dir: &str) {
             candidate.to_string_lossy().into_owned()
         } else {
             panic!(
-                "Feature 'sycl_kernels' is enabled but icpx not found. \
+                "Feature 'xpu-sycl' is enabled but icpx not found. \
                  Install Intel oneAPI DPC++ compiler or set ONEAPI_ROOT."
             );
         }
     } else {
         panic!(
-            "Feature 'sycl_kernels' is enabled but icpx not found. \
+            "Feature 'xpu-sycl' is enabled but icpx not found. \
              Install Intel oneAPI DPC++ compiler."
         );
     };
 
-    let so_path = Path::new(out_dir).join("libkvbm_kernels_xpu.so");
+    let so_path = Path::new(out_dir).join("libkvbm_kernels_sycl.so");
 
-    // Single-step compile + link: icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_xpu.so *.cpp
+    // Single-step compile + link: icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_sycl.so *.cpp
     let mut cmd = Command::new(&icpx);
     cmd.arg("-fsycl")
         .arg("-shared")
@@ -466,7 +466,7 @@ fn build_sycl_library(manifest_dir: &str, out_dir: &str) {
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir);
-    println!("cargo:rustc-link-lib=dylib=kvbm_kernels_xpu");
+    println!("cargo:rustc-link-lib=dylib=kvbm_kernels_sycl");
 
     // SYCL runtime
     println!("cargo:rustc-link-lib=sycl");

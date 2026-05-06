@@ -34,11 +34,11 @@ permute_kernels = []
 
 # Enable core XPU SYCL kernels (vectorized_copy). Requires icpx/DPC++ compiler;
 # build.rs will fail clearly if the compiler is not found when this feature is active.
-sycl_kernels = []
+xpu-sycl = []
 
-# Enable XPU permute kernels (block/universal layout transforms). Implies sycl_kernels.
+# Enable XPU permute kernels (block/universal layout transforms). Implies xpu-sycl.
 # Tests are gated with #[cfg(all(test, feature = "testing-xpu"))]
-sycl_permute_kernels = ["sycl_kernels"]
+xpu-sycl-permute = ["xpu-sycl"]
 
 # Enable XPU tests - only works when SYCL kernels are built
 testing-xpu = []
@@ -48,7 +48,7 @@ kvbench = ["dep:clap"]
 
 
 # Enable XPU SYCL kvbench example (pulls in clap + oneapi-rs)
-kvbench-xpu-sycl = ["dep:clap", "dep:oneapi-rs", "sycl_permute_kernels"]
+kvbench-xpu-sycl = ["dep:clap", "dep:oneapi-rs", "xpu-sycl-permute"]
 
 [[example]]
 name = "kvbench"

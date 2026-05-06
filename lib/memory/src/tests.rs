@@ -17,7 +17,7 @@ fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
     )
 }
 
-#[cfg(all(feature = "testing-sycl", not(feature = "testing-cuda")))]
+#[cfg(all(feature = "testing-xpu-sycl", not(feature = "testing-cuda")))]
 fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
     std::sync::Arc::new(
         TestSyclAllocator::new(0).expect("XPU device 0 required for tests"),
@@ -80,14 +80,14 @@ impl DeviceAllocator for TestCudaAllocator {
 
 // ---- SYCL/XPU test allocator ----
 
-#[cfg(feature = "testing-sycl")]
+#[cfg(feature = "testing-xpu-sycl")]
 #[derive(Debug)]
 struct TestSyclAllocator {
     queue: std::sync::Arc<oneapi_rs::safe::SyclQueue>,
     device_id: u32,
 }
 
-#[cfg(feature = "testing-sycl")]
+#[cfg(feature = "testing-xpu-sycl")]
 impl TestSyclAllocator {
     fn new(device_id: u32) -> anyhow::Result<Self> {
         let queue = oneapi_rs::safe::SyclQueue::new_for_device_ordinal(device_id as usize)?;
@@ -95,7 +95,7 @@ impl TestSyclAllocator {
     }
 }
 
-#[cfg(feature = "testing-sycl")]
+#[cfg(feature = "testing-xpu-sycl")]
 impl DeviceAllocator for TestSyclAllocator {
     fn allocate_device(&self, size: usize) -> Result<u64> {
         self.queue
@@ -410,7 +410,7 @@ fn test_disk_storage_unregistered_no_nixl_descriptor() {
     assert!(storage.nixl_descriptor().is_none());
 }
 
-#[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
+#[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
 mod device_tests {
     use super::*;
 
@@ -613,7 +613,7 @@ mod nixl_tests {
         assert_eq!(desc.size, buffer.size());
     }
 
-    #[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
     #[test]
     fn test_type_erasure_pinned_storage() {
         let storage = PinnedStorage::new(2048, test_device_ctx()).unwrap();
@@ -626,7 +626,7 @@ mod nixl_tests {
         assert_eq!(buffer.storage_kind(), StorageKind::Pinned);
     }
 
-    #[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
     #[test]
     fn test_type_erasure_device_storage() {
         let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
@@ -778,7 +778,7 @@ mod arena_nixl_tests {
         assert_eq!(desc2.size, PAGE_SIZE * 5);
     }
 
-    #[cfg(any(feature = "testing-cuda", feature = "testing-sycl"))]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
     mod device_arena_tests {
         use super::*;
 

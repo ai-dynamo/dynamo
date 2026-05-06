@@ -50,7 +50,7 @@ pub use numa::worker_pool::PinnedAllocator;
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
-#[cfg(feature = "sycl")]
+#[cfg(feature = "xpu-sycl")]
 pub use pool::{SyclMemPool, SyclMemPoolBuilder};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};

@@ -502,10 +502,10 @@ impl BackendGpuEnumerator for CudaGpuEnumerator {
 }
 
 /// SYCL/XPU backend: sysfs PCI scan (all Intel GPUs) → SYCL runtime fallback.
-#[cfg(feature = "sycl")]
+#[cfg(feature = "xpu-sycl")]
 struct SyclGpuEnumerator;
 
-#[cfg(feature = "sycl")]
+#[cfg(feature = "xpu-sycl")]
 impl BackendGpuEnumerator for SyclGpuEnumerator {
     fn enumerate_all_gpus(&self) -> Vec<GpuTopoInfo> {
         // sysfs scan sees all Intel GPUs regardless of ONEAPI_DEVICE_SELECTOR / ZE_AFFINITY_MASK
@@ -525,7 +525,7 @@ impl BackendGpuEnumerator for SyclGpuEnumerator {
 }
 
 /// Enumerate GPUs visible to the SYCL runtime with their PCI addresses.
-#[cfg(feature = "sycl")]
+#[cfg(feature = "xpu-sycl")]
 fn enumerate_sycl_gpus() -> Vec<GpuTopoInfo> {
     use oneapi_rs::safe::SyclDevice;
 
@@ -551,7 +551,7 @@ fn enumerate_sycl_gpus() -> Vec<GpuTopoInfo> {
 ///
 /// This is the SYCL/XPU equivalent of NVML for CUDA: it sees every Intel GPU
 /// on the system regardless of `ONEAPI_DEVICE_SELECTOR` or `ZE_AFFINITY_MASK`.
-#[cfg(feature = "sycl")]
+#[cfg(feature = "xpu-sycl")]
 fn enumerate_intel_gpus_sysfs() -> Vec<GpuTopoInfo> {
     let pci_dir = std::path::Path::new("/sys/bus/pci/devices");
     let entries = match fs::read_dir(pci_dir) {
@@ -713,11 +713,11 @@ fn compute_cpu_set_for_device(
     let all_gpus = match backend {
         DeviceBackendKind::Cuda => CudaGpuEnumerator.enumerate_all_gpus(),
         DeviceBackendKind::Sycl => {
-            #[cfg(feature = "sycl")]
+            #[cfg(feature = "xpu-sycl")]
             {
                 SyclGpuEnumerator.enumerate_all_gpus()
             }
-            #[cfg(not(feature = "sycl"))]
+            #[cfg(not(feature = "xpu-sycl"))]
             {
                 tracing::warn!("SYCL feature not enabled, cannot enumerate SYCL GPUs");
                 return None;
@@ -859,7 +859,7 @@ mod cuda_tests {
 }
 
 
-#[cfg(all(test, feature = "testing-sycl"))]
+#[cfg(all(test, feature = "testing-xpu-sycl"))]
 mod sycl_tests {
     use super::*;
     use oneapi_rs::safe::SyclDevice;

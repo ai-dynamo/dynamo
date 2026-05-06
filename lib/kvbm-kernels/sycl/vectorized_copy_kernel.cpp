@@ -6,8 +6,8 @@
 // Mirrors the CUDA kvbm_kernels_launch_vectorized_copy() but uses a
 // sycl::queue* for submission instead of a cudaStream_t.
 //
-// Build (part of libkvbm_kernels_xpu.so):
-//   icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_xpu.so \
+// Build (part of libkvbm_kernels_sycl.so):
+//   icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_sycl.so \
 //        tensor_permute_kernel.cpp vectorized_copy_kernel.cpp
 //
 // The queue pointer is passed opaquely from Rust as void*.
@@ -44,7 +44,7 @@ extern "C" {
 ///   queue_ptr       - opaque sycl::queue* (passed from Rust as *mut c_void)
 ///
 /// Returns 0 on success, non-zero on error.
-int kvbm_kernels_xpu_launch_vectorized_copy(
+int kvbm_kernels_sycl_launch_vectorized_copy(
     void** src_ptrs,
     void** dst_ptrs,
     size_t copy_size_bytes,

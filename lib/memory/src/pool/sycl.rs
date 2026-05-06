@@ -384,7 +384,7 @@ impl Drop for SyclMemPool {
     }
 }
 
-#[cfg(all(test, feature = "testing-sycl"))]
+#[cfg(all(test, feature = "testing-xpu-sycl"))]
 mod tests {
     use super::*;
 
