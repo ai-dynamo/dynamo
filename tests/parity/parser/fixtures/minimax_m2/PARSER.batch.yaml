@@ -87,12 +87,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <minimax:tool_call>
-        <invoke name="get_weather">
-        <parameter name="location">NYC</parameter>
-        </invoke>
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: null
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: |-

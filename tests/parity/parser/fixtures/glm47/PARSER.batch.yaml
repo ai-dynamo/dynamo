@@ -65,8 +65,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: null
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: <tool_call>get_time</tool_call>

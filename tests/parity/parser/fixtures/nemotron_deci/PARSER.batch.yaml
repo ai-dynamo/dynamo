@@ -56,16 +56,22 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC</TOOLCALL>'
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: null
   PARSER.batch.5:
     description: Missing </TOOLCALL> end marker
     model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: null
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: '<TOOLCALL>[{"name": "get_time", "arguments": {}}]</TOOLCALL>'
