@@ -1851,10 +1851,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     @staticmethod
     def _extract_logprobs(
-        output,
-        num_output_tokens_so_far: int,
-        tokenizer=None,
-        return_tokens_as_token_ids: bool = False,
+        output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         """
         Extract logprobs from vLLM CompletionOutput for new tokens.
@@ -1896,16 +1893,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
-                token_str: str | None
-                if return_tokens_as_token_ids:
-                    token_str = f"token_id:{tok_id}"
-                else:
-                    token_str = getattr(logprob_info, "decoded_token", None)
-                    if not token_str and tokenizer:
-                        try:
-                            token_str = tokenizer.decode([tok_id])
-                        except Exception:
-                            token_str = None
+                token_str = getattr(logprob_info, "decoded_token", None)
+                if not token_str and tokenizer:
+                    try:
+                        token_str = tokenizer.decode([tok_id])
+                    except Exception:
+                        token_str = None
                 token_top_logprobs.append(
                     {
                         "rank": (
@@ -1967,7 +1960,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length=None,
         trace_headers=None,
         priority=0,
-        return_tokens_as_token_ids=False,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2017,10 +2009,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Extract logprobs for new tokens if available
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
                     log_probs, top_logprobs = self._extract_logprobs(
-                        output,
-                        previous_total_toks,
-                        tokenizer=tokenizer,
-                        return_tokens_as_token_ids=return_tokens_as_token_ids,
+                        output, previous_total_toks, tokenizer=tokenizer
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
@@ -2266,11 +2255,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = build_trace_headers(context)
 
-        output_options = request.get("output_options", {})
-        return_tokens_as_token_ids = bool(
-            output_options.get("return_tokens_as_token_ids")
-        )
-
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
         # on the decode worker (which can crash EngineCore). The guard's
@@ -2293,7 +2277,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         embedding_sequence_length=embedding_sequence_length,
                         trace_headers=trace_headers,
                         priority=priority,
-                        return_tokens_as_token_ids=return_tokens_as_token_ids,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()

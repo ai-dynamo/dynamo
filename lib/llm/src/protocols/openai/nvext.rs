@@ -124,6 +124,9 @@ pub struct NvExtResponse {
 
     /// Backend-specific matched stop condition. This is not part of the
     /// OpenAI response schema, so it is only returned under nvext when requested.
+    ///
+    /// This is response-level for Dynamo's current single-choice serving paths.
+    /// If `n > 1` is supported here, this needs an indexed/per-choice shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<serde_json::Value>,
 }
