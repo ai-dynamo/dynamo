@@ -24,6 +24,11 @@ on:
         required: false
         type: boolean
         default: false
+      upstream_failed:
+        description: 'Upstream tests/builds failed. Forwarded to GitLab as UPSTREAM_FAILED so the pipeline can require human approval before promoting a partial nightly.'
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       commit_sha:
@@ -37,6 +42,10 @@ on:
         type: boolean
         default: false
       skip_gitlab_pipeline:
+        required: false
+        type: boolean
+        default: false
+      upstream_failed:
         required: false
         type: boolean
         default: false
@@ -198,6 +207,9 @@ jobs:
     if: needs.prepare-release.result == 'success'
     runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
     environment: automated-release
+    outputs:
+      successful_count: ${{ steps.copy_images.outputs.successful_count }}
+      failed_count: ${{ steps.copy_images.outputs.failed_count }}
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
@@ -488,6 +500,8 @@ jobs:
     if: needs.prepare-release.result == 'success'
     runs-on: prod-tester-amd-v1
     environment: automated-release
+    outputs:
+      wheels_staged: ${{ steps.extract.outputs.wheels_staged }}
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
@@ -522,6 +536,16 @@ jobs:
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
           ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12"
+
+          # If the dynamo-runtime image isn't in ECR (e.g. dynamo-pipeline
+          # failed in the caller), skip wheel staging instead of failing the
+          # whole release. The GitLab trigger drops `wheel` from ARTIFACTS
+          # accordingly and forwards UPSTREAM_FAILED for the human gate.
+          if ! crane manifest "${ECR_IMAGE}" >/dev/null 2>&1; then
+            echo "::warning::dynamo-runtime image not found in ECR (${ECR_IMAGE}); skipping wheel staging."
+            echo "wheels_staged=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           STAGE="${RUNNER_TEMP}/wheels"
           mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"
@@ -565,8 +589,10 @@ jobs:
           ls -la "${OUT}/"
 
           echo "upload_dir=${OUT}" >> $GITHUB_OUTPUT
+          echo "wheels_staged=true" >> $GITHUB_OUTPUT
 
       - name: Upload wheels to Artifactory
+        if: steps.extract.outputs.wheels_staged == 'true'
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
@@ -631,7 +657,11 @@ jobs:
   trigger-gitlab-release-pipeline:
     name: Trigger GitLab Release Pipeline
     needs: [prepare-release, release-publish, stage-wheels-artifactory]
-    if: ${{ inputs.skip_gitlab_pipeline != true }}
+    # `!cancelled()` lets us still fire when release-publish or
+    # stage-wheels-artifactory partially failed (e.g. missing ECR images
+    # from a broken upstream build); UPSTREAM_FAILED is forwarded so the
+    # GitLab pipeline can require human approval.
+    if: ${{ !cancelled() && needs.prepare-release.result == 'success' && inputs.skip_gitlab_pipeline != true }}
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
@@ -649,27 +679,54 @@ jobs:
           COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
           NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
+          UPSTREAM_FAILED:      ${{ inputs.upstream_failed }}
+          PUBLISH_RESULT:       ${{ needs.release-publish.result }}
+          PUBLISH_FAILED_COUNT: ${{ needs.release-publish.outputs.failed_count }}
+          WHEELS_RESULT:        ${{ needs.stage-wheels-artifactory.result }}
+          WHEELS_STAGED:        ${{ needs.stage-wheels-artifactory.outputs.wheels_staged }}
         run: |
           set -euo pipefail
 
+          # Resolve the composite "had any upstream failure" flag forwarded
+          # to the GitLab pipeline. The pipeline keys off this to require a
+          # human approval step before promoting a partial nightly.
+          HAD_FAILURES="false"
+          if [ "${UPSTREAM_FAILED}" = "true" ]; then HAD_FAILURES="true"; fi
+          if [ "${PUBLISH_RESULT}" != "success" ]; then HAD_FAILURES="true"; fi
+          if [ -n "${PUBLISH_FAILED_COUNT}" ] && [ "${PUBLISH_FAILED_COUNT}" != "0" ]; then HAD_FAILURES="true"; fi
+          if [ "${WHEELS_RESULT}" != "success" ] || [ "${WHEELS_STAGED}" != "true" ]; then HAD_FAILURES="true"; fi
+
+          # ARTIFACTS reflects what actually staged so GitLab only scans /
+          # promotes things that exist. Helm only ships on non-nightly and
+          # only if release-publish completed (it pushes the chart inline).
+          ARTIFACTS_LIST=()
+          if [ "${PUBLISH_RESULT}" = "success" ]; then
+            ARTIFACTS_LIST+=("container")
+          fi
+          if [ "${WHEELS_RESULT}" = "success" ] && [ "${WHEELS_STAGED}" = "true" ]; then
+            ARTIFACTS_LIST+=("wheel")
+          fi
+
           # PIPELINE_TYPE / RELEASE_TYPE drive every rule in dynamo.yml.
-          # ARTIFACTS gates per-artifact scans and promotions.
           # NIGHTLY_TAG carries the resolved nightly tag (date+shortsha) for
           # the GitLab pipeline summary; the nspect version-name is hardcoded
           # to "Dynamo Nightlies" inside dynamo.yml, so we don't pass it.
           if [ "${NIGHTLY}" = "true" ]; then
             PIPELINE_TYPE="security"
             RELEASE_TYPE="nightly"
-            ARTIFACTS="wheel,container"
             NIGHTLY_TAG="${NGC_VERSION_TAG}"
             RC_TAG=""
           else
             PIPELINE_TYPE="rc"
             RELEASE_TYPE="rc"
-            ARTIFACTS="wheel,container,helm"
+            if [ "${PUBLISH_RESULT}" = "success" ]; then
+              ARTIFACTS_LIST+=("helm")
+            fi
             NIGHTLY_TAG=""
             RC_TAG="v${VERSION}-rc${RC_NUMBER}"
           fi
+
+          ARTIFACTS=$(IFS=,; echo "${ARTIFACTS_LIST[*]}")
 
           # Pipe the trigger token via @file rather than inline form value so
           # it never appears in process listings or `set -x` output.
@@ -695,6 +752,7 @@ jobs:
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
             --form "variables[ARTIFACTS]=${ARTIFACTS}" \
+            --form "variables[UPSTREAM_FAILED]=${HAD_FAILURES}" \
             --form "variables[ENABLE_PULSE_SCAN]=true" \
             --form "variables[ENABLE_WHEEL_SCAN]=true" \
             --form "variables[ENABLE_SONARQUBE]=true" \
@@ -725,4 +783,5 @@ jobs:
             echo "| NGC tag | ${NGC_VERSION_TAG} |"
             echo "| Commit | ${COMMIT_SHA} |"
             echo "| Artifacts | ${ARTIFACTS} |"
+            echo "| Upstream failed | ${HAD_FAILURES} |"
           } >> "${GITHUB_STEP_SUMMARY}"

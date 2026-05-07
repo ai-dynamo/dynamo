@@ -422,6 +422,9 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - vllm-build
+      - sglang-build
+      - trtllm-build
       - vllm-test
       - vllm-multi-gpu-test
       - sglang-test
@@ -430,16 +433,17 @@ jobs:
       - trtllm-multi-gpu-test
       - dynamo-pipeline
       - rust-tests
-    # `!cancelled() && !failure()` lets test jobs be `skipped` (when
-    # run_tests=false) without blocking the release, while still gating on
-    # `success` when tests do run. dynamo-pipeline is unconditional so its
-    # status remains a real gate either way.
-    if: ${{ !cancelled() && !failure() && needs.compute-release-mode.outputs.release == 'true' }}
+    # `!cancelled()` lets test/build jobs be `skipped` (when run_tests=false)
+    # or `failed` without blocking the publish; `upstream_failed` is forwarded
+    # to release.yml so the GitLab pipeline can require human approval before
+    # promoting a partial nightly.
+    if: ${{ !cancelled() && needs.compute-release-mode.outputs.release == 'true' }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
+      upstream_failed: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
     secrets: inherit
 
   # ============================================================================
