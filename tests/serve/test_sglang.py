@@ -492,6 +492,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(19.3),
+            pytest.mark.requested_sglang_vram_gib(19.3),
             pytest.mark.timeout(240),
             pytest.mark.nightly,
         ],
@@ -531,6 +532,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
+            pytest.mark.requested_sglang_vram_gib(17.6),
             pytest.mark.timeout(180),
             pytest.mark.nightly,
         ],
