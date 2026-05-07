@@ -269,9 +269,15 @@ async fn handle_reader(
                            (Some(bytes), None) => {
                                 let msg = match serde_json::from_slice::<ControlMessage>(bytes) {
                                     Ok(msg) => msg,
-                                    Err(_) => {
-                                        // TODO(#171) - address fatal errors
-                                        panic!("fatal error - invalid control message detected");
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "invalid control message, closing connection: {e:?}"
+                                        );
+                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                            counter.inc();
+                                        }
+                                        context.kill();
+                                        break;
                                     }
                                 };
 
@@ -291,13 +297,26 @@ async fn handle_reader(
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
-                                        // TODO(#171) - address fatal errors
-                                        panic!("received a sentinel message; this should never happen");
+                                        tracing::warn!(
+                                            "unexpected sentinel on client reader, closing connection"
+                                        );
+                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                            counter.inc();
+                                        }
+                                        context.kill();
+                                        break;
                                     }
                                 }
                            }
                            _ => {
-                                panic!("received a non-control message; this should never happen");
+                                tracing::warn!(
+                                    "unexpected non-control message on client reader, closing connection"
+                                );
+                                if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                    counter.inc();
+                                }
+                                context.kill();
+                                break;
                            }
                         }
                     }
@@ -810,9 +829,7 @@ mod tests {
         );
     }
 
-    /// Test the actual reader/writer monitor path used by create_response_stream:
-    /// a read decode error kills the context, the writer exits without a
-    /// sentinel, and the monitor returns promptly instead of waiting for FIN.
+    /// Read error in the connection monitor kills the context and skips the FIN wait.
     #[tokio::test]
     async fn test_connection_monitor_skips_fin_wait_after_read_error_kills_context() {
         let (client, mut server) = create_tcp_pair().await;
@@ -1106,9 +1123,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_reader calls context.kill() on a TCP stream read error,
-    /// preserving the downstream signal the original `panic!` delivered via
-    /// `JoinError::Panic`.
+    /// Read error in handle_reader kills the context.
     #[tokio::test]
     async fn test_handle_reader_kills_context_on_read_error() {
         let ReaderHarness {
