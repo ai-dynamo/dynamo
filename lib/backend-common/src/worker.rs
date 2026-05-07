@@ -252,9 +252,11 @@ impl Worker {
 
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
-        // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds, otherwise
-        // we exit(911). Healthy long-running workers never hit this — the
-        // timer only starts after `shutdown_token` is cancelled.
+        // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
+        // grace-period sleep, which is a fixed wait rather than a hang
+        // risk), otherwise we exit(911). Healthy long-running workers
+        // never hit this — the timer only starts after `shutdown_token`
+        // is cancelled.
         let outcome = {
             let inner_fut = self.run_inner(runtime, &shutdown_token);
             tokio::pin!(inner_fut);
@@ -263,17 +265,21 @@ impl Worker {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
                     let timeout = graceful_shutdown_timeout();
+                    let grace = grace_period_secs();
+                    let deadline = shutdown_deadline(timeout, grace);
                     tracing::debug!(
-                        "graceful shutdown started; deadline {}s",
-                        timeout.as_secs()
+                        "graceful shutdown started; deadline {}s ({}s timeout + {:.2}s grace)",
+                        deadline.as_secs(),
+                        timeout.as_secs(),
+                        grace,
                     );
-                    match tokio::time::timeout(timeout, &mut inner_fut).await {
+                    match tokio::time::timeout(deadline, &mut inner_fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
                                 "Graceful shutdown exceeded {}s; force-exiting with code 911. \
                                  Set DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to override.",
-                                timeout.as_secs()
+                                deadline.as_secs()
                             );
                             std::process::exit(911);
                         }
@@ -549,6 +555,25 @@ fn graceful_shutdown_timeout() -> Duration {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(default);
     Duration::from_secs(secs)
+}
+
+/// Compose the post-signal shutdown deadline from the drain+cleanup
+/// timeout and the grace-period sleep that precedes them.
+///
+/// The grace sleep is a fixed wait (not a hang risk), so reserving its
+/// duration on top of `timeout` ensures `engine.drain()` and
+/// `engine.cleanup()` always get the full timeout budget regardless of
+/// how the operator configures the grace period. Without this reserve,
+/// a grace period equal to the timeout (the debug default — both 5s)
+/// consumes the whole budget and the deadline expires before drain or
+/// cleanup get scheduled.
+fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
+    let grace = if grace_secs > 0.0 {
+        Duration::from_secs_f64(grace_secs)
+    } else {
+        Duration::ZERO
+    };
+    timeout.saturating_add(grace)
 }
 
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
@@ -1154,6 +1179,100 @@ mod tests {
                 Duration::from_secs(expected_default_timeout_secs())
             );
         });
+    }
+
+    // -------------------------------------------------------------------
+    // shutdown_deadline composition + budget interaction with the grace
+    // sleep. Regression coverage for the bug where deadline == timeout
+    // and grace == timeout (the debug default) starves drain + cleanup.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn shutdown_deadline_adds_grace_to_timeout() {
+        assert_eq!(
+            shutdown_deadline(Duration::from_secs(5), 5.0),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            shutdown_deadline(Duration::from_secs(30), 0.0),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            shutdown_deadline(Duration::from_secs(2), 0.5),
+            Duration::from_millis(2_500)
+        );
+    }
+
+    #[test]
+    fn shutdown_deadline_clamps_negative_grace() {
+        assert_eq!(
+            shutdown_deadline(Duration::from_secs(5), -1.0),
+            Duration::from_secs(5)
+        );
+    }
+
+    /// Regression: with the buggy deadline (timeout only, no grace
+    /// reserve), a grace period at or above the timeout consumes the
+    /// whole budget and drain + cleanup never get scheduled. This is
+    /// the default-env debug failure mode — DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
+    /// (5) equals DEFAULT_GRACE_PERIOD_SECS (5.0), and the unregister
+    /// network call (~ms-scale) tips sleep past the deadline. We use
+    /// grace > timeout to model that real-world latency deterministically
+    /// in virtual time.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_alone_starves_drain_cleanup_when_grace_meets_timeout() {
+        let (engine, log) = OrderingMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        worker.start_engine().await.unwrap();
+
+        let timeout = Duration::from_secs(5);
+        let grace = 5.1;
+
+        // The pre-fix deadline (timeout, no grace reserve).
+        let result = tokio::time::timeout(
+            timeout,
+            worker.run_engine_shutdown_steps_with_grace(grace),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "buggy deadline must expire before drain/cleanup run"
+        );
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec!["start"],
+            "drain and cleanup must not have been observed"
+        );
+    }
+
+    /// The fix: deadline = timeout + grace. Same scenario as above —
+    /// grace exceeding the raw timeout — but drain and cleanup now both
+    /// complete because the grace sleep is reserved on top of the
+    /// timeout budget.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_deadline_reserves_grace_so_drain_cleanup_complete() {
+        let (engine, log) = OrderingMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        worker.start_engine().await.unwrap();
+
+        let timeout = Duration::from_secs(5);
+        let grace = 5.1;
+
+        let deadline = shutdown_deadline(timeout, grace);
+        let result = tokio::time::timeout(
+            deadline,
+            worker.run_engine_shutdown_steps_with_grace(grace),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "fixed deadline must allow drain + cleanup to finish"
+        );
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
     }
 
     // -------------------------------------------------------------------
