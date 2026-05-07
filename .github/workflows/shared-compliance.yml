@@ -3,19 +3,29 @@
 
 name: Shared Compliance Scan
 
+# Inline-compliance design: license validation runs INSIDE each container's
+# `licenses` Dockerfile stage as part of the normal image build (the build
+# fails outright on any policy violation). This workflow just extracts the
+# resulting NOTICES tree (`/legal/`) and per-ecosystem SBOMs (`/sboms/`) as
+# CI artifacts for archival and for downstream consumers (OSRB packager,
+# SBOM-diff verifier).
+#
+# Both extractions hit the BuildKit cache populated by the upstream build
+# job, so they typically complete in seconds even though they re-run buildx.
+
 on:
   workflow_call:
     inputs:
       framework:
-        description: 'Framework name (vllm, sglang, trtllm)'
+        description: 'Framework name (vllm, sglang, trtllm, dynamo)'
         required: true
         type: string
       target:
-        description: 'Target docker stage'
+        description: 'Target docker stage (runtime, frontend, planner, ...)'
         required: true
         type: string
       target_tag_plain:
-        description: 'Plain runtime image tag prefix from the build workflow'
+        description: 'Plain runtime image tag prefix from the build workflow (kept for compatibility with existing callers)'
         required: true
         type: string
       cuda_version:
@@ -51,13 +61,12 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     runs-on: prod-builder-v3
-    # cuda_version not empty -- name: cuda12, linux/amd64
-    # cuda_version empty -- name: cpu, linux/amd64
     name: Compliance ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     timeout-minutes: ${{ inputs.compliance_timeout_minutes }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -66,29 +75,87 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Calculate target tag
-        id: calculate-target-tag
+
+      - name: Set builder name
+        id: builder
         shell: bash
-        env:
-          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
-        run: |
-          CUDA_VERSION="${{ matrix.cuda_version }}"
-          TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
+        run: echo "name=compliance-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_OUTPUT
 
-          IMAGE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
-          if [ -n "${CUDA_VERSION}" ]; then
-            CUDA_MAJOR=${CUDA_VERSION%%.*}
-            IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
-          fi
-
-          RUNTIME_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}
-          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
-      - name: Compliance scan
-        uses: ./.github/actions/compliance-scan
+      - name: Initialize builder
+        uses: ./.github/actions/init-dynamo-builder
         with:
-          image: ${{ steps.calculate-target-tag.outputs.runtime_image }}
-          artifact_name: compliance-${{ inputs.target_tag_plain }}-${{ matrix.cuda_version }}-${{ matrix.platform }}
-          arch: ${{ matrix.platform }}
-          framework: ${{ inputs.framework }}
-          target: ${{ inputs.target }}
-          cuda_version: ${{ matrix.cuda_version }}
+          builder_name: ${{ steps.builder.outputs.name }}
+          flavor: general
+          arch: linux/${{ matrix.platform }}
+
+      - name: Render Dockerfile
+        id: render
+        shell: bash
+        run: |
+          RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform linux/${{ matrix.platform }}"
+          if [ -n "${{ matrix.cuda_version }}" ]; then
+            RENDER_ARGS+=" --cuda-version ${{ matrix.cuda_version }}"
+          fi
+          RENDERED_PATH=$(python3 container/render.py ${RENDER_ARGS} --output-short-filename)
+          echo "rendered=${RENDERED_PATH}" >> $GITHUB_OUTPUT
+
+      # Extract /legal/ — the NOTICES tree. FROM scratch stage; export is bounded
+      # by the size of the NOTICES files (a few MB), not the runtime filesystem.
+      - name: Extract /legal/ (NOTICES)
+        shell: bash
+        run: |
+          mkdir -p /tmp/legal
+          docker buildx build \
+              --builder ${{ steps.builder.outputs.name }} \
+              --platform linux/${{ matrix.platform }} \
+              --target legal \
+              --output type=local,dest=/tmp/legal \
+              --progress=plain \
+              -f ${{ steps.render.outputs.rendered }} \
+              .
+
+      # Extract /sboms/ — per-ecosystem deps CSVs (and CycloneDX JSON when
+      # individual generators add them later). Also FROM scratch.
+      - name: Extract /sboms/
+        shell: bash
+        run: |
+          mkdir -p /tmp/sboms
+          docker buildx build \
+              --builder ${{ steps.builder.outputs.name }} \
+              --platform linux/${{ matrix.platform }} \
+              --target sboms \
+              --output type=local,dest=/tmp/sboms \
+              --progress=plain \
+              -f ${{ steps.render.outputs.rendered }} \
+              .
+
+      - name: Compute artifact name
+        id: artifact-name
+        shell: bash
+        run: |
+          NAME="compliance-${{ inputs.target_tag_plain }}-${{ matrix.cuda_version }}-${{ matrix.platform }}"
+          # Strip any empty CUDA marker (cpu builds): "compliance-foo--linux" -> "compliance-foo-linux".
+          NAME=$(echo "$NAME" | sed 's/--/-/g; s/-$//')
+          echo "name=${NAME}" >> $GITHUB_OUTPUT
+
+      - name: Upload /legal/ NOTICES artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ${{ steps.artifact-name.outputs.name }}-legal
+          path: /tmp/legal/
+          retention-days: 90
+
+      - name: Upload /sboms/ artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ${{ steps.artifact-name.outputs.name }}-sboms
+          path: /tmp/sboms/
+          retention-days: 90
+
+      - name: Cleanup compliance builder
+        if: always()
+        shell: bash
+        run: |
+          docker buildx rm ${{ steps.builder.outputs.name }} || true
