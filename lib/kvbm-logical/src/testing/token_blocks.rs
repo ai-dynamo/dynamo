@@ -9,16 +9,14 @@ use super::TEST_SALT;
 
 /// Create a token block from a slice of tokens with standard test salt.
 ///
-/// If the token count matches block_size, returns a complete block.
-/// Otherwise attempts to commit a partial block.
+/// The slice must contain at least one complete block.
 pub fn create_test_token_block(tokens: &[u32], block_size: u32) -> TokenBlock {
     let sequence = TokenBlockSequence::from_slice(tokens, block_size, Some(TEST_SALT));
-    if let Some(block) = sequence.blocks().first() {
-        block.clone()
-    } else {
-        let mut partial = sequence.into_parts().1;
-        partial.commit().expect("Should be able to commit")
-    }
+    sequence
+        .blocks()
+        .first()
+        .cloned()
+        .expect("create_test_token_block requires tokens.len() >= block_size")
 }
 
 /// Create a token block with sequential tokens starting from `start`.
