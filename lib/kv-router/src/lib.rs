@@ -12,6 +12,7 @@ pub(crate) mod cleanup;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;
+pub mod remote_g2_plan;
 pub mod scheduling;
 pub mod sequences;
 pub mod zmq_wire;
