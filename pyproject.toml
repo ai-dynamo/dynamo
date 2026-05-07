@@ -222,6 +222,8 @@ filterwarnings = [
     "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
     # torch.jit.script deprecation from modelopt.torch.quantization
     "ignore:`torch.jit.script` is deprecated:DeprecationWarning",
+    # nvidia-cutlass-dsl deprecation from flashinfer's grouped_gemm import chain
+    "ignore:tcgen05\\..*is deprecated.*:DeprecationWarning",
     # nvidia-modelopt warning about transformers version (transitive dep from TRT-LLM)
     "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
     # SGLang quantization warnings on CPU-only runners

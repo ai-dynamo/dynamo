@@ -19,14 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import os
 from typing import cast
 
 import pytest
 import pytest_asyncio
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
-_VLLM_MULTIPROC_ENV = "VLLM_WORKER_MULTIPROC_METHOD"
 _BASE_ARGV = [
     "--model",
     MODEL_ID,
@@ -73,27 +71,17 @@ class _FakeContext:
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def started_engine():
-    # Force direct engine tests to fork before importing vLLM. Restore afterward
-    # so serve/e2e tests in the same pytest job still exercise the default spawn path.
-    previous_multiproc = os.environ.get(_VLLM_MULTIPROC_ENV)
-    os.environ[_VLLM_MULTIPROC_ENV] = "fork"
+    # Use vLLM's default spawn for the EngineCore subprocess (set by
+    # VllmLLMEngine.start). Fork would inherit pytest's filterwarnings=error
+    # and crash the child on transitive flashinfer DeprecationWarnings.
+    from dynamo.vllm.llm_engine import VllmLLMEngine
 
-    engine = None
+    engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
     try:
-        from dynamo.vllm.llm_engine import VllmLLMEngine
-
-        engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
         engine_config = await engine.start()
         yield engine, engine_config
     finally:
-        try:
-            if engine is not None:
-                await engine.cleanup()
-        finally:
-            if previous_multiproc is None:
-                os.environ.pop(_VLLM_MULTIPROC_ENV, None)
-            else:
-                os.environ[_VLLM_MULTIPROC_ENV] = previous_multiproc
+        await engine.cleanup()
 
 
 async def test_start_populates_registration_metadata(started_engine):
