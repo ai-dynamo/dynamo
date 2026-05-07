@@ -55,6 +55,11 @@ import (
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
+const (
+	testDottedDCDName     = "service.1"
+	testNormalizedDCDName = "service-1"
+)
+
 func init() {
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
 		panic(err)
@@ -325,6 +330,39 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 			want1:   true,
 			wantErr: false,
 		},
+		{
+			name:   "generate ingress, disabled with dotted name",
+			fields: fields{},
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoComponentDeployment: betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      testDottedDCDName,
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								ServiceName:     "service1",
+								DynamoNamespace: &[]string{"default"}[0],
+								ComponentType:   commonconsts.ComponentTypeFrontend,
+								Ingress: &v1alpha1.IngressSpec{
+									Enabled: false,
+								},
+							},
+						},
+					}),
+				},
+			},
+			want: &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testNormalizedDCDName,
+					Namespace: "default",
+				},
+			},
+			want1:   true,
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -450,6 +488,39 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 			want1:   false,
 			wantErr: false,
 		},
+		{
+			name:   "generate virtual service, disabled with dotted name",
+			fields: fields{},
+			args: args{
+				ctx: context.Background(),
+				opt: generateResourceOption{
+					dynamoComponentDeployment: betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      testDottedDCDName,
+							Namespace: "default",
+						},
+						Spec: v1alpha1.DynamoComponentDeploymentSpec{
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								ServiceName:     "service1",
+								DynamoNamespace: &[]string{"default"}[0],
+								ComponentType:   commonconsts.ComponentTypeFrontend,
+								Ingress: &v1alpha1.IngressSpec{
+									Enabled: false,
+								},
+							},
+						},
+					}),
+				},
+			},
+			want: &networkingv1beta1.VirtualService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testNormalizedDCDName,
+					Namespace: "default",
+				},
+			},
+			want1:   true,
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -464,6 +535,28 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 			g.Expect(got1).To(gomega.Equal(tt.want1))
 		})
 	}
+}
+
+func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t *testing.T) {
+	r := &DynamoComponentDeploymentReconciler{Config: &configv1alpha1.OperatorConfiguration{}}
+	service, toDelete, err := r.generateService(generateResourceOption{
+		dynamoComponentDeployment: betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      testDottedDCDName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ServiceName:     "service1",
+					DynamoNamespace: &[]string{"default"}[0],
+					ComponentType:   commonconsts.ComponentTypeWorker,
+				},
+			},
+		}),
+	})
+	require.NoError(t, err)
+	require.True(t, toDelete)
+	require.Equal(t, testNormalizedDCDName, service.Name)
 }
 
 type mockDockerSecretRetriever struct {

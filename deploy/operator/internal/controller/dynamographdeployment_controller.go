@@ -204,6 +204,16 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 	} else {
+		if r.getCurrentWorkerHash(dynamoDeployment) == "" {
+			hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dynamoDeployment)
+			r.setCurrentWorkerHash(dynamoDeployment, hash)
+			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
+				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
+				reason = "failed_to_initialize_worker_hash"
+				return ctrl.Result{}, updateErr
+			}
+		}
+
 		// For unsupported pathways, log if a rolling update would have been triggered
 		if r.shouldTriggerRollingUpdate(dynamoDeployment) {
 			logger.Info("Worker spec change detected but rolling update not supported for this pathway",
@@ -436,12 +446,12 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 
 		var isReady bool
 		var reason string
-		// Keep in sync with reconcileGroveScaling: any component that requires a
-		// PodCliqueScalingGroup (multinode OR inter-pod GMS failover) must be
-		// queried via CheckPCSGReady, otherwise single-node GMS components stall
-		// in the "in progress" list because the corresponding PodClique never
-		// exists.
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
+		// Keep in sync with reconcileGroveScaling and Grove status aggregation:
+		// any component that requires a PodCliqueScalingGroup (multinode or
+		// inter-pod GMS) must be queried via CheckPCSGReady, otherwise
+		// single-node GMS components stall in the in-progress list because the
+		// corresponding PodClique never exists.
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
 		if usesPCSG {
 			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
@@ -1082,7 +1092,7 @@ func checkDCDReady(ctx context.Context, client client.Client, resourceName, name
 
 	// Check if the Available condition is True
 	for _, condition := range dcd.Status.Conditions {
-		if condition.Type == nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeAvailable {
+		if condition.Type == nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable {
 			if condition.Status == metav1.ConditionTrue {
 				return true, ""
 			}

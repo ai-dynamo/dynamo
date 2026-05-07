@@ -148,10 +148,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// generation path container.Resources has already been merged from the
 	// component podTemplate; keep the component fallback for direct backend
 	// callers and focused unit tests.
-	resources := container.Resources
-	if len(resources.Requests) == 0 && len(resources.Limits) == 0 && len(resources.Claims) == 0 {
-		resources = GetMainContainerResources(component)
-	}
+	resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
 	gpusPerNode := getGPUsPerNode(&resources)
 	totalGPUs := numberOfNodes * gpusPerNode
 
@@ -239,13 +236,7 @@ func getGPUsPerNode(resources *corev1.ResourceRequirements) int32 {
 	if resources == nil {
 		return 0
 	}
-	if q, ok := resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
-		return int32(q.Value())
-	}
-	if q, ok := resources.Limits[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
-		return int32(q.Value())
-	}
-	return 0 // Default to 0 GPUs if not specified
+	return int32(getGPUQuantity(resources))
 }
 
 // getCommonTRTLLMEnvVars returns a map of common environment variables for TRTLLM deployments

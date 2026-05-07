@@ -52,10 +52,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
-		resources := container.Resources
-		if len(resources.Requests) == 0 && len(resources.Limits) == 0 && len(resources.Claims) == 0 {
-			resources = GetMainContainerResources(component)
-		}
+		resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
 		// Apply multinode-specific argument modifications
 		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, &resources, numberOfNodes, annotations)
 
@@ -587,14 +584,51 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 }
 
 func getContainerGPUs(resources *corev1.ResourceRequirements) int64 {
+	return getGPUQuantity(resources)
+}
+
+func getGPUQuantity(resources *corev1.ResourceRequirements) int64 {
 	if resources == nil {
 		return 0
 	}
-	if q, ok := resources.Limits[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
-		return q.Value()
+	if value, ok := resourceListGPUValue(resources.Requests); ok {
+		return value
 	}
-	if q, ok := resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
-		return q.Value()
+	if value, ok := resourceListGPUValue(resources.Limits); ok {
+		return value
 	}
 	return 0
+}
+
+func resourceListGPUValue(resources corev1.ResourceList) (int64, bool) {
+	if q, ok := resources[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
+		return q.Value(), true
+	}
+	for name, q := range resources {
+		if resourceNameIsGPU(name) {
+			return q.Value(), true
+		}
+	}
+	return 0, false
+}
+
+func resourceNameIsGPU(name corev1.ResourceName) bool {
+	normalized := strings.ToLower(string(name))
+	return normalized == "gpu" ||
+		normalized == "nvidia/gpu" ||
+		strings.HasSuffix(normalized, "/gpu") ||
+		strings.Contains(normalized, ".com/gpu")
+}
+
+func resourceRequirementsWithFallback(resources, fallback corev1.ResourceRequirements) corev1.ResourceRequirements {
+	if len(resources.Requests) == 0 {
+		resources.Requests = fallback.Requests
+	}
+	if len(resources.Limits) == 0 {
+		resources.Limits = fallback.Limits
+	}
+	if len(resources.Claims) == 0 {
+		resources.Claims = fallback.Claims
+	}
+	return resources
 }
