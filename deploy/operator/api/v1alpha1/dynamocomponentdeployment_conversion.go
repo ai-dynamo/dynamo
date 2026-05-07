@@ -159,8 +159,9 @@ func restoreDCDAlphaOnlyStatusFromSaved(dstStatus *DynamoComponentDeploymentStat
 	if preservedStatus != nil && len(dstStatus.PodSelector) == 0 && len(preservedStatus.PodSelector) > 0 {
 		dstStatus.PodSelector = maps.Clone(preservedStatus.PodSelector)
 	}
-	if preservedStatus != nil && shouldRestoreSavedComponentName(dstStatus.Service, preservedStatus.Service) {
+	if preservedStatus != nil && shouldRestoreSavedServiceReplicaStatus(dstStatus.Service, preservedStatus.Service) {
 		dstStatus.Service.ComponentName = preservedStatus.Service.ComponentName
+		dstStatus.Service.ComponentNames = slices.Clone(preservedStatus.Service.ComponentNames)
 	}
 }
 
