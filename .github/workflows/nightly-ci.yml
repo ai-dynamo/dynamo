@@ -65,7 +65,7 @@ jobs:
   # and workflow_dispatch from main, this is just github.sha.
   resolve-source-sha:
     name: Resolve source SHA
-    runs-on: ubuntu-slim
+    runs-on: prod-default-v2
     permissions:
       contents: read
     outputs:
@@ -88,7 +88,7 @@ jobs:
   # wheel_builder stage carry the dev version.
   compute-dev-version:
     name: Compute dev version suffix
-    runs-on: ubuntu-slim
+    runs-on: prod-default-v2
     permissions:
       contents: read
     outputs:
@@ -108,7 +108,7 @@ jobs:
   # into release.yml.
   compute-release-mode:
     name: Compute release mode
-    runs-on: ubuntu-slim
+    runs-on: prod-default-v2
     permissions:
       contents: read
     outputs:
@@ -670,7 +670,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
-    runs-on: ubuntu-slim
+    runs-on: prod-default-v2
     if: always()
     needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     permissions:
