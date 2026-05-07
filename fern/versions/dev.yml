@@ -178,8 +178,6 @@ navigation:
         slug: agents
         path: ../pages-dev/agents/README.md
         contents:
-          - page: Agent Context
-            path: ../pages-dev/agents/agent-context.md
           - page: Agent Tracing
             path: ../pages-dev/agents/agent-tracing.md
           - page: Agent Hints
