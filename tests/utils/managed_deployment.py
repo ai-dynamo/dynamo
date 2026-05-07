@@ -241,46 +241,58 @@ class ServiceSpec:
 
     # ----- Log collection -----
     def enable_log_collection(self, log_dir: str, pvc_name: str):
-        """Wrap this service's command to tee output into a PVC-mounted log dir."""
+        """Capture stdout+stderr to a per-pod log file on the PVC without
+        parsing the user's command.
+
+        Strategy: prepend a fixed wrapper at argv[0]. The user's original
+        command + args are concatenated (raw, no shell parsing) into
+        ``args`` and execve'd by the wrapper via ``exec "$@"``. Inserts
+        only at well-defined seams in the spec (command/args list,
+        volume mounts, env vars, init containers) — never edits the
+        text of any user-supplied string.
+
+        The wrapper script itself is shipped via a per-namespace
+        ConfigMap (managed by ManagedDeployment._install_log_wrapper_configmap)
+        and copied into a shared emptyDir by a tiny init container.
+        """
         main_container = self._spec.get("extraPodSpec", {}).get("mainContainer", {})
         existing_command = main_container.get("command", [])
-        if (
-            len(existing_command) >= 3
-            and existing_command[:2] == ["/bin/bash", "-c"]
-            and "tee -a" in existing_command[2]
-        ):
+        if existing_command[:1] == [self._WRAPPER_PATH]:
             return  # already wrapped
 
         main_container = self._ensure_path("extraPodSpec", "mainContainer")
-        original_command = main_container.get("command", [])
-        original_args = main_container.get("args", [])
+        original_command = main_container.get("command", []) or []
+        original_args = main_container.get("args", []) or []
         if not original_command and not original_args:
             original_command = ["python3"]
             original_args = (
                 ["-m", "dynamo.frontend"] if self.component_type == "frontend" else []
             )
 
-        # shlex.join shell-quotes each arg so e.g. JSON literals like
-        # --kv-transfer-config '{"kv_connector":"NixlConnector",...}'
-        # survive being pasted into the bash -c heredoc; a naive
-        # " ".join would let bash interpret the braces as brace-
-        # expansion and the inner quotes would be stripped.
-        full_command = shlex.join(original_command + original_args)
+        # KEY INVARIANT: we do not modify any element of original_command
+        # or original_args. We only reorder the arrays. argv[0] becomes
+        # the wrapper; the original command + args follow, passed
+        # directly to execve via `exec "$@"` in the wrapper. JSON
+        # literals, shell metacharacters, anything goes.
+        main_container["command"] = [self._WRAPPER_PATH]
+        main_container["args"] = list(original_command) + list(original_args)
+
         service_log_dir = f"{log_dir}/service_logs/{self._name.lower()}"
 
-        template_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "templates", "log_wrapper.sh"
-        )
-        with open(template_path) as f:
-            wrapper_script = f.read()
-        wrapper_script = wrapper_script.replace("{{SERVICE_LOG_DIR}}", service_log_dir)
-        wrapper_script = wrapper_script.replace("{{FULL_COMMAND}}", full_command)
-
-        main_container["command"] = ["/bin/bash", "-c", wrapper_script]
-        if "args" in main_container:
-            del main_container["args"]
-
+        # The log PVC is operator-managed: service-level volumeMounts
+        # tells the operator to provision the corresponding volume on
+        # our behalf.
         self._add_volume_mount(pvc_name, log_dir)
+        # The wrapper-staging emptyDir is NOT operator-managed: we
+        # mount it directly on mainContainer (kubelet-level) and
+        # declare the volume in extraPodSpec.volumes ourselves. Mixing
+        # the two layers causes the operator to also generate a volume
+        # of the same name → "Duplicate value" error on Deployment apply.
+        main_vmounts = main_container.setdefault("volumeMounts", [])
+        if not any(m.get("name") == self._WRAPPER_VOLUME for m in main_vmounts):
+            main_vmounts.append(
+                {"name": self._WRAPPER_VOLUME, "mountPath": self._WRAPPER_DIR}
+            )
         self._add_env_var(
             "POD_NAME", value_from={"fieldRef": {"fieldPath": "metadata.name"}}
         )
@@ -288,6 +300,73 @@ class ServiceSpec:
             "POD_NAMESPACE",
             value_from={"fieldRef": {"fieldPath": "metadata.namespace"}},
         )
+        self._add_env_var("DYN_LOG_DIR", value=service_log_dir)
+
+        extra_pod_spec = self._ensure_path("extraPodSpec")
+
+        # 1. Stage the wrapper script from the namespace ConfigMap into
+        #    the shared emptyDir so the main container can exec it.
+        init_containers = extra_pod_spec.setdefault("initContainers", [])
+        if not any(c.get("name") == "stage-log-wrapper" for c in init_containers):
+            init_containers.append(
+                {
+                    "name": "stage-log-wrapper",
+                    "image": "busybox:1.36",
+                    "command": [
+                        "sh",
+                        "-c",
+                        (
+                            f"cp /cm/dyn_tee.sh {self._WRAPPER_PATH} && "
+                            f"chmod +x {self._WRAPPER_PATH}"
+                        ),
+                    ],
+                    "volumeMounts": [
+                        {"name": self._WRAPPER_CM_VOLUME, "mountPath": "/cm"},
+                        {"name": self._WRAPPER_VOLUME, "mountPath": self._WRAPPER_DIR},
+                    ],
+                }
+            )
+
+        # 2. chmod 1777 the log mount. Some CSI drivers (fsx.csi.aws.com
+        #    Lustre) don't honour pod fsGroup, leaving the volume root
+        #    as root:root 0755 — the non-root main container then can't
+        #    mkdir its per-pod log subdir. Sticky 1777 mirrors /tmp.
+        #    NFS / k3s local-path / nfs-rwx honour fsGroup correctly so
+        #    this is a no-op there.
+        if not any(c.get("name") == "log-pvc-chmod" for c in init_containers):
+            init_containers.append(
+                {
+                    "name": "log-pvc-chmod",
+                    "image": "busybox:1.36",
+                    "command": ["sh", "-c", f"chmod 1777 {log_dir} || true"],
+                    "securityContext": {"runAsUser": 0, "runAsGroup": 0},
+                    "volumeMounts": [{"name": pvc_name, "mountPath": log_dir}],
+                }
+            )
+
+        # 3. Volumes: ConfigMap (read-only), shared emptyDir (rw to
+        #    init, ro fine for main since wrapper is exec'd not edited).
+        volumes = extra_pod_spec.setdefault("volumes", [])
+        if not any(v.get("name") == self._WRAPPER_CM_VOLUME for v in volumes):
+            volumes.append(
+                {
+                    "name": self._WRAPPER_CM_VOLUME,
+                    "configMap": {
+                        "name": self._WRAPPER_CM_NAME,
+                        "defaultMode": 0o755,
+                    },
+                }
+            )
+        if not any(v.get("name") == self._WRAPPER_VOLUME for v in volumes):
+            volumes.append({"name": self._WRAPPER_VOLUME, "emptyDir": {}})
+
+    # Constants for the log-wrapper machinery — kept on the class so
+    # ManagedDeployment can read them when applying the ConfigMap.
+    _WRAPPER_CM_NAME = "dyn-log-wrapper"
+    _WRAPPER_CM_VOLUME = "dyn-log-wrapper-cm"
+    _WRAPPER_VOLUME = "dyn-log-wrapper"
+    _WRAPPER_DIR = "/dyn-wrapper"
+    _WRAPPER_PATH = "/dyn-wrapper/dyn_tee.sh"
 
     # ----- ported from _2 (full surface area) -----
     def set_readiness_probe(
@@ -1796,8 +1875,56 @@ class ManagedDeployment:
         # this implicit means pods get stuck in Pending instead of giving us
         # an actionable error here.
         await self._verify_pvc_binding(pvc_name)
+        # Apply the ConfigMap that ships the dyn_tee.sh wrapper. Pods
+        # reference it via volume → emptyDir → main container; without
+        # it, log collection pods would CrashLoop on missing wrapper.
+        await self._install_log_wrapper_configmap()
         self._log_collection_pvc_created = True
         return pvc_name
+
+    async def _install_log_wrapper_configmap(self) -> None:
+        """Apply the ConfigMap that holds the dyn_tee.sh log-tee wrapper.
+
+        Idempotent — safe to call on every test run. The ConfigMap is
+        per-namespace so concurrent tests in the same namespace see the
+        same content.
+        """
+        wrapper_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "templates",
+            "dyn_tee.sh",
+        )
+        with open(wrapper_path) as f:
+            wrapper_script = f.read()
+
+        cm_name = ServiceSpec._WRAPPER_CM_NAME
+        body = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": cm_name,
+                "namespace": self.namespace,
+                "labels": {
+                    "managed-by": "managed-deployment",
+                    "purpose": "log-wrapper",
+                },
+            },
+            "data": {"dyn_tee.sh": wrapper_script},
+        }
+        assert self._core_api is not None
+        try:
+            await self._core_api.read_namespaced_config_map(
+                name=cm_name, namespace=self.namespace
+            )
+            await self._core_api.replace_namespaced_config_map(
+                name=cm_name, namespace=self.namespace, body=body
+            )
+        except exceptions.ApiException as e:
+            if e.status != 404:
+                raise
+            await self._core_api.create_namespaced_config_map(
+                namespace=self.namespace, body=body
+            )
 
     # ----- ported from _2 (full surface area) -----
     def _load_template(self, template_name: str) -> str:
@@ -1910,7 +2037,7 @@ class ManagedDeployment:
             local_output_dir=local_output_dir,
         )
 
-    async def _verify_pvc_binding(self, pvc_name: str, timeout: int = 60):
+    async def _verify_pvc_binding(self, pvc_name: str, timeout: int = 600):
         """Verify PVC can be bound by creating a dummy job that mounts it.
 
         This ensures the storage class supports RWX before proceeding with deployment.
@@ -1919,7 +2046,10 @@ class ManagedDeployment:
 
         Args:
             pvc_name: Name of the PVC to verify
-            timeout: Maximum time to wait for binding in seconds
+            timeout: Maximum time to wait for binding in seconds. Default 600s
+                accommodates FSx-class provisioners (AWS dgxc-enterprise-file
+                takes 5-10 min to spin up an actual filesystem); fast classes
+                like nfs-rwx / k3s local-path bind in seconds either way.
 
         Raises:
             RuntimeError: If PVC cannot be bound within timeout
