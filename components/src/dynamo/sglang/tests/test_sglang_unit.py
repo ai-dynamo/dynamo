@@ -212,7 +212,9 @@ async def test_prefill_generated_bootstrap_room_matches_dp_rank(monkeypatch):
     handler._consume_tasks = set()
     handler._engine_supports_priority = False
     handler.lora_id_for_name = {}
-    monkeypatch.setattr(handler, "_get_input_param", lambda _request: {"input_ids": [1]})
+    monkeypatch.setattr(
+        handler, "_get_input_param", lambda _request: {"input_ids": [1]}
+    )
     monkeypatch.setattr(
         PrefillWorkerHandler, "_generate_bootstrap_room", staticmethod(lambda: 4)
     )
