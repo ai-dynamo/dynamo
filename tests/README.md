@@ -511,13 +511,16 @@ Tests must be deterministic. A flaky test -- one that sometimes passes and somet
    The server is launched once and stays up across attempts; only the request/response is re-issued. Set `max_attempts` on the payload:
    ```python
    # tests/serve/multimodal_profiles/vllm.py
-   request_payloads=[
-       make_image_payload(
-           ["green", "white", "black", "purple", "red", ...],
-           max_attempts=3,  # known-flaky model output; see comment above
+   tests=[
+       MmCase(
+           payload=make_image_payload(
+               ["green", "white", "black", "purple", "red", ...],
+               max_attempts=3,  # known-flaky model output; see comment above
+           )
        )
    ],
    ```
+   For background on the `MultimodalModelProfile → TopologyConfig → MmCase` shape, see [`tests/serve/multimodal_profiles/README.md`](serve/multimodal_profiles/README.md).
    - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `max_attempts: int` kwarg that lands on `BasePayload.max_attempts`.
    - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `ResponseValidationError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
    - Cost: each attempt is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all attempts.

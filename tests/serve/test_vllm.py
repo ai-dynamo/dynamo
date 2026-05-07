@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import dataclasses
 import logging
 import os
@@ -16,7 +15,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
@@ -375,90 +374,6 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "multimodal_agg_frontend_decoding": VLLMConfig(
-        name="multimodal_agg_frontend_decoding",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        # post_merge-only: local pre-merge runs that compile outside docker
-        # can pick up NIXL stubs, which don't support the multimodal transfer
-        # path this case exercises. CI post_merge runs in a container with
-        # real NIXL, so keep this test there.
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_710_490_000
-            ),  # KV cache cap (2x safety over min=855_244_800)
-            pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
-            pytest.mark.post_merge,
-        ],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        env={"DYN_MM_ALLOW_INTERNAL": "1"},
-        script_args=[
-            "--model",
-            "Qwen/Qwen2-VL-2B-Instruct",
-            "--frontend-decoding",
-        ],
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_agg_llava": VLLMConfig(
-        name="multimodal_agg_llava",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(19.2),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                4_318_854_000
-            ),  # KV cache cap (2x safety over min=2_159_426_560)
-            pytest.mark.timeout(360),  # 7B model; L4 machines need more headroom
-            pytest.mark.nightly,
-        ],
-        model="llava-hf/llava-1.5-7b-hf",
-        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
-        env={"DYN_MM_ALLOW_INTERNAL": "1"},
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[
-            # HTTP URL test
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["bus"],
-                temperature=0.0,
-            ),
-            # String content test - verifies string → array conversion for multimodal templates
-            chat_payload_default(
-                repeat_count=1,
-                expected_response=[],  # Just validate no error
-            ),
-        ],
-    ),
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,
@@ -660,133 +575,6 @@ def test_serve_deployment(
     """
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-@pytest.mark.vllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.nightly
-@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
-@pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
-def test_multimodal_b64(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_models,
-):
-    """
-    Test multimodal inference with base64 url passthrough.
-
-    This test is separate because it loads the required image at runtime
-    (not collection time), ensuring it only fails when actually executed.
-
-    Runs on gpu_1 alongside other single-GPU multimodal tests that use the
-    same model (mm_agg_qwen2.5-vl-7b).  The ``@pytest.mark.model`` mark is
-    kept as a safety net so the model is predownloaded even if no other
-    gpu_1 config collects this model in a given CI job.
-    """
-    # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
-    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
-
-    # Create payload with B64 image
-    b64_payload = chat_payload(
-        [
-            {
-                "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
-            },
-        ],
-        repeat_count=1,
-        expected_response=["purple"],
-        max_tokens=100,
-    )
-
-    # Create test config
-    config = VLLMConfig(
-        name="test_multimodal_b64",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[],  # markers at function-level
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[b64_payload],
-    )
-
-    config = dataclasses.replace(
-        config, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-@pytest.mark.vllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.pre_merge
-@pytest.mark.profiled_vram_gib(9.6)  # same Qwen3-VL-2B agg multimodal profile
-@pytest.mark.requested_vllm_kv_cache_bytes(922_354_000)
-@pytest.mark.timeout(220)
-def test_multimodal_b64_frontend_decoding(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_models,
-):
-    """
-    Test multimodal inference with base64 images through frontend decoding path.
-
-    This exercises the Rust frontend image decode + NIXL RDMA transfer path
-    with inline base64 data: URIs (not HTTP URLs). Verifies that the
-    strip_inline_data_urls optimization does not break correctness.
-
-    HF predownload: same model is already listed via ``@pytest.mark.model`` on
-    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + gpu_1), so no
-    extra ``model`` mark is needed here for PR CI.
-    """
-    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
-
-    b64_payload = chat_payload(
-        [
-            {
-                "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
-            },
-        ],
-        repeat_count=1,
-        expected_response=["green"],
-        temperature=0.0,
-        max_tokens=100,
-    )
-
-    config = VLLMConfig(
-        name="test_multimodal_b64_frontend_decoding",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=[
-            "--model",
-            "Qwen/Qwen3-VL-2B-Instruct",
-            "--frontend-decoding",
-        ],
-        delayed_start=0,
-        timeout=220,
-        request_payloads=[b64_payload],
-    )
-
-    config = dataclasses.replace(
-        config, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 

@@ -9,7 +9,6 @@ use validator::Validate;
 mod aggregator;
 mod nvext;
 
-pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]

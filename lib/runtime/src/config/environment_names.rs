@@ -315,8 +315,9 @@ pub mod llm {
 
     /// Audit sink configuration
     pub mod audit {
-        /// Audit sink selection. Comma-separated values: `stderr`, `nats`.
-        /// Setting any non-empty value enables audit recording.
+        /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
+        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
+        /// recording.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
         /// Force audit emission even when the request `store` flag is `false`.
@@ -327,6 +328,24 @@ pub mod llm {
 
         /// NATS subject the JetStream audit sink publishes to.
         pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
+
+        /// Local output path for audit records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is
+        /// the segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AUDIT_OUTPUT_PATH: &str = "DYN_AUDIT_OUTPUT_PATH";
+
+        /// JSONL audit sink buffer size in bytes.
+        pub const DYN_AUDIT_JSONL_BUFFER_BYTES: &str = "DYN_AUDIT_JSONL_BUFFER_BYTES";
+
+        /// JSONL audit sink periodic flush interval in milliseconds.
+        pub const DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS: &str = "DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL audit sink roll threshold in uncompressed bytes.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_BYTES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL audit sink roll threshold in record lines.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
     }
 
     /// Agent trace configuration
@@ -581,6 +600,11 @@ mod tests {
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
             llm::audit::DYN_AUDIT_CAPACITY,
             llm::audit::DYN_AUDIT_NATS_SUBJECT,
+            llm::audit::DYN_AUDIT_OUTPUT_PATH,
+            llm::audit::DYN_AUDIT_JSONL_BUFFER_BYTES,
+            llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
+            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
+            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
             llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,

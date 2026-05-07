@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dynamo.common.backend.worker import Worker, WorkerConfig
+from dynamo.common.backend.engine import EngineConfig
+from dynamo.common.backend.worker import Worker, WorkerConfig, _model_runtime_config
 from dynamo.llm.exceptions import EngineShutdown
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -29,6 +30,56 @@ def _make_worker() -> tuple:
     engine.cleanup = AsyncMock()
     config = WorkerConfig(namespace="test")
     return Worker(engine=engine, config=config), engine
+
+
+def test_worker_config_from_runtime_config_copies_parser_settings():
+    runtime_cfg = MagicMock()
+    runtime_cfg.namespace = "test"
+    runtime_cfg.component = None
+    runtime_cfg.endpoint = None
+    runtime_cfg.endpoint_types = "chat,completions"
+    runtime_cfg.discovery_backend = "etcd"
+    runtime_cfg.request_plane = "tcp"
+    runtime_cfg.event_plane = "nats"
+    runtime_cfg.use_kv_events = False
+    runtime_cfg.custom_jinja_template = None
+    runtime_cfg.dyn_tool_call_parser = "kimi_k2"
+    runtime_cfg.dyn_reasoning_parser = "kimi_k25"
+    runtime_cfg.exclude_tools_when_tool_choice_none = False
+    runtime_cfg.enable_local_indexer = False
+
+    config = WorkerConfig.from_runtime_config(runtime_cfg, "nvidia/Kimi-K2.5-NVFP4")
+
+    assert config.tool_call_parser == "kimi_k2"
+    assert config.reasoning_parser == "kimi_k25"
+    assert config.exclude_tools_when_tool_choice_none is False
+    assert config.enable_local_indexer is False
+
+
+def test_model_runtime_config_includes_parser_settings():
+    worker_config = WorkerConfig(
+        namespace="test",
+        tool_call_parser="kimi_k2",
+        reasoning_parser="kimi_k25",
+        exclude_tools_when_tool_choice_none=False,
+        enable_local_indexer=False,
+    )
+    engine_config = EngineConfig(
+        model="nvidia/Kimi-K2.5-NVFP4",
+        total_kv_blocks=100,
+        max_num_seqs=16,
+        max_num_batched_tokens=8192,
+    )
+
+    runtime_config = _model_runtime_config(engine_config, worker_config)
+
+    assert runtime_config.total_kv_blocks == 100
+    assert runtime_config.max_num_seqs == 16
+    assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.tool_call_parser == "kimi_k2"
+    assert runtime_config.reasoning_parser == "kimi_k25"
+    assert runtime_config.exclude_tools_when_tool_choice_none is False
+    assert runtime_config.enable_local_indexer is False
 
 
 def test_cleanup_after_start_calls_engine_cleanup_exactly_once():
