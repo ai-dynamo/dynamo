@@ -111,6 +111,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         capacity_gb: float = extra_config["multimodal_embedding_cache_capacity_gb"]
 
         # --- Scheduler-side: logical LRU for CPU embedding cache ---
+        # Mirrors EncoderCacheManager but for the CPU tier, tracking bytes.
         hidden_size = vllm_config.model_config.get_hidden_size()
         dtype_bytes = torch.tensor(
             [], dtype=vllm_config.model_config.dtype
@@ -153,15 +154,45 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
     # ==============================
     # Scheduler-side methods
+    #
+    # vLLM scheduler call sequence per multimodal feature:
+    #
+    #   1. encoder_cache_manager.check_and_update_cache(request, i)
+    #      → if True (GPU hit): skip entirely, neither method below is called.
+    #
+    #   2. has_cache_item(identifier)
+    #      → if True (CPU hit):  item goes to external_load_encoder_input
+    #      → if False (CPU miss): item goes to encoder_inputs_to_schedule
+    #
+    #   3. update_state_after_alloc(request, i) is called for both paths.
+    #      The two paths are mutually exclusive per hash within a step:
+    #      - external_load_encoder_input → mm_hash IN _cache_order  → load path
+    #      - encoder_inputs_to_schedule  → mm_hash NOT in _cache_order → save path
     # ==============================
 
     def has_cache_item(self, identifier: str) -> bool:
+        """Check if an embedding is in the CPU cache, promoting it to MRU on hit.
+
+        Called by the scheduler only after the GPU encoder_cache_manager reports
+        a miss. A True return tells the scheduler to skip encoder compute and
+        load the embedding from the CPU store instead.
+        """
         if identifier in self._cache_order:
             self._cache_order.move_to_end(identifier)
             return True
         return False
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
+        """Record a load or save command for a multimodal feature.
+
+        Called by the scheduler after has_cache_item has already determined
+        the path. The _cache_order check here mirrors that decision:
+
+        CPU hit  (mm_hash in _cache_order):  mark for CPU→GPU load.
+        CPU miss (mm_hash not in _cache_order): evict LRU entries if needed,
+            then mark for GPU→CPU save so the worker persists the newly
+            computed embedding. Silently skips items larger than total capacity.
+        """
         mm_hash: str = request.mm_features[index].identifier
         num_embeds: int = request.get_num_encoder_embeds(index)
         size_bytes: int = num_embeds * self._bytes_per_embed
@@ -191,6 +222,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
+        """Flush accumulated load/save/evict commands into metadata for the worker."""
         meta = MultimodalEmbeddingCacheConnectorMetadata(
             loads=list(self._loads_this_step),
             saves=list(self._saves_this_step),
@@ -205,6 +237,10 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
     # ==============================
     # Worker-side methods
+    #
+    # Called by the model runner each step with the metadata produced by
+    # build_connector_meta. The worker has no caching logic of its own;
+    # it simply obeys the scheduler's load/save/evict commands.
     # ==============================
 
     def _ensure_streams(self, device: torch.device) -> None:
