@@ -15,7 +15,11 @@ pytest.importorskip(
     reason="dynamo._core.backend not built — run `maturin develop` first",
 )
 
-from dynamo.common.backend.engine import EngineConfig, GenerateChunk, LLMEngine
+from dynamo.common.backend.engine import (  # noqa: E402
+    EngineConfig,
+    GenerateChunk,
+    LLMEngine,
+)
 
 # Framework-agnostic: routed to sample-unified-test via
 # `pre_merge and gpu_0 and unified` (see test_engine.py module docstring).
