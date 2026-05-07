@@ -242,13 +242,15 @@ No pod annotations are needed. InfiniBand devices are injected by the device plu
 
 **Security Context:**
 
-Add `IPC_LOCK` capability so NIXL/UCX can pin GPU memory for RDMA registration. Without this, transfers fail with `waiting_timeout`:
+Add `IPC_LOCK` and `SYS_RESOURCE` capabilities. `IPC_LOCK` allows RDMA memory pinning, `SYS_RESOURCE` allows memlock limit escalation:
 
 ```yaml
 securityContext:
+  runAsUser: 0
   capabilities:
     add:
       - IPC_LOCK
+      - SYS_RESOURCE
 ```
 
 **Environment Variables (worker containers):**
@@ -257,7 +259,15 @@ securityContext:
 env:
   # --- UCX (RDMA transport) ---
   - name: UCX_TLS
-    value: "cuda_ipc,cuda_copy,rc"
+    value: "rc_x,rc,cuda_copy,cuda_ipc"
+  - name: UCX_NET_DEVICES
+    value: "mlx5_0:1"
+  - name: UCX_IB_ADDR_TYPE
+    value: "eth"
+  - name: UCX_RNDV_SCHEME
+    value: "get_zcopy"
+  - name: UCX_RNDV_THRESH
+    value: "0"
   - name: UCX_RC_TIMEOUT
     value: "600s"
   - name: UCX_KEEPALIVE_INTERVAL
