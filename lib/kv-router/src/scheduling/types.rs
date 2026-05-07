@@ -14,11 +14,11 @@ use crate::sequences::PrefillTokenDeltas;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
     #[serde(default)]
-    pub device: HashMap<WorkerWithDpRank, usize>,
+    pub device: FxHashMap<WorkerWithDpRank, usize>,
     #[serde(default)]
-    pub host_pinned: HashMap<WorkerWithDpRank, usize>,
+    pub host_pinned: FxHashMap<WorkerWithDpRank, usize>,
     #[serde(default)]
-    pub disk: HashMap<WorkerWithDpRank, usize>,
+    pub disk: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

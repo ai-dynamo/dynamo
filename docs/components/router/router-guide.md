@@ -174,7 +174,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Round-Robin** | `round-robin` (default) | Cycles through available workers in order |
 | **Random** | `random` | Selects a random worker for each request |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
-| **Token DP Balance** | `token-dp-balance` | Uses the KV scheduler's per-DP-rank load model with prefix matching and KV events disabled |
+| **Token DP Balance** | `token-dp-balance` | Uses the KV scheduler's per-DP-rank prompt/decode load model without prefix matching or KV events |
 | **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
 | **Device-Aware Weighted** | `device-aware-weighted` | Partitions workers into CPU and non-CPU groups, applies capability-normalized ratio budgeting using `DYN_ENCODER_CUDA_TO_CPU_RATIO` to decide which group receives the request, then selects the least-loaded worker within that group |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |

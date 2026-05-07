@@ -71,6 +71,10 @@ class KvRouterConfigBase(ConfigBase):
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
+    def validate_kv_router_config(self) -> None:
+        if self.prefill_load_scale < 0.0:
+            raise ValueError("--router-prefill-load-scale must be >= 0.0")
+
 
 class KvRouterArgGroup(ArgGroup):
     """CLI arguments for the shared KvRouterConfig parameters."""

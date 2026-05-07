@@ -1276,7 +1276,6 @@ class KvRouterConfig:
     def __init__(
         self,
         overlap_score_weight: float = 1.0,
-        prefill_load_scale: float = 1.0,
         host_cache_hit_weight: float = 0.75,
         disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
@@ -1298,6 +1297,8 @@ class KvRouterConfig:
         serve_indexer: bool = False,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
+        *,
+        prefill_load_scale: float = 1.0,
     ) -> None:
         """
         Create a KV router configuration.

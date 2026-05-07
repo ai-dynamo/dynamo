@@ -114,18 +114,27 @@ impl DefaultWorkerSelector {
     ) -> f64 {
         let block_size_f64 = block_size as f64;
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
+        let has_tier_overlap_blocks = !request.tier_overlap_blocks.device.is_empty()
+            || !request.tier_overlap_blocks.host_pinned.is_empty()
+            || !request.tier_overlap_blocks.disk.is_empty();
         let device_overlap_blocks = request
             .tier_overlap_blocks
             .device
             .get(&worker)
             .copied()
-            .unwrap_or(0);
+            .map(|blocks| blocks as f64)
+            .unwrap_or_else(|| {
+                if has_tier_overlap_blocks {
+                    0.0
+                } else {
+                    effective_overlap_blocks
+                }
+            });
         // `shared_cache_hits::hits_beyond` expects an integer block count, so
         // use the unweighted device prefix depth for this comparison.
-        let device_overlap_blocks_u32 = device_overlap_blocks as u32;
+        let device_overlap_blocks_u32 = device_overlap_blocks.round().max(0.0) as u32;
         let raw_prefill_tokens = request.raw_prefill_tokens_for(worker) as f64;
 
-        let device_overlap_blocks = device_overlap_blocks as f64;
         let host_overlap_blocks = request
             .tier_overlap_blocks
             .host_pinned
@@ -613,6 +622,65 @@ mod tests {
         assert_eq!(
             result.worker, worker0,
             "prefill load scale should apply before adding decode block load"
+        );
+    }
+
+    #[test]
+    fn test_effective_overlap_falls_back_when_tier_blocks_are_absent() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let block_size = 16u32;
+        let isl = 64usize;
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+
+        let mut effective_overlap_blocks = HashMap::new();
+        effective_overlap_blocks.insert(worker0, 4.0);
+
+        let config = KvRouterConfig {
+            overlap_score_weight: 1.0,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+
+        let selector = DefaultWorkerSelector::new(Some(config), "test");
+        let mut workers = HashMap::new();
+        workers.insert(0, SimpleWorkerConfig::default());
+        workers.insert(1, SimpleWorkerConfig::default());
+
+        let mut decode_blocks = FxHashMap::default();
+        decode_blocks.insert(worker0, 1);
+        decode_blocks.insert(worker1, 0);
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: isl,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks,
+            effective_cached_tokens: HashMap::new(),
+            decode_blocks,
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            shared_cache_hits: None,
+            resp_tx: Some(tx),
+        };
+
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .unwrap();
+
+        assert_eq!(
+            result.worker, worker0,
+            "effective overlap should still credit older callers without tier maps"
         );
     }
 

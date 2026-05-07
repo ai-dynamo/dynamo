@@ -260,8 +260,7 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
   - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` or `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` to control the device-local prefix-overlap credit multiplier, from 0.0 to 1.0. Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_PREFILL_LOAD_SCALE` to scale adjusted prompt-side prefill load before decode blocks are added. (default: 1)
-- Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen normalized worker sampling. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- `DYN_ROUTER_TEMPERATURE` — Temperature for normalized worker sampling via softmax (default: 0.0)
+- Set `DYN_ROUTER_TEMPERATURE` (default: `0.0`) to soften or sharpen normalized worker sampling. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
