@@ -119,11 +119,13 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
-        # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
-        # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
-        # that reads HOME (git, getpass.getuser) gets a writable path.
-        export HOME="${GITHUB_WORKSPACE}"
+        # Get absolute path for test-results directory and ensure it has proper permissions.
+        # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
+        TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
+        mkdir -p "${TEST_RESULTS_DIR}"
+        chmod 777 "${TEST_RESULTS_DIR}"
+        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
 
         # NVMe guard: GPU runners mount ${{ inputs.nvme_dir }}" (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no ${{ inputs.nvme_dir }} mount.
@@ -133,6 +135,13 @@ runs:
         else
           WRITE_DIR="/tmp"
         fi
+
+        # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
+        # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
+        # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
+        # that reads HOME (git, getpass.getuser) gets a writable path.
+        export HOME="${GITHUB_WORKSPACE}"
+
 
         # XDG cache (flashinfer JIT, torch compile) → NVMe when available
         export XDG_CACHE_HOME="${WRITE_DIR}/.cache"
@@ -188,10 +197,6 @@ runs:
           PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WRITE_DIR}/pytest_temp -o cache_dir=${WRITE_DIR}/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
-        # Get absolute path for test-results directory and ensure it has proper permissions
-        TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
-        chmod 777 "${TEST_RESULTS_DIR}"
-        echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
 
         umask 0022
