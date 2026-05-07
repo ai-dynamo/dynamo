@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import List
 
+from .power import write_power_summary
+
 
 def _build_aiperf_cmd(
     model: str,
@@ -97,6 +99,14 @@ def run_aiperf_single(
         )
 
     print(f"  aiperf {sweep_mode}={sweep_value} done.", flush=True)
+
+    try:
+        summary_path = write_power_summary(artifact_dir)
+    except Exception as exc:
+        print(f"  WARNING: power summary generation failed: {exc}", flush=True)
+    else:
+        if summary_path is not None:
+            print(f"  power summary -> {summary_path}", flush=True)
 
 
 def run_sweep(
