@@ -23,7 +23,7 @@ tests:
 
   - it: should use explicit natsAddr over global.nats.install
     set:
-      global.nats.install: false
+      global.nats.install: true
       dynamo-operator.natsAddr: "nats://external-nats:4222"
     asserts:
       - matchRegex:

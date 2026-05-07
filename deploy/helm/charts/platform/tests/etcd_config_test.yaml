@@ -21,7 +21,7 @@ tests:
 
   - it: should use explicit etcdAddr over global.etcd.install
     set:
-      global.etcd.install: false
+      global.etcd.install: true
       dynamo-operator.etcdAddr: "http://external-etcd:2379"
     asserts:
       - matchRegex:

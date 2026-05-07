@@ -63,14 +63,16 @@ helm-docs-clean: ## Remove generated helm documentation
 .PHONY: helm-unittest-install
 helm-unittest-install: ## Install helm-unittest plugin if not present
 	@helm plugin list | grep -q unittest || \
-		helm plugin install https://github.com/helm-unittest/helm-unittest --version $(HELM_UNITTEST_VERSION) --verify=false
+		helm plugin install https://github.com/helm-unittest/helm-unittest --version $(HELM_UNITTEST_VERSION)
+
+.PHONY: charts-prep
+charts-prep: ## Package operator subchart for local testing
+	@helm package components/operator -d charts/ 2>/dev/null
 
 .PHONY: test
-test: helm-unittest-install ## Run helm-unittest chart tests
-	@helm package components/operator -d charts/ 2>/dev/null
+test: helm-unittest-install charts-prep ## Run helm-unittest chart tests
 	@helm unittest .
 
 .PHONY: lint
-lint: ## Run helm lint
-	@helm package components/operator -d charts/ 2>/dev/null
+lint: charts-prep ## Run helm lint
 	@helm lint .
