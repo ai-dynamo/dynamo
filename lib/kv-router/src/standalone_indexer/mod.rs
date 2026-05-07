@@ -1,6 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Standalone HTTP KV-cache indexer.
+//!
+//! Hosts an Axum HTTP server with `/register`, `/unregister`, `/query`,
+//! `/query_by_hash`, and peer-discovery routes that workers / gateways can
+//! call to drive cache-aware routing decisions. Each registered worker spawns
+//! a ZMQ listener that ingests its KV events into a per-(model, tenant)
+//! [`indexer::Indexer`].
+//!
+//! ## Multi-tier responses
+//!
+//! `/query` and `/query_by_hash` return both:
+//! - the legacy flat `scores`/`frequencies`/`tree_sizes` (device-tier overlap),
+//!   for backward compatibility, and
+//! - a per-instance `instances` map keyed by `instance_id` with `gpu`, `cpu`,
+//!   `disk`, per-`dp_rank` device counts, and `longest_matched`.
+//!
+//! The `instances` shape is intended to align with Mooncake's
+//! "[RFC]: KV-Store Indexer API Standardization"
+//! (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
+//! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
+//! response struct in [`server`] for the exact semantics.
+
 pub mod indexer;
 pub mod listener;
 pub mod metrics;

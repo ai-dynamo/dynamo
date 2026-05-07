@@ -12247,8 +12247,9 @@ spec:
                           a hash during rolling updates) without losing the stable identity that
                           downstream consumers (labels, status maps, DGDSA references, planner
                           RBAC, EPP filters) depend on.
+                        maxLength: 63
                         minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        pattern: ^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$
                         type: string
                       podTemplate:
                         description: |-
@@ -20355,6 +20356,8 @@ spec:
                   x-kubernetes-validations:
                     - message: at most one component may have type epp
                       rule: self.filter(c, has(c.type) && c.type == 'epp').size() <= 1
+                    - message: component names must be unique case-insensitively
+                      rule: self.all(c1, !has(c1.name) || self.filter(c2, has(c2.name) && c2.name.lowerAscii() == c1.name.lowerAscii()).size() == 1)
                 env:
                   description: |-
                     env is prepended to every component's environment. Component-specific

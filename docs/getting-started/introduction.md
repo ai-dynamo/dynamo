@@ -159,4 +159,4 @@ Explore the following resources to go deeper:
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
 - [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
 
-**Further reading:** [Dynamo engineering blog](../blogs/README.md).
+**Further reading:** [Dynamo Digest](../digest/index.mdx).

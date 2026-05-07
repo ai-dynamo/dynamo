@@ -82,6 +82,20 @@ fn softmax_sample_with_sample(
     *entries.last().unwrap()
 }
 
+/// Read DYN_ROUTER_LOAD_BLOCK_SIZE once. When set to a positive integer it
+/// replaces `block_size` in the load-metric portion of `worker_logit`; the
+/// indexer / hash sequence / worker-event matching are untouched.
+fn load_block_size_override() -> Option<u32> {
+    use std::sync::OnceLock;
+    static OVERRIDE: OnceLock<Option<u32>> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("DYN_ROUTER_LOAD_BLOCK_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+    })
+}
+
 /// Default implementation matching the Python _cost_function.
 #[derive(Debug, Clone)]
 pub struct DefaultWorkerSelector {
@@ -123,13 +137,22 @@ impl DefaultWorkerSelector {
                 (prefill_token, 0)
             };
 
-        let potential_prefill_block = (adjusted_prefill_token as f64) / (block_size as f64);
-        let decode_block_fallback = (prefill_token as f64) / (block_size as f64);
-        let decode_block = request
-            .decode_blocks
-            .get(&worker)
-            .copied()
-            .unwrap_or(decode_block_fallback.floor() as usize) as f64;
+        // DYN_ROUTER_LOAD_BLOCK_SIZE: override the divisor used for the load
+        // metric only. When set, the score derives directly from the active
+        // prefill-token sum instead of the (coarser) tracker block count,
+        // giving finer ISL discrimination without re-hashing.
+        let load_block_size = load_block_size_override().unwrap_or(block_size);
+        let potential_prefill_block = (adjusted_prefill_token as f64) / (load_block_size as f64);
+        let decode_block = if load_block_size_override().is_some() {
+            (prefill_token as f64) / (load_block_size as f64)
+        } else {
+            let decode_block_fallback = (prefill_token as f64) / (block_size as f64);
+            request
+                .decode_blocks
+                .get(&worker)
+                .copied()
+                .unwrap_or(decode_block_fallback.floor() as usize) as f64
+        };
         let logit = overlap_weight * potential_prefill_block + decode_block;
 
         if shared_beyond > 0 {

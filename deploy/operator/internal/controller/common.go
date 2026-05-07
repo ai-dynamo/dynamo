@@ -19,6 +19,7 @@ package controller
 
 import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -54,36 +55,42 @@ type dockerSecretRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-// getServiceKeys returns the keys of the services map for logging purposes
-func getServiceKeys(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) []string {
-	keys := make([]string, 0, len(services))
-	for k := range services {
-		keys = append(keys, k)
+// getComponentNames returns the component names for logging purposes.
+func getComponentNames(components []v1beta1.DynamoComponentDeploymentSharedSpec) []string {
+	keys := make([]string, 0, len(components))
+	for i := range components {
+		keys = append(keys, components[i].ComponentName)
 	}
 	return keys
 }
 
-// servicesEqual compares two services maps to detect changes in replica counts
-func servicesEqual(old, new map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+// componentsEqual compares two component lists to detect changes in replica counts.
+func componentsEqual(old, new []v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	if len(old) != len(new) {
 		return false
 	}
 
-	for key, oldSvc := range old {
-		newSvc, exists := new[key]
+	newByName := make(map[string]*v1beta1.DynamoComponentDeploymentSharedSpec, len(new))
+	for i := range new {
+		newByName[new[i].ComponentName] = &new[i]
+	}
+
+	for i := range old {
+		oldComponent := &old[i]
+		newComponent, exists := newByName[old[i].ComponentName]
 		if !exists {
 			return false
 		}
 
 		// Compare replicas
 		oldReplicas := int32(1)
-		if oldSvc.Replicas != nil {
-			oldReplicas = *oldSvc.Replicas
+		if oldComponent.Replicas != nil {
+			oldReplicas = *oldComponent.Replicas
 		}
 
 		newReplicas := int32(1)
-		if newSvc.Replicas != nil {
-			newReplicas = *newSvc.Replicas
+		if newComponent.Replicas != nil {
+			newReplicas = *newComponent.Replicas
 		}
 
 		if oldReplicas != newReplicas {

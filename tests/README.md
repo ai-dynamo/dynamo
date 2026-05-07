@@ -487,13 +487,53 @@ All commands shown in the "Local equivalent" columns above are also documented i
 
 Tests must be deterministic. A flaky test -- one that sometimes passes and sometimes fails without code changes -- wastes CI time and erodes developer trust in the test suite. If you encounter or introduce a flaky test:
 
-1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order.
-2. **If a fix is not immediately possible**, quarantine the test to prevent it from blocking other developers:
+1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order. For LLM-output assertions, pass `temperature=0` and `seed=0` to the request so the model picks the same tokens each call.
+2. **If determinism truly isn't reachable** (model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
+
+   **2a. Whole-test retry — `@pytest.mark.flaky`** (use for unit tests, parser tests, tool-calling tests, anything that doesn't launch a server)
+
+   The plugin (`pytest-rerunfailures`) is pinned in `container/deps/requirements.test.txt` and the `flaky` marker is registered in `pyproject.toml`. Apply it as narrowly as you can:
+   ```python
+   @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
+   def test_named_tool_choice_forces_specific_function(...):
+       ...
+   ```
+   - `reruns=2` means up to 2 retries (3 attempts total). Pick the smallest number that gets you green; don't paper over a real bug.
+   - `only_rerun=[...]` restricts retries to **content / validation failures**. Use the bare exception class name. Common values:
+     - `"AssertionError"` -- direct pytest asserts (most tool-calling and parser tests).
+     - `"EngineResponseError"` -- `tests/utils/engine_process.py` wraps the validator's `AssertionError` here.
+   - **Never** match infra exceptions (`TimeoutError`, `ConnectionError`, `RuntimeError`) -- those signal a real problem, and retrying hides it.
+   - For tests parametrized via dataclasses, add the marker to the per-parametrization `marks=[...]` list so it only applies to the offending case.
+   - Cost: `@pytest.mark.flaky` reruns the *whole* test. For e2e tests where startup costs 60-90s, three attempts can spend 5+ minutes before failing. Use 2b instead.
+
+   **2b. In-process query retry — `payload.max_attempts`** (use for tests going through `run_serve_deployment` — e2e serving, multimodal smoke checks)
+
+   The server is launched once and stays up across attempts; only the request/response is re-issued. Set `max_attempts` on the payload:
+   ```python
+   # tests/serve/multimodal_profiles/vllm.py
+   request_payloads=[
+       make_image_payload(
+           ["green", "white", "black", "purple", "red", ...],
+           max_attempts=3,  # known-flaky model output; see comment above
+       )
+   ],
+   ```
+   - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `max_attempts: int` kwarg that lands on `BasePayload.max_attempts`.
+   - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `ResponseValidationError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
+   - Cost: each attempt is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all attempts.
+   - Trade-off: only re-issues the same request -- if the flake is in startup or model loading, this won't help; use 2a for those cases.
+
+   **Other in-repo retry sites** (in case you need to roll your own for a different layer):
+   - `tests/frontend/test_frontend_api_surface_compliance.py:_retry_network_op` -- sync, network-only exception list.
+   - `tests/router/helper.py:send_request_with_retry` -- async, status-code-driven (aiohttp).
+   - `tests/utils/managed_deployment.py` -- sync connect retry with 1.5x backoff.
+   - `components/src/dynamo/planner/connectors/remote_client.py` -- sync exponential backoff (`2**attempt`).
+3. **If retry is not enough either**, quarantine the test to prevent it from blocking other developers:
    - `@pytest.mark.skip(reason="Flaky: <ticket link>")` -- disables the test entirely. Use when the test provides no signal in its current state.
    - `@pytest.mark.xfail(reason="Flaky: <ticket link>", strict=False)` -- runs the test but does not fail the suite. Use when you still want visibility into pass/fail rates while you investigate.
    - In Rust, use `#[ignore]` with a comment explaining why.
-3. **File a ticket** for every quarantined test. Flaky tests without an owner drift indefinitely.
-4. **Do not leave tests quarantined for more than one sprint.** If the root cause is elusive, delete the test and rewrite it.
+4. **File a ticket** for every retried or quarantined test. Even tests using `@pytest.mark.flaky` need an owner -- retry hides the symptom; the underlying non-determinism still exists.
+5. **Do not leave tests quarantined for more than one sprint.** If the root cause is elusive, delete the test and rewrite it. A test marked `flaky` should aim to drop the marker once the upstream determinism issue is fixed.
 
 ### Timeouts
 

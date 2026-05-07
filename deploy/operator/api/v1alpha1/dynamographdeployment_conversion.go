@@ -271,8 +271,9 @@ func restoreDGDAlphaOnlyStatusFromSaved(dstStatus *DynamoGraphDeploymentStatus, 
 		if !ok {
 			continue
 		}
-		if shouldRestoreSavedComponentName(&dstSvc, &savedSvc) {
+		if shouldRestoreSavedServiceReplicaStatus(&dstSvc, &savedSvc) {
 			dstSvc.ComponentName = savedSvc.ComponentName
+			dstSvc.ComponentNames = slices.Clone(savedSvc.ComponentNames)
 		}
 		dstStatus.Services[name] = dstSvc
 	}
@@ -322,10 +323,27 @@ func serviceStatusComponentNameNeedsPreservation(src *ServiceReplicaStatus) bool
 	return src.ComponentNames[len(src.ComponentNames)-1] != src.ComponentName
 }
 
-func shouldRestoreSavedComponentName(dst, saved *ServiceReplicaStatus) bool {
-	return serviceStatusComponentNameNeedsPreservation(saved) &&
-		dst != nil &&
-		dst.ComponentName != saved.ComponentName
+func shouldRestoreSavedServiceReplicaStatus(dst, saved *ServiceReplicaStatus) bool {
+	if !serviceStatusComponentNameNeedsPreservation(saved) || dst == nil {
+		return false
+	}
+	if slices.Equal(dst.ComponentNames, componentNamesToHub(saved)) {
+		return true
+	}
+	return saved.ComponentName != "" &&
+		len(saved.ComponentNames) == 0 &&
+		len(dst.ComponentNames) == 0
+}
+
+func componentNamesToHub(src *ServiceReplicaStatus) []string {
+	if src == nil {
+		return nil
+	}
+	componentNames := slices.Clone(src.ComponentNames)
+	if len(componentNames) == 0 && src.ComponentName != "" {
+		componentNames = []string{src.ComponentName}
+	}
+	return componentNames
 }
 
 func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus, error) {
@@ -649,7 +667,7 @@ func convertReplicaStatusToHub(src *ServiceReplicaStatus, dst *v1beta1.Component
 	}
 	*dst = v1beta1.ComponentReplicaStatus{
 		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:  slices.Clone(src.ComponentNames),
+		ComponentNames:  componentNamesToHub(src),
 		Replicas:        src.Replicas,
 		UpdatedReplicas: src.UpdatedReplicas,
 	}
