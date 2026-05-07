@@ -11,6 +11,8 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_media_urls,
     _extract_sglang_stop_reason,
+    _openai_stop_sampling_params,
+    _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
@@ -61,6 +63,62 @@ def test_extract_sglang_stop_reason(finish_reason, expected):
     assert _extract_sglang_stop_reason(finish_reason) == expected
 
 
+def test_extract_sglang_stop_reason_filters_hidden_token_ids():
+    finish_reason = {"type": "stop", "matched": 128001}
+
+    assert _extract_sglang_stop_reason(finish_reason, {576}) is None
+    assert _extract_sglang_stop_reason(finish_reason, {128001}) == 128001
+
+
+def test_extract_sglang_stop_reason_filters_hidden_token_id_arrays():
+    finish_reason = {"type": "stop", "matched": [128001, 128009]}
+
+    assert _extract_sglang_stop_reason(finish_reason, {128001}) is None
+    assert _extract_sglang_stop_reason(finish_reason, {128001, 128009}) == [
+        128001,
+        128009,
+    ]
+
+
+def test_user_stop_token_ids_ignores_hidden_ids():
+    assert _user_stop_token_ids(
+        {
+            "stop_conditions": {
+                "stop_token_ids": [576],
+                "stop_token_ids_hidden": [128001],
+            }
+        }
+    ) == {576}
+
+
+def test_user_stop_token_ids_handles_null_fields():
+    assert _user_stop_token_ids({"stop_conditions": {"stop_token_ids": None}}) == set()
+    assert _user_stop_token_ids({"stop_token_ids": None}) == set()
+
+
+def test_user_stop_token_ids_accepts_stop_token_id_array():
+    assert _user_stop_token_ids({"stop": [576]}) == {576}
+
+
+def test_user_stop_token_ids_treats_token_id_display_as_string_stop():
+    assert _user_stop_token_ids({"stop": ["token_id:576"]}) == set()
+
+
+def test_openai_stop_sampling_params_preserves_string_stops():
+    assert _openai_stop_sampling_params({"stop": "END"}) == {"stop": "END"}
+    assert _openai_stop_sampling_params({"stop": ["END"]}) == {"stop": ["END"]}
+    assert _openai_stop_sampling_params({"stop": ["token_id:576"]}) == {
+        "stop": ["token_id:576"]
+    }
+
+
+def test_openai_stop_sampling_params_maps_token_id_stop_array():
+    assert _openai_stop_sampling_params({"stop": [576]}) == {"stop_token_ids": [576]}
+    assert _openai_stop_sampling_params({"stop_token_ids": [576]}) == {
+        "stop_token_ids": [576]
+    }
+
+
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.use_sglang_tokenizer = use_sglang_tokenizer
@@ -105,12 +163,19 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
     sampling_params = handler._build_sampling_params(
-        {"temperature": 0.2, "top_p": 0.9, "n": 2, "max_tokens": 8}
+        {
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "n": 2,
+            "max_tokens": 8,
+            "stop": [576],
+        }
     )
 
     assert sampling_params["n"] == 2
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
+    assert sampling_params["stop_token_ids"] == [576]
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
@@ -251,6 +316,88 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
         "llo",
         "od",
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_stop_reason_uses_response_nvext():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": "END"},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            request={"nvext": {"extra_fields": ["stop_reason"]}},
+        )
+    )
+
+    assert "stop_reason" not in chunks[0]["choices"][0]
+    assert chunks[0]["nvext"]["stop_reason"] == "END"
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": "END"},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert "stop_reason" not in chunks[0]["choices"][0]
+    assert "nvext" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_suppresses_hidden_stop_token_reason():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [128001],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": 128001},
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "cached_tokens": None,
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            user_stop_token_ids={576},
+        )
+    )
+
+    assert "stop_reason" not in chunks[0]
 
 
 @pytest.mark.asyncio

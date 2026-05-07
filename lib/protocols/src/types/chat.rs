@@ -133,6 +133,17 @@ impl From<Vec<u32>> for Stop {
     }
 }
 
+impl From<async_openai::types::chat::StopConfiguration> for Stop {
+    fn from(value: async_openai::types::chat::StopConfiguration) -> Self {
+        match value {
+            async_openai::types::chat::StopConfiguration::String(value) => Stop::String(value),
+            async_openai::types::chat::StopConfiguration::StringArray(value) => {
+                Stop::StringArray(value)
+            }
+        }
+    }
+}
+
 // Upstream renamed FinishReason (streaming) -- re-export
 pub use async_openai::types::chat::FinishReason;
 
@@ -822,6 +833,31 @@ pub struct CreateChatCompletionStreamResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_accepts_token_id_array() {
+        let stop: Stop = serde_json::from_value(serde_json::json!([576])).unwrap();
+
+        assert_eq!(stop, Stop::TokenIdArray(vec![576]));
+    }
+
+    #[test]
+    fn stop_token_id_display_string_remains_string_stop() {
+        let stop: Stop = serde_json::from_value(serde_json::json!(["token_id:576"])).unwrap();
+
+        assert_eq!(stop, Stop::StringArray(vec!["token_id:576".to_string()]));
+    }
+
+    #[test]
+    fn stop_converts_from_upstream_stop_configuration() {
+        let upstream =
+            async_openai::types::chat::StopConfiguration::StringArray(vec!["END".to_string()]);
+
+        assert_eq!(
+            Stop::from(upstream),
+            Stop::StringArray(vec!["END".to_string()])
+        );
+    }
 
     #[test]
     fn tool_call_defaults_type_on_deserialize() {

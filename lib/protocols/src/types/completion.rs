@@ -208,6 +208,20 @@ mod tests {
     }
 
     #[test]
+    fn builder_accepts_upstream_stop_configuration() {
+        let upstream_stop = async_openai::types::chat::StopConfiguration::String("END".to_string());
+
+        let request = CreateCompletionRequestArgs::default()
+            .model("test_model")
+            .prompt(Prompt::String("hello".to_string()))
+            .stop(upstream_stop)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.stop, Some(Stop::String("END".to_string())));
+    }
+
+    #[test]
     fn stop_rejects_single_token_id() {
         let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": 576}"#;
         let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);

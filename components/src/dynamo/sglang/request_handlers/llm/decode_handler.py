@@ -61,7 +61,64 @@ def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | 
     return urls or None
 
 
-def _extract_sglang_stop_reason(finish_reason: Dict[str, Any] | None) -> Any | None:
+def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
+    nvext = request.get("nvext")
+    if not isinstance(nvext, dict):
+        return False
+    extra_fields = nvext.get("extra_fields")
+    if not isinstance(extra_fields, list):
+        return False
+    return field in extra_fields
+
+
+def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
+    stop_conditions = request.get("stop_conditions")
+    if isinstance(stop_conditions, dict):
+        return {
+            token_id
+            for token_id in (stop_conditions.get("stop_token_ids") or [])
+            if isinstance(token_id, int) and not isinstance(token_id, bool)
+        }
+
+    stop = request.get("stop")
+    if isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        return set(stop)
+
+    return {
+        token_id
+        for token_id in (request.get("stop_token_ids") or [])
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    }
+
+
+def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
+    stop = request.get("stop")
+    if isinstance(stop, str):
+        return {"stop": stop}
+    if isinstance(stop, list):
+        if stop and all(
+            isinstance(item, int) and not isinstance(item, bool) for item in stop
+        ):
+            return {"stop_token_ids": stop}
+        if stop and all(isinstance(item, str) for item in stop):
+            return {"stop": stop}
+
+    stop_token_ids = [
+        token_id
+        for token_id in (request.get("stop_token_ids") or [])
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    ]
+    if stop_token_ids:
+        return {"stop_token_ids": stop_token_ids}
+    return {}
+
+
+def _extract_sglang_stop_reason(
+    finish_reason: Dict[str, Any] | None,
+    user_stop_token_ids: set[int] | None = None,
+) -> Any | None:
     """Extract SGLang's matched stop value for Dynamo's stop_reason field."""
 
     if not finish_reason:
@@ -70,11 +127,19 @@ def _extract_sglang_stop_reason(finish_reason: Dict[str, Any] | None) -> Any | N
     matched = finish_reason.get("matched")
     if isinstance(matched, bool):
         return None
-    if isinstance(matched, (str, int)):
+    if isinstance(matched, str):
+        return matched
+    if isinstance(matched, int):
+        if user_stop_token_ids is not None and matched not in user_stop_token_ids:
+            return None
         return matched
     if isinstance(matched, list) and all(
         isinstance(item, int) and not isinstance(item, bool) for item in matched
     ):
+        if user_stop_token_ids is not None and any(
+            item not in user_stop_token_ids for item in matched
+        ):
+            return None
         return matched
 
     return None
@@ -183,6 +248,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "top_k": request.get("top_k"),
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
 
@@ -361,6 +427,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_tokens_as_token_ids = bool(
             output_options.get("return_tokens_as_token_ids")
         )
+        user_stop_token_ids = _user_stop_token_ids(request)
 
         lora_path = self._resolve_lora(request)
         if lora_path:
@@ -407,11 +474,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
-                    decode, context, return_tokens_as_token_ids
+                    decode,
+                    context,
+                    return_tokens_as_token_ids,
+                    user_stop_token_ids=user_stop_token_ids,
                 ):
                     yield out
             else:
-                async for out in self._process_text_stream(decode, context):
+                async for out in self._process_text_stream(
+                    decode,
+                    context,
+                    request=request,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
                     yield out
         else:
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
@@ -443,11 +518,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
-                    agg, context, return_tokens_as_token_ids
+                    agg,
+                    context,
+                    return_tokens_as_token_ids,
+                    user_stop_token_ids=user_stop_token_ids,
                 ):
                     yield out
             else:
-                async for out in self._process_text_stream(agg, context):
+                async for out in self._process_text_stream(
+                    agg,
+                    context,
+                    request=request,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
                     yield out
 
     async def _process_token_stream(
@@ -455,6 +538,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
         return_tokens_as_token_ids: bool = False,
+        user_stop_token_ids: set[int] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -498,7 +582,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
-                    stop_reason = _extract_sglang_stop_reason(finish_reason)
+                    stop_reason = _extract_sglang_stop_reason(
+                        finish_reason, user_stop_token_ids
+                    )
                     if stop_reason is not None:
                         out["stop_reason"] = stop_reason
 
@@ -558,6 +644,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
+        request: Dict[str, Any] | None = None,
+        user_stop_token_ids: set[int] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -568,6 +656,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             OpenAI-formatted chat completion chunk dicts.
         """
+        request = request or {}
         # SGLang text chunks are cumulative per choice. Keep independent text
         # offsets so interleaved n>1 choices do not compute deltas from each
         # other's previous text.
@@ -609,9 +698,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "delta": {"role": "assistant", "content": delta},
                     "finish_reason": finish_reason_type,
                 }
-                stop_reason = _extract_sglang_stop_reason(finish_reason)
-                if stop_reason is not None:
-                    choice_data["stop_reason"] = stop_reason
+                stop_reason = _extract_sglang_stop_reason(
+                    finish_reason, user_stop_token_ids
+                )
 
                 response = {
                     "id": res["meta_info"]["id"],
@@ -620,13 +709,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "model": self.config.server_args.served_model_name,
                     "object": "chat.completion.chunk",
                 }
+                response_nvext: dict[str, Any] = {}
+                if stop_reason is not None and _nvext_extra_field_requested(
+                    request, "stop_reason"
+                ):
+                    response_nvext["stop_reason"] = stop_reason
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
                     # Base64-encode tensor bytes to match sglang's output format.
                     routed_experts = pybase64.b64encode(
                         routed_experts.numpy().tobytes()
                     ).decode("utf-8")
-                    response["nvext"] = {"routed_experts": routed_experts}
+                    response_nvext["routed_experts"] = routed_experts
+                if response_nvext:
+                    response["nvext"] = response_nvext
                 if not context.is_stopped():
                     yield response
                 text_counts_per_choice[index] = next_count
