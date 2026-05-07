@@ -130,7 +130,6 @@ We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read 
 
 ![Native AIO pipeline: up to 128 reads in flight via io_submit and io_getevents, storage device runs them concurrently.](./figures/aio_pipeline_after.svg)
 
-<!-- TODO: anecdotes for AIO perf on its own -->
 
 #### Direct I/O and the Page Cache
 Where the storage backend supports it, both anonymous and shared memory reads use `O_DIRECT`. Restore is mostly a one-pass stream from checkpoint files into destination memory, so caching the input pages in the kernel page cache is usually wasteful. Without direct I/O, a large restore can temporarily fill the page cache with checkpoint data while also allocating the destination shmem pages, increasing memory pressure and evicting useful data for other workloads.
@@ -147,16 +146,15 @@ The solution was to modify CRIU to first enumerate all the unique shmem-backed o
 ### Results
 On the same setup, we saw a massive improvement in CRIU restore time, and it is now significantly faster to restore from checkpoint than to cold start an inference worker:
 
-<!-- TODO(itay-feedback): add an SOL column (checkpoint size / NFS bandwidth) once we confirm the PVC bandwidth used in this benchmark, so the reader can see how close optimized CRIU is to the storage limit. -->
-| Model | Checkpoint size | CRIU Restore (baseline) | CRIU Restore (optimized) | Speedup |
-| --- | --- | --- | --- | --- |
-| Qwen3 0.6B | 6.2 GiB | 6.8 s | 2.4 s | 2.8x |
-| Qwen3 8B | 26 GiB | 24 s | 4.7 s | 5.1x |
-| Qwen3 14B | 47 GiB | 44 s | 6.8 s | 6.5x |
-| Qwen3 32B | 74 GiB | 70 s | 9.9 s | 7.1x |
-| Llama 3.3 70B FP8 | 86 GiB | 82 s | 11 s | 7.5x |
-| GPT-OSS 120B | 129 GiB | 119 s | 15 s | 7.9x |
-| Qwen2.5 72B | 164 GiB | 127 s | 20 s | 6.4x |
+| Model | Checkpoint size | CRIU (upstream) | CRIU (AIO) | CRIU (AIO + parallel memfd) | Speedup over upstream | SOL |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Qwen3 0.6B | 6.2 GiB | 6.8 s | 2.9 s | 2.4 s | 2.8x | 0.95 s|
+| Qwen3 8B | 26 GiB | 24 s | 11 s | 4.7 s | 5.1x | 1.8 s|
+| Qwen3 14B | 47 GiB | 44 s | 19 s | 6.8 s | 6.5x | 3.5 s |
+| Qwen3 32B | 74 GiB | 69 s | 31 s | 9.9 s | 7.1x | 5.4 s|
+| Llama 3.3 70B FP8 | 86 GiB | 81 s | 36 s | 11 s | 7.5x | 6.5 s|
+| GPT-OSS 120B | 129 GiB | 119 s | 54 s | 15 s | 7.9x | 11 s|
+| Qwen2.5 72B | 164 GiB | 126 s | 66 s | 20 s | 6.4x | 13 s |
 
 ![Optimized snapshot restore time after AIO and parallel memfd changes — significantly faster than cold start across all model sizes.](./figures/regular_restore.svg)
 
