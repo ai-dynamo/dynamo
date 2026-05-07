@@ -519,6 +519,8 @@ class TestDiffusionEngineGenerate:
         engine = DiffusionEngine(config=config)
         engine._initialized = True
         engine._pipeline = MagicMock()
+        engine._pipeline.default_generation_params = {}
+        engine._pipeline.extra_param_specs = {}
         engine._pipeline.infer.return_value = SimpleNamespace(
             video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
             image=None,
@@ -535,6 +537,7 @@ class TestDiffusionEngineGenerate:
         class FakeDiffusionRequest:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
+                self.extra_params = kwargs.get("extra_params")
                 for k, v in kwargs.items():
                     setattr(self, k, v)
 

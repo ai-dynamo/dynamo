@@ -156,13 +156,10 @@ impl ListenerLoop {
                 ) else {
                     continue;
                 };
-                if !placement_event.placement.is_local_gpu() {
-                    continue;
-                }
                 let router_event = placement_event
                     .into_router_event()
                     .expect("local worker placement must convert to router event");
-                indexer.apply_event(router_event).await;
+                indexer.apply_event_routed(router_event).await;
             }
             watermark.store(seq, Ordering::Release);
             replayed += 1;
@@ -225,13 +222,10 @@ impl ListenerLoop {
             ) else {
                 continue;
             };
-            if !placement_event.placement.is_local_gpu() {
-                continue;
-            }
             let router_event = placement_event
                 .into_router_event()
                 .expect("local worker placement must convert to router event");
-            self.indexer.apply_event(router_event).await;
+            self.indexer.apply_event_routed(router_event).await;
             self.messages_processed += 1;
         }
         self.watermark.store(seq, Ordering::Release);

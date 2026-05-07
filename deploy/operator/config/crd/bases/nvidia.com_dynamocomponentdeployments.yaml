@@ -11897,8 +11897,9 @@ spec:
                     a hash during rolling updates) without losing the stable identity that
                     downstream consumers (labels, status maps, DGDSA references, planner
                     RBAC, EPP filters) depend on.
+                  maxLength: 63
                   minLength: 1
-                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  pattern: ^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$
                   type: string
                 podTemplate:
                   description: |-

@@ -274,7 +274,7 @@ impl ReasoningParser for Gemma4ReasoningParser {
 mod tests {
     use super::*;
 
-    #[test] // CASE.10 — non-streaming basic case
+    #[test] // REASONING.batch.1 — non-streaming basic case
     fn detect_basic_thinking() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning(
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(r.normal_text, "The answer is 42.");
     }
 
-    #[test] // CASE.3 — no reasoning markers, pass through
+    #[test] // REASONING.batch.3 — no reasoning markers, pass through
     fn detect_no_markers_passes_through() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("just a plain answer", &[]);
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(r.normal_text, "just a plain answer");
     }
 
-    #[test] // CASE.5 — reasoning open without close (truncation): everything after
+    #[test] // REASONING.batch.5 — reasoning open without close (truncation): everything after
     // start marker is reasoning content.
     fn detect_truncated_reasoning_open_only() {
         let mut p = Gemma4ReasoningParser::new();
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(r.normal_text, "intro ");
     }
 
-    #[test] // CASE.13 — text before AND after the reasoning span preserved
+    #[test] // REASONING.batch.3 — text before AND after the reasoning span preserved
     fn detect_text_before_and_after() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning(
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(r.normal_text, "Hello.  Goodbye.");
     }
 
-    #[test] // CASE.5, CASE.13 — dangling end marker, missing start (upstream INVALID_SIMPLE)
+    #[test] // REASONING.batch.5, REASONING.batch.3 — dangling end marker, missing start (upstream INVALID_SIMPLE)
     fn detect_dangling_end_marker_extracts_prefix_as_reasoning() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("some thinking<channel|>final answer", &[]);
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(r.normal_text, "final answer");
     }
 
-    #[test] // CASE.5, CASE.13 — dangling end + thought prefix on the head (upstream INVALID_COMPLETE)
+    #[test] // REASONING.batch.5, REASONING.batch.3 — dangling end + thought prefix on the head (upstream INVALID_COMPLETE)
     fn detect_dangling_end_marker_strips_thought_prefix() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("thought\nrumination<channel|>final answer", &[]);
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(r.normal_text, "final answer");
     }
 
-    #[test] // CASE.20 — `thought\n` prefix absent (some tokens drop it): pass through unchanged
+    #[test] // `thought\n` prefix absent (some tokens drop it): pass through unchanged
     fn detect_no_thought_prefix() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning(
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(r.normal_text, "answer");
     }
 
-    #[test] // CASE.8 — streaming arrival, single chunk
+    #[test] // REASONING.stream.3 — streaming arrival, single chunk
     fn streaming_single_chunk() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.parse_reasoning_streaming_incremental(
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(r.normal_text, "final");
     }
 
-    #[test] // CASE.8 — streaming with `thought\n` split across deltas
+    #[test] // REASONING.stream.3 — streaming with `thought\n` split across deltas
     fn streaming_thought_prefix_split_across_deltas() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(normal, "the answer.");
     }
 
-    #[test] // CASE.8 — start marker split across deltas
+    #[test] // REASONING.stream.3 — start marker split across deltas
     fn streaming_start_marker_split() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(normal, "intro outro");
     }
 
-    #[test] // CASE.8 — end marker split across deltas
+    #[test] // REASONING.stream.3 — end marker split across deltas
     fn streaming_end_marker_split() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // CASE.8 — diverged accumulated text (no `thought\n` prefix at all)
+    #[test] // REASONING.stream.3 — diverged accumulated text (no `thought\n` prefix at all)
     fn streaming_no_thought_prefix_streaming() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // CASE.3 — streaming with no markers at all
+    #[test] // REASONING.batch.3 — streaming with no markers at all
     fn streaming_no_markers() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.parse_reasoning_streaming_incremental("plain text only", &[]);
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(r.normal_text, "plain text only");
     }
 
-    #[test] // CASE.2 — multiple reasoning spans back-to-back
+    #[test] // REASONING.batch.2 — multiple reasoning spans back-to-back
     fn streaming_multiple_reasoning_spans() {
         let mut p = Gemma4ReasoningParser::new();
         let input =
@@ -457,7 +457,7 @@ mod tests {
         assert!(r.normal_text.contains("answer2"));
     }
 
-    #[test] // CASE.9 — paired reasoning + tool call. The reasoning parser
+    #[test] // REASONING.batch.2 — paired reasoning + tool call. The reasoning parser
     // must extract the channel content as `reasoning_text` and leave the
     // following `<|tool_call>...<tool_call|>` markers intact in
     // `normal_text` for the tool-call parser to consume downstream.
@@ -475,19 +475,19 @@ mod tests {
         );
     }
 
-    // ----- Explicit N/A coverage notes (per lib/parsers/TEST_CASES.md) -----
+    // ----- Explicit N/A coverage notes (per lib/parsers/PARSER_CASES.md) -----
     //
-    // CASE.1, CASE.4, CASE.6, CASE.7  — Tool-call-only categories. N/A for
+    // REASONING.batch.1, REASONING.batch.4, REASONING.batch.6, REASONING.batch.7  — Tool-call-only categories. N/A for
     //          a reasoning parser.
-    // CASE.11, CASE.12 — `tool_choice` and `finish_reason`: tool-call concerns,
+    // FRONTEND.tool_choice, PIPELINE.finish_reason — `tool_choice` and `finish_reason`: tool-call concerns,
     //          N/A for reasoning. (Universal cross-parser gap regardless;
     //          see notes in `tool_calling/gemma4/parser.rs`.)
-    // CASE.14 — Empty / null content: empty input is covered implicitly
+    // REASONING.batch.8 — Empty / null content: empty input is covered implicitly
     //          via the no-markers passthrough cases (`detect_no_markers_*`,
     //          `streaming_no_markers`).
-    // CASE.15 — Duplicate calls: tool-call concept; N/A. Multi-span
+    // REASONING.batch.9 — Duplicate calls: tool-call concept; N/A. Multi-span
     //          reasoning is the analog and is covered by
     //          `streaming_multiple_reasoning_spans`.
-    // CASE.xml1 / CASE.xml2 — XML-family only. N/A.
-    // CASE.harmony1 — Harmony only. N/A.
+    // PARSER.xml.1 / PARSER.xml.2 — XML-family only. N/A.
+    // PARSER.harmony.1 / PARSER.harmony.2 — Harmony only. N/A.
 }

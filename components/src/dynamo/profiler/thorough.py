@@ -25,7 +25,6 @@ from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_m
 from aiconfigurator.sdk.task import TaskConfig
 
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
-from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.rapid import _generate_dgd_from_pick
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,
@@ -37,7 +36,6 @@ from dynamo.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
 )
-from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -50,6 +48,7 @@ from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     get_profiling_job_tolerations,
     inject_tolerations_into_dgd,
+    pick_decode_component,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
@@ -227,10 +226,12 @@ async def _benchmark_decode_candidates(
 
         await client.get_deployment_logs()
 
-        decode_cfg = Config.model_validate(candidate.dgd_config)
-        decode_service_name = get_service_name_by_type(
-            decode_cfg, backend, SubComponentType.DECODE
-        ).lower()
+        # Log paths are stored under {work_dir}/{deployment_name}/{component}/0.log
+        # where component names are the lowercase versions of the DGD service names.
+        # client.components is populated by create_deployment() based on the actual
+        # deployment spec.
+        decode_service_name = pick_decode_component(client)
+
         max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
             f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
             attention_dp_size=candidate.dp,
