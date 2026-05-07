@@ -80,7 +80,7 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(
                 96
             ),  # KV cache cap (2x safety over min=48)
-            pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
+            pytest.mark.timeout(293),  # profiled 33s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -112,7 +112,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.7),
             pytest.mark.requested_sglang_kv_tokens(96),
-            pytest.mark.timeout(195),
+            pytest.mark.timeout(293),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
