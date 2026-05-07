@@ -53,7 +53,7 @@ inputs:
   hf_home:
     description: 'Path to the HF home directory on the runner. When set, the HF_HOME environment variable is set to this path.'
     required: false
-    default: '/scratch'
+    default: '/models'
   gpu_tests:
     description: 'Is this a GPU test job?'
     required: false
