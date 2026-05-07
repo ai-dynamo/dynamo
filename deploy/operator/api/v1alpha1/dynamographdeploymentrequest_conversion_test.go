@@ -217,18 +217,18 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 
 	// EnableGPUDiscovery → annotation
-	if dst.Annotations[annDGDREnableGPUDisc] != "true" {
-		t.Errorf("annDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[annDGDREnableGPUDisc], "true")
+	if dst.Annotations[legacyAnnDGDREnableGPUDisc] != "true" {
+		t.Errorf("legacyAnnDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[legacyAnnDGDREnableGPUDisc], "true")
 	}
 
 	// OutputPVC → annotation
-	if dst.Annotations[annDGDROutputPVC] != "output-pvc" {
-		t.Errorf("annDGDROutputPVC annotation: got %q, want %q", dst.Annotations[annDGDROutputPVC], "output-pvc")
+	if dst.Annotations[legacyAnnDGDROutputPVC] != "output-pvc" {
+		t.Errorf("legacyAnnDGDROutputPVC annotation: got %q, want %q", dst.Annotations[legacyAnnDGDROutputPVC], "output-pvc")
 	}
 
 	// DeploymentOverrides → annotation
-	if dst.Annotations[annDGDRDeployOverrides] == "" {
-		t.Error("annDGDRDeployOverrides annotation is empty")
+	if dst.Annotations[legacyAnnDGDRDeployOverrides] == "" {
+		t.Error("legacyAnnDGDRDeployOverrides annotation is empty")
 	}
 }
 
@@ -255,13 +255,13 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 
 	// Backend → annotation
-	if dst.Annotations[annDGDRStatusBackend] != "vllm" {
-		t.Errorf("annDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[annDGDRStatusBackend], "vllm")
+	if dst.Annotations[legacyAnnDGDRStatusBackend] != "vllm" {
+		t.Errorf("legacyAnnDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRStatusBackend], "vllm")
 	}
 
 	// ProfilingResults → annotation
-	if dst.Annotations[annDGDRProfilingResults] != "configmap/profiling-cm" {
-		t.Errorf("annDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[annDGDRProfilingResults], "configmap/profiling-cm")
+	if dst.Annotations[legacyAnnDGDRProfilingResults] != "configmap/profiling-cm" {
+		t.Errorf("legacyAnnDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRProfilingResults], "configmap/profiling-cm")
 	}
 }
 
@@ -309,7 +309,7 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if blob["extra_key"] != "preserved" {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
 	}
-	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
+	// Planner round-trip via profiling-config projection helpers.
 	plannerMap, _ := blob["planner"].(map[string]interface{})
 	if plannerMap == nil {
 		t.Fatal("planner key missing in restored JSON blob")
@@ -346,11 +346,7 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 
 	// --- Status checks ---
-	// Phase is intentionally lossy: DGDRPhaseDeployed → Ready → Ready
-	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
-		t.Errorf("Status.Phase: got %q, want %q (Deployed→Ready is lossy)", restored.Status.Phase, v1beta1.DGDRPhaseReady)
-	}
-	if diff := cmp.Diff(original.Status, restored.Status, cmpopts.IgnoreFields(v1beta1.DynamoGraphDeploymentRequestStatus{}, "Phase")); diff != "" {
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
 		t.Errorf("Status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 	// GeneratedDeployment round-trip via ProfilingResults.SelectedConfig
@@ -369,6 +365,49 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 	err := src.ConvertTo(dst)
 	if err == nil {
 		t.Fatal("ConvertTo() expected error for invalid JSON, got nil")
+	}
+}
+
+func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
+	original := newV1beta1DGDR()
+	concurrency := float64(8)
+	requestRate := float64(2.5)
+	e2eLatency := float64(900)
+	totalGPUs := int32(8)
+	replicas := int32(3)
+	availableReplicas := int32(2)
+	original.Spec.Workload.Concurrency = &concurrency
+	original.Spec.Workload.RequestRate = &requestRate
+	original.Spec.SLA.E2ELatency = &e2eLatency
+	original.Spec.Hardware = &v1beta1.HardwareSpec{
+		GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+		TotalGPUs: &totalGPUs,
+	}
+	original.Spec.SearchStrategy = v1beta1.SearchStrategyThorough
+	original.Status.Phase = v1beta1.DGDRPhaseDeployed
+	original.Status.ProfilingPhase = v1beta1.ProfilingPhaseSweepingDecode
+	original.Status.DeploymentInfo = &v1beta1.DeploymentInfoStatus{
+		Replicas:          &replicas,
+		AvailableReplicas: &availableReplicas,
+	}
+	original.Status.ProfilingResults.Pareto = []v1beta1.ParetoConfig{
+		{Config: runtime.RawExtension{Raw: []byte(`{"candidate":"a"}`)}},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Fatalf("status mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
 	}
 }
 
