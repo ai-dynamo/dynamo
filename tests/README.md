@@ -114,14 +114,14 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Category                | Marker(s)                                                        | Description                        |
 |-------------------------|------------------------------------------------------------------|------------------------------------|
 | Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
-| Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
+| Test Type [required]    | unit, integration, e2e, benchmark, performance, stress | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
 | SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
-| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
+| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router, multimodal, core | Backend or component specificity. For backend tests (vllm/trtllm/sglang), tag with exactly one component (`multimodal`, `router`, `kvbm`, or `core`) so CI can fan out one job per (backend × component). |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
@@ -134,6 +134,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
 @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm
 def test_kv_cache_behavior():
     ...
 ```

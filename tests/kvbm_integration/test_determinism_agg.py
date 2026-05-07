@@ -116,6 +116,8 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.gpu_1,
     pytest.mark.nightly,
+    pytest.mark.vllm,
+    pytest.mark.trtllm,
 ]
 
 
