@@ -1112,6 +1112,9 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         if rank < 0 or size <= 0 or rank >= size:
             return cls._generate_bootstrap_room()
 
+        # All valid rooms have the form q * size + rank.
+        # Bound q so the result never exceeds i64::MAX (2^63 - 1),
+        # which is the room ID contract on the SGLang side.
         max_room = 2**63 - 1
         max_q = (max_room - rank) // size
         return random.randint(0, max_q) * size + rank
