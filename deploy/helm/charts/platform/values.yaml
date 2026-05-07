@@ -21,6 +21,12 @@ global:
     # When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd.
     install: false
 
+  nats:
+    # -- Whether this chart should install the bundled NATS subchart.
+    # When true, deploys NATS and auto-configures the operator with its address.
+    # When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS.
+    install: true
+
   kai-scheduler:
     # -- Whether this chart should install the bundled kai-scheduler subchart.
     # When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled.
@@ -62,10 +68,6 @@ dynamo-operator:
 
   # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
-
-  nats:
-    # -- Whether the NATS is enabled
-    enabled: true
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
@@ -316,10 +318,8 @@ etcd:
   affinity: {}
 
 # NATS configuration - messaging system for operator communication
+# Installation is controlled by global.nats.install above.
 nats:
-  # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats."
-  enabled: true
-
   # TLS Certificate Authority configuration for secure communication
   # Reference a common CA Certificate or Bundle in all nats config `tls` blocks and nats-box contexts
   # Note: `tls.verify` still must be set in the appropriate nats config `tls` blocks to require mTLS

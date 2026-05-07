@@ -170,7 +170,7 @@ class ChatPayload(BasePayload):
             if field_content:
                 return field_content
 
-        raise ValueError(
+        raise AssertionError(
             "All possible content fields are empty in message. "
             f"Checked: content={repr(content)}, reasoning_content={repr(reasoning_content)}, "
             f"refusal={repr(refusal)}, tool_calls={tool_calls}"
