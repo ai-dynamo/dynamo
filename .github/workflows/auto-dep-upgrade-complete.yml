@@ -18,10 +18,11 @@ jobs:
     if: startsWith(github.event.workflow_run.head_branch, 'deps/upgrade-')
     runs-on: ubuntu-latest
     steps:
-      - name: Parse upgrade branch
-        id: parse
+      - name: Parse upgrade branch + status
+        id: ctx
         env:
           BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           if [[ ! "$BRANCH" =~ ^deps/upgrade-([a-z]+)-v(.+)$ ]]; then
             echo "Branch $BRANCH does not match expected pattern; aborting."
@@ -32,35 +33,59 @@ jobs:
             echo "version=${BASH_REMATCH[2]}"
             echo "branch=$BRANCH"
           } >> "$GITHUB_OUTPUT"
+          if [[ "$CONCLUSION" == "success" ]]; then
+            {
+              echo "status_emoji=:white_check_mark:"
+              echo "status_word=Passed"
+              echo "status_note=Post-merge CI passed on this branch."
+              echo "conclusion_note=Ready for review."
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "status_emoji=:warning:"
+              echo "status_word=Failed"
+              echo "status_note=Post-merge CI did not pass (conclusion: \`$CONCLUSION\`). Investigate before merging."
+              echo "conclusion_note=Conclusion: \`$CONCLUSION\`. Investigate before merging."
+            } >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Checkout PR body template
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ steps.parse.outputs.branch }}
-          sparse-checkout: |
-            .github/templates
-
-      - name: Open draft PR on success
-        if: github.event.workflow_run.conclusion == 'success'
+      - name: Open or reuse draft PR
+        id: pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FW:    ${{ steps.parse.outputs.framework }}
-          VER:   ${{ steps.parse.outputs.version }}
-          BR:    ${{ steps.parse.outputs.branch }}
+          GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
+          FW:    ${{ steps.ctx.outputs.framework }}
+          VER:   ${{ steps.ctx.outputs.version }}
+          BR:    ${{ steps.ctx.outputs.branch }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
+          STATUS_NOTE: ${{ steps.ctx.outputs.status_note }}
         run: |
           gh label create dep-upgrade --color BFD4F2 \
               --description "Automated dependency upgrade" --force || true
 
-          BODY=$(envsubst < .github/templates/dep-upgrade-pr-body.md)
-          gh pr create --draft \
-            --base main --head "$BR" \
-            --title "chore: bump $FW to v$VER" \
-            --label dep-upgrade --label "backend::$FW" \
-            --body "$BODY"
+          # Idempotent under reruns: reuse the existing PR if one is already open
+          # for this branch, otherwise create a fresh draft PR.
+          PR_URL=$(gh pr view "$BR" --json url --jq .url 2>/dev/null || true)
+          if [[ -z "$PR_URL" ]]; then
+            BODY=$(cat <<EOF
+          ## Automated dependency upgrade — $FW v$VER
 
-      - name: Slack on failure
-        if: github.event.workflow_run.conclusion != 'success'
+          $STATUS_NOTE
+
+          - **Framework:** $FW
+          - **Target version:** v$VER
+          - **Branch:** $BR
+          - **Validating run:** $RUN_URL
+          EOF
+          )
+            PR_URL=$(gh pr create --draft \
+              --base main --head "$BR" \
+              --title "chore: bump $FW to v$VER" \
+              --label dep-upgrade --label "backend::$FW" \
+              --body "$BODY")
+          fi
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Slack notification
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a  # v2.1.1
         with:
           webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
@@ -70,12 +95,12 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: ":package: *Auto Dep Upgrade Failed* — ${{ steps.parse.outputs.framework }} v${{ steps.parse.outputs.version }}"
+                  text: ":package: *Auto Dep Upgrade* ${{ steps.ctx.outputs.status_emoji }} ${{ steps.ctx.outputs.status_word }} — ${{ steps.ctx.outputs.framework }} v${{ steps.ctx.outputs.version }}"
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "<${{ github.event.workflow_run.html_url }}|Post-merge CI run> · branch `${{ steps.parse.outputs.branch }}`"
+                  text: "<${{ steps.pr.outputs.url }}|Draft PR> · <${{ github.event.workflow_run.html_url }}|Post-merge CI run> · branch `${{ steps.ctx.outputs.branch }}`"
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "Conclusion: `${{ github.event.workflow_run.conclusion }}`. Investigate before retry — the branch will be reused on the next cron tick if not deleted or merged."
+                  text: "${{ steps.ctx.outputs.conclusion_note }}"
