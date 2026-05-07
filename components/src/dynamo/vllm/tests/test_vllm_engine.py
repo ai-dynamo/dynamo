@@ -22,18 +22,11 @@ import importlib.util
 import os
 from typing import cast
 
-# Force vLLM's EngineCore subprocesses to fork from the test process instead of
-# spawning a fresh interpreter. Spawn launches a clean Python that re-imports
-# vllm.v1 from sys.path, which fails in the pytest+venv layout used in CI
-# (`ModuleNotFoundError: No module named 'vllm.v1'` during pickle.load). Fork
-# inherits the parent's already-loaded modules, sidestepping the import. Must
-# run before any vllm import so it precedes vllm's own multiproc setup.
-os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-
 import pytest
 import pytest_asyncio
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
+_VLLM_MULTIPROC_ENV = "VLLM_WORKER_MULTIPROC_METHOD"
 _BASE_ARGV = [
     "--model",
     MODEL_ID,
@@ -80,14 +73,27 @@ class _FakeContext:
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def started_engine():
-    from dynamo.vllm.llm_engine import VllmLLMEngine
+    # Force direct engine tests to fork before importing vLLM. Restore afterward
+    # so serve/e2e tests in the same pytest job still exercise the default spawn path.
+    previous_multiproc = os.environ.get(_VLLM_MULTIPROC_ENV)
+    os.environ[_VLLM_MULTIPROC_ENV] = "fork"
 
-    engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
+    engine = None
     try:
+        from dynamo.vllm.llm_engine import VllmLLMEngine
+
+        engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
         engine_config = await engine.start()
         yield engine, engine_config
     finally:
-        await engine.cleanup()
+        try:
+            if engine is not None:
+                await engine.cleanup()
+        finally:
+            if previous_multiproc is None:
+                os.environ.pop(_VLLM_MULTIPROC_ENV, None)
+            else:
+                os.environ[_VLLM_MULTIPROC_ENV] = previous_multiproc
 
 
 async def test_start_populates_registration_metadata(started_engine):

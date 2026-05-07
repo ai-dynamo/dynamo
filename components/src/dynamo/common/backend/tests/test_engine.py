@@ -10,7 +10,12 @@ TypedDict mechanics are not tested — those are Python-language guarantees.
 
 import pytest
 
-from dynamo.common.backend import EngineConfig, GenerateChunk, LLMEngine
+pytest.importorskip(
+    "dynamo._core.backend",
+    reason="dynamo._core.backend not built — run `maturin develop` first",
+)
+
+from dynamo.common.backend.engine import EngineConfig, GenerateChunk, LLMEngine
 
 # Framework-agnostic: routed to sample-unified-test via
 # `pre_merge and gpu_0 and unified` (see test_engine.py module docstring).
