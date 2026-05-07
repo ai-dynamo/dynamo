@@ -263,7 +263,6 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
         # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
         # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
         # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
@@ -314,14 +313,22 @@ async def init_llm_worker(
         if isinstance(current_kv_config, KvCacheConfig):
             # Convert KvCacheConfig object to dict, preserving ALL existing settings
             # This ensures YAML overrides are not lost when adding event_buffer_max_size
-            kv_config_dict = current_kv_config.model_dump(exclude_none=True)
-            kv_config_dict["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-            arg_map["kv_cache_config"] = kv_config_dict
-        elif isinstance(current_kv_config, dict):
-            # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
-            current_kv_config[
-                "event_buffer_max_size"
-            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            current_kv_config = current_kv_config.model_dump(exclude_none=True)
+            arg_map["kv_cache_config"] = current_kv_config
+
+        if isinstance(current_kv_config, dict):
+            # Preserve a user-specified event_buffer_max_size from YAML/overrides;
+            # only apply the default when it is unset or zero (TRTLLM's disabled value).
+            existing = current_kv_config.get("event_buffer_max_size")
+            if existing:
+                logging.info(
+                    "Using existing event_buffer_max_size=%d from kv_cache_config",
+                    existing,
+                )
+            else:
+                current_kv_config[
+                    "event_buffer_max_size"
+                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
