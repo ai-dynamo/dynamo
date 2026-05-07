@@ -23,7 +23,7 @@ title: Snapshot
 
 - x86_64 (`amd64`) GPU nodes
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
-- vLLM backend today, with limited preview support
+- vLLM and SGLang backends, with limited preview support; TensorRT-LLM support in progress
 - `ReadWriteMany` storage for cross-node restore
 - **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
@@ -401,7 +401,7 @@ status:
 
 ## Limitations
 
-- **Backend support is limited**: checkpoint/restore currently supports vLLM workers only, and that support is still a limited preview.
+- **Backend support is limited**: checkpoint/restore currently supports vLLM and SGLang workers, both still in limited preview. TensorRT-LLM support is in progress.
 - **Worker coverage is narrow**: specialized workers such as multimodal, embedding, and diffusion are not supported.
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
 - **GMS restore is not yet available**: Snapshot plus GPU Memory Service is blocked by admission.
@@ -454,7 +454,7 @@ If the manifest already carries snapshot target metadata, it must agree with the
 ## Planned Features
 
 - Stabilize multi-GPU support
-- Additional backend support
+- TensorRT-LLM backend support
 - Alternative storage backends
 
 ## Related Documentation
