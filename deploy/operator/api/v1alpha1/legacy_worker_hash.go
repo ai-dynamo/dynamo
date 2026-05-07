@@ -11,12 +11,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	AnnotationDGDLegacyWorkerHash = "nvidia.com/dgd-legacy-worker-hash"
 	annCurrentWorkerHash          = "nvidia.com/current-worker-hash"
 )
+
+// GetDGDLegacyWorkerHash returns the preserved v1alpha1 worker hash carried on
+// converted v1beta1 DGD objects.
+func GetDGDLegacyWorkerHash(obj metav1.Object) string {
+	if obj == nil {
+		return ""
+	}
+	return obj.GetAnnotations()[AnnotationDGDLegacyWorkerHash]
+}
+
+// ClearDGDLegacyWorkerHash removes the preserved v1alpha1 worker hash from a
+// DGD object after the v1beta1 controller has consumed it.
+func ClearDGDLegacyWorkerHash(obj metav1.Object) {
+	if obj == nil || obj.GetAnnotations() == nil {
+		return
+	}
+	annotations := obj.GetAnnotations()
+	delete(annotations, AnnotationDGDLegacyWorkerHash)
+	obj.SetAnnotations(annotations)
+}
 
 // ComputeDGDWorkersSpecHash computes the worker hash used by the
 // v1alpha1 DGD controller before v1beta1 conversion. ConvertTo stores this

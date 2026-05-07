@@ -1333,6 +1333,7 @@ func GenerateBasePodSpec(
 	}
 
 	AddStandardEnvVars(&container, operatorConfig)
+	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
 	multinodeDeployer := deployerOverride
@@ -1400,7 +1401,7 @@ func GenerateBasePodSpec(
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts); err != nil {
 			return nil, err
 		}
 	}
@@ -1550,7 +1551,7 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
@@ -1576,10 +1577,29 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
 		AddStandardEnvVars(&base, operatorConfig)
+		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil
 	}
 	return fmt.Errorf("frontendSidecar %q does not match any podTemplate container", sidecarName)
+}
+
+func appendMissingVolumeMounts(dst, mounts []corev1.VolumeMount) []corev1.VolumeMount {
+	if len(mounts) == 0 {
+		return dst
+	}
+	seen := make(map[string]struct{}, len(dst))
+	for _, mount := range dst {
+		seen[mount.Name] = struct{}{}
+	}
+	for _, mount := range mounts {
+		if _, ok := seen[mount.Name]; ok {
+			continue
+		}
+		dst = append(dst, mount)
+		seen[mount.Name] = struct{}{}
+	}
+	return dst
 }
 
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.DynamoGraphDeployment) {
