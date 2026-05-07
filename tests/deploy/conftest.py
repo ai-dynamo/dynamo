@@ -4,6 +4,8 @@
 """
 Pytest configuration for deployment tests.
 
+Temporary CI trigger for operator v1beta1 deploy validation; remove before merge.
+
 This module provides dynamic test discovery and fixtures for running deployment tests
 against Kubernetes deployments. This currently only covers deployments in the examples directory.
 """
