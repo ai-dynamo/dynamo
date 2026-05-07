@@ -544,13 +544,6 @@ where
 
         let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
-        let tree_sizes: HashMap<_, _> = tiered_matches
-            .device
-            .overlap_scores
-            .tree_sizes
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -568,7 +561,6 @@ where
                 tier_overlap_blocks,
                 cache_hit_estimates.effective_overlap_blocks,
                 cache_hit_estimates.cached_tokens,
-                tree_sizes,
                 router_config_override,
                 update_states,
                 lora_name,

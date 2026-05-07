@@ -1,0 +1,289 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4-Pro SGLang Disaggregated P/D on GB200
+#
+# Topology: 4 nodes total (ComputeDomain)
+#   prefill: 2 nodes × 4 GPUs = TP8
+#   decode:  2 nodes × 4 GPUs = TP8
+#
+# Prerequisites:
+#   - dynamo-platform HelmRelease applied
+#   - Model weights cached on shared-model-cache PVC
+#   - hf-token-secret created: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#
+# RDMA: Disaggregated KV transfer requires RDMA networking for NIXL.
+# See README.md for cluster-specific RDMA configuration (GKE, EFA, IB).
+#
+# EAGLE disabled: crashes on long context (>18k) and tool calling on TP8
+# due to insufficient GPU memory headroom (4.23 GB/GPU with vs 7.75 without)
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-disagg
+  namespace: <your-namespace>
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-token-secret
+          key: HF_TOKEN
+    - name: HF_HOME
+      value: /models
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
+
+  pvcs:
+    - name: shared-model-cache
+      create: false
+
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      extraPodSpec:
+        mainContainer:
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          imagePullPolicy: Always
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv4-pro-compute-domain-channel
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-V4-Pro
+              --served-model-name deepseek-ai/DeepSeek-V4-Pro
+              --trust-remote-code
+              --tp 8
+              --moe-runner-backend flashinfer_mxfp4
+              --chunked-prefill-size 4096
+              --disable-flashinfer-autotune
+              --dyn-tool-call-parser deepseek_v4
+              --dyn-reasoning-parser deepseek_v4
+              --mem-fraction-static 0.75
+              --cuda-graph-max-bs 128
+              --host 0.0.0.0
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --prefill-round-robin-balance
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+              value: "0"
+            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+              value: "1"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: UCX_TLS
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_IB_GID_INDEX
+              value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          workingDir: /workspace/
+
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+        claims:
+          - name: compute-domain-channel
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /models
+      sharedMemory:
+        size: 200Gi
+      extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: dsv4-pro-compute-domain-channel
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-V4-Pro
+              --served-model-name deepseek-ai/DeepSeek-V4-Pro
+              --trust-remote-code
+              --tp 8
+              --moe-runner-backend flashinfer_mxfp4
+              --chunked-prefill-size 4096
+              --disable-flashinfer-autotune
+              --dyn-tool-call-parser deepseek_v4
+              --dyn-reasoning-parser deepseek_v4
+              --mem-fraction-static 0.75
+              --cuda-graph-max-bs 128
+              --host 0.0.0.0
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --load-balance-method round_robin
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+              value: "0"
+            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+              value: "1"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: UCX_TLS
+              value: "cuda_ipc,cuda_copy,rc"
+            - name: UCX_IB_GID_INDEX
+              value: "3"
+            - name: UCX_RC_TIMEOUT
+              value: "600s"
+            - name: UCX_KEEPALIVE_INTERVAL
+              value: "300s"
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          imagePullPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          workingDir: /workspace/
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv4-pro-compute-domain
+  namespace: <your-namespace>
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: dsv4-pro-compute-domain-channel
+  numNodes: 4
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: dsv4-pro-compute-domain-channel
+  namespace: <your-namespace>
+spec:
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: compute-domain.nvidia.com
+          parameters:
+            allocationMode: Single
+            apiVersion: resource.nvidia.com/v1beta1
+            kind: ComputeDomainChannelConfig
+        requests:
+        - channel
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: compute-domain-default-channel.nvidia.com
+        name: channel

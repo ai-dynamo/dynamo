@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated TRT-LLM deployment: prefill/decode split with UCX KV transfer.
-# Tested with dynamo 1.0 (TRT-LLM PyTorch backend).
+# Tested with Dynamo v1.0.0 (TRT-LLM PyTorch backend).
 #
 # Uses TP=2 per worker (prefill: 2 GPUs, decode: 2 GPUs) for a total of 4 GPUs.
 # KV cache (attention + Mamba SSM state) is transferred between workers via UCX.
@@ -14,7 +14,7 @@
 #   hybrid models.
 #
 # Dynamo 0.9.1 compatibility notes:
-#   - Change image tags from :1.0.0 to :0.9.1
+#   - Change image tags from :1.1.0 to :0.9.1
 #   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
 #   - With deepseek_r1 parser, enable_thinking: false will not work correctly
 #   - Keep enable_block_reuse: false in both kv_cache_config blocks. Current
@@ -107,7 +107,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
     TrtllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
@@ -133,7 +133,7 @@ spec:
             timeoutSeconds: 10
             # TRT-LLM startup is slow (~7 min) due to CUDA graph compilation
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           env:
           - name: HF_HOME
             value: "/opt/models"
@@ -185,7 +185,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           env:
           - name: HF_HOME
             value: "/opt/models"

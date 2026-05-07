@@ -71,6 +71,40 @@ spec:
             claimName: model-cache
 ```
 
+### Find the Snapshot Path
+
+After the Job completes, the model is stored in HuggingFace's cache layout:
+
+```
+hub/models--<org>--<model>/snapshots/<commit-hash>/
+```
+
+For example, `meta-llama/Llama-3.1-70B-Instruct` becomes:
+
+```
+hub/models--meta-llama--Llama-3.1-70B-Instruct/snapshots/9d3b8e0f71f8c1e0f9b7c2a3d4e5f6a7b8c9d0e1/
+```
+
+To find the exact commit hash after the download Job completes:
+
+```bash
+kubectl run find-snapshot --rm -it --image=busybox --restart=Never \
+  --overrides='{
+    "spec": {
+      "volumes": [{"name": "c", "persistentVolumeClaim": {"claimName": "model-cache"}}],
+      "containers": [{
+        "name": "f", "image": "busybox",
+        "command": ["find", "/c/hub", "-mindepth", "3", "-maxdepth", "3", "-type", "d"],
+        "volumeMounts": [{"name": "c", "mountPath": "/c"}]
+      }]
+    }
+  }'
+```
+
+Alternatively, look up the commit hash on the HuggingFace Hub model page under **Files and versions**.
+
+You need this path for the `pvcModelPath` field in a DGDR spec (see [Model Deployment Guide — Model Caching](model-deployment-guide.md#model-caching)).
+
 ### Step 3: Mount in DynamoGraphDeployment
 
 ```yaml

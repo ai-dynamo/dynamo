@@ -152,7 +152,7 @@ GlobalPlanner operates in one of two modes depending on whether `--managed-names
 
 ## Namespace Convention
 
-The Dynamo operator prepends the Kubernetes namespace to the DGD's `dynamoNamespace`:
+The Dynamo operator builds each Dynamo namespace from the Kubernetes namespace and DGD name:
 - K8s namespace: `my-ns`, DGD name: `gp-ctrl`
 - Dynamo namespace: `my-ns-gp-ctrl`
 

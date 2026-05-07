@@ -406,6 +406,54 @@ sglang_configs = {
             )
         ],
     ),
+    "video_e_pd_qwen": SGLangConfig(
+        # Tests E/PD video inference path using a separate encode worker
+        # and a multimodal PD worker on a single GPU for CI coverage.
+        name="video_e_pd_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            # No profiled_vram_gib: multimodal_epd.sh uses explicit
+            # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
+            # Expected to fail until SGLang release includes the upstream fix:
+            # https://github.com/sgl-project/sglang/pull/22431
+            pytest.mark.xfail(
+                reason="Known upstream SGLang issue for video_e_pd_qwen E/PD path; expected failure until next SGLang version bump includes sglang#22431."
+            ),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+            "--single-gpu",
+        ],
+        timeout=360,
+        env={
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "embedding_agg": SGLangConfig(
         name="embedding_agg",
         directory=sglang_dir,
@@ -418,7 +466,12 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(
                 128
             ),  # KV cache cap (2x safety over min=64)
-            pytest.mark.timeout(147),  # profiled 24s on RTX 6000 Ada
+            # Qwen3-Embedding-4B (~8 GB bf16) cold-loads + warms up in 130-150s
+            # on L4 CI before the first request; the 24s "profiled" figure is
+            # the steady-state run only. 147s left no headroom for startup and
+            # blew up 100% of recent amd64 runs in `_check_url`. 300s aligns
+            # with sibling 4B-class agg configs in this file.
+            pytest.mark.timeout(300),  # profiled 24s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],

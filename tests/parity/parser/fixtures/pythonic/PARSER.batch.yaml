@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: '[get_weather(location="NYC")]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.2:
+    description: Multiple tool calls (parallel)
+    model_text: '[get_weather(location="NYC"), get_time(timezone="EST")]'
+    tools:
+    - *id001
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: Hello, how can I help you today?
+  PARSER.batch.4:
+    description: Malformed (missing closing bracket)
+    model_text: '[get_weather(location="NYC"'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '[get_weather(location="NYC"'
+  PARSER.batch.5:
+    description: Missing closing `]` end marker
+    model_text: '[get_weather(location="NYC")'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '[get_weather(location="NYC")'
+  PARSER.batch.6:
+    description: Empty args (no-arg call)
+    model_text: '[get_time()]'
+    tools:
+    - name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.7:
+    description: Complex args (nested dict + array)
+    model_text: '[process_data(items=[1, 2, 3], config={"nested": True})]'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          items:
+          - 1
+          - 2
+          - 3
+          config:
+            nested: true
+      normal_text: ''
+  PARSER.batch.8:
+    description: Interleaved normal text
+    model_text: Hey yo ! [get_weather(location="NYC")] Hey yo
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: Hey yo !
+  PARSER.batch.9:
+    description: Empty input
+    model_text: ''
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: '[get_weather(location="NYC"), get_weather(location="LA")]'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

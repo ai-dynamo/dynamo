@@ -37,6 +37,8 @@ _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
 
+_GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add shared command-line options for all tests.
@@ -261,15 +263,41 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
-    rc = run_parallel(
-        test_ids=test_ids,
-        meta=meta,
-        max_vram_gib=vram_limit,
-        num_slots=num_slots,
-        gpu_indices=gpu_indices,
-        extra_pytest_args=extra_args or None,
-        stream=is_stream,
-    )
+    old_downloads_ready = os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV)
+    old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+    downloads_ready = False
+    if models_dir is None and any(
+        "predownload_models" in getattr(item, "fixturenames", ())
+        for item in session.items
+    ):
+        models = getattr(config, "models_to_download", None)
+        model_names = ", ".join(models) if models else "default test models"
+        with FileLock(_download_lock_path):
+            print(f"GPU parallel: pre-downloading models: {model_names}")
+            download_models(model_list=list(models) if models else None)
+        _enable_offline_with_mistral_patch()
+        os.environ[_GPU_PARALLEL_DOWNLOADS_READY_ENV] = "1"
+        downloads_ready = True
+
+    try:
+        rc = run_parallel(
+            test_ids=test_ids,
+            meta=meta,
+            max_vram_gib=vram_limit,
+            num_slots=num_slots,
+            gpu_indices=gpu_indices,
+            extra_pytest_args=extra_args or None,
+            stream=is_stream,
+        )
+    finally:
+        if downloads_ready:
+            _disable_offline_with_mistral_patch()
+            if old_hf_offline is not None:
+                os.environ["HF_HUB_OFFLINE"] = old_hf_offline
+            if old_downloads_ready is None:
+                os.environ.pop(_GPU_PARALLEL_DOWNLOADS_READY_ENV, None)
+            else:
+                os.environ[_GPU_PARALLEL_DOWNLOADS_READY_ENV] = old_downloads_ready
 
     if rc != 0:
         session.testsfailed = 1
@@ -402,6 +430,10 @@ def predownload_models(pytestconfig, _models_dir_env):
     if pytestconfig.getoption("--models-dir"):
         yield
         return
+    if os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV) == "1":
+        yield
+        return
+
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
@@ -432,6 +464,10 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
     if pytestconfig.getoption("--models-dir"):
         yield
         return
+    if os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV) == "1":
+        yield
+        return
+
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
@@ -581,9 +617,9 @@ def pytest_collection_modifyitems(config, items):
             getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
         ):
             continue
-        model_mark = item.get_closest_marker("model")
-        if model_mark and model_mark.args:
-            models_to_download.add(model_mark.args[0])
+        for model_mark in item.iter_markers("model"):
+            for repo_id in model_mark.args:
+                models_to_download.add(repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:

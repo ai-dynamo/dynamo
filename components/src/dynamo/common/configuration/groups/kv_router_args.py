@@ -237,7 +237,12 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue as soon as any tokens are active)."
+                "queueing sensitivity (queue as soon as any tokens are active). "
+                "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
+                "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
+                "cache pool size), not the per-step prefill window, which inflates "
+                "the threshold's effective denominator. Set --max-prefill-tokens "
+                "explicitly for predictable semantics, or use a smaller threshold."
             ),
             arg_type=float,
         )
@@ -247,9 +252,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_EVENT_THREADS",
             default=4,
             help=(
-                "KV Router: Number of event processing threads. When > 1, uses a concurrent "
-                "radix tree with a thread pool for higher throughput. Ignored when "
-                "--no-router-kv-events is set."
+                "KV Router: Number of KV indexer worker threads. When > 1, uses a concurrent "
+                "radix tree with a thread pool for higher throughput, including "
+                "approximate routing when --no-router-kv-events is set."
             ),
             arg_type=int,
         )

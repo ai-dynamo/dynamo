@@ -71,7 +71,7 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
-  - 'container/templates/test_stage.Dockerfile'
+  - 'container/Dockerfile.test'
 
 core:
   - *ci
@@ -92,6 +92,9 @@ core:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
+  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
+  # TokenSpeed Docker images and backend-specific build/test jobs.
+  - 'components/src/dynamo/tokenspeed/**'
   - '*.toml'
   - '*.lock'
   - '*.py'

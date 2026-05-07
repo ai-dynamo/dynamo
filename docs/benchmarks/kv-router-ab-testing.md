@@ -117,12 +117,11 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-no-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           env:
             - name: POD_UID
               valueFrom:
@@ -130,7 +129,6 @@ spec:
                   fieldPath: metadata.uid
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-no-router
       componentType: worker
       replicas: 8
       resources:
@@ -147,7 +145,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           workingDir: /workspace
           command:
             - /bin/sh
@@ -208,12 +206,11 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           env:
             - name: POD_UID
               valueFrom:
@@ -224,7 +221,6 @@ spec:
           value: kv  # KEY DIFFERENCE: Enable KV Smart Router
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router
       componentType: worker
       replicas: 8
       resources:
@@ -241,7 +237,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           workingDir: /workspace
           command:
             - /bin/sh
@@ -446,7 +442,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: benchmark
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
         securityContext:
           runAsUser: 0  # Required: apt-get and pip install need root in ephemeral benchmark pod
         command:
