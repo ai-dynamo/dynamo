@@ -13,7 +13,9 @@
 //! which has no bidirectional accessor yet. A future revision will replace the
 //! static with a `ModelManager` lookup keyed on `model_name`.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use parking_lot::Mutex;
 
 use axum::{
     Router,
@@ -150,7 +152,6 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
         // → NORMAL.
         let msg = outbound_close_reason
             .lock()
-            .expect("close_reason mutex poisoned")
             .take()
             .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"));
         let _ = ws_tx.send(msg).await;
@@ -181,7 +182,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
                     }
                     Err(err) => {
                         tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
-                        *close_reason.lock().expect("close_reason mutex poisoned") =
+                        *close_reason.lock() =
                             Some(close_message(close_code::INVALID, "malformed JSON frame"));
                         break;
                     }
@@ -189,7 +190,7 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
             }
             Message::Binary(_) => {
                 tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
-                *close_reason.lock().expect("close_reason mutex poisoned") = Some(close_message(
+                *close_reason.lock() = Some(close_message(
                     close_code::UNSUPPORTED,
                     "binary frames not supported",
                 ));
