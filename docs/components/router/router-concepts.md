@@ -54,7 +54,7 @@ cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
 Lower costs indicate better routing choices.
-`overlap_score_weight` is the device-local prefix-overlap credit multiplier.
+`overlap_score_weight` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0.
 Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
 
 ## Worker Selection

@@ -21,13 +21,15 @@ MODEL = "Qwen/Qwen3-32B"
 BACKEND = "vllm"
 GPU_SKU = "h200_sxm"
 TOTAL_GPUS = 16
-OVERLAP_WEIGHTS = [0.0, 0.5, 1.0, 2.0]
+OVERLAP_WEIGHTS = [1.0]
+PREFILL_LOAD_SCALES = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0]
 RESULT_COLUMNS: Sequence[str] = (
     "prefill_tp",
     "decode_tp",
     "prefill_workers",
     "decode_workers",
     "overlap_score_weight",
+    "prefill_load_scale",
     "total_gpus_used",
     "output_throughput_tok_s",
     "prefix_cache_reused_ratio",
@@ -105,6 +107,7 @@ def run_example(
         router=RouterSpec(
             baseRouterConfig=KvRouterConfig(),
             overlapWeights=OVERLAP_WEIGHTS,
+            prefillLoadScales=PREFILL_LOAD_SCALES,
         ),
         maxParallelEvals=max_parallel_evals,
     )

@@ -176,7 +176,9 @@ def _evaluate_state(
     router_config = None
     if state.router_mode == "kv_router":
         router_config = _build_router_config(
-            spec.router.baseRouterConfig, state.overlap_score_weight
+            spec.router.baseRouterConfig,
+            state.overlap_score_weight,
+            state.prefill_load_scale,
         )
     report = _run_replay_for_state(
         state=state,
@@ -239,7 +241,9 @@ def _evaluate_agg_state(
     router_config = None
     if state.router_mode == "kv_router":
         router_config = _build_router_config(
-            spec.router.baseRouterConfig, state.overlap_score_weight
+            spec.router.baseRouterConfig,
+            state.overlap_score_weight,
+            state.prefill_load_scale,
         )
     report = _run_agg_replay_for_state(
         state=state,
@@ -312,6 +316,9 @@ def _spec_to_payload(spec: ReplayOptimizeSpec) -> dict[str, Any]:
         "router_overlap_weights": (
             None if router.overlapWeights is None else list(router.overlapWeights)
         ),
+        "router_prefill_load_scales": (
+            None if router.prefillLoadScales is None else list(router.prefillLoadScales)
+        ),
         "router_base_config_json": (
             router.baseRouterConfig.dump_json()
             if router.baseRouterConfig is not None
@@ -349,6 +356,7 @@ def _spec_from_payload(payload: Mapping[str, Any]) -> ReplayOptimizeSpec:
         router=RouterSpec(
             mode=payload["router_mode"],
             overlapWeights=payload["router_overlap_weights"],
+            prefillLoadScales=payload["router_prefill_load_scales"],
             baseRouterConfig=(
                 KvRouterConfig.from_json(payload["router_base_config_json"])
                 if payload["router_base_config_json"] is not None

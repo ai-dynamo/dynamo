@@ -85,7 +85,8 @@ class KvRouterArgGroup(ArgGroup):
             default=1.0,
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
-                "Higher values more strongly prefer KV cache reuse."
+                "Range: 0.0 to 1.0; higher values more strongly prefer KV cache reuse. "
+                "Use router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily."
             ),
             arg_type=float,
             dest="overlap_score_weight",

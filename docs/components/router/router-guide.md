@@ -37,7 +37,7 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
-| `--router-kv-overlap-score-weight <float>` | `1.0` | Credit multiplier for device-local prefix overlap |
+| `--router-kv-overlap-score-weight <float>` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale <float>` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |

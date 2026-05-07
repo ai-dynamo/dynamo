@@ -123,7 +123,7 @@ logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 
 `hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_weight = 1.0`. Shared pool contains blocks 0–3.
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_weight = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
 
 | Worker | Device overlap | `hits_beyond` | Device credit | Shared credit | Adjusted prefill | Logit          |
 | ------ | -------------- | ------------- | ------------- | ------------- | ---------------- | -------------- |

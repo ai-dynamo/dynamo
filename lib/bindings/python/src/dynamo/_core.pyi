@@ -1303,7 +1303,7 @@ class KvRouterConfig:
         Create a KV router configuration.
 
         Args:
-            overlap_score_weight: Credit multiplier for device-local prefix overlap (default: 1.0)
+            overlap_score_weight: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)

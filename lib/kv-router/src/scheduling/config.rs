@@ -47,6 +47,41 @@ const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
+pub const OVERLAP_SCORE_WEIGHT_RANGE_ERROR: &str =
+    "overlap_score_weight must be between 0.0 and 1.0";
+pub const OVERLAP_SCORE_WEIGHT_MIGRATION_ERROR: &str = concat!(
+    "overlap_score_weight must be between 0.0 and 1.0; values above 1.0 are probably not what ",
+    "you intended. If you want to weigh TTFT/prompt-side prefill load more heavily, keep ",
+    "overlap_score_weight <= 1.0 and use that larger value for prefill_load_scale instead; ",
+    "prefill_load_scale is applied after overlap credits."
+);
+
+pub fn overlap_score_weight_error_message(value: f64) -> Option<&'static str> {
+    if (0.0..=1.0).contains(&value) {
+        None
+    } else if value > 1.0 {
+        Some(OVERLAP_SCORE_WEIGHT_MIGRATION_ERROR)
+    } else {
+        Some(OVERLAP_SCORE_WEIGHT_RANGE_ERROR)
+    }
+}
+
+fn validate_overlap_score_weight(value: f64) -> Result<(), ValidationError> {
+    let Some(message) = overlap_score_weight_error_message(value) else {
+        return Ok(());
+    };
+    let mut error = ValidationError::new("overlap_score_weight_out_of_range");
+    error.message = Some(message.into());
+    Err(error)
+}
+
+fn validate_router_config_override(config: &RouterConfigOverride) -> Result<(), ValidationError> {
+    if let Some(weight) = config.overlap_score_weight {
+        validate_overlap_score_weight(weight)?;
+    }
+    Ok(())
+}
+
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -154,11 +189,11 @@ impl FromStr for RouterQueuePolicy {
 
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_router_config_override"))]
 pub struct RouterConfigOverride {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling. Set to 0.0 to ignore prefix matching.
+    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
     #[builder(default)]
-    #[validate(range(min = 0.0))]
     pub overlap_score_weight: Option<f64>,
 
     /// Scale applied to the adjusted prefill load after device/lower-tier
@@ -189,8 +224,8 @@ pub struct RouterConfigOverride {
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling. Set to 0.0 to ignore prefix matching.
-    #[validate(range(min = 0.0))]
+    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
+    #[validate(custom(function = "validate_overlap_score_weight"))]
     pub overlap_score_weight: f64,
 
     /// Scale applied after overlap/cache-hit credits reduce the prompt-side
@@ -515,6 +550,22 @@ mod tests {
     }
 
     #[test]
+    fn test_kv_router_config_rejects_out_of_range_overlap_score_weight() {
+        let too_small = KvRouterConfig {
+            overlap_score_weight: -0.1,
+            ..Default::default()
+        };
+        let too_large = KvRouterConfig {
+            overlap_score_weight: 1.1,
+            ..Default::default()
+        };
+
+        assert!(too_small.validate().is_err());
+        let error = too_large.validate().unwrap_err().to_string();
+        assert!(error.contains("prefill_load_scale"));
+    }
+
+    #[test]
     fn test_router_config_override_rejects_out_of_range_shared_cache_multiplier() {
         let too_small = RouterConfigOverride {
             overlap_score_weight: None,
@@ -535,6 +586,30 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_router_config_override_rejects_out_of_range_overlap_score_weight() {
+        let too_small = RouterConfigOverride {
+            overlap_score_weight: Some(-0.1),
+            prefill_load_scale: None,
+            router_temperature: None,
+            assume_kv_reuse: None,
+            track_prefill_tokens: None,
+            shared_cache_multiplier: None,
+        };
+        let too_large = RouterConfigOverride {
+            overlap_score_weight: Some(1.1),
+            prefill_load_scale: None,
+            router_temperature: None,
+            assume_kv_reuse: None,
+            track_prefill_tokens: None,
+            shared_cache_multiplier: None,
+        };
+
+        assert!(too_small.validate().is_err());
+        let error = too_large.validate().unwrap_err().to_string();
+        assert!(error.contains("prefill_load_scale"));
     }
 
     #[test]

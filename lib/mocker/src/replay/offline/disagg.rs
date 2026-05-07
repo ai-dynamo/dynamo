@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn test_derive_stage_router_configs_force_required_overrides() {
         let config = KvRouterConfig {
-            overlap_score_weight: 2.0,
+            overlap_score_weight: 1.0,
             router_track_active_blocks: true,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: true,

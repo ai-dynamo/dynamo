@@ -79,7 +79,7 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-kv-overlap-score-weight",
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
             default=1.0,
-            help="KV Router: Credit multiplier for device-local prefix overlap. Higher values more strongly prefer KV cache reuse",
+            help="KV Router: Credit multiplier for device-local prefix overlap. Range: 0.0 to 1.0; higher values more strongly prefer KV cache reuse. Use router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily",
             arg_type=float,
             obsolete_flag="--kv-overlap-score-weight",
         )

@@ -12,6 +12,7 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    overlap_score_weight_error_message,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
@@ -35,6 +36,13 @@ use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
+
+fn validate_overlap_score_weight(value: f64) -> PyResult<()> {
+    if let Some(message) = overlap_score_weight_error_message(value) {
+        return Err(PyValueError::new_err(message));
+    }
+    Ok(())
+}
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -152,8 +160,10 @@ impl KvRouterConfig {
         serve_indexer: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
-    ) -> Self {
-        KvRouterConfig {
+    ) -> PyResult<Self> {
+        validate_overlap_score_weight(overlap_score_weight)?;
+
+        Ok(KvRouterConfig {
             inner: RsKvRouterConfig {
                 overlap_score_weight,
                 prefill_load_scale,
@@ -188,14 +198,16 @@ impl KvRouterConfig {
                     .parse()
                     .unwrap_or_else(|_| panic!("invalid shared_cache_type: {shared_cache_type:?}")),
             },
-        }
+        })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        serde_json::from_str::<RsKvRouterConfig>(config_json)
-            .map(|inner| KvRouterConfig { inner })
-            .map_err(|e| PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}")))
+        let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
+            PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
+        })?;
+        validate_overlap_score_weight(inner.overlap_score_weight)?;
+        Ok(KvRouterConfig { inner })
     }
 
     fn dump_json(&self) -> PyResult<String> {
@@ -214,11 +226,7 @@ impl KvRouterConfig {
 
     #[setter]
     fn set_overlap_score_weight(&mut self, value: f64) -> PyResult<()> {
-        if value < 0.0 {
-            return Err(PyValueError::new_err(
-                "overlap_score_weight must be non-negative",
-            ));
-        }
+        validate_overlap_score_weight(value)?;
         self.inner.overlap_score_weight = value;
         Ok(())
     }
@@ -247,11 +255,7 @@ impl KvRouterConfig {
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(weight) = overlap_score_weight {
-            if weight < 0.0 {
-                return Err(PyValueError::new_err(
-                    "overlap_score_weight must be non-negative",
-                ));
-            }
+            validate_overlap_score_weight(weight)?;
             inner.overlap_score_weight = weight;
         }
         if let Some(scale) = prefill_load_scale {

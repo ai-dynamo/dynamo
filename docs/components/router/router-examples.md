@@ -79,7 +79,7 @@ async def main():
             "top_p": 0.9,
         },
         router_config_override={
-            "overlap_score_weight": 2.0,    # Prioritize cache hits for this request
+            "overlap_score_weight": 1.0,    # Prioritize cache hits for this request
             "router_temperature": 0.5,       # Add routing randomness
         }
     )

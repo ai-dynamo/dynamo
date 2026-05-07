@@ -25,6 +25,7 @@ class DenseReplayState:
     decode_workers: int
     overlap_score_weight: float
     router_mode: str = "kv_router"
+    prefill_load_scale: float = 1.0
 
     @property
     def total_gpus_used(self) -> int:
@@ -38,6 +39,7 @@ class DenseReplayState:
             f"prefill_tp={self.prefill_tp} decode_tp={self.decode_tp} "
             f"prefill_workers={self.prefill_workers} decode_workers={self.decode_workers} "
             f"router_mode={self.router_mode} overlap_score_weight={self.overlap_score_weight} "
+            f"prefill_load_scale={self.prefill_load_scale} "
             f"total_gpus={self.total_gpus_used}"
         )
 
@@ -48,6 +50,7 @@ class DenseAggReplayState:
     workers: int
     router_mode: str
     overlap_score_weight: float
+    prefill_load_scale: float = 1.0
 
     @property
     def total_gpus_used(self) -> int:
@@ -57,6 +60,7 @@ class DenseAggReplayState:
         return (
             f"tp={self.tp} workers={self.workers} "
             f"router_mode={self.router_mode} overlap_score_weight={self.overlap_score_weight} "
+            f"prefill_load_scale={self.prefill_load_scale} "
             f"total_gpus={self.total_gpus_used}"
         )
 

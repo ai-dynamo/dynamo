@@ -10,7 +10,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 ## Routing Behavior
 
 - `--router-mode token-dp-balance`: Uses the KV scheduler for DP-rank-aware load balancing without prefix matching, KV events, remote indexer queries, or shared-cache scoring.
-- `--router-kv-overlap-score-weight`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and skips creating a local indexer. Defaults to 1.
+- `--router-kv-overlap-score-weight`: Device-local prefix-overlap credit multiplier in the prefill cost calculation, from 0.0 to 1.0. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and skips creating a local indexer. Defaults to 1.
 - `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
@@ -58,7 +58,9 @@ These activate automatically with `--router-mode kv` -- no additional flags are 
 
 ## Tuning Guidelines
 
-`--router-kv-overlap-score-weight` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Lower values distribute load more evenly and reduce ITL. The default of 1.0 is a reasonable starting point. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`.
+`--router-kv-overlap-score-weight` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be between 0.0 and 1.0. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Lower values distribute load more evenly and reduce ITL. The default of 1.0 is a reasonable starting point. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`.
+
+If an older config used `--router-kv-overlap-score-weight` above 1.0 to make the router care more about TTFT, keep the overlap weight at or below 1.0 and move that larger value to `--router-prefill-load-scale` instead. `prefill_load_scale` multiplies the overlap-adjusted prompt-side load, so it still implicitly accounts for device, host, disk, and shared-cache credits.
 
 Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
 

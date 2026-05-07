@@ -119,7 +119,7 @@ loads = await router.get_potential_loads(token_ids)
 
 # Override routing config based on request properties
 # Long contexts benefit from heavier overlap weighting
-config = {"overlap_score_weight": 2.0} if len(token_ids) > 8192 else {}
+config = {"overlap_score_weight": 1.0} if len(token_ids) > 8192 else {}
 worker_id, dp_rank, overlap = await router.best_worker(
     token_ids,
     request_id="req-123",

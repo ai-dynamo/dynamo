@@ -71,7 +71,7 @@ The router uses a cost function that considers both the prefill cost (influenced
    cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
    ```
    - Lower costs indicate better routing choices
-   - `overlap_score_weight` is the device-local prefix-overlap credit multiplier
+   - `overlap_score_weight` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0
    - `prefill_load_scale` controls adjusted prompt-side load relative to decode blocks
    - Higher overlap weights favor cache reuse (improving TTFT), while lower weights prioritize even load distribution (improving ITL)
 
