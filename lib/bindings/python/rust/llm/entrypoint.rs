@@ -12,7 +12,7 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    overlap_score_weight_error_message,
+    overlap_score_credit_error_message,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
@@ -37,11 +37,36 @@ use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
-fn validate_overlap_score_weight(value: f64) -> PyResult<()> {
-    if let Some(message) = overlap_score_weight_error_message(value) {
+fn validate_overlap_score_credit(value: f64) -> PyResult<()> {
+    if let Some(message) = overlap_score_credit_error_message(value) {
         return Err(PyValueError::new_err(message));
     }
     Ok(())
+}
+
+fn validate_prefill_load_scale(value: f64) -> PyResult<()> {
+    if value < 0.0 {
+        return Err(PyValueError::new_err(
+            "prefill_load_scale must be non-negative",
+        ));
+    }
+    Ok(())
+}
+
+fn warn_overlap_score_weight_deprecated() {
+    tracing::warn!("overlap_score_weight is deprecated; use prefill_load_scale");
+}
+
+fn apply_deprecated_overlap_score_weight(
+    value: f64,
+    overlap_score_credit: &mut f64,
+    prefill_load_scale: &mut f64,
+) {
+    warn_overlap_score_weight_deprecated();
+    *prefill_load_scale = value;
+    if value == 0.0 {
+        *overlap_score_credit = 0.0;
+    }
 }
 
 #[pyclass(eq, eq_int)]
@@ -134,10 +159,10 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", *, prefill_load_scale=1.0))]
+    #[pyo3(signature = (overlap_score_credit=1.0, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", *, prefill_load_scale=1.0, overlap_score_weight=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        overlap_score_weight: f64,
+        mut overlap_score_credit: f64,
         host_cache_hit_weight: f64,
         disk_cache_hit_weight: f64,
         router_temperature: f64,
@@ -159,13 +184,22 @@ impl KvRouterConfig {
         serve_indexer: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
-        prefill_load_scale: f64,
+        mut prefill_load_scale: f64,
+        overlap_score_weight: Option<f64>,
     ) -> PyResult<Self> {
-        validate_overlap_score_weight(overlap_score_weight)?;
+        if let Some(value) = overlap_score_weight {
+            apply_deprecated_overlap_score_weight(
+                value,
+                &mut overlap_score_credit,
+                &mut prefill_load_scale,
+            );
+        }
+        validate_overlap_score_credit(overlap_score_credit)?;
+        validate_prefill_load_scale(prefill_load_scale)?;
 
         Ok(KvRouterConfig {
             inner: RsKvRouterConfig {
-                overlap_score_weight,
+                overlap_score_credit,
                 prefill_load_scale,
                 host_cache_hit_weight,
                 disk_cache_hit_weight,
@@ -206,7 +240,8 @@ impl KvRouterConfig {
         let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
-        validate_overlap_score_weight(inner.overlap_score_weight)?;
+        validate_overlap_score_credit(inner.overlap_score_credit)?;
+        validate_prefill_load_scale(inner.prefill_load_scale)?;
         Ok(KvRouterConfig { inner })
     }
 
@@ -220,14 +255,30 @@ impl KvRouterConfig {
     }
 
     #[getter]
+    fn overlap_score_credit(&self) -> f64 {
+        self.inner.overlap_score_credit
+    }
+
+    #[setter]
+    fn set_overlap_score_credit(&mut self, value: f64) -> PyResult<()> {
+        validate_overlap_score_credit(value)?;
+        self.inner.overlap_score_credit = value;
+        Ok(())
+    }
+
+    #[getter]
     fn overlap_score_weight(&self) -> f64 {
-        self.inner.overlap_score_weight
+        self.inner.prefill_load_scale
     }
 
     #[setter]
     fn set_overlap_score_weight(&mut self, value: f64) -> PyResult<()> {
-        validate_overlap_score_weight(value)?;
-        self.inner.overlap_score_weight = value;
+        validate_prefill_load_scale(value)?;
+        apply_deprecated_overlap_score_weight(
+            value,
+            &mut self.inner.overlap_score_credit,
+            &mut self.inner.prefill_load_scale,
+        );
         Ok(())
     }
 
@@ -238,32 +289,33 @@ impl KvRouterConfig {
 
     #[setter]
     fn set_prefill_load_scale(&mut self, value: f64) -> PyResult<()> {
-        if value < 0.0 {
-            return Err(PyValueError::new_err(
-                "prefill_load_scale must be non-negative",
-            ));
-        }
+        validate_prefill_load_scale(value)?;
         self.inner.prefill_load_scale = value;
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_weight=None, prefill_load_scale=None))]
+    #[pyo3(signature = (overlap_score_credit=None, prefill_load_scale=None, *, overlap_score_weight=None))]
     fn with_overrides(
         &self,
-        overlap_score_weight: Option<f64>,
+        overlap_score_credit: Option<f64>,
         prefill_load_scale: Option<f64>,
+        overlap_score_weight: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
+        if let Some(credit) = overlap_score_credit {
+            validate_overlap_score_credit(credit)?;
+            inner.overlap_score_credit = credit;
+        }
         if let Some(weight) = overlap_score_weight {
-            validate_overlap_score_weight(weight)?;
-            inner.overlap_score_weight = weight;
+            validate_prefill_load_scale(weight)?;
+            apply_deprecated_overlap_score_weight(
+                weight,
+                &mut inner.overlap_score_credit,
+                &mut inner.prefill_load_scale,
+            );
         }
         if let Some(scale) = prefill_load_scale {
-            if scale < 0.0 {
-                return Err(PyValueError::new_err(
-                    "prefill_load_scale must be non-negative",
-                ));
-            }
+            validate_prefill_load_scale(scale)?;
             inner.prefill_load_scale = scale;
         }
         Ok(Self { inner })

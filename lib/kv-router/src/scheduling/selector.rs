@@ -91,7 +91,7 @@ pub struct DefaultWorkerSelector {
 
 #[derive(Debug, Clone, Copy)]
 struct LogitWeights {
-    overlap_score_weight: f64,
+    overlap_score_credit: f64,
     prefill_load_scale: f64,
     shared_cache_multiplier: f64,
 }
@@ -158,7 +158,7 @@ impl DefaultWorkerSelector {
             };
 
         let raw_prefill_blocks = raw_prefill_tokens / block_size_f64;
-        let overlap_credit_blocks = weights.overlap_score_weight * device_overlap_blocks
+        let overlap_credit_blocks = weights.overlap_score_credit * device_overlap_blocks
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
@@ -218,11 +218,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let request_blocks = request.request_blocks(block_size);
 
         let weights = LogitWeights {
-            overlap_score_weight: request
+            overlap_score_credit: request
                 .router_config_override
                 .as_ref()
-                .and_then(|cfg| cfg.overlap_score_weight)
-                .unwrap_or(self.kv_router_config.overlap_score_weight),
+                .and_then(|cfg| cfg.overlap_score_credit)
+                .unwrap_or(self.kv_router_config.overlap_score_credit),
             prefill_load_scale: request
                 .router_config_override
                 .as_ref()
@@ -518,7 +518,7 @@ mod tests {
         let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
 
         let config = KvRouterConfig {
-            overlap_score_weight: 1.0,
+            overlap_score_credit: 1.0,
             shared_cache_multiplier: 0.5,
             router_temperature: 0.0,
             ..Default::default()
@@ -578,7 +578,7 @@ mod tests {
         tier_overlap_blocks.device.insert(worker0, 2);
 
         let config = KvRouterConfig {
-            overlap_score_weight: 1.0,
+            overlap_score_credit: 1.0,
             prefill_load_scale: 2.0,
             router_temperature: 0.0,
             ..Default::default()
@@ -638,7 +638,7 @@ mod tests {
         effective_overlap_blocks.insert(worker0, 4.0);
 
         let config = KvRouterConfig {
-            overlap_score_weight: 1.0,
+            overlap_score_credit: 1.0,
             router_temperature: 0.0,
             ..Default::default()
         };

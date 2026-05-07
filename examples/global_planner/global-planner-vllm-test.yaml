@@ -337,7 +337,7 @@ spec:
             - ${K8S_NAMESPACE}-gp-decode-0.backend.generate
             - --router-block-size
             - "16"
-            - --router-kv-overlap-score-weight
+            - --router-kv-overlap-score-credit
             - "0"
 
     VllmDecodeWorker:

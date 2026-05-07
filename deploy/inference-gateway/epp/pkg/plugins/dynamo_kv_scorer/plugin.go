@@ -466,7 +466,7 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 }
 
 // CallRouteDecodeRequest routes a request to the best decode worker.
-// When isDisaggregated is true, overlap_score_weight=0 is used (KV cache transferred from prefill).
+// When isDisaggregated is true, overlap_score_credit=0 is used (KV cache transferred from prefill).
 func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated bool) (*RoutingResult, error) {
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")

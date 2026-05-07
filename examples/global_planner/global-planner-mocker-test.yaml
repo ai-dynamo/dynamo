@@ -277,7 +277,7 @@ spec:
             - --endpoint
             - ${K8S_NAMESPACE}-gp-decode-0.backend.generate
             - --no-router-kv-events
-            - --router-kv-overlap-score-weight=0
+            - --router-kv-overlap-score-credit=0
 
     MockerDecode:
       componentType: worker
@@ -345,7 +345,7 @@ spec:
             - --endpoint
             - ${K8S_NAMESPACE}-gp-decode-1.backend.generate
             - --no-router-kv-events
-            - --router-kv-overlap-score-weight=0
+            - --router-kv-overlap-score-credit=0
 
     MockerDecode:
       componentType: worker

@@ -71,7 +71,7 @@ def _router_config_payload():
         "router_event_threads": 1,
         "router_queue_policy": "wspt",
         "router_temperature": 0.0,
-        "overlap_score_weight": 1.0,
+        "overlap_score_credit": 1.0,
         "use_kv_events": True,
         "durable_kv_events": False,
         "router_replica_sync": False,

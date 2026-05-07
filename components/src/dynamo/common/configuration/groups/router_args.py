@@ -72,15 +72,13 @@ class RouterArgGroup(ArgGroup):
                 "the worker with the fewest active requests. device-aware-weighted routes "
                 "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
                 "both power-of-two and least-loaded skip bootstrap optimization and fall "
-                "back to the synchronous prefill path. token-dp-balance uses the KV "
-                "scheduler for DP-rank-aware token load balancing without prefix matching."
+                "back to the synchronous prefill path."
             ),
             choices=[
                 "round-robin",
                 "random",
                 "power-of-two",
                 "kv",
-                "token-dp-balance",
                 "direct",
                 "least-loaded",
                 "device-aware-weighted",

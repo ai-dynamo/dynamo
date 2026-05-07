@@ -29,8 +29,8 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `token-dp-balance`, `direct`, `least-loaded`, `device-aware-weighted` |
-| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
+| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. 0 = deterministic |
 | `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
@@ -50,7 +50,7 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 
 ## AIC Prefill Load Model
 
-These options are used only when `--router-mode kv` or `--router-mode token-dp-balance` is combined with `--router-prefill-load-model aic`.
+These options are used only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|

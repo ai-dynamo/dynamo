@@ -1275,7 +1275,7 @@ class KvRouterConfig:
 
     def __init__(
         self,
-        overlap_score_weight: float = 1.0,
+        overlap_score_credit: float = 1.0,
         host_cache_hit_weight: float = 0.75,
         disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
@@ -1299,13 +1299,15 @@ class KvRouterConfig:
         shared_cache_type: str = "none",
         *,
         prefill_load_scale: float = 1.0,
+        overlap_score_weight: Optional[float] = None,
     ) -> None:
         """
         Create a KV router configuration.
 
         Args:
-            overlap_score_weight: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
+            overlap_score_credit: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            overlap_score_weight: Deprecated alias for prefill_load_scale. A value of 0 also sets overlap_score_credit to 0.
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1355,6 +1357,11 @@ class KvRouterConfig:
     def copy(self) -> "KvRouterConfig": ...
 
     @property
+    def overlap_score_credit(self) -> float: ...
+
+    @overlap_score_credit.setter
+    def overlap_score_credit(self, value: float) -> None: ...
+    @property
     def overlap_score_weight(self) -> float: ...
 
     @overlap_score_weight.setter
@@ -1366,8 +1373,10 @@ class KvRouterConfig:
 
     def with_overrides(
         self,
-        overlap_score_weight: Optional[float] = None,
+        overlap_score_credit: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
+        *,
+        overlap_score_weight: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:

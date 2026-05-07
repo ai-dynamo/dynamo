@@ -62,7 +62,7 @@ The router uses a cost function that considers both the prefill cost (influenced
    ```text
    adjusted_prefill_blocks = max(
        prefill_blocks
-       - overlap_score_weight * device_overlap_blocks
+       - overlap_score_credit * device_overlap_blocks
        - host_cache_hit_weight * host_overlap_blocks
        - disk_cache_hit_weight * disk_overlap_blocks
        - shared_cache_multiplier * shared_beyond_blocks,
@@ -71,15 +71,15 @@ The router uses a cost function that considers both the prefill cost (influenced
    cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
    ```
    - Lower costs indicate better routing choices
-   - `overlap_score_weight` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0
+   - `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0
    - `prefill_load_scale` controls adjusted prompt-side load relative to decode blocks
-   - Higher overlap weights favor cache reuse (improving TTFT), while lower weights prioritize even load distribution (improving ITL)
+   - Higher overlap credits favor cache reuse (improving TTFT), while lower credits prioritize even load distribution (improving ITL)
 
 #### Worker Selection
 
 The router selects the worker with the lowest cost. When `router_temperature` is set to a non-zero value, the router uses softmax sampling on the normalized cost logits to introduce randomness in the selection, which can help with load distribution.
 
-Example calculation with `overlap_score_weight = 1.0`:
+Example calculation with `overlap_score_credit = 1.0`:
 - Worker 1: raw prefill 10 blocks, device overlap 2 blocks, decode 10 blocks => cost = 8 + 10 = 18
 - **Worker 2: raw prefill 10 blocks, device overlap 5 blocks, decode 5 blocks => cost = 5 + 5 = 10** (selected - lowest cost)
 - Worker 3: raw prefill 10 blocks, device overlap 8 blocks, decode 9 blocks => cost = 2 + 9 = 11

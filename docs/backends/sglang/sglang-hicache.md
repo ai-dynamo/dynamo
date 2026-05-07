@@ -101,7 +101,7 @@ For each candidate worker, the router computes a **logit** (lower wins):
 # Without shared cache
 adjusted_prefill_blocks = max(
     prefill_blocks
-    - overlap_score_weight * device_overlap_blocks
+    - overlap_score_credit * device_overlap_blocks
     - host_cache_hit_weight * host_overlap_blocks
     - disk_cache_hit_weight * disk_overlap_blocks,
     0,
@@ -112,7 +112,7 @@ logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 shared_beyond = shared_cache_hits.hits_beyond(device_overlap_blocks)
 adjusted_prefill_blocks = max(
     prefill_blocks
-    - overlap_score_weight * device_overlap_blocks
+    - overlap_score_credit * device_overlap_blocks
     - host_cache_hit_weight * host_overlap_blocks
     - disk_cache_hit_weight * disk_overlap_blocks
     - shared_cache_multiplier * shared_beyond,
@@ -123,7 +123,7 @@ logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 
 `hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_weight = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
 
 | Worker | Device overlap | `hits_beyond` | Device credit | Shared credit | Adjusted prefill | Logit          |
 | ------ | -------------- | ------------- | ------------- | ------------- | ---------------- | -------------- |

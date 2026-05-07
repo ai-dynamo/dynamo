@@ -10,6 +10,9 @@ constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
 unpacked directly into ``KvRouterConfig(**config.kv_router_kwargs())``.
 """
 
+import argparse
+import os
+import warnings
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -18,7 +21,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
-    "overlap_score_weight",
+    "overlap_score_credit",
     "prefill_load_scale",
     "router_temperature",
     "use_kv_events",
@@ -41,11 +44,63 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_type",
 )
 
+_DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
+    "router KV overlap score weight is deprecated; use "
+    "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
+)
+
+
+class _DeprecatedOverlapScoreWeightAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        warnings.warn(_DEPRECATED_OVERLAP_WEIGHT_MESSAGE, FutureWarning, stacklevel=2)
+        setattr(namespace, self.dest, values)
+        if values == 0.0:
+            setattr(namespace, "overlap_score_credit", 0.0)
+
+
+def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
+    for env_var in ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT"):
+        if env_var in os.environ:
+            return env_var, float(os.environ[env_var])
+    return None
+
+
+def _default_overlap_score_credit() -> float:
+    if "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" in os.environ:
+        return 1.0
+    if (legacy := _deprecated_overlap_score_weight_from_env()) is not None and legacy[
+        1
+    ] == 0.0:
+        return 0.0
+    return 1.0
+
+
+def _default_prefill_load_scale() -> float:
+    legacy = _deprecated_overlap_score_weight_from_env()
+    if "DYN_ROUTER_PREFILL_LOAD_SCALE" in os.environ:
+        if legacy is not None:
+            env_var, _ = legacy
+            warnings.warn(
+                f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
+                FutureWarning,
+                stacklevel=3,
+            )
+        return 1.0
+    if legacy is not None:
+        env_var, value = legacy
+        warnings.warn(
+            f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
+            FutureWarning,
+            stacklevel=3,
+        )
+        return value
+    return 1.0
+
 
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
-    overlap_score_weight: float
+    overlap_score_credit: float
     prefill_load_scale: float
     router_temperature: float
     use_kv_events: bool
@@ -72,6 +127,11 @@ class KvRouterConfigBase(ConfigBase):
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
     def validate_kv_router_config(self) -> None:
+        if self.overlap_score_credit < 0.0 or self.overlap_score_credit > 1.0:
+            raise ValueError(
+                "--router-kv-overlap-score-credit must be between 0.0 and 1.0; "
+                "use --router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily"
+            )
         if self.prefill_load_scale < 0.0:
             raise ValueError("--router-prefill-load-scale must be >= 0.0")
 
@@ -84,23 +144,31 @@ class KvRouterArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--router-kv-overlap-score-weight",
-            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
-            default=1.0,
+            flag_name="--router-kv-overlap-score-credit",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+            default=_default_overlap_score_credit(),
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
                 "Range: 0.0 to 1.0; higher values more strongly prefer KV cache reuse. "
                 "Use router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily."
             ),
             arg_type=float,
-            dest="overlap_score_weight",
-            obsolete_flag="--kv-overlap-score-weight",
+            dest="overlap_score_credit",
+        )
+        g.add_argument(
+            "--router-kv-overlap-score-weight",
+            "--kv-overlap-score-weight",
+            dest="prefill_load_scale",
+            type=float,
+            action=_DeprecatedOverlapScoreWeightAction,
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
         )
         add_argument(
             g,
             flag_name="--router-prefill-load-scale",
             env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
-            default=1.0,
+            default=_default_prefill_load_scale(),
             help=(
                 "KV Router: Scale applied to adjusted prompt-side prefill load after "
                 "overlap and lower-tier cache-hit credits are subtracted."
