@@ -9,6 +9,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func TestComponentsByNameNil(t *testing.T) {
+	if got := ComponentsByName(nil); len(got) != 0 {
+		t.Fatalf("ComponentsByName(nil) = %#v, want empty map", got)
+	}
+}
+
 func TestGetDCDComponentNamePrefersSpecOverLegacyMetadata(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{

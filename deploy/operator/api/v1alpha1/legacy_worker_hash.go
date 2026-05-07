@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -25,6 +26,10 @@ const (
 // Keep this in the api/v1alpha1 package so conversion can call it without an
 // api/v1alpha1 -> internal/dynamo -> api/v1alpha1 import cycle.
 func ComputeDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
+	if dgd == nil {
+		return "", fmt.Errorf("nil DynamoGraphDeployment")
+	}
+
 	var workerNames []string
 	for name, spec := range dgd.Spec.Services {
 		if spec != nil && isV1alpha1WorkerComponent(spec.ComponentType) {

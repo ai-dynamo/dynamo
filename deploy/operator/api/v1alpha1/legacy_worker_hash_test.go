@@ -73,6 +73,12 @@ func TestComputeDGDWorkersSpecHashGolden(t *testing.T) {
 	}
 }
 
+func TestComputeDGDWorkersSpecHashNil(t *testing.T) {
+	if _, err := ComputeDGDWorkersSpecHash(nil); err == nil {
+		t.Fatal("ComputeDGDWorkersSpecHash(nil) error = nil, want error")
+	}
+}
+
 func TestDGDConvertToPreservesLegacyWorkerHashCompatibleWithControllerHash(t *testing.T) {
 	src := legacyWorkerHashDGD()
 	src.Annotations = map[string]string{

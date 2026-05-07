@@ -12,6 +12,10 @@ import (
 )
 
 func ComponentsByName(dgd *v1beta1.DynamoGraphDeployment) map[string]*v1beta1.DynamoComponentDeploymentSharedSpec {
+	if dgd == nil {
+		return map[string]*v1beta1.DynamoComponentDeploymentSharedSpec{}
+	}
+
 	components := make(map[string]*v1beta1.DynamoComponentDeploymentSharedSpec, len(dgd.Spec.Components))
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
