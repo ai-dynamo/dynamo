@@ -262,6 +262,10 @@ class DiffusionEngine:
             f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
         )
 
+        # Use TRT-LLM's DiffusionRequest dataclass so that all defaults
+        # (including pipeline-specific fields like max_sequence_length,
+        # guidance_scale_2, boundary_ratio) are owned by TRT-LLM rather
+        # than hardcoded here.
         from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
         from tensorrt_llm.visual_gen.params import VisualGenParams
 
