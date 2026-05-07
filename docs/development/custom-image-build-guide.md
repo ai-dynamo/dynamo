@@ -1,6 +1,6 @@
 # Custom Image Build Guide for DGDR Deployments
 
-How to build, tag, and layer custom Dynamo images for DGDR-based deployments on a custom registry (e.g. Docker Hub `jont828/`).
+How to build, tag, and layer custom Dynamo images for DGDR-based deployments on a custom registry (e.g. Docker Hub `<your-registry>/`).
 
 ## Image Naming and Derivation
 
@@ -15,14 +15,14 @@ The derivation logic lives in `components/src/dynamo/profiler/utils/profile_comm
 | SGLang runtime | `sglang-runtime` |
 | TRT-LLM runtime | `tensorrtllm-runtime` |
 
-**Example:** Given `spec.image: jont828/dynamo-planner:main-short-names`:
+**Example:** Given `spec.image: <your-registry>/dynamo-planner:main-short-names`:
 
 | Component | Derived image |
 |---|---|
-| Profiling job (uses spec.image as-is) | `jont828/dynamo-planner:main-short-names` |
-| Planner service | `jont828/dynamo-planner:main-short-names` |
-| Backend runtime | `jont828/tensorrtllm-runtime:main-short-names` |
-| Frontend service | `jont828/tensorrtllm-runtime:main-short-names` (set by `update_image`) |
+| Profiling job (uses spec.image as-is) | `<your-registry>/dynamo-planner:main-short-names` |
+| Planner service | `<your-registry>/dynamo-planner:main-short-names` |
+| Backend runtime | `<your-registry>/tensorrtllm-runtime:main-short-names` |
+| Frontend service | `<your-registry>/tensorrtllm-runtime:main-short-names` (set by `update_image`) |
 
 **Key implication:** All images under the same registry prefix **must share the same tag** for the derivation to find them. If you push `dynamo-planner:foo` you must also push `tensorrtllm-runtime:foo` and `dynamo-frontend:foo` (if used separately).
 
@@ -34,7 +34,7 @@ The derivation logic lives in `components/src/dynamo/profiler/utils/profile_comm
 
 The frontend Dockerfile includes the EPP (Endpoint Policy Processor) binary, pulled from a base image. The pre-rendered Dockerfiles checked into the repo may reference an old EPP version that has been removed from the staging registry:
 
-```
+```text
 ERROR: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1: not found
 ```
 
@@ -46,7 +46,7 @@ ERROR: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-exten
    ```
 
 2. **Use `registry.k8s.io`** — the old version still exists there. Edit the rendered Dockerfile's `EPP_IMAGE` ARG:
-   ```
+   ```dockerfile
    # Change this:
    ARG EPP_IMAGE=us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1
    # To this:
@@ -61,7 +61,7 @@ ERROR: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-exten
 ### Transient NVCR Pull Failures
 
 Pulls from `nvcr.io` occasionally fail with connection errors:
-```
+```text
 nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04: Unavailable: connection error
 ```
 Simply retry the build — Docker layer caching means only the failed pull is retried.
@@ -95,15 +95,15 @@ python container/render.py \
 ```bash
 # 1. Frontend (CUDA 12.9)
 python container/render.py --framework dynamo --target frontend --cuda-version 12.9 --platform linux/amd64
-docker build -t jont828/dynamo-frontend:main -f container/dynamo-frontend-cuda12.9-amd64-rendered.Dockerfile .
+docker build -t <your-registry>/dynamo-frontend:main -f container/dynamo-frontend-cuda12.9-amd64-rendered.Dockerfile .
 
 # 2. Planner (CUDA 12.9)
 python container/render.py --framework dynamo --target planner --cuda-version 12.9 --platform linux/amd64
-docker build -t jont828/dynamo-planner:main -f container/dynamo-planner-cuda12.9-amd64-rendered.Dockerfile .
+docker build -t <your-registry>/dynamo-planner:main -f container/dynamo-planner-cuda12.9-amd64-rendered.Dockerfile .
 
 # 3. TRT-LLM Runtime (CUDA 13.1)
 # Pre-rendered Dockerfile is checked in
-docker build -t jont828/tensorrtllm-runtime:main -f container/trtllm-runtime-cuda13.1-amd64-rendered.Dockerfile .
+docker build -t <your-registry>/tensorrtllm-runtime:main -f container/trtllm-runtime-cuda13.1-amd64-rendered.Dockerfile .
 ```
 
 Pre-rendered Dockerfiles are checked into the repo:
@@ -115,9 +115,9 @@ The planner Dockerfile needs to be rendered on demand (not checked in by default
 ### Push to Registry
 
 ```bash
-docker push jont828/dynamo-frontend:main
-docker push jont828/dynamo-planner:main
-docker push jont828/tensorrtllm-runtime:main
+docker push <your-registry>/dynamo-frontend:main
+docker push <your-registry>/dynamo-planner:main
+docker push <your-registry>/tensorrtllm-runtime:main
 ```
 
 ## Layering Changes Without Full Rebuilds
@@ -140,22 +140,22 @@ Full image builds are slow (especially the ~34GB TRT-LLM runtime). When iteratin
 3. **Rebuild only the affected image** with a new tag:
    ```bash
    # Example: planner-only change (service name shortening)
-   docker build -t jont828/dynamo-planner:main-short-names \
+   docker build -t <your-registry>/dynamo-planner:main-short-names \
        -f container/dynamo-planner-cuda12.9-amd64-rendered.Dockerfile .
    ```
 
 4. **Tag the unchanged images** to match:
    ```bash
    # Runtime and frontend didn't change, just retag
-   docker tag jont828/tensorrtllm-runtime:main jont828/tensorrtllm-runtime:main-short-names
-   docker tag jont828/dynamo-frontend:main jont828/dynamo-frontend:main-short-names
+   docker tag <your-registry>/tensorrtllm-runtime:main <your-registry>/tensorrtllm-runtime:main-short-names
+   docker tag <your-registry>/dynamo-frontend:main <your-registry>/dynamo-frontend:main-short-names
    ```
 
 5. **Push all images with the new tag**:
    ```bash
-   docker push jont828/dynamo-planner:main-short-names
-   docker push jont828/tensorrtllm-runtime:main-short-names
-   docker push jont828/dynamo-frontend:main-short-names
+   docker push <your-registry>/dynamo-planner:main-short-names
+   docker push <your-registry>/tensorrtllm-runtime:main-short-names
+   docker push <your-registry>/dynamo-frontend:main-short-names
    ```
 
 6. **Reset your working tree** so `main` stays clean:
@@ -214,7 +214,7 @@ spec:
   autoApply: true
 
   # All images derived from this: dynamo-planner, tensorrtllm-runtime, dynamo-frontend
-  image: jont828/dynamo-planner:main-short-names
+  image: <your-registry>/dynamo-planner:main-short-names
 
   modelCache:
     pvcName: model-cache

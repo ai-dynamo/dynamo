@@ -178,12 +178,6 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Mocker
-        contents:
-          - page: Testing with Mocker
-            path: mocker/mocker.md
-          - page: Mocker Offline Trace Replay
-            path: benchmarks/mocker-trace-replay.md
 
   # ==================== Backends ====================
   - section: Backends
@@ -332,8 +326,12 @@ navigation:
         path: development/backend-guide.md
       - page: Metrics Developer Guide
         path: observability/metrics-developer-guide.md
-      - page: Mocker
-        path: mocker/mocker.md
+      - section: Mocker
+        contents:
+          - page: Testing with Mocker
+            path: mocker/mocker.md
+          - page: Mocker Offline Trace Replay
+            path: benchmarks/mocker-trace-replay.md
       - page: Minikube Setup
         path: kubernetes/deployment/minikube.md
       - page: Developing with Tilt
@@ -425,9 +423,6 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- Mocker --
-      - page: Mocker
-        path: mocker/mocker.md
       # -- Templates --
       - section: Templates
         path: templates/README.md
