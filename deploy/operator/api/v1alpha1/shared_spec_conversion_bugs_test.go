@@ -56,17 +56,15 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got v1beta1.DynamoComponentDeploymentSharedSpec
-			if err := convertSharedMemoryTo(tt.src, &got); err != nil {
-				t.Fatalf("convertSharedMemoryTo() error = %v", err)
-			}
+			convertSharedMemoryToHub(tt.src, &got)
 			if tt.want == "" {
 				if got.SharedMemorySize != nil {
-					t.Fatalf("convertSharedMemoryTo().SharedMemorySize = %s, want nil", got.SharedMemorySize.String())
+					t.Fatalf("convertSharedMemoryToHub().SharedMemorySize = %s, want nil", got.SharedMemorySize.String())
 				}
 				return
 			}
 			if got.SharedMemorySize == nil || got.SharedMemorySize.String() != tt.want {
-				t.Fatalf("convertSharedMemoryTo().SharedMemorySize = %v, want %s", got.SharedMemorySize, tt.want)
+				t.Fatalf("convertSharedMemoryToHub().SharedMemorySize = %v, want %s", got.SharedMemorySize, tt.want)
 			}
 		})
 	}
