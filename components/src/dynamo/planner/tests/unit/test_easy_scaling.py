@@ -85,7 +85,7 @@ def _easy_config(**overrides) -> PlannerConfig:
         enable_throughput_scaling=False,
         min_endpoint=1,
         max_gpu_budget=-1,
-        load_adjustment_interval=5,
+        load_adjustment_interval_seconds=5,
         max_num_fpm_samples=50,
         fpm_sample_bucket_size=16,
         load_min_observations=5,
@@ -158,8 +158,8 @@ class TestEasyConfig:
                 enable_load_scaling=True,
                 enable_throughput_scaling=True,
                 pre_deployment_sweeping_mode="rapid",
-                throughput_adjustment_interval=60,
-                load_adjustment_interval=5,
+                throughput_adjustment_interval_seconds=60,
+                load_adjustment_interval_seconds=5,
             )
         )
         assert cfg.enable_load_scaling is True

@@ -53,7 +53,7 @@ def _make_config(
     """Create a minimal mock PlannerConfig for predictor instantiation."""
     cfg = MagicMock()
     cfg.load_predictor_log1p = load_predictor_log1p
-    cfg.throughput_adjustment_interval = step_size
+    cfg.throughput_adjustment_interval_seconds = step_size
     cfg.prophet_window_size = prophet_window_size
     cfg.kalman_q_level = kalman_q_level
     cfg.kalman_q_trend = kalman_q_trend

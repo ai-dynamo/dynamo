@@ -89,12 +89,12 @@ def _make_config(**overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
         optimization_target="sla",
-        ttft=500.0,
-        itl=50.0,
+        ttft_ms=500.0,
+        itl_ms=50.0,
         min_endpoint=1,
         max_gpu_budget=-1,
-        throughput_adjustment_interval=60,
-        load_adjustment_interval=5,
+        throughput_adjustment_interval_seconds=60,
+        load_adjustment_interval_seconds=5,
         load_scaling_down_sensitivity=80,
         max_num_fpm_samples=50,
         fpm_sample_bucket_size=16,
@@ -247,7 +247,7 @@ class TestFpmObservation:
 
 class TestPrefillLoadScaling:
     def test_scale_up_when_all_above_sla(self):
-        core = _make_core(mode="prefill", ttft=5.0)
+        core = _make_core(mode="prefill", ttft_ms=5.0)
         _train_prefill_regression(core)
 
         fpm = _make_fpm(
@@ -309,7 +309,7 @@ class TestPrefillLoadScaling:
 
 class TestDecodeLoadScaling:
     def test_scale_up_when_all_above_sla(self):
-        core = _make_core(mode="decode", itl=5.0)
+        core = _make_core(mode="decode", itl_ms=5.0)
         _train_decode_regression(core)
 
         fpm = _make_fpm(
@@ -338,7 +338,7 @@ class TestDecodeLoadScaling:
 
 class TestDisaggLoadScaling:
     def test_disagg_scale_up(self):
-        core = _make_core(ttft=5.0, itl=5.0)
+        core = _make_core(ttft_ms=5.0, itl_ms=5.0)
         _train_prefill_regression(core)
         _train_decode_regression(core)
 
@@ -427,7 +427,7 @@ class TestThroughputScaling:
             mode="prefill",
             enable_load_scaling=False,
             enable_throughput_scaling=True,
-            ttft=200.0,
+            ttft_ms=200.0,
         )
         _train_prefill_regression(core)
 
@@ -555,7 +555,7 @@ class TestKvHitRatePlumbing:
             mode="prefill",
             enable_load_scaling=True,
             enable_throughput_scaling=False,
-            load_adjustment_interval=7,
+            load_adjustment_interval_seconds=7,
         )
         tick = core.initial_tick(start_s=0.0)
         # Load-only mode: the load tick should request a kv-hit-rate scrape
@@ -570,8 +570,8 @@ class TestKvHitRatePlumbing:
             mode="prefill",
             enable_load_scaling=True,
             enable_throughput_scaling=True,
-            load_adjustment_interval=5,
-            throughput_adjustment_interval=60,
+            load_adjustment_interval_seconds=5,
+            throughput_adjustment_interval_seconds=60,
         )
         tick = core.initial_tick(start_s=0.0)
         # First tick is a pure load tick (5s < 60s); traffic scrape is reserved
@@ -680,7 +680,7 @@ class TestKvHitRatePlumbing:
 
 class TestFpmReconciliation:
     def test_mismatch_skips_scaling(self):
-        core = _make_core(mode="prefill", ttft=5.0)
+        core = _make_core(mode="prefill", ttft_ms=5.0)
         _train_prefill_regression(core)
 
         tick = TickInput(
@@ -792,7 +792,7 @@ class TestDiagnostics:
         assert effects.diagnostics is not None
 
     def test_diagnostics_reset_each_tick(self):
-        core = _make_core(mode="prefill", ttft=5.0)
+        core = _make_core(mode="prefill", ttft_ms=5.0)
         _train_prefill_regression(core)
 
         fpm = _make_fpm(

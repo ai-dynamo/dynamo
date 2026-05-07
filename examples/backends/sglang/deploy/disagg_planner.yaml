@@ -76,7 +76,7 @@ spec:
           - dynamo.planner
           args:
             - --config
-            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results"}'
+            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval_seconds": 60, "profile_results_dir": "/workspace/profiling_results"}'
           volumeMounts:
             - name: planner-profile-data
               mountPath: /workspace/profiling_results

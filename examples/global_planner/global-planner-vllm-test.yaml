@@ -50,12 +50,12 @@ data:
         "${K8S_NAMESPACE}-gp-decode-0"
       ],
       "prefill_pool_selection_strategy": {
-        "ttft_min": 10, "ttft_max": 3000, "ttft_resolution": 2,
+        "ttft_min_ms": 10, "ttft_max_ms": 3000, "ttft_resolution": 2,
         "isl_min": 0,   "isl_max": 32000, "isl_resolution": 2,
         "prefill_pool_mapping": [[0,1],[0,1]]
       },
       "decode_pool_selection_strategy": {
-        "itl_min": 10,  "itl_max": 500,   "itl_resolution": 2,
+        "itl_min_ms": 10,  "itl_max_ms": 500,   "itl_resolution": 2,
         "context_length_min": 0, "context_length_max": 32000, "context_length_resolution": 2,
         "decode_pool_mapping": [[0,0],[0,0]]
       }
@@ -233,7 +233,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -308,7 +308,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"prefill","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"max_gpu_budget":-1,"prefill_engine_num_gpu":2,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -383,4 +383,4 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","itl":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"decode","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","itl_ms":200,"max_gpu_budget":-1,"decode_engine_num_gpu":1,"model_name":"${MODEL_NAME}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'

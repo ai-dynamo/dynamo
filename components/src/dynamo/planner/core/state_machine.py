@@ -141,10 +141,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._capabilities = capabilities
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
-        self._next_load_s = start_s + self._config.load_adjustment_interval
+        self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
         if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
-                start_s + self._config.throughput_adjustment_interval
+                start_s + self._config.throughput_adjustment_interval_seconds
             )
         return self._next_scheduled_tick()
 
@@ -204,7 +204,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 self._observe_traffic(tick_input.traffic)
                 throughput_decision = self._advance_throughput(tick_input.traffic)
             self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
+                tick_input.now_s + self._config.throughput_adjustment_interval_seconds
             )
 
         if tick.run_load_scaling:
@@ -219,7 +219,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 load_decision = self._advance_load(tick_input.fpm_observations)
                 if load_decision is not None:
                     effects.scale_to = load_decision
-            self._next_load_s = tick_input.now_s + self._config.load_adjustment_interval
+            self._next_load_s = (
+                tick_input.now_s + self._config.load_adjustment_interval_seconds
+            )
 
         # Load scaling has precedence when it produced a decision; otherwise
         # fall back to the throughput-scaling decision.
@@ -283,10 +285,12 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         # planner can still discount prefill work by recent prefix reuse.
         if is_throughput:
             need_traffic = True
-            traffic_duration_s = float(self._config.throughput_adjustment_interval)
+            traffic_duration_s = float(
+                self._config.throughput_adjustment_interval_seconds
+            )
         elif is_load and not self._config.enable_throughput_scaling:
             need_traffic = True
-            traffic_duration_s = float(self._config.load_adjustment_interval)
+            traffic_duration_s = float(self._config.load_adjustment_interval_seconds)
         else:
             need_traffic = False
             traffic_duration_s = 0.0

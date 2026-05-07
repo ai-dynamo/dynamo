@@ -30,11 +30,11 @@ Passed as JSON via `--planner-config`. Uses the same schema as the live planner.
 |---|---|
 | `mode` | `"agg"` or `"disagg"` — picks scaling strategy and required engine args. |
 | `optimization_target` | `"sla"` uses TTFT/ITL targets; `"throughput"` uses static queue/KV thresholds. |
-| `ttft` / `itl` | SLA targets in ms. Drives load-scaling decisions. |
+| `ttft_ms` / `itl_ms` | SLA targets in ms. Drives load-scaling decisions. |
 | `enable_throughput_scaling` | Periodic scaling based on predicted steady-state load. |
 | `enable_load_scaling` | Reactive scaling to short-term traffic spikes. |
-| `throughput_adjustment_interval` | Seconds between throughput-scaling decisions. |
-| `load_adjustment_interval` | Seconds between load-scaling decisions. Short intervals mean faster reaction but more flapping. |
+| `throughput_adjustment_interval_seconds` | Seconds between throughput-scaling decisions. |
+| `load_adjustment_interval_seconds` | Seconds between load-scaling decisions. Short intervals mean faster reaction but more flapping. |
 | `pre_deployment_sweeping_mode` | `"rapid"` uses the AIC analytical model; leave unset to fall back to recorded profile data. |
 | `prefill_engine_num_gpu` / `decode_engine_num_gpu` | GPUs per engine replica. **Must be set explicitly** — both default to `None`, and the replay adapter silently treats `None` as `0`, which collapses the cumulative-GPU-hours metric in the report to zero. |
 | `report_filename` | Output HTML filename under `./planner_reports/`. |
@@ -69,10 +69,10 @@ Run agg (2 workers, TP=1):
   --planner-config '{
     "mode": "agg",
     "optimization_target": "sla",
-    "ttft": 1500, "itl": 50,
+    "ttft_ms": 1500, "itl_ms": 50,
     "enable_throughput_scaling": true, "enable_load_scaling": true,
     "pre_deployment_sweeping_mode": "rapid",
-    "throughput_adjustment_interval": 300, "load_adjustment_interval": 10,
+    "throughput_adjustment_interval_seconds": 300, "load_adjustment_interval_seconds": 10,
     "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1,
     "report_filename": "replay_agg.html"
   }' \
@@ -87,10 +87,10 @@ Run disagg (1P1D, TP=1):
   --planner-config '{
     "mode": "disagg",
     "optimization_target": "sla",
-    "ttft": 1500, "itl": 50,
+    "ttft_ms": 1500, "itl_ms": 50,
     "enable_throughput_scaling": true, "enable_load_scaling": true,
     "pre_deployment_sweeping_mode": "rapid",
-    "throughput_adjustment_interval": 300, "load_adjustment_interval": 10,
+    "throughput_adjustment_interval_seconds": 300, "load_adjustment_interval_seconds": 10,
     "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1,
     "report_filename": "replay_disagg.html"
   }' \
@@ -123,7 +123,7 @@ run_one() {
     extra=$(printf '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"startup_time":%d}' "$s")
   fi
   .venv/bin/python -m dynamo.replay "$TRACE" \
-    --planner-config "$(printf '{"mode":"agg","optimization_target":"sla","ttft":1500,"itl":50,"enable_throughput_scaling":true,"enable_load_scaling":true,"pre_deployment_sweeping_mode":"rapid","throughput_adjustment_interval":300,"load_adjustment_interval":10,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"report_filename":"%s"}' "$name")" \
+    --planner-config "$(printf '{"mode":"agg","optimization_target":"sla","ttft_ms":1500,"itl_ms":50,"enable_throughput_scaling":true,"enable_load_scaling":true,"pre_deployment_sweeping_mode":"rapid","throughput_adjustment_interval_seconds":300,"load_adjustment_interval_seconds":10,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"report_filename":"%s"}' "$name")" \
     --extra-engine-args "$extra" \
     --num-workers 2 --arrival-speedup-ratio 1.0 \
     --report-json "$OUT/startup_$(printf '%03d' "$s").json" \

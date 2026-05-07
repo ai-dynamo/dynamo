@@ -416,7 +416,7 @@ class LoadScalingMixin:
             self._diag_estimated_ttft_ms = max(estimates)
 
         return self._scale_decision(
-            estimates, self._config.ttft, num_workers, "prefill TTFT"
+            estimates, self._config.ttft_ms, num_workers, "prefill TTFT"
         )
 
     def _decode_load_decision(
@@ -452,7 +452,7 @@ class LoadScalingMixin:
             self._diag_estimated_itl_ms = max(estimates)
 
         return self._scale_decision(
-            estimates, self._config.itl, num_workers, "decode ITL"
+            estimates, self._config.itl_ms, num_workers, "decode ITL"
         )
 
     def _agg_prefill_scaling(
@@ -477,7 +477,7 @@ class LoadScalingMixin:
             self._diag_estimated_ttft_ms = max(estimates)
 
         return self._scale_decision(
-            estimates, self._config.ttft, num_workers, "agg TTFT"
+            estimates, self._config.ttft_ms, num_workers, "agg TTFT"
         )
 
     def _agg_decode_scaling(
@@ -497,7 +497,9 @@ class LoadScalingMixin:
         if estimates:
             self._diag_estimated_itl_ms = max(estimates)
 
-        return self._scale_decision(estimates, self._config.itl, num_workers, "agg ITL")
+        return self._scale_decision(
+            estimates, self._config.itl_ms, num_workers, "agg ITL"
+        )
 
     # ------------------------------------------------------------------
     # Easy-mode decision methods (optimization_target != "sla")
