@@ -487,8 +487,10 @@ All commands shown in the "Local equivalent" columns above are also documented i
 
 Tests must be deterministic. A flaky test -- one that sometimes passes and sometimes fails without code changes -- wastes CI time and erodes developer trust in the test suite. If you encounter or introduce a flaky test:
 
-1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order. For LLM-output assertions, pass `temperature=0` and `seed=0` to the request so the model picks the same tokens each call.
-2. **If determinism truly isn't reachable** (model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
+1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order.
+
+   **Special case — LLM-output assertions.** Pass `temperature=0` and `seed=0` so sampling picks the same logits, but treat that as **necessary, not sufficient**: GPU-served LLM inference remains non-deterministic in practice from FP non-associativity in tensor-parallel reductions, batch-size-dependent kernel selection (cuBLAS / flash-attn), prefix-cache state across calls, and non-deterministic attention kernels. For any test asserting on served-model response content, configure retry (step 2b below) — treat it as required, not a fallback.
+2. **If determinism truly isn't reachable** (LLM-output content as above, model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
 
    **2a. Whole-test retry — `@pytest.mark.flaky`** (use for unit tests, parser tests, tool-calling tests, anything that doesn't launch a server)
 
