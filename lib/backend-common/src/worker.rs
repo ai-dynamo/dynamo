@@ -1229,11 +1229,8 @@ mod tests {
         let grace = 5.1;
 
         // The pre-fix deadline (timeout, no grace reserve).
-        let result = tokio::time::timeout(
-            timeout,
-            worker.run_engine_shutdown_steps_with_grace(grace),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(timeout, worker.run_engine_shutdown_steps_with_grace(grace)).await;
         assert!(
             result.is_err(),
             "buggy deadline must expire before drain/cleanup run"
@@ -1261,11 +1258,9 @@ mod tests {
         let grace = 5.1;
 
         let deadline = shutdown_deadline(timeout, grace);
-        let result = tokio::time::timeout(
-            deadline,
-            worker.run_engine_shutdown_steps_with_grace(grace),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(deadline, worker.run_engine_shutdown_steps_with_grace(grace))
+                .await;
         assert!(
             result.is_ok(),
             "fixed deadline must allow drain + cleanup to finish"
