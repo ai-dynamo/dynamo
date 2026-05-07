@@ -40,11 +40,6 @@ from tests.utils.payloads import (
 logger = logging.getLogger(__name__)
 
 
-def _is_cuda13() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    return v.startswith("13")
-
-
 @dataclass
 class SGLangConfig(EngineConfig):
     """Configuration for SGLang test scenarios"""
@@ -149,18 +144,16 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),  # actual profiled peak with kv-tokens
+            pytest.mark.profiled_vram_gib(
+                5.5
+            ),  # actual profiled peak (re-profiled 2026-05-07 after dropping --enable-memory-saver)
             pytest.mark.requested_sglang_kv_tokens(
-                37472
-            ),  # KV cache cap (2x safety over min=18736)
+                1184
+            ),  # KV cache cap (2x safety over min=592)
             # Local repro took ~289s wall time with worker readiness reaching
             # "ready" at ~176s on a warm-cache RTX 6000 Ada.
             pytest.mark.timeout(420),
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
@@ -234,7 +227,8 @@ sglang_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
-    # KV size is set by requested_sglang_kv_tokens; no fraction overrides.
+    # KV size is set by requested_sglang_kv_tokens; build_sglang_gpu_mem_args
+    # also emits --mem-fraction-static 0.9 (see PR #9238).
     "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_e_pd_qwen",

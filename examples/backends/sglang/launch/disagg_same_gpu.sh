@@ -64,7 +64,6 @@ python3 -m dynamo.sglang \
   --context-length "$CONTEXT_LENGTH" \
   --chunked-prefill-size "$CONTEXT_LENGTH" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
-  --enable-memory-saver \
   --delete-ckpt-after-loading \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
@@ -93,7 +92,6 @@ python3 -m dynamo.sglang \
   --context-length "$CONTEXT_LENGTH" \
   --chunked-prefill-size "$CONTEXT_LENGTH" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
-  --enable-memory-saver \
   --delete-ckpt-after-loading \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
