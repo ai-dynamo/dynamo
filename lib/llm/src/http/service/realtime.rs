@@ -164,9 +164,14 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
 
     let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
 
-    // Forward the first event into the engine so it sees the same traffic a
-    // post-engine-acquisition frame would; e.g. a session.update is echoed back
-    // as session.updated.
+    // Forward the first event into the engine. For `session.update` in
+    // particular this is load-bearing, not just echo plumbing: the payload
+    // carries per-session generation config the engine actually consumes —
+    // instructions, voice, audio formats, turn-detection / VAD parameters,
+    // max_output_tokens, tools, output_modalities. The handler's only
+    // interest in the event was extracting the routing key (`model`); the
+    // rest of the config is the engine's to apply, so we hand the whole
+    // event over verbatim.
     if req_tx.send(first_event).await.is_err() {
         tracing::debug!("/v1/realtime engine receiver dropped before first event delivered");
         return;
