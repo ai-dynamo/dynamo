@@ -179,7 +179,7 @@ async fn realtime_websocket_audio_append_streams_response_envelope() {
         "type": "input_audio_buffer.append",
         "audio": audio.clone(),
     });
-    ws.send(Message::Text(body.to_string()))
+    ws.send(Message::Text(body.to_string().into()))
         .await
         .expect("send append");
 
