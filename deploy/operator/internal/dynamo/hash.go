@@ -42,7 +42,7 @@ import (
 //
 // Only worker components (prefill, decode, worker) are included in the hash.
 func ComputeDGDWorkersSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
-	hash, err := v1alpha1.ComputeV1alpha1DGDWorkersSpecHash(dgd)
+	hash, err := v1alpha1.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		// Fallback to empty hash on error (shouldn't happen with valid input)
 		return "00000000"

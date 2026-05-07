@@ -17,7 +17,7 @@ import (
 
 const currentWorkerHashAnnotation = "nvidia.com/current-worker-hash"
 
-func TestComputeV1alpha1DGDWorkersSpecHashGolden(t *testing.T) {
+func TestComputeDGDWorkersSpecHashGolden(t *testing.T) {
 	tests := []struct {
 		name string
 		dgd  *DynamoGraphDeployment
@@ -55,19 +55,19 @@ func TestComputeV1alpha1DGDWorkersSpecHashGolden(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got1, err := ComputeV1alpha1DGDWorkersSpecHash(tt.dgd)
+			got1, err := ComputeDGDWorkersSpecHash(tt.dgd)
 			if err != nil {
-				t.Fatalf("ComputeV1alpha1DGDWorkersSpecHash: %v", err)
+				t.Fatalf("ComputeDGDWorkersSpecHash: %v", err)
 			}
-			got2, err := ComputeV1alpha1DGDWorkersSpecHash(tt.dgd)
+			got2, err := ComputeDGDWorkersSpecHash(tt.dgd)
 			if err != nil {
-				t.Fatalf("second ComputeV1alpha1DGDWorkersSpecHash: %v", err)
+				t.Fatalf("second ComputeDGDWorkersSpecHash: %v", err)
 			}
 			if got1 != got2 {
 				t.Fatalf("hash is not stable: first %q, second %q", got1, got2)
 			}
 			if got1 != tt.want {
-				t.Fatalf("ComputeV1alpha1DGDWorkersSpecHash() = %q, want golden %q", got1, tt.want)
+				t.Fatalf("ComputeDGDWorkersSpecHash() = %q, want golden %q", got1, tt.want)
 			}
 		})
 	}
@@ -79,9 +79,9 @@ func TestDGDConvertToPreservesLegacyWorkerHashCompatibleWithControllerHash(t *te
 		currentWorkerHashAnnotation: "stale-controller-hash",
 	}
 
-	expected, err := ComputeV1alpha1DGDWorkersSpecHash(src)
+	expected, err := ComputeDGDWorkersSpecHash(src)
 	if err != nil {
-		t.Fatalf("ComputeV1alpha1DGDWorkersSpecHash: %v", err)
+		t.Fatalf("ComputeDGDWorkersSpecHash: %v", err)
 	}
 	hub := &v1beta1.DynamoGraphDeployment{}
 	if err := src.ConvertTo(hub); err != nil {
@@ -168,9 +168,9 @@ func preservedLegacyWorkerHash(t *testing.T, src *DynamoGraphDeployment) string 
 	}
 	src.Annotations[currentWorkerHashAnnotation] = "existing-controller-hash"
 
-	expected, err := ComputeV1alpha1DGDWorkersSpecHash(src)
+	expected, err := ComputeDGDWorkersSpecHash(src)
 	if err != nil {
-		t.Fatalf("ComputeV1alpha1DGDWorkersSpecHash: %v", err)
+		t.Fatalf("ComputeDGDWorkersSpecHash: %v", err)
 	}
 	hub := &v1beta1.DynamoGraphDeployment{}
 	if err := src.ConvertTo(hub); err != nil {

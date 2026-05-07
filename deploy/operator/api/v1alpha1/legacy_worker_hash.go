@@ -17,14 +17,14 @@ const (
 	annCurrentWorkerHash          = "nvidia.com/current-worker-hash"
 )
 
-// ComputeV1alpha1DGDWorkersSpecHash computes the worker hash used by the
+// ComputeDGDWorkersSpecHash computes the worker hash used by the
 // v1alpha1 DGD controller before v1beta1 conversion. ConvertTo stores this
 // value on the v1beta1 hub object so the v1beta1 controller can migrate
 // existing v1alpha1 hashes without rolling workers.
 //
 // Keep this in the api/v1alpha1 package so conversion can call it without an
 // api/v1alpha1 -> internal/dynamo -> api/v1alpha1 import cycle.
-func ComputeV1alpha1DGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
+func ComputeDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
 	var workerNames []string
 	for name, spec := range dgd.Spec.Services {
 		if spec != nil && isV1alpha1WorkerComponent(spec.ComponentType) {
