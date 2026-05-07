@@ -15,14 +15,16 @@ _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
     "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
 )
+_CANONICAL_OVERLAP_ENV_VARS = (
+    "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+    "DYN_ROUTER_PREFILL_LOAD_SCALE",
+)
 
 
 class _DeprecatedOverlapScoreWeightAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None) -> None:
         warnings.warn(_DEPRECATED_OVERLAP_WEIGHT_MESSAGE, FutureWarning, stacklevel=2)
         setattr(namespace, self.dest, values)
-        if values == 0.0:
-            setattr(namespace, "router_kv_overlap_score_credit", 0.0)
 
 
 def _deprecated_overlap_score_weight_from_env() -> tuple[str, float] | None:
@@ -32,36 +34,22 @@ def _deprecated_overlap_score_weight_from_env() -> tuple[str, float] | None:
     return None
 
 
-def _default_router_kv_overlap_score_credit() -> float:
-    if "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" in os.environ:
-        return 1.0
-    if (legacy := _deprecated_overlap_score_weight_from_env()) is not None and legacy[
-        1
-    ] == 0.0:
-        return 0.0
-    return 1.0
-
-
-def _default_router_prefill_load_scale() -> float:
+def _default_router_kv_overlap_score_weight() -> float | str:
     legacy = _deprecated_overlap_score_weight_from_env()
-    if "DYN_ROUTER_PREFILL_LOAD_SCALE" in os.environ:
-        if legacy is not None:
-            env_var, _ = legacy
-            warnings.warn(
-                f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
-                FutureWarning,
-                stacklevel=3,
-            )
-        return 1.0
-    if legacy is not None:
-        env_var, value = legacy
-        warnings.warn(
-            f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
-            FutureWarning,
-            stacklevel=3,
-        )
-        return value
-    return 1.0
+    if legacy is None:
+        return argparse.SUPPRESS
+
+    env_var, value = legacy
+    warnings.warn(
+        f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
+        FutureWarning,
+        stacklevel=3,
+    )
+
+    if any(env_var in os.environ for env_var in _CANONICAL_OVERLAP_ENV_VARS):
+        return argparse.SUPPRESS
+
+    return value
 
 
 class DynamoRouterConfig(ConfigBase):
@@ -71,6 +59,7 @@ class DynamoRouterConfig(ConfigBase):
     endpoint: str
     router_block_size: int
     router_kv_overlap_score_credit: float
+    router_kv_overlap_score_weight: float | None = None
     router_prefill_load_scale: float
     router_temperature: float
     router_use_kv_events: bool
@@ -132,7 +121,7 @@ class DynamoRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-kv-overlap-score-credit",
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
-            default=_default_router_kv_overlap_score_credit(),
+            default=1.0,
             help="KV Router: Credit multiplier for device-local prefix overlap. Range: 0.0 to 1.0; higher values more strongly prefer KV cache reuse. Use router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily",
             arg_type=float,
         )
@@ -141,16 +130,16 @@ class DynamoRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-prefill-load-scale",
             env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
-            default=_default_router_prefill_load_scale(),
+            default=1.0,
             help="KV Router: Scale applied to adjusted prompt-side prefill load after overlap and lower-tier cache-hit credits are subtracted",
             arg_type=float,
         )
         g.add_argument(
             "--router-kv-overlap-score-weight",
-            dest="router_prefill_load_scale",
+            dest="router_kv_overlap_score_weight",
             type=float,
             action=_DeprecatedOverlapScoreWeightAction,
-            default=argparse.SUPPRESS,
+            default=_default_router_kv_overlap_score_weight(),
             help=argparse.SUPPRESS,
         )
 

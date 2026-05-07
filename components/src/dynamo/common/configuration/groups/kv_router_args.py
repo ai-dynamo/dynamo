@@ -48,14 +48,16 @@ _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
     "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
 )
+_CANONICAL_OVERLAP_ENV_VARS = (
+    "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+    "DYN_ROUTER_PREFILL_LOAD_SCALE",
+)
 
 
 class _DeprecatedOverlapScoreWeightAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None) -> None:
         warnings.warn(_DEPRECATED_OVERLAP_WEIGHT_MESSAGE, FutureWarning, stacklevel=2)
         setattr(namespace, self.dest, values)
-        if values == 0.0:
-            setattr(namespace, "overlap_score_credit", 0.0)
 
 
 def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
@@ -65,35 +67,25 @@ def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
     return None
 
 
-def _default_overlap_score_credit() -> float:
-    if "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" in os.environ:
-        return 1.0
-    if (legacy := _deprecated_overlap_score_weight_from_env()) is not None and legacy[
-        1
-    ] == 0.0:
-        return 0.0
-    return 1.0
+def _default_overlap_score_weight() -> float | str:
+    legacy = _deprecated_overlap_score_weight_from_env()
+    if legacy is None:
+        return argparse.SUPPRESS
+
+    env_var, value = legacy
+    warnings.warn(
+        f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
+        FutureWarning,
+        stacklevel=3,
+    )
+
+    if any(env_var in os.environ for env_var in _CANONICAL_OVERLAP_ENV_VARS):
+        return argparse.SUPPRESS
+
+    return value
 
 
 def _default_prefill_load_scale() -> float:
-    legacy = _deprecated_overlap_score_weight_from_env()
-    if "DYN_ROUTER_PREFILL_LOAD_SCALE" in os.environ:
-        if legacy is not None:
-            env_var, _ = legacy
-            warnings.warn(
-                f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
-                FutureWarning,
-                stacklevel=3,
-            )
-        return 1.0
-    if legacy is not None:
-        env_var, value = legacy
-        warnings.warn(
-            f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
-            FutureWarning,
-            stacklevel=3,
-        )
-        return value
     return 1.0
 
 
@@ -124,7 +116,10 @@ class KvRouterConfigBase(ConfigBase):
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
-        return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
+        kwargs = {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
+        if hasattr(self, "overlap_score_weight"):
+            kwargs["overlap_score_weight"] = self.overlap_score_weight
+        return kwargs
 
     def validate_kv_router_config(self) -> None:
         if self.overlap_score_credit < 0.0 or self.overlap_score_credit > 1.0:
@@ -146,7 +141,7 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-kv-overlap-score-credit",
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
-            default=_default_overlap_score_credit(),
+            default=1.0,
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
                 "Range: 0.0 to 1.0; higher values more strongly prefer KV cache reuse. "
@@ -158,10 +153,10 @@ class KvRouterArgGroup(ArgGroup):
         g.add_argument(
             "--router-kv-overlap-score-weight",
             "--kv-overlap-score-weight",
-            dest="prefill_load_scale",
+            dest="overlap_score_weight",
             type=float,
             action=_DeprecatedOverlapScoreWeightAction,
-            default=argparse.SUPPRESS,
+            default=_default_overlap_score_weight(),
             help=argparse.SUPPRESS,
         )
         add_argument(
