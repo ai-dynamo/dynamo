@@ -22,7 +22,8 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 # Escape hatch: set to "1" (or any truthy value) to allow top_logprobs_num >= 1.
 # Default-off because SGLang's tokenizer manager detokenizes top-k tokens
 # per-position serially (O(N) per generated token), causing severe latency
-# degradation. Flip once upstream batches detokenize_top_logprobs_tokens.
+# degradation. Flip once upstream lands batched top-logprob detokenization:
+# https://github.com/sgl-project/sglang/pull/24447
 _ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
 
 _TOP_LOGPROBS_UNSUPPORTED_MSG = (
@@ -30,7 +31,7 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "an O(N) per-position detokenization in the upstream sglang tokenizer "
     "manager. Use logprobs=0 for chosen-token logprobs, or set "
     "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
-    "Track the upstream fix at https://github.com/sgl-project/sglang/issues/."
+    "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
 )
 
 
