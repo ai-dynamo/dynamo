@@ -53,7 +53,7 @@ navigation:
     slug: digest
     contents:
       - page: "Dynamo Day 0 support for TokenSpeed"
-        path: digest/tokenspeed-day-0.md
+        path: digest/tokenspeed/tokenspeed-day-0.md
         slug: tokenspeed-day-0
       - page: "Multi-Turn Agentic Harnesses"
         path: digest/agentic-inference/agentic-harnesses.md

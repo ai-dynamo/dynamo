@@ -129,10 +129,10 @@ navbar-links:
         href: /dynamo/dev/digest
       - text: "Dynamo Day 0 support for TokenSpeed"
         href: /dynamo/dev/digest/tokenspeed-day-0
+      - text: "Multi-Turn Agentic Harnesses"
+        href: /dynamo/dev/digest/agentic-harnesses
       - text: "Full-Stack Optimizations for Agentic Inference"
         href: /dynamo/dev/digest/agentic-inference
-      - text: "Flash Indexer: Inter-Galactic KV Routing"
-        href: /dynamo/dev/digest/flash-indexer
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 
