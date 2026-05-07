@@ -64,6 +64,39 @@ return preserved if annotation exists
 
 ## Structural Helpers
 
+Conversion policy belongs in the API conversion package. Do not put conversion
+logic in controllers, internal helper packages, or compatibility wrappers. If a
+controller temporarily needs converted data while versions are being reconciled,
+it should call the same conversion function that the real conversion path uses.
+Read-only getters are acceptable outside the API package; conversion helpers
+are not.
+
+Exported conversion helpers in the `v1alpha1` package use the spoke type name:
+
+```go
+func ConvertTo<TypeName>(src *v1beta1.HubType, dst *TypeName)
+func ConvertFrom<TypeName>(src *TypeName, dst *v1beta1.HubType)
+```
+
+Do not include `V1alpha1` in these names; the package already says that. Do not
+add wrapper functions with alternative names. Callers that need this behavior
+should call the structural helper directly.
+
+The paired `ConvertTo<TypeName>` and `ConvertFrom<TypeName>` functions must use
+the same structural signature: source pointer first, destination pointer second,
+and an optional typed context argument only at the end. The destination must be
+non-nil and owned by the caller. The conversion function writes into `dst`; it
+does not allocate `dst`, does not accept `**T`, and does not encode absence by
+assigning nil. Callers perform nil, disabled, zero, or absence checks before
+calling the helper and allocate destination subobjects explicitly.
+
+Conversion helpers must mirror the API type structure. If a converted type has
+a nested sub-struct that needs conversion, add the corresponding structural
+`ConvertTo<SubStruct>` and `ConvertFrom<SubStruct>` pair as well. Do not skip a
+sub-struct and inline its conversion somewhere else because it currently looks
+small. The point is to make every conversion edge systematic, discoverable, and
+usable by both generated-style conversion flow and temporary controller code.
+
 Conversion helpers should generally follow a `src`, `dst`, `restored`, `save`,
 `ctx` shape:
 
@@ -297,6 +330,17 @@ For each helper:
 ## Mutability
 
 Conversion functions must not mutate their input object.
+
+`src` and `dst` may share backing data when the converted value can be assigned
+as-is. Do not add `DeepCopy` calls only because a field came from `src`.
+Aliasing is acceptable when the conversion code treats the shared value as
+read-only after assignment.
+
+Use `DeepCopy` only when the conversion needs an independently mutable value:
+for example, before editing, appending to, sorting, normalizing, clearing,
+merging into, or otherwise mutating a value that came from `src`. This applies
+equally to direct mutation through `src` and indirect mutation through a `dst`
+field that aliases `src`; both violate the "do not mutate input" invariant.
 
 The round-trip fuzz tests snapshot inputs through YAML before conversion because
 marshalling observes the actual in-memory shape, including aliasing bugs that a
