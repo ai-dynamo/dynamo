@@ -66,6 +66,8 @@ import (
 type Reason string
 type Message string
 
+const reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
+
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
 	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
@@ -190,11 +192,23 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	if r.supportsManagedRollingUpdate(dynamoDeployment) {
 		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 			logger.Error(err, "Failed to initialize worker hash")
-			reason = "failed_to_initialize_worker_hash"
+			reason = reasonFailedToInitializeWorkerHash
 			return ctrl.Result{}, err
 		}
 
-		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
+		rollingUpdateInProgress := r.isRollingUpdateInProgress(dynamoDeployment)
+		triggerRollingUpdate := false
+		if !rollingUpdateInProgress {
+			triggerRollingUpdate, err = r.shouldTriggerRollingUpdate(dynamoDeployment)
+			if err != nil {
+				logger.Error(err, "Failed to check rolling update trigger")
+				state = nvidiacomv1beta1.DGDStateFailed
+				reason = Reason("RollingUpdateFailed")
+				message = Message(err.Error())
+				return ctrl.Result{}, err
+			}
+		}
+		if rollingUpdateInProgress || triggerRollingUpdate {
 			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")
 				state = nvidiacomv1beta1.DGDStateFailed
@@ -205,17 +219,30 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	} else {
 		if r.getCurrentWorkerHash(dynamoDeployment) == "" {
-			hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dynamoDeployment)
+			hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dynamoDeployment)
+			if err != nil {
+				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+				reason = reasonFailedToInitializeWorkerHash
+				return ctrl.Result{}, err
+			}
 			r.setCurrentWorkerHash(dynamoDeployment, hash)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
-				reason = "failed_to_initialize_worker_hash"
+				reason = reasonFailedToInitializeWorkerHash
 				return ctrl.Result{}, updateErr
 			}
 		}
 
 		// For unsupported pathways, log if a rolling update would have been triggered
-		if r.shouldTriggerRollingUpdate(dynamoDeployment) {
+		triggerRollingUpdate, err := r.shouldTriggerRollingUpdate(dynamoDeployment)
+		if err != nil {
+			logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
+			state = nvidiacomv1beta1.DGDStateFailed
+			reason = Reason("RollingUpdateFailed")
+			message = Message(err.Error())
+			return ctrl.Result{}, err
+		}
+		if triggerRollingUpdate {
 			logger.Info("Worker spec change detected but rolling update not supported for this pathway",
 				"isGrove", r.isGrovePathway(dynamoDeployment),
 				"hasMultinode", dynamoDeployment.HasAnyMultinodeComponent())
@@ -223,7 +250,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
 			// Update the hash to prevent repeated warnings
-			hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dynamoDeployment)
+			hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dynamoDeployment)
+			if err != nil {
+				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+				return ctrl.Result{}, err
+			}
 			r.setCurrentWorkerHash(dynamoDeployment, hash)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
@@ -1236,7 +1267,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
-	computedHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	computedHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute worker hash: %w", err)
+	}
 
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {
