@@ -3,8 +3,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    env,
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -17,6 +18,10 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
         RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
         TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    },
+    remote_g2_plan::{
+        RemoteKvReuseDecision, RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput,
+        RemoteKvReuseSelectionStats, select_remote_g2_reuse_plan,
     },
     scheduling::{
         CacheHitEstimates, OverloadedWorkerProvider, effective_prefill_tokens,
@@ -78,6 +83,7 @@ use crate::{
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    protocols::common::preprocessor::PreprocessedRequest,
 };
 
 pub enum FindBestMatchOutcome {
@@ -87,6 +93,7 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
+        remote_kv_reuse: RemoteKvReuseDecision,
     },
     Backpressure {
         reason: RouterBackpressureReason,
@@ -114,6 +121,44 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
+
+const REMOTE_KV_REUSE_PLAN_TTL_MS: u64 = 30_000;
+const REMOTE_G2_REUSE_ENABLED_ENV: &str = "DYN_REMOTE_G2_REUSE_ENABLED";
+
+fn unix_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+fn remote_g2_reuse_enabled() -> bool {
+    env::var(REMOTE_G2_REUSE_ENABLED_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
+}
+
+pub(crate) fn attach_remote_kv_reuse_decision(
+    request: &mut PreprocessedRequest,
+    decision: &RemoteKvReuseDecision,
+) -> serde_json::Result<()> {
+    match decision {
+        RemoteKvReuseDecision::Plan { plan, .. } => {
+            if request.attach_remote_kv_reuse_plan(plan).is_ok() {
+                return Ok(());
+            }
+            request.attach_remote_kv_reuse_no_plan_reason(
+                RemoteKvReuseNoPlanReason::SerializationFailed,
+            )
+        }
+        RemoteKvReuseDecision::NoPlan { reason, .. } => {
+            request.attach_remote_kv_reuse_no_plan_reason(reason.clone())
+        }
+    }
+}
 
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     if !error.is_overload() {
@@ -433,7 +478,9 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
-        let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
+        let remote_g2_enabled = remote_g2_reuse_enabled();
+        let retain_block_hashes =
+            supports_overlap_refresh || return_routing_hashes || remote_g2_enabled;
 
         let TieredLookupResult {
             tiered_matches,
@@ -451,15 +498,27 @@ where
         )
         .await?;
 
-        let (block_hashes_for_refresh, routing_block_hashes) = retained_block_hashes
-            .map(|block_hashes| {
-                split_retained_block_hashes(
-                    block_hashes,
-                    supports_overlap_refresh,
-                    return_routing_hashes,
-                )
-            })
-            .unwrap_or((None, None));
+        let (block_hashes_for_refresh, routing_block_hashes, remote_block_hashes) =
+            retained_block_hashes
+                .map(|block_hashes| {
+                    let remote_block_hashes = remote_g2_enabled.then(|| block_hashes.clone());
+                    let (block_hashes_for_refresh, routing_block_hashes) =
+                        if supports_overlap_refresh || return_routing_hashes {
+                            split_retained_block_hashes(
+                                block_hashes,
+                                supports_overlap_refresh,
+                                return_routing_hashes,
+                            )
+                        } else {
+                            (None, None)
+                        };
+                    (
+                        block_hashes_for_refresh,
+                        routing_block_hashes,
+                        remote_block_hashes,
+                    )
+                })
+                .unwrap_or((None, None, None));
 
         let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
@@ -512,6 +571,23 @@ where
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
+        let created_at_ms = unix_epoch_ms();
+        let remote_kv_reuse = if remote_g2_enabled {
+            select_remote_g2_reuse_plan(RemoteKvReuseSelectionInput {
+                request_id: context_id.unwrap_or_default(),
+                target: response.best_worker,
+                block_hashes: remote_block_hashes.as_deref().unwrap_or(&[]),
+                block_size_tokens: self.block_size,
+                tiered_matches: &tiered_matches,
+                created_at_ms,
+                expires_at_ms: created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS),
+            })
+        } else {
+            RemoteKvReuseDecision::NoPlan {
+                reason: RemoteKvReuseNoPlanReason::Disabled,
+                stats: RemoteKvReuseSelectionStats::default(),
+            }
+        };
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
 
@@ -538,6 +614,10 @@ where
             m.shared_cache_beyond_blocks.observe(beyond as f64);
         }
 
+        if let Some(m) = metrics::RouterRequestMetrics::get() {
+            m.observe_remote_g2_decision(&remote_kv_reuse, self.block_size);
+        }
+
         #[cfg(feature = "bench")]
         tracing::info!(
             isl_tokens,
@@ -555,6 +635,7 @@ where
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
             routing_hashes,
+            remote_kv_reuse,
         })
     }
 
@@ -1099,7 +1180,12 @@ mod tests {
     use async_trait::async_trait;
     use dynamo_kv_router::{
         indexer::{LowerTierMatchDetails, MatchDetails},
-        protocols::{OverlapScores, StorageTier, compute_seq_hash_for_block},
+        protocols::{LocalBlockHash, OverlapScores, StorageTier, compute_seq_hash_for_block},
+        remote_g2_plan::{
+            REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
+            REMOTE_KV_REUSE_PLAN_VERSION, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+            RemoteKvReuseSelectionStats,
+        },
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
@@ -1498,6 +1584,89 @@ mod tests {
             assert_eq!(worker.disk_extension_blocks, 0);
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
             assert!((worker.router_credit_blocks - 1.0).abs() < f64::EPSILON);
+        }
+    }
+
+    fn remote_g2_test_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3, 4])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    fn remote_g2_test_plan() -> RemoteKvReusePlan {
+        RemoteKvReusePlan {
+            plan_id: "plan-1".to_string(),
+            request_id: "request-1".to_string(),
+            target_worker_id: 42,
+            target_dp_rank: 2,
+            source_worker_id: 7,
+            source_dp_rank: 0,
+            source_tier: StorageTier::HostPinned,
+            block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            planned_prefix_blocks: 2,
+            block_size_tokens: 16,
+            created_at_ms: 1000,
+            expires_at_ms: 2000,
+            plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+        }
+    }
+
+    #[test]
+    fn router_attaches_remote_g2_plan_after_target_selection() {
+        let mut request = remote_g2_test_request();
+        let decision = RemoteKvReuseDecision::Plan {
+            plan: remote_g2_test_plan(),
+            stats: RemoteKvReuseSelectionStats {
+                rejected_g1_candidates: 1,
+            },
+        };
+
+        attach_remote_kv_reuse_decision(&mut request, &decision).unwrap();
+
+        let extra_args = request.extra_args.unwrap();
+        let plan = &extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY];
+        assert_eq!(plan["target_worker_id"], 42);
+        assert_eq!(plan["target_dp_rank"], 2);
+        assert_eq!(plan["source_worker_id"], 7);
+        assert_eq!(plan["source_dp_rank"], 0);
+        assert_eq!(plan["source_tier"], "host_pinned");
+    }
+
+    #[test]
+    fn router_no_plan_has_reason_without_forbidden_fields() {
+        let mut request = remote_g2_test_request();
+        let decision = RemoteKvReuseDecision::NoPlan {
+            reason: RemoteKvReuseNoPlanReason::NoRemoteG2Candidate,
+            stats: RemoteKvReuseSelectionStats {
+                rejected_g1_candidates: 1,
+            },
+        };
+
+        attach_remote_kv_reuse_decision(&mut request, &decision).unwrap();
+
+        let extra_args = request.extra_args.unwrap();
+        assert_eq!(
+            extra_args[REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY],
+            "no_remote_g2_candidate"
+        );
+        let serialized = serde_json::to_string(&extra_args).unwrap();
+        for forbidden in [
+            "virtual_address",
+            "physical_address",
+            "nixl_descriptor",
+            "descriptor",
+            "source_block_id",
+            "target_g1_block_id",
+            "prompt text",
+            "11",
+            "22",
+        ] {
+            assert!(!serialized.contains(forbidden));
         }
     }
 }

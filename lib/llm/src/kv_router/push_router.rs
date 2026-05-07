@@ -18,7 +18,8 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, sticky::coordinator::StickySessionCoordinator,
+        KvRouter, attach_remote_kv_reuse_decision, metrics::RouterRequestMetrics,
+        sticky::coordinator::StickySessionCoordinator,
     },
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -246,7 +247,7 @@ impl KvPushRouter {
 
     async fn dispatch_selection(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
         mut guard: RequestGuard,
         exact: bool,
@@ -260,6 +261,16 @@ impl KvPushRouter {
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
+
+        if let Some(decision) = selection.remote_kv_reuse.as_ref()
+            && let Err(error) = attach_remote_kv_reuse_decision(&mut request, decision)
+        {
+            tracing::warn!(
+                request_id = %context_id,
+                %error,
+                "Failed to attach remote G2 reuse metadata"
+            );
+        }
 
         let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
         let route_outcome = cancel_on_stop(
