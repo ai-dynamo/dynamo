@@ -73,5 +73,10 @@ name = "bench_engine"
 path = "bin/bench_engine.rs"
 required-features = ["bench"]
 
+[[bin]]
+name = "bench_collectives"
+path = "bin/bench_collectives.rs"
+required-features = ["bench"]
+
 [package.metadata.cargo-machete]
 ignored = ["rayon"]

@@ -228,6 +228,17 @@ impl OneCclCollectives {
     }
 
     /// Broadcast memory regions using oneCCL.
+    ///
+    /// Submission is batched via `group_start`/`group_end`. Every
+    /// `ccl_rs_broadcast` returns an event and the API requires every
+    /// returned event to be destroyed; we destroy them as we iterate.
+    ///
+    /// **Host completion via `ccl_rs_stream_wait`, not per-op events.**
+    /// oneCCL warns that `ccl::event::wait()` on a collective submitted
+    /// inside group API is not supported — per-op events in a group are
+    /// not meaningful completion signals (the runtime may fuse/reorder
+    /// them). The spec-correct host-side wait for a group is a wait on
+    /// the underlying `sycl::queue`, exposed via `ccl_rs_stream_wait`.
     fn broadcast_regions(&self, regions: &[(usize, usize)], root: c_int) -> Result<()> {
         if regions.is_empty() {
             return Ok(());
@@ -259,7 +270,8 @@ impl OneCclCollectives {
             })
             .map_err(|e| anyhow::anyhow!("ccl_rs_broadcast failed: {}", e))?;
 
-            // Destroy any previous event; only need the last one for sync.
+            // Destroy any previous event; we don't wait on per-op events
+            // (see function docs). Always destroy the last one too (below).
             if !last_event.is_null() {
                 unsafe { sys::ccl_rs_event_destroy(last_event) };
             }
@@ -270,12 +282,17 @@ impl OneCclCollectives {
         check_ccl_result(unsafe { sys::ccl_rs_group_end() })
             .map_err(|e| anyhow::anyhow!("ccl_rs_group_end failed: {}", e))?;
 
-        // Wait on the last event to ensure all data is on-device.
+        // Destroy the retained per-op event without waiting on it: per-op
+        // events in a group are not valid sync points per oneCCL spec.
         if !last_event.is_null() {
-            check_ccl_result(unsafe { sys::ccl_rs_event_wait(last_event) })
-                .map_err(|e| anyhow::anyhow!("ccl_rs_event_wait failed: {}", e))?;
             unsafe { sys::ccl_rs_event_destroy(last_event) };
         }
+
+        // Block until all submitted work has completed on-device. This
+        // delegates to `sycl::queue::wait()` on the queue wrapped by the
+        // CCL stream — the only spec-valid way to await a group.
+        check_ccl_result(unsafe { sys::ccl_rs_stream_wait(stream) })
+            .map_err(|e| anyhow::anyhow!("ccl_rs_stream_wait failed: {}", e))?;
 
         Ok(())
     }
@@ -309,10 +326,11 @@ impl OneCclCollectives {
 
     /// Create a completion notification.
     ///
-    /// group_end() + event_wait on the last op ensures all data is on-device
-    /// when this returns. Create an already-triggered event so callers
-    /// see immediate completion. 
-    /// TODO: fix the gap about register_cuda_event(trait CudaEventRegistrar)
+    /// Returns an already-triggered notification. Callers see immediate
+    /// completion because `broadcast_regions` has already blocked on
+    /// `ccl_rs_stream_wait` — by the time this function runs, the
+    /// broadcast is complete on-device.
+    ///
     fn create_completion_notification(&self) -> Result<TransferCompleteNotification> {
         let nova_event = self.event_system.new_event()?;
         let handle = nova_event.handle();

@@ -49,8 +49,7 @@ Each real backend exposes the same two construction shapes:
 
 The "borrowed" paths exist because inference runtimes already own a
 communicator — `torch.distributed` creates one for `nccl` and for
-`ccl`. KVBM borrows it rather than creating a second one, which would
-fight for the same NIC / XeLink ports.
+`ccl`. KVBM borrows it rather than creating a second one.
 
 ## oneCCL bootstrap — step by step
 
@@ -121,23 +120,69 @@ registered `CudaEventRegistrar` so the returned
 ccl_rs_group_start();                           // begin batch
 for (ptr, size) in regions {
     ccl_rs_broadcast(ptr, size, UINT8, root, comm, stream, &mut event);
-    // keep only the last event
+    // keep only the last event for destruction
 }
 ccl_rs_group_end();                             // submit batch
-ccl_rs_event_wait(last_event);                  // host-side wait
-ccl_rs_event_destroy(last_event);
+ccl_rs_event_destroy(last_event);               // per-op events in a group
+                                                // are not valid sync points
+ccl_rs_stream_wait(stream);                     // host wait —
+                                                // delegates to sycl::queue::wait()
 ```
 
-All broadcasts submit as a single group, but the host still waits on
-the last event before returning. The returned notification is
-constructed with `event_system.new_event() → trigger() → awaiter`, i.e.
-already-triggered, so callers see immediate completion. This is
-semantically equivalent to the NCCL path *for correctness*, but loses
-the overlap opportunity that `CudaEventRegistrar` gives to NCCL.
+All broadcasts submit as a single group, and the host blocks on the
+underlying SYCL queue after `group_end`. Per-op events returned by
+in-group collectives are not valid synchronization points (oneCCL
+logs a warning if you wait on them); the primitive for a
+group is a queue-level wait, exposed via `ccl_rs_stream_wait` from the
+`oneapi-rs` bindings.
 
-A TODO in `oneccl.rs` near `create_completion_notification` tracks
-replacing the synchronous wait with an equivalent
-`OneCclEventRegistrar` to match NCCL's overlap profile.
+The returned `TransferCompleteNotification` is constructed with
+`event_system.new_event() → trigger() → awaiter`, i.e.
+already-triggered, so callers see immediate completion. This is
+semantically equivalent to the NCCL path *for correctness*: by the
+time `broadcast()` returns, the GPU is done.
+
+## TODO: async completion
+
+The current implementation host-blocks inside `broadcast_regions`.
+That's correct and warning-free, but stalls the calling thread for
+the broadcast duration — acceptable for the stream-ordered consumption
+pattern KVBM uses today, a problem if a future consumer wants host
+work to overlap with the broadcast.
+
+`NcclCollectives` has had a `CudaEventRegistrar` trait declared but
+no implementation. Two paths are viable.
+
+**Path A — reuse `TransferContext::register_device_event`**
+(async primitive that kvbm-physical already drives for
+local device transfers):
+
+1. `ccl_rs_stream_get_native_queue(stream, &mut raw_queue)` — reach
+   the `sycl::queue` behind the CCL stream.
+2. `oneapi_rs::ccl::sys::sycl_rs_submit_barrier(raw_queue, &mut ev)` —
+   record a SYCL barrier event at the tail of the group.
+3. Wrap the raw `sycl_rs_event_t` as `SyclEvent`, then as a
+   backend-agnostic `DeviceEvent { backend: Sycl, ops: ... }`.
+4. Hand the `DeviceEvent` to
+   `kvbm_physical::transfer::TransferContext::register_device_event`,
+   which enqueues it onto the existing shared polling task and
+   returns a real deferred `TransferCompleteNotification`.
+
+This requires injecting `Arc<TransferContext>` into `OneCclCollectives`
+but doesn't add a new trait.
+
+**Path B — `OneCclEventRegistrar` trait** (mirrors the
+declared-but-unimplemented `CudaEventRegistrar` in `nccl.rs`):
+
+Define `trait OneCclEventRegistrar { fn register_sycl_event(&self, …)
+-> TransferCompleteNotification; }` and have `OneCclCollectives` take
+`Arc<dyn OneCclEventRegistrar>`. The concrete implementation still
+forwards to `register_device_event` underneath.
+
+Both approaches use the same underlying primitives
+(`submit_barrier` + `register_device_event` polling task) — they
+differ only in whether `OneCclCollectives` takes a concrete
+`TransferContext` or an abstract trait object.
 
 ## MLA pattern — where this gets used
 
