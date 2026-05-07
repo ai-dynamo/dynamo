@@ -384,6 +384,64 @@ func TestDGD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing
 	}
 }
 
+func TestDGD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-alpha", Namespace: "ns"},
+		Status: DynamoGraphDeploymentStatus{
+			Services: map[string]ServiceReplicaStatus{
+				"worker": {
+					ComponentName:   "worker-current",
+					Replicas:        1,
+					UpdatedReplicas: 1,
+				},
+			},
+		},
+	}
+	got := roundTripFromV1alpha1(t, src)
+	status := got.Status.Services["worker"]
+	if status.ComponentName != "worker-current" {
+		t.Fatalf("componentName = %q, want worker-current", status.ComponentName)
+	}
+	if len(status.ComponentNames) != 0 {
+		t.Fatalf("componentNames = %#v, want empty", status.ComponentNames)
+	}
+}
+
+func TestDGD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T) {
+	hub := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-existing-hub", Namespace: "ns"},
+		Status: v1beta1.DynamoGraphDeploymentStatus{
+			Components: map[string]v1beta1.ComponentReplicaStatus{
+				"worker": {
+					Replicas:        1,
+					UpdatedReplicas: 1,
+				},
+			},
+		},
+	}
+	if err := setJSONAnnOnObj(&hub.ObjectMeta, annDGDStatus, &DynamoGraphDeploymentStatus{
+		Services: map[string]ServiceReplicaStatus{
+			"worker": {
+				ComponentName: "worker-current",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("set status annotation: %v", err)
+	}
+
+	got := &DynamoGraphDeployment{}
+	if err := got.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	status := got.Status.Services["worker"]
+	if status.ComponentName != "worker-current" {
+		t.Fatalf("componentName = %q, want worker-current", status.ComponentName)
+	}
+	if len(status.ComponentNames) != 0 {
+		t.Fatalf("componentNames = %#v, want empty", status.ComponentNames)
+	}
+}
+
 func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},

@@ -518,6 +518,20 @@ When using DGDR, the Dynamo Operator:
 3. Generates optimized DGD configurations
 4. Deploys the DGD with SLA Planner integration
 
+#### Failure Handling
+
+Profiling failures are not retried at the Kubernetes Job level (`backoffLimit: 0`).
+Most profiler errors — validation failures, unsupported model/hardware combinations,
+missing configs — are deterministic and will never succeed on retry, so re-running
+the full profiling cycle would only waste GPU time.
+
+When the profiler reports failure, the output-copier sidecar writes the error
+details (phase, error message, profiler status) to the output ConfigMap and exits
+successfully. The DGDR controller reads the failure from the ConfigMap and
+transitions the DGDR directly to the `Failed` phase with the specific sub-phase
+failure reason (e.g., `SweepingDecodeFailed`, `GeneratingDGDFailed`). Use
+`kubectl describe dgdr <name>` to see the failure details in the conditions.
+
 The generated DGD is tracked via labels:
 ```yaml
 metadata:

@@ -72,6 +72,13 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	hubOrigin := restoredHubSpec != nil
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
+	if hash, ok := getAnnFromObj(&src.ObjectMeta, annCurrentWorkerHash); ok && hash != "" {
+		legacyHash, err := ComputeDGDWorkersSpecHash(src)
+		if err != nil {
+			return fmt.Errorf("compute v1alpha1 DGD worker hash: %w", err)
+		}
+		setAnnOnObj(&dst.ObjectMeta, AnnotationDGDLegacyWorkerHash, legacyHash)
+	}
 
 	ctx := dgdConversionContext{
 		includeOriginSplits: !hubOrigin,
@@ -271,8 +278,9 @@ func restoreDGDAlphaOnlyStatusFromSaved(dstStatus *DynamoGraphDeploymentStatus, 
 		if !ok {
 			continue
 		}
-		if shouldRestoreSavedComponentName(&dstSvc, &savedSvc) {
+		if shouldRestoreSavedServiceReplicaStatus(&dstSvc, &savedSvc) {
 			dstSvc.ComponentName = savedSvc.ComponentName
+			dstSvc.ComponentNames = slices.Clone(savedSvc.ComponentNames)
 		}
 		dstStatus.Services[name] = dstSvc
 	}
@@ -322,10 +330,27 @@ func serviceStatusComponentNameNeedsPreservation(src *ServiceReplicaStatus) bool
 	return src.ComponentNames[len(src.ComponentNames)-1] != src.ComponentName
 }
 
-func shouldRestoreSavedComponentName(dst, saved *ServiceReplicaStatus) bool {
-	return serviceStatusComponentNameNeedsPreservation(saved) &&
-		dst != nil &&
-		dst.ComponentName != saved.ComponentName
+func shouldRestoreSavedServiceReplicaStatus(dst, saved *ServiceReplicaStatus) bool {
+	if !serviceStatusComponentNameNeedsPreservation(saved) || dst == nil {
+		return false
+	}
+	if slices.Equal(dst.ComponentNames, componentNamesToHub(saved)) {
+		return true
+	}
+	return saved.ComponentName != "" &&
+		len(saved.ComponentNames) == 0 &&
+		len(dst.ComponentNames) == 0
+}
+
+func componentNamesToHub(src *ServiceReplicaStatus) []string {
+	if src == nil {
+		return nil
+	}
+	componentNames := slices.Clone(src.ComponentNames)
+	if len(componentNames) == 0 && src.ComponentName != "" {
+		componentNames = []string{src.ComponentName}
+	}
+	return componentNames
 }
 
 func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus, error) {
@@ -500,6 +525,7 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 	for _, key := range []string{
 		annDGDSpec,
 		annDGDStatus,
+		AnnotationDGDLegacyWorkerHash,
 	} {
 		delAnnFromObj(obj, key)
 	}
@@ -649,7 +675,7 @@ func convertReplicaStatusToHub(src *ServiceReplicaStatus, dst *v1beta1.Component
 	}
 	*dst = v1beta1.ComponentReplicaStatus{
 		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:  slices.Clone(src.ComponentNames),
+		ComponentNames:  componentNamesToHub(src),
 		Replicas:        src.Replicas,
 		UpdatedReplicas: src.UpdatedReplicas,
 	}

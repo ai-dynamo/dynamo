@@ -443,11 +443,20 @@ class DynamoDeploymentClient:
             if use_port_forward or not inside_cluster:
                 self.stop_port_forward()
 
-    async def get_deployment_logs(self):
+    async def get_deployment_logs(
+        self, max_retries: int = 6, retry_interval: float = 5.0
+    ):
         """
         Get logs from all pods in the deployment, organized by component.
+
+        Retries pod discovery for each component to handle transient cases
+        where pods are not yet visible via the API immediately after the
+        deployment reports ready (e.g. API/informer cache lag).
+
+        Args:
+            max_retries: Maximum number of retries per component when no pods are found.
+            retry_interval: Seconds to wait between retries.
         """
-        # Create logs directory
         base_dir = self.base_log_dir / self.deployment_name
         base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,9 +473,27 @@ class DynamoDeploymentClient:
                 f"nvidia.com/dynamo-component={original_name}"
             )
 
-            pods = await self.core_api.list_namespaced_pod(
-                namespace=self.namespace, label_selector=label_selector
-            )
+            pods = None
+            for attempt in range(max_retries + 1):
+                pods = await self.core_api.list_namespaced_pod(
+                    namespace=self.namespace, label_selector=label_selector
+                )
+                if pods.items:
+                    break
+                if attempt < max_retries:
+                    print(
+                        f"No pods found for component {original_name} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}), "
+                        f"retrying in {retry_interval}s..."
+                    )
+                    await asyncio.sleep(retry_interval)
+
+            if not pods or not pods.items:
+                print(
+                    f"WARNING: No pods found for component {original_name} "
+                    f"after {max_retries + 1} attempts with selector: {label_selector}"
+                )
+                continue
 
             # Get logs for each pod
             for i, pod in enumerate(pods.items):
