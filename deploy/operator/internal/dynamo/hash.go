@@ -113,21 +113,18 @@ func workerHashInputForSpec(spec *v1beta1.DynamoComponentDeploymentSharedSpec) w
 // pre-v1beta1 controllers. Converted v1alpha1 DGDs carry the exact old hash in
 // an annotation; the ConvertFrom fallback is only for synthetic beta objects.
 func ComputeLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, error) {
-	if hash := dgd.GetAnnotations()[v1alpha1.AnnotationDGDLegacyWorkerHash]; hash != "" {
+	if hash := v1alpha1.GetDGDLegacyWorkerHash(dgd); hash != "" {
 		return hash, nil
 	}
 	alpha := &v1alpha1.DynamoGraphDeployment{}
 	if err := alpha.ConvertFrom(dgd); err != nil {
 		return "", err
 	}
-	return v1alpha1.ComputeV1alpha1DGDWorkersSpecHash(alpha)
+	return v1alpha1.ComputeDGDWorkersSpecHash(alpha)
 }
 
 func ClearLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) {
-	if dgd == nil || dgd.Annotations == nil {
-		return
-	}
-	delete(dgd.Annotations, v1alpha1.AnnotationDGDLegacyWorkerHash)
+	v1alpha1.ClearDGDLegacyWorkerHash(dgd)
 }
 
 // stripNonPodTemplateFields returns a copy of the beta spec with fields that do

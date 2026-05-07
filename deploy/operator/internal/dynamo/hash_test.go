@@ -75,7 +75,7 @@ func TestComputeLegacyAlphaDGDWorkersSpecHash_MatchesV1Alpha1Hash(t *testing.T) 
 
 	legacyHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(beta)
 	assert.NoError(t, err)
-	expectedLegacyHash, err := v1alpha1.ComputeV1alpha1DGDWorkersSpecHash(alpha)
+	expectedLegacyHash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
 	assert.NoError(t, err)
 	assert.Equal(t, expectedLegacyHash, legacyHash)
 	assert.NotEqual(t, ComputeV1beta1DGDWorkersSpecHash(beta), legacyHash)
