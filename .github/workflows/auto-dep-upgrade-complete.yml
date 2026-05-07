@@ -7,6 +7,7 @@ on:
   workflow_run:
     workflows: ['Post-Merge CI Pipeline']
     types: [completed]
+    branches: ['deps/upgrade-*']
 
 permissions:
   contents: read
@@ -15,7 +16,6 @@ permissions:
 
 jobs:
   finalize:
-    if: startsWith(github.event.workflow_run.head_branch, 'deps/upgrade-')
     runs-on: ubuntu-latest
     steps:
       - name: Parse upgrade branch + status
