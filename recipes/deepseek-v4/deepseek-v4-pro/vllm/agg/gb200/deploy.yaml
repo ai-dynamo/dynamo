@@ -151,4 +151,5 @@ spec:
                 --dyn-tool-call-parser deepseek_v4 \
                 --attention-config '{"use_fp4_indexer_cache":true}' \
                 --moe-backend deep_gemm_mega_moe \
-                --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}'
+                --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}' \
+                --no-enable-flashinfer-autotune
