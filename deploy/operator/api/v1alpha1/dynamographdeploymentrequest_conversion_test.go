@@ -368,6 +368,120 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 	}
 }
 
+func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub, err := legacyDGDRConvertToHubForTest(original)
+	if err != nil {
+		t.Fatalf("legacy convert to hub: %v", err)
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	if diff := cmp.Diff(original.Spec, restored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
+		t.Fatalf("spec mismatch after legacy read (-want +got):\n%s", diff)
+	}
+	assertProfilingConfigBlobHas(t, restored.Spec.ProfilingConfig.Config, map[string]any{
+		"extra_key": "preserved",
+	})
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Fatalf("status mismatch after legacy read (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDRWritesLegacyAnnotationsReadableByOldConverter(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	for _, key := range []string{
+		legacyAnnDGDREnableGPUDisc,
+		legacyAnnDGDRProfilingConfig,
+		legacyAnnDGDRConfigMapRef,
+		legacyAnnDGDROutputPVC,
+		legacyAnnDGDRDeployOverrides,
+		legacyAnnDGDRStatusBackend,
+		legacyAnnDGDRProfilingResults,
+		legacyAnnDGDRDeploymentStatus,
+	} {
+		if hub.Annotations[key] == "" {
+			t.Fatalf("legacy annotation %q was not written", key)
+		}
+	}
+
+	legacyRestored := legacyDGDRConvertFromHubForTest(hub)
+	if diff := cmp.Diff(original.Spec, legacyRestored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
+		t.Fatalf("legacy restored spec mismatch (-want +got):\n%s", diff)
+	}
+	assertProfilingConfigBlobHas(t, legacyRestored.Spec.ProfilingConfig.Config, map[string]any{
+		"extra_key": "preserved",
+	})
+	if diff := cmp.Diff(original.Status, legacyRestored.Status); diff != "" {
+		t.Fatalf("legacy restored status mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDRLegacyProfilingConfigDoesNotOverrideLiveHubFields(t *testing.T) {
+	legacyBlob, err := json.Marshal(map[string]any{
+		"sla": map[string]any{
+			"ttft": 100,
+			"itl":  10,
+			"isl":  200,
+			"osl":  20,
+		},
+		"deployment": map[string]any{
+			"modelCache": map[string]any{
+				"pvcName": "stale-pvc",
+			},
+		},
+		"planner":   map[string]any{"stale": true},
+		"extra_key": "keep",
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy blob: %v", err)
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "edited",
+			Annotations: map[string]string{
+				legacyAnnDGDRProfilingConfig: string(legacyBlob),
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model: "model",
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	if restored.Spec.SLA != nil {
+		t.Fatalf("stale legacy SLA restored into live hub spec: %#v", restored.Spec.SLA)
+	}
+	if restored.Spec.Workload != nil {
+		t.Fatalf("stale legacy workload restored into live hub spec: %#v", restored.Spec.Workload)
+	}
+	if restored.Spec.ModelCache != nil {
+		t.Fatalf("stale legacy model cache restored into live hub spec: %#v", restored.Spec.ModelCache)
+	}
+	if restored.Spec.Features != nil && restored.Spec.Features.Planner != nil {
+		t.Fatalf("stale legacy planner restored into live hub spec: %#v", restored.Spec.Features.Planner)
+	}
+	assertProfilingConfigBlobHas(t, spoke.Spec.ProfilingConfig.Config, map[string]any{
+		"extra_key": "keep",
+	})
+}
+
 func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	original := newV1beta1DGDR()
 	concurrency := float64(8)
@@ -408,6 +522,22 @@ func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	}
 	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
 		t.Fatalf("status mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want map[string]any) {
+	t.Helper()
+	if raw == nil {
+		t.Fatal("profiling config is nil")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw.Raw, &got); err != nil {
+		t.Fatalf("unmarshal profiling config: %v", err)
+	}
+	for key, wantValue := range want {
+		if diff := cmp.Diff(wantValue, got[key]); diff != "" {
+			t.Fatalf("profiling config %q mismatch (-want +got):\n%s", key, diff)
+		}
 	}
 }
 
