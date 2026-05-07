@@ -6,8 +6,10 @@ Pytest Marker Report (Production Grade)
 
 - Collects pytest tests without executing them
 - Prints markers and validates category coverage
-- Optionally mocks unavailable dependencies so tests in import paths do
-  not fail collection
+- Auto-stubs unavailable dependencies via a sys.meta_path import hook
+  (`_AutoStubFinder`) so test files import without their real third-party
+  deps. First-party namespaces (`dynamo.*`, `tests.*`, `components.*`)
+  are excluded from auto-stubbing so real bugs surface as ImportError.
 - Provides structured output suitable for CI (text, JSON)
 """
 
@@ -24,7 +26,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 import pytest
 
@@ -68,198 +70,6 @@ REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
         "xpu_2",
     },
 }
-
-STUB_MODULES = [
-    "pytest_httpserver",
-    "pytest_httpserver.HTTPServer",
-    "pytest_benchmark",
-    "pytest_benchmark.logger",
-    "pytest_benchmark.plugin",
-    "kubernetes",
-    "kubernetes_asyncio",
-    "kubernetes_asyncio.client",
-    "kubernetes_asyncio.client.exceptions",
-    "kubernetes.client",
-    "kubernetes.config",
-    "kubernetes.config.config_exception",
-    "kr8s",
-    "kr8s.objects",
-    "tritonclient",
-    "tritonclient.grpc",
-    "aiohttp",
-    "aiofiles",
-    "httpx",
-    "yarl",
-    "pytest_asyncio",
-    "tabulate",
-    "prometheus_api_client",
-    "huggingface_hub",
-    "huggingface_hub.model_info",
-    "transformers",
-    "transformers.models",
-    "transformers.models.qwen2_vl",
-    "transformers.models.qwen2_vl.image_processing_qwen2_vl",
-    "pandas",
-    "matplotlib",
-    "matplotlib.pyplot",
-    "pmdarima",
-    "prophet",
-    "filterpy",
-    "filterpy.kalman",
-    "scipy",
-    "scipy.interpolate",
-    "nats",
-    "dynamo._core",
-    "psutil",
-    "requests",
-    "numpy",
-    "gradio",
-    "aiconfigurator",
-    "aiconfigurator.webapp",
-    "aiconfigurator.webapp.components",
-    "aiconfigurator.webapp.components.profiling",
-    "boto3",
-    "botocore",
-    "botocore.client",
-    "botocore.exceptions",
-    "pynvml",
-    "gpu_memory_service",
-    "gpu_memory_service.client",
-    "gpu_memory_service.client.memory_manager",
-    "gpu_memory_service.client.rpc",
-    "gpu_memory_service.client.session",
-    "gpu_memory_service.client.torch",
-    "gpu_memory_service.client.torch.allocator",
-    "gpu_memory_service.client.torch.module",
-    "gpu_memory_service.client.torch.tensor",
-    "gpu_memory_service.common",
-    "gpu_memory_service.common.locks",
-    "gpu_memory_service.common.cuda_utils",
-    "gpu_memory_service.common.protocol",
-    "gpu_memory_service.common.protocol.messages",
-    "gpu_memory_service.common.protocol.wire",
-    "gpu_memory_service.common.types",
-    "gpu_memory_service.common.utils",
-    "gpu_memory_service.failover_lock",
-    "gpu_memory_service.failover_lock.flock",
-    "gpu_memory_service.integrations",
-    "gpu_memory_service.integrations.common",
-    "gpu_memory_service.integrations.common.utils",
-    "gpu_memory_service.integrations.sglang",
-    "gpu_memory_service.integrations.sglang.patches",
-    "gpu_memory_service.integrations.sglang.memory_saver",
-    "gpu_memory_service.integrations.vllm",
-    "gpu_memory_service.integrations.vllm.worker",
-    "gpu_memory_service.server",
-    "gpu_memory_service.server.allocations",
-    "gpu_memory_service.server.fsm",
-    "gpu_memory_service.server.gms",
-    "gpu_memory_service.server.rpc",
-    "gpu_memory_service.server.session",
-    "prometheus_client",
-    "prometheus_client.parser",
-    "sklearn",
-    "sklearn.linear_model",
-    "torch",
-    "PIL",
-    "PIL.Image",
-    "fsspec",
-    "fsspec.implementations",
-    "fsspec.implementations.dirfs",
-    "sglang",
-    "sglang.srt",
-    "sglang.srt.entrypoints",
-    "sglang.srt.entrypoints.openai",
-    "sglang.srt.entrypoints.openai.protocol",
-    "sglang.srt.function_call",
-    "sglang.srt.function_call.core_types",
-    "sglang.srt.function_call.function_call_parser",
-    "sglang.srt.function_call.json_array_parser",
-    "sglang.srt.function_call.utils",
-    "sglang.srt.parser",
-    "sglang.srt.parser.conversation",
-    "sglang.srt.parser.reasoning_parser",
-    "sglang.srt.utils",
-    "sglang.srt.utils.hf_transformers_utils",
-    "sglang.srt.disaggregation",
-    "sglang.srt.disaggregation.kv_events",
-    "sglang.srt.disaggregation.utils",
-    "sglang.srt.server_args",
-    "sglang.srt.server_args_config_parser",
-    "vllm",
-    "vllm.config",
-    "vllm.distributed",
-    "vllm.distributed.ec_transfer",
-    "vllm.distributed.ec_transfer.ec_connector",
-    "vllm.distributed.ec_transfer.ec_connector.base",
-    "vllm.distributed.kv_events",
-    "vllm.engine",
-    "vllm.engine.arg_utils",
-    "vllm.entrypoints",
-    "vllm.entrypoints.chat_utils",
-    "vllm.entrypoints.openai",
-    "vllm.entrypoints.openai.chat_completion",
-    "vllm.entrypoints.openai.chat_completion.protocol",
-    "vllm.entrypoints.openai.engine",
-    "vllm.entrypoints.openai.engine.protocol",
-    "vllm.inputs",
-    "vllm.logprobs",
-    "vllm.lora",
-    "vllm.lora.request",
-    "vllm.multimodal",
-    "vllm.multimodal.inputs",
-    "vllm.outputs",
-    "vllm.reasoning",
-    "vllm.reasoning.mistral_reasoning_parser",
-    "vllm.reasoning.qwen3_reasoning_parser",
-    "vllm.renderers",
-    "vllm.renderers.embed_utils",
-    "vllm.sampling_params",
-    "vllm.tokenizers",
-    "vllm.tokenizers.mistral",
-    "vllm.tool_parsers",
-    "vllm.tool_parsers.hermes_tool_parser",
-    "vllm.tool_parsers.mistral_tool_parser",
-    "vllm.utils",
-    "vllm.utils.async_utils",
-    "vllm.utils.hashing",
-    "vllm.utils.system_utils",
-    "vllm.v1",
-    "vllm.v1.core",
-    "vllm.v1.core.kv_cache_utils",
-    "vllm.v1.core.sched",
-    "vllm.v1.core.sched.async_scheduler",
-    "vllm.v1.core.sched.output",
-    "vllm.v1.engine",
-    "vllm.v1.engine.async_llm",
-    "vllm.v1.engine.exceptions",
-    "vllm.v1.engine.input_processor",
-    "vllm.v1.engine.output_processor",
-    "vllm.v1.metrics",
-    "vllm.v1.metrics.loggers",
-    "vllm.v1.metrics.stats",
-    "vllm.v1.request",
-    "msgspec",
-    "msgspec.structs",
-    "mistral_common",
-    "mistral_common.tokens",
-    "mistral_common.tokens.tokenizers",
-    "mistral_common.tokens.tokenizers.base",
-    "safetensors",
-    "nixl",
-    "nixl._api",
-    "nixl._bindings",
-    "aiohttp.web",
-    "aiconfigurator.sdk",
-    "aiconfigurator.sdk.task",
-    "plotly",
-    "plotly.graph_objects",
-    "plotly.subplots",
-    "pybase64",
-    "zmq",
-    "zmq.asyncio",
-    "blake3",
-]
 
 # Project paths for local imports
 PROJECT_PATHS = [
@@ -370,54 +180,133 @@ class _StubModule(ModuleType):
         return cls
 
 
-class DependencyStubber:
-    """Stub unavailable modules to allow test collection without real dependencies."""
+# First-party namespaces that must NEVER be auto-stubbed. A typo in
+# `dynamo.runtime.foo` should surface as ModuleNotFoundError, not silently
+# resolve to a stub. `pytest` and `_pytest.*` are excluded so pytest's own
+# machinery keeps working; third-party `pytest_*` plugins (pytest_asyncio,
+# pytest_benchmark, pytest_httpserver) are NOT in this list — they fall
+# through to auto-stub when missing from the pre-commit env.
+_NEVER_STUB_PREFIXES = ("dynamo.", "dynamo_run.", "tests.", "components.", "_pytest.")
+_NEVER_STUB_EXACT: Set[str] = {"dynamo", "dynamo_run", "tests", "components", "pytest"}
 
-    def __init__(self):
-        self.stubbed: Set[str] = set()
+# Native extensions we DO want to auto-stub even though they sit under a
+# never-stub namespace (the .so isn't built in the pre-commit env).
+_ALWAYS_STUB_EXACT: Set[str] = {"dynamo._core", "nixl._api"}
 
-    def _create_module_stub(self, name: str) -> ModuleType:
-        """Create a stub module with proper Python module attributes."""
-        stub = _StubModule(name)
-        stub.__path__ = []  # type: ignore[attr-defined]
-        stub.__loader__ = None
-        # Real ModuleSpec so importlib.util.find_spec() doesn't raise
-        # ValueError when callers introspect the stub.
-        stub.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
-        stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
-        return stub
+# Lazy specials: applied by _StubLoader.exec_module after the bare stub is
+# created. Add an entry only when test code reads a module attribute that a
+# bare auto-vivified stub class can't satisfy (e.g. a real Warning subclass
+# for `issubclass(..., Warning)`, or a non-dunder attribute that
+# _StubModule.__getattr__ would refuse to create).
+_LOADER_SPECIALS: Dict[str, Callable[[ModuleType], None]] = {
+    "vllm": lambda m: setattr(m, "__version__", "0.0.0"),
+    "pytest_benchmark.logger": lambda m: setattr(
+        m,
+        "PytestBenchmarkWarning",
+        type("PytestBenchmarkWarning", (Warning,), {}),
+    ),
+}
 
-    def ensure_available(self, module_name: str) -> ModuleType:
-        """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
-            return sys.modules[module_name]
 
-        parts = module_name.split(".")
-        parent_stubbed = any(
-            ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
+class _StubLoader:
+    """Loader paired with `_AutoStubFinder` — instantiates `_StubModule`."""
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType:
+        return _StubModule(spec.name)
+
+    def exec_module(self, module: ModuleType) -> None:
+        module.__path__ = []  # type: ignore[attr-defined]
+        module.__loader__ = self
+        module.__package__ = (  # type: ignore[assignment]
+            module.__name__.rsplit(".", 1)[0]
+            if "." in module.__name__
+            else module.__name__
         )
+        special = _LOADER_SPECIALS.get(module.__name__)
+        if special is not None:
+            special(module)
 
-        if not parent_stubbed:
-            try:
-                return importlib.import_module(module_name)
-            except (ImportError, AttributeError):
-                pass
 
-        # Create parent packages if needed
-        for i in range(1, len(parts)):
-            sub = ".".join(parts[:i])
-            if sub not in sys.modules:
-                pkg = _StubModule(sub)
-                pkg.__path__ = []  # type: ignore[attr-defined]
-                pkg.__spec__ = importlib.machinery.ModuleSpec(sub, loader=None)
-                sys.modules[sub] = pkg
-                self.stubbed.add(sub)
+class _AutoStubFinder:
+    """Last-resort meta-path finder: stubs any import a real loader couldn't resolve.
 
-        # Create stub module with proper attributes
-        stub = self._create_module_stub(module_name)
-        sys.modules[module_name] = stub
-        self.stubbed.add(module_name)
-        return stub
+    Append to the END of `sys.meta_path` so `BuiltinImporter`, `FrozenImporter`,
+    and `PathFinder` all get first crack. Real installed packages win;
+    auto-stubbing only fires on `ModuleNotFoundError`. First-party namespaces
+    (`dynamo.*`, `tests.*`, `components.*`) are excluded so a typo or a real
+    bug in our code raises instead of getting silently masked — except for
+    `dynamo._core` / `nixl._api`, native extensions that intentionally fall
+    through when the .so isn't built.
+    """
+
+    def __init__(self) -> None:
+        self.stubbed: Set[str] = set()
+        self._loader = _StubLoader()
+
+    def _should_skip(self, fullname: str) -> bool:
+        if fullname in _ALWAYS_STUB_EXACT:
+            return False
+        if fullname in _NEVER_STUB_EXACT:
+            return True
+        if fullname.startswith(_NEVER_STUB_PREFIXES):
+            return True
+        # CPython stdlib top-level names — never stub. Stdlib code wraps
+        # platform-specific imports (`winreg`, `_winapi`, `msilib`,
+        # `_posixsubprocess`, etc.) in try/except ImportError;
+        # auto-stubbing makes those blocks take the wrong branch (Windows
+        # code path on Linux, mimetypes registry read against a stub
+        # OpenKey, etc.). `sys.stdlib_module_names` lists ALL stdlib top
+        # levels regardless of platform availability — same set on every
+        # platform, so it correctly identifies "this is missing because
+        # stdlib expects it to be missing here."
+        if fullname.split(".", 1)[0] in sys.stdlib_module_names:
+            return True
+        return False
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Optional[List[str]] = None,
+        target: Optional[ModuleType] = None,
+    ) -> Optional[importlib.machinery.ModuleSpec]:
+        if self._should_skip(fullname):
+            return None
+        # `importlib.util.find_spec(X)` is a presence check, not an import
+        # request. Returning a stub here makes `if find_spec(X): use(X)`
+        # patterns false-positive — caller assumes the package is installed
+        # and dies later (e.g. `dash/dash.py` does this for dash_design_kit
+        # and follows up with `metadata.version(...)` which fails). Only
+        # respond to the real import machinery.
+        if _called_from_util_find_spec():
+            return None
+        self.stubbed.add(fullname)
+        # is_package=True populates spec.submodule_search_locations so the
+        # spec carries an `__path__`; the loader resets it to [] so any
+        # submodule cascades back through us instead of resolving to disk.
+        return importlib.machinery.ModuleSpec(fullname, self._loader, is_package=True)
+
+
+def _called_from_util_find_spec() -> bool:
+    """True if the call stack contains `importlib.util.find_spec`.
+
+    The real import machinery uses `_bootstrap._find_spec`; the public
+    `importlib.util.find_spec` is the presence-check API. They share our
+    `find_spec(...)` signature, so distinguishing them by stack walk is the
+    only signal available.
+    """
+    frame = sys._getframe(2)  # skip _called_from_util_find_spec + find_spec
+    while frame is not None:
+        code = frame.f_code
+        # Python 3.12+ freezes importlib — co_filename is `<frozen
+        # importlib.util>`. Match by frozen marker as well as the source
+        # path to stay portable across versions.
+        if code.co_name == "find_spec" and (
+            "importlib.util" in code.co_filename
+            or code.co_filename.endswith(("importlib/util.py", "importlib\\util.py"))
+        ):
+            return True
+        frame = frame.f_back
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -592,25 +481,20 @@ def parse_args():
 
 def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Report]:
     """Run pytest collection and return exit code and report."""
+    auto: Optional[_AutoStubFinder] = None
     if use_stubbing:
         # Force-remove native extensions that may be partially loaded but broken.
         for mod in ("dynamo._core", "nixl._api"):
             sys.modules.pop(mod, None)
 
-        stubber = DependencyStubber()
-        for module in STUB_MODULES:
-            stubber.ensure_available(module)
-
-        # Special case: pytest-benchmark needs a real Warning subclass
-        try:
-            sys.modules["pytest_benchmark.logger"].PytestBenchmarkWarning = type(  # type: ignore[attr-defined]
-                "PytestBenchmarkWarning", (Warning,), {}
-            )
-        except (KeyError, AttributeError):
-            pass
+        auto = _AutoStubFinder()
+        sys.meta_path.append(auto)  # END of meta_path — real finders win first
 
         # Default pydantic models to arbitrary_types_allowed so stubbed
         # classes used as field annotations don't blow up schema generation.
+        # This patches REAL pydantic (the pre-commit env installs it); when
+        # pydantic itself is auto-stubbed, _make_stub_class already produces
+        # pydantic-friendly classes via __get_pydantic_core_schema__.
         try:
             import pydantic as _pydantic_root
 
@@ -619,13 +503,6 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
             )
         except (ImportError, AttributeError):
             pass
-
-        # Some dynamo code reads `vllm.__version__`. Stubs strip dunders;
-        # set the attribute explicitly so `from vllm import __version__` works.
-        if "vllm" in sys.modules and "vllm" in stubber.stubbed:
-            sys.modules["vllm"].__version__ = "0.0.0"  # type: ignore[attr-defined]
-
-        LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
     plugin = MarkerReportPlugin()
     exitcode = pytest.main(
@@ -643,6 +520,22 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
         ],
         plugins=[plugin],
     )
+
+    # Visibility: print which packages got auto-stubbed during collection.
+    # Reviewers spot-check this; surprising names ("why is `pandas` here?")
+    # surface immediately. Goes to stderr so --json output stays clean.
+    if auto is not None and auto.stubbed:
+        roots: Dict[str, int] = {}
+        for name in auto.stubbed:
+            root = name.split(".", 1)[0]
+            roots[root] = roots.get(root, 0) + 1
+        summary = ", ".join(f"{k}({v})" for k, v in sorted(roots.items()))
+        print(
+            f"[auto-stub] {len(auto.stubbed)} modules across "
+            f"{len(roots)} packages: {summary}",
+            file=sys.stderr,
+        )
+
     return exitcode, plugin.build_report()
 
 

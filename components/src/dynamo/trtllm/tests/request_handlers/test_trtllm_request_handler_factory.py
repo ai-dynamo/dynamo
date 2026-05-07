@@ -25,6 +25,7 @@ from dynamo.trtllm.tests.utils import create_mock_request_handler_config
 
 pytestmark = [
     pytest.mark.pre_merge,
+    pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.gpu_0,
 ]
