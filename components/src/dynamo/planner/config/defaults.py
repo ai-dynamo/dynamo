@@ -66,7 +66,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     enable_load_scaling = False
 
     # Load-based scaling settings
-    load_adjustment_interval_seconds = 5  # also controls FPM regression update frequency for throughput scaling
+    load_adjustment_interval_seconds = (
+        5  # also controls FPM regression update frequency for throughput scaling
+    )
     max_num_fpm_samples = 64  # max retained FPM observations for regression
     fpm_sample_bucket_size = (
         16  # must be a perfect square; total buckets across input axes

@@ -149,7 +149,9 @@ class TestAggPoolSelection:
             ]
         )
         # Grid: relaxed TTFT + relaxed ITL -> pool 1, but priority overrides to 0
-        result = strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150, priority=50)
+        result = strategy.select_pool(
+            ttft_target_ms=2000, itl_target_ms=150, priority=50
+        )
         assert result == 0
 
     def test_no_priority_uses_grid(self):
@@ -167,7 +169,9 @@ class TestAggPoolSelection:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=0)
             ]
         )
-        result = strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150, priority=5)
+        result = strategy.select_pool(
+            ttft_target_ms=2000, itl_target_ms=150, priority=5
+        )
         assert result == 1  # priority=5 doesn't match [10, 100]
 
     def test_no_overrides_backward_compatible(self):
@@ -441,4 +445,7 @@ class TestLoadAggConfig:
         # Relaxed TTFT + relaxed ITL -> pool 1 from grid
         assert strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150) == 1
         # Priority override: relaxed would be pool 1, but priority 75 -> pool 0
-        assert strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150, priority=75) == 0
+        assert (
+            strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150, priority=75)
+            == 0
+        )
