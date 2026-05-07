@@ -8,6 +8,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from sglang.srt.function_call.deepseekv3_detector import (
+    DeepSeekV3Detector,  # type: ignore[import-untyped]
+)
+
 # SGLang re-exports detectors through `function_call_parser`; we go through
 # that umbrella so the import is stable across per-module renames.
 from sglang.srt.function_call.function_call_parser import (  # type: ignore[import-untyped]
@@ -23,6 +27,9 @@ from sglang.srt.function_call.kimik2_detector import (
 from sglang.srt.function_call.minimax_m2 import (
     MinimaxM2Detector,  # type: ignore[import-untyped]
 )
+from sglang.srt.function_call.pythonic_detector import (
+    PythonicDetector,  # type: ignore[import-untyped]
+)
 from sglang.srt.function_call.qwen3_coder_detector import (  # type: ignore[import-untyped]
     Qwen3CoderDetector,
 )
@@ -36,11 +43,13 @@ _FAMILY_TO_SGLANG_DETECTOR = {
     "qwen3_coder": Qwen3CoderDetector,
     "glm47": Glm47MoeDetector,
     "deepseek_v3_1": DeepSeekV31Detector,
+    "deepseek_v3": DeepSeekV3Detector,
     "harmony": GptOssDetector,
     "minimax_m2": MinimaxM2Detector,
+    "pythonic": PythonicDetector,
 }
 
-# Families with no SGLang detector today: nemotron_deci.
+# Families with no SGLang detector today: nemotron_deci, gemma4.
 
 
 def parse(

@@ -443,6 +443,166 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments": {"location": "LA"}}]</TOOLCALL>',
         "tools": [_GET_WEATHER_LOC],
     },
+    # ----- pythonic -----
+    # Format: [name(arg=val, ...), name2(...)] — Python-call-style. Also
+    # accepts <|python_start|>...<|python_end|> wrapping (e.g. Llama 4).
+    ("pythonic", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '[get_weather(location="NYC")]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '[get_weather(location="NYC"), get_time(timezone="EST")]',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("pythonic", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.4"): {
+        "description": "Malformed (missing closing bracket)",
+        "text": '[get_weather(location="NYC"',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.5"): {
+        "description": "Missing closing `]` end marker",
+        "text": '[get_weather(location="NYC")',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": "[get_time()]",
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("pythonic", "PARSER.batch.7"): {
+        "description": "Complex args (nested dict + array)",
+        "text": '[process_data(items=[1, 2, 3], config={"nested": True})]',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("pythonic", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'Hey yo ! [get_weather(location="NYC")] Hey yo',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '[get_weather(location="NYC"), get_weather(location="LA")]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- gemma4 -----
+    # Format: <|tool_call>call:NAME{key:val,...}<tool_call|>
+    # String values are wrapped with `<|"|>` literal markers (not standard JSON quotes).
+    ("gemma4", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("gemma4", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.4"): {
+        "description": "Malformed (missing close brace)",
+        "text": '<|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.5"): {
+        "description": "Missing <tool_call|> end marker",
+        "text": '<|tool_call>call:get_weather{location:<|"|>NYC<|"|>}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": "<|tool_call>call:get_time{}<tool_call|>",
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("gemma4", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": "<|tool_call>call:process_data{items:[1,2,3],config:{nested:true}}<tool_call|>",
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("gemma4", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check that. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:get_weather{location:<|"|>LA<|"|>}<tool_call|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- deepseek_v3 (legacy) -----
+    # Format: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME
+    # ```json\n{args}\n```<｜tool▁call▁end｜>...<｜tool▁calls▁end｜>
+    # Note: distinct from `deepseek_v3_1` (no markdown fence).
+    ("deepseek_v3", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time\n```json\n{"timezone": "EST"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("deepseek_v3", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.5"): {
+        "description": "Missing calls_end / call_end markers",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time\n```json\n{}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("deepseek_v3", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>process_data\n```json\n{"items": [1, 2, 3], "config": {"nested": true}}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("deepseek_v3", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "New York"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "LA"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC],
+    },
 }
 
 

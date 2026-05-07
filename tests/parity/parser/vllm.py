@@ -64,7 +64,10 @@ _FAMILY_TO_VLLM_KEY = {
     "minimax_m2": "minimax_m2",
     "glm47": "glm47",
     "deepseek_v3_1": "deepseek_v31",
+    "deepseek_v3": "deepseek_v3",
     "harmony": "openai",  # gpt-oss / harmony parser registered as "openai"
+    "pythonic": "pythonic",
+    "gemma4": "gemma4",
 }
 
 

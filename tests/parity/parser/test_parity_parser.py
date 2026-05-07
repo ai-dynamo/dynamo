@@ -106,6 +106,46 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.8",
     ): "trims trailing space from preceding normal_text",
     (
+        "sglang",
+        "deepseek_v3",
+        "PARSER.batch.8",
+    ): "trims trailing space from preceding normal_text",
+    (
+        "sglang",
+        "pythonic",
+        "PARSER.batch.8",
+    ): _TRAILING_NORMAL_TEXT_DROP,
+    (
+        "sglang",
+        "deepseek_v3",
+        "PARSER.batch.5",
+    ): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "deepseek_v3",
+        "PARSER.batch.4",
+    ): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "deepseek_v3",
+        "PARSER.batch.5",
+    ): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "gemma4",
+        "PARSER.batch.8",
+    ): _TRAILING_NORMAL_TEXT_DROP,
+    # vLLM's pythonic parser rejects the whole input when the bracket-call form
+    # is surrounded by interleaved text — calls=[], normal_text=raw input.
+    # Dynamo's pythonic parser extracts the call and surfaces the surrounding
+    # text in normal_text (matches the upstream Llama 4 / pythonic_detector
+    # behavior — vLLM is the outlier here).
+    (
+        "vllm",
+        "pythonic",
+        "PARSER.batch.8",
+    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
+    (
         "vllm",
         "minimax_m2",
         "PARSER.batch.8",
