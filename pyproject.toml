@@ -198,6 +198,9 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning",
     # unraisable exception warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
+    # multiprocessing's resource_tracker daemon may die after engine subprocesses
+    # are torn down; CPython relaunches it and warns. Benign for tests.
+    "ignore:resource_tracker.*process died unexpectedly.*:UserWarning",
     # pynvml deprecation, temporary until upstream migrates to nvidia-ml-py
     "ignore:The pynvml package is deprecated.*:FutureWarning",
     # Dynamo's own KV events deprecation warning
