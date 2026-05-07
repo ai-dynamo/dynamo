@@ -228,9 +228,9 @@ class LLMServerManager:
             "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_llm_api_config.yaml"
         )
         llm_api_config: Dict[str, Any] = {}
-        llm_api_config[
-            "cuda_graph_config"
-        ] = None  # explicitly disable CUDA graph since Connector API doesn't support CUDA graph yet in TRTLLM
+        llm_api_config["cuda_graph_config"] = (
+            None  # explicitly disable CUDA graph since Connector API doesn't support CUDA graph yet in TRTLLM
+        )
         llm_api_config["kv_cache_config"] = {
             "enable_partial_reuse": False,
             "free_gpu_memory_fraction": 0.10,  # Set a small GPU fraction so that we can evict/reset the on-device kv cache faster
@@ -550,6 +550,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
         indirect=True,
         ids=[cfg.short_name for cfg in _MODEL_CONFIGS],
     )
+    @pytest.mark.kvbm
     @pytest.mark.kvbm_concurrency
     @pytest.mark.skipif(
         not HAS_VLLM_BENCH, reason="requires vllm bench (vllm module not found)"
