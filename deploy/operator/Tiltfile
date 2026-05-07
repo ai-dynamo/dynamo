@@ -146,16 +146,20 @@ _crd_cmd = kubectl_cmd + ' apply --server-side --force-conflicts -f ' + CRD_DIR
 if not SKIP_CODEGEN:
     _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
 
+_crds_deps = ['api/']
+if SKIP_CODEGEN:
+    _crds_deps.append(CRD_DIR)
+
 local_resource(
     'crds',
     _crd_cmd,
-    deps=['api/'],
+    deps=_crds_deps,
     ignore=['**/zz_generated.deepcopy.go'],
     labels=['operator'],
 )
 
 # ---------------------------------------------------------------------------
-# Helm dependencies — fetch remote subcharts and package the local operator
+# Helm dependencies — update remote subcharts and package the local operator
 # subchart (file://components/operator).
 # ---------------------------------------------------------------------------
 
@@ -164,13 +168,14 @@ local(helm_cmd + ' repo add --force-update nats https://nats-io.github.io/k8s/he
 local(helm_cmd + ' repo add --force-update bitnami https://charts.bitnami.com/bitnami', quiet=True)
 local(helm_cmd + ' repo update', quiet=True)
 
-# Initial build at load time so render_helm() can succeed.
+# Initial sync at load time so render_helm() can succeed on a fresh checkout.
+# Keep this lock-file based; the Tilt resource below performs full updates.
 local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
 
-# Re-run when the local operator subchart changes.
+# Re-run when the local operator subchart or dependency list changes.
 local_resource(
     'helm-dep-build',
-    helm_cmd + ' dependency build ' + HELM_CHART,
+    helm_cmd + ' dependency update ' + HELM_CHART,
     deps=[os.path.join(HELM_CHART, 'components', 'operator'), os.path.join(HELM_CHART, 'Chart.yaml')],
     labels=['operator'],
 )
