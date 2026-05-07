@@ -134,10 +134,13 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
     Arc::new(data)
 }
 
-/// How many base64 characters per [`response.output_audio.delta`] frame the
-/// echo engine emits. Picked small enough to demonstrate streaming (multiple
-/// deltas per append) on typical audio buffers, large enough to keep the
-/// frame count reasonable. Has no semantic meaning beyond pacing.
+/// Maximum byte length per [`response.output_audio.delta`] frame the echo
+/// engine emits. Slicing on a UTF-8 char boundary at or before this limit
+/// keeps multibyte characters intact; for the spec-shaped pure-ASCII base64
+/// audio that's the only contract this mock is built for, byte length and
+/// character count coincide. Picked small enough to demonstrate streaming
+/// (multiple deltas per append) on typical audio buffers, large enough to
+/// keep the frame count reasonable. No semantic meaning beyond pacing.
 const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
 
 /// Bidirectional echo engine over the OpenAI Realtime event surface.
@@ -180,16 +183,12 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
 
         let output = stream! {
             let ctx = ctx_for_stream;
-            let mut turn: u64 = 0;
             let mut frame: u64 = 0;
 
             while let Some(client_event) = incoming.next().await {
                 if ctx.is_stopped() {
                     break;
                 }
-                turn += 1;
-                let response_id = format!("resp_{session_id}_{turn}");
-                let item_id = format!("item_{session_id}_{turn}");
 
                 match client_event {
                     RealtimeClientEvent::SessionUpdate(req) => {
@@ -205,11 +204,9 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                         );
                     }
                     RealtimeClientEvent::InputAudioBufferAppend(req) => {
-                        // Spec shape: response.created → output_audio.delta×N
-                        // → output_audio.done → response.done. Chunking is on
-                        // base64-character boundaries (not byte boundaries),
-                        // which is fine for transport echo — receivers
-                        // concatenate the deltas before decoding.
+                        let response_id = format!("resp_{session_id}_{frame}");
+                        let item_id = format!("item_{session_id}_{frame}");
+
                         frame += 1;
                         yield annotated_event(
                             frame,
@@ -224,10 +221,18 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                             ),
                         );
 
-                        let chars: Vec<char> = req.audio.chars().collect();
-                        for chunk in chars.chunks(ECHO_AUDIO_DELTA_CHUNK_LEN) {
+                        // Slice the base64 audio in-place on UTF-8 char
+                        // boundaries — avoids the O(N) `Vec<char>` an upfront
+                        // `chars().collect()` would allocate on a 15 MB frame.
+                        let audio = req.audio.as_str();
+                        let mut start = 0;
+                        while start < audio.len() {
                             if ctx.is_stopped() {
                                 break;
+                            }
+                            let mut end = (start + ECHO_AUDIO_DELTA_CHUNK_LEN).min(audio.len());
+                            while !audio.is_char_boundary(end) {
+                                end -= 1;
                             }
                             frame += 1;
                             yield annotated_event(
@@ -239,10 +244,11 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                                         item_id: item_id.clone(),
                                         output_index: 0,
                                         content_index: 0,
-                                        delta: chunk.iter().collect(),
+                                        delta: audio[start..end].to_string(),
                                     },
                                 ),
                             );
+                            start = end;
                         }
                         if ctx.is_stopped() {
                             break;
@@ -304,10 +310,7 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
 fn annotated_event(frame: u64, event: RealtimeServerEvent) -> Annotated<RealtimeServerEvent> {
     Annotated {
         id: Some(frame.to_string()),
-        data: Some(event),
-        event: None,
-        comment: None,
-        error: None,
+        ..Annotated::from_data(event)
     }
 }
 

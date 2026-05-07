@@ -10,10 +10,12 @@
 
 use std::time::Duration;
 
+use anyhow::Result;
 use dynamo_llm::http::service::{realtime, service_v2::HttpService};
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 #[path = "common/ports.rs"]
@@ -47,6 +49,19 @@ async fn wait_for_health(port: u16) {
     panic!("frontend never became healthy on port {port}");
 }
 
+/// Spawn an `HttpService` on a free port with the echo engine installed and
+/// the `/health` endpoint live, returning the port plus a cancel-token /
+/// join-handle pair the caller cleans up at the end of the test.
+async fn spawn_test_service() -> (u16, CancellationToken, JoinHandle<Result<()>>) {
+    ensure_echo_engine_installed();
+    let port = get_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    let token = CancellationToken::new();
+    let handle = service.spawn(token.clone()).await;
+    wait_for_health(port).await;
+    (port, token, handle)
+}
+
 /// Read one Text frame off the socket and parse it as JSON, asserting the
 /// `type` field matches `expected_type`. Returns the parsed value so callers
 /// can drill into the payload.
@@ -78,13 +93,7 @@ async fn expect_text_event(
 /// merge-blocker the rest of the slice gates on.
 #[tokio::test]
 async fn realtime_websocket_emits_session_created_on_connect() {
-    ensure_echo_engine_installed();
-
-    let port = get_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
-    wait_for_health(port).await;
+    let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -112,13 +121,7 @@ async fn realtime_websocket_emits_session_created_on_connect() {
 /// Demonstrates end-to-end realtime-event plumbing through the WebSocket.
 #[tokio::test]
 async fn realtime_websocket_session_update_echoes_session_updated() {
-    ensure_echo_engine_installed();
-
-    let port = get_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
-    wait_for_health(port).await;
+    let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -159,13 +162,7 @@ async fn realtime_websocket_session_update_echoes_session_updated() {
 /// in the right order with stable response_id across the turn.
 #[tokio::test]
 async fn realtime_websocket_audio_append_streams_response_envelope() {
-    ensure_echo_engine_installed();
-
-    let port = get_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
-    wait_for_health(port).await;
+    let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -264,13 +261,7 @@ async fn realtime_websocket_audio_append_streams_response_envelope() {
 /// (the echo test) or server-side rejection (the binary-frame test).
 #[tokio::test]
 async fn realtime_websocket_emits_close_after_client_close() {
-    ensure_echo_engine_installed();
-
-    let port = get_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
-    wait_for_health(port).await;
+    let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -326,13 +317,7 @@ async fn realtime_websocket_emits_close_after_client_close() {
 
 #[tokio::test]
 async fn realtime_websocket_rejects_binary_frame() {
-    ensure_echo_engine_installed();
-
-    let port = get_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
-    wait_for_health(port).await;
+    let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
