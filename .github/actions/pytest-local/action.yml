@@ -130,10 +130,10 @@ runs:
         # NVMe guard: GPU runners mount ${{ inputs.nvme_dir }}" (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no ${{ inputs.nvme_dir }} mount.
         if [[ -d "${{ inputs.nvme_dir }}" ]]; then
-          WRITE_DIR="${{ inputs.nvme_dir }}"
+          WORK_DIR="${{ inputs.nvme_dir }}"
           echo "✅ NVMe scratch available"
         else
-          WRITE_DIR="/tmp"
+          WORK_DIR="/tmp"
         fi
 
         # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
@@ -144,7 +144,7 @@ runs:
 
 
         # XDG cache (flashinfer JIT, torch compile) → NVMe when available
-        export XDG_CACHE_HOME="${WRITE_DIR}/.cache"
+        export XDG_CACHE_HOME="${WORK_DIR}/.cache"
         mkdir -p "${XDG_CACHE_HOME}"
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
@@ -194,7 +194,7 @@ runs:
             DIST_OPTS="--dist=loadscope"
           fi
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WRITE_DIR}/pytest_temp -o cache_dir=${WRITE_DIR}/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
