@@ -70,6 +70,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod backend;
 mod context;
 mod engine;
 pub mod errors;
@@ -207,6 +208,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
+    backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;

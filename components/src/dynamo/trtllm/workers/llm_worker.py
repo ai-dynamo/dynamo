@@ -133,6 +133,13 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     )
 
 
+def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
+    """Sync MDC-visible config fields from final TensorRT-LLM engine args."""
+    for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
+        if field_name in engine_args:
+            setattr(config, field_name, engine_args[field_name])
+
+
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
         "release_memory_occupation",
@@ -297,6 +304,8 @@ async def init_llm_worker(
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    _sync_config_from_engine_args(config, arg_map)
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
