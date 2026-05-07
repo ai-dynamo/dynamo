@@ -328,7 +328,7 @@ pub struct NvExt {
     pub agent_hints: Option<AgentHints>,
 
     /// Agent-provided request identity metadata.
-    /// This describes what workflow/program the request belongs to.
+    /// This describes what session/trajectory the request belongs to.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
@@ -559,20 +559,20 @@ mod tests {
     fn test_agent_context_serde() {
         let json = r#"{
             "agent_context": {
-                "workflow_type_id": "deep_research:v1",
-                "workflow_id": "run-123",
-                "program_id": "run-123:researcher-0",
-                "parent_program_id": "run-123:orchestrator"
+                "session_type_id": "deep_research:v1",
+                "session_id": "run-123",
+                "trajectory_id": "run-123:researcher-0",
+                "parent_trajectory_id": "run-123:orchestrator"
             }
         }"#;
 
         let nvext: NvExt = serde_json::from_str(json).unwrap();
         let agent_context = nvext.agent_context.expect("agent_context should parse");
-        assert_eq!(agent_context.workflow_type_id, "deep_research:v1");
-        assert_eq!(agent_context.workflow_id, "run-123");
-        assert_eq!(agent_context.program_id, "run-123:researcher-0");
+        assert_eq!(agent_context.session_type_id, "deep_research:v1");
+        assert_eq!(agent_context.session_id, "run-123");
+        assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
         assert_eq!(
-            agent_context.parent_program_id.as_deref(),
+            agent_context.parent_trajectory_id.as_deref(),
             Some("run-123:orchestrator")
         );
     }
@@ -581,8 +581,8 @@ mod tests {
     fn test_agent_context_missing_required_field_fails() {
         let json = r#"{
             "agent_context": {
-                "workflow_type_id": "deep_research:v1",
-                "program_id": "run-123:researcher-0"
+                "session_type_id": "deep_research:v1",
+                "trajectory_id": "run-123:researcher-0"
             }
         }"#;
 

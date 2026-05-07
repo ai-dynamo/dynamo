@@ -171,10 +171,10 @@ mod tests {
             event_time_unix_ms: 1,
             event_source: TraceEventSource::Harness,
             agent_context: AgentContext {
-                workflow_type_id: "ms_agent".to_string(),
-                workflow_id: "run-1".to_string(),
-                program_id: "run-1:agent".to_string(),
-                parent_program_id: None,
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-1".to_string(),
+                trajectory_id: "run-1:agent".to_string(),
+                parent_trajectory_id: None,
             },
             request: None,
             tool: Some(AgentToolEvent {
@@ -243,7 +243,7 @@ mod tests {
 
                 assert_eq!(record.event_type, TraceEventType::ToolEnd);
                 assert_eq!(record.event_source, TraceEventSource::Harness);
-                assert_eq!(record.agent_context.workflow_id, "run-1");
+                assert_eq!(record.agent_context.session_id, "run-1");
                 assert_eq!(record.tool.unwrap().tool_call_id, "tool-123");
 
                 relay.shutdown();
