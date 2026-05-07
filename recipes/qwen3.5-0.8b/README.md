@@ -27,16 +27,11 @@ Smallest dense multimodal Qwen3.5 variant (`Qwen/Qwen3.5-0.8B`) deployed on a si
 
 ## Quick Start
 
+The DGD references two PVCs (`model-cache`, `compilation-cache`) with `create: false` -- ensure both exist in your namespace before applying. Then:
+
 ```bash
 export NAMESPACE=your-namespace
 
-# 1. Provision PVCs (edit storageClassName for your cluster)
-kubectl apply -n ${NAMESPACE} -f model-cache/model-cache.yaml
-
-# 2. Pre-download weights to the PVC
-kubectl apply -n ${NAMESPACE} -f model-cache/model-download.yaml
-
-# 3. Deploy the graph
 kubectl apply -n ${NAMESPACE} -f vllm/agg/deploy.yaml
 ```
 
