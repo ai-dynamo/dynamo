@@ -193,7 +193,9 @@ where
 }
 
 fn request(model: &str) -> PreprocessedRequest {
-    request_with_max_tokens(model, None)
+    // Keep conformance smokes bounded for real LLM engines. The separate
+    // cancellation check still requests enough tokens to catch ignored cancels.
+    request_with_max_tokens(model, Some(8))
 }
 
 fn request_with_max_tokens(model: &str, max_tokens: Option<u32>) -> PreprocessedRequest {

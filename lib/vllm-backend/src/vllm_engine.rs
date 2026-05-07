@@ -42,6 +42,14 @@ struct Args {
     #[arg(long)]
     served_model_name: Option<String>,
 
+    /// Maximum time to wait for the managed vLLM engine to report ready.
+    #[arg(
+        long = "engine-ready-timeout-secs",
+        env = "VLLM_ENGINE_READY_TIMEOUT_S",
+        default_value_t = default_engine_ready_timeout_secs()
+    )]
+    engine_ready_timeout_secs: u64,
+
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     managed_engine: ManagedEngineArgs,
@@ -66,6 +74,10 @@ struct ExtraEngineArgs {
     max_num_batched_tokens: Option<u64>,
 }
 
+fn default_engine_ready_timeout_secs() -> u64 {
+    600
+}
+
 /// Dynamo backend implementation backed by a managed Python vLLM engine-core.
 ///
 /// The backend consumes tokenized [`PreprocessedRequest`] values produced by
@@ -73,6 +85,7 @@ struct ExtraEngineArgs {
 /// through the backend-common worker runtime.
 pub struct VllmBackend {
     model: String,
+    engine_ready_timeout_secs: u64,
     managed_engine: ManagedEngineArgs,
     extra: ExtraEngineArgs,
     inner: RwLock<Option<Inner>>,
@@ -84,9 +97,15 @@ struct Inner {
 }
 
 impl VllmBackend {
-    fn new(model: String, managed_engine: ManagedEngineArgs, extra: ExtraEngineArgs) -> Self {
+    fn new(
+        model: String,
+        engine_ready_timeout_secs: u64,
+        managed_engine: ManagedEngineArgs,
+        extra: ExtraEngineArgs,
+    ) -> Self {
         Self {
             model,
+            engine_ready_timeout_secs,
             managed_engine,
             extra,
             inner: RwLock::new(None),
@@ -108,7 +127,12 @@ impl VllmBackend {
         let args =
             Args::try_parse_from(repartitioned_args).map_err(|e| invalid_arg(e.to_string()))?;
 
-        let engine = Self::new(args.model.clone(), args.managed_engine, args.extra.clone());
+        let engine = Self::new(
+            args.model.clone(),
+            args.engine_ready_timeout_secs,
+            args.managed_engine,
+            args.extra.clone(),
+        );
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
@@ -154,10 +178,12 @@ impl LLMEngine for VllmBackend {
         let handshake_address = managed_config.handshake_address();
         let advertised_host = managed_config.handshake_host.clone();
         let engine_count = managed_config.data_parallel_size;
+        let ready_timeout = Duration::from_secs(self.engine_ready_timeout_secs);
 
         info!(
             %handshake_address,
             engine_count,
+            ?ready_timeout,
             "starting managed vLLM engine"
         );
         let engine_handle = ManagedEngineHandle::spawn(managed_config)
@@ -169,7 +195,7 @@ impl LLMEngine for VllmBackend {
                 handshake_address,
                 advertised_host,
                 engine_count,
-                ready_timeout: Duration::from_secs(30),
+                ready_timeout,
                 local_input_address: None,
                 local_output_address: None,
             },
@@ -360,9 +386,24 @@ mod tests {
             engine.managed_engine.python_args,
             vec!["--dtype", "float16"]
         );
+        assert_eq!(engine.engine_ready_timeout_secs, 600);
         assert_eq!(engine.extra.block_size, Some(32));
         assert_eq!(engine.extra.max_num_seqs, Some(128));
         assert_eq!(engine.extra.max_num_batched_tokens, Some(4096));
+    }
+
+    #[test]
+    fn engine_ready_timeout_arg_is_parsed_on_rust_side() {
+        let (engine, _config) = VllmBackend::from_args(Some(vec![
+            "dynamo-vllm-backend".to_string(),
+            "Qwen/Qwen3-0.6B".to_string(),
+            "--engine-ready-timeout-secs".to_string(),
+            "42".to_string(),
+        ]))
+        .unwrap();
+
+        assert_eq!(engine.engine_ready_timeout_secs, 42);
+        assert!(engine.managed_engine.python_args.is_empty());
     }
 
     #[test]
