@@ -174,7 +174,10 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	}
 
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
-	convertSharedMemoryToHub(src.SharedMemory, dst)
+	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
+		dst.SharedMemorySize = &resource.Quantity{}
+		ConvertFromSharedMemorySpec(src.SharedMemory, dst.SharedMemorySize)
+	}
 
 	// volumeMounts + useAsCompilationCache -> compilationCache (the container
 	// volumeMounts themselves are emitted by buildPodTemplateToHub).
@@ -521,7 +524,10 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	dst.ServiceName = src.ComponentName
 
 	// sharedMemorySize -> SharedMemorySpec.
-	convertSharedMemoryFromHub(src.SharedMemorySize, dst)
+	if src.SharedMemorySize != nil {
+		dst.SharedMemory = &SharedMemorySpec{}
+		ConvertToSharedMemorySpec(src.SharedMemorySize, dst.SharedMemory)
+	}
 
 	// compilationCache + podTemplate volumeMounts -> VolumeMounts.
 	convertVolumeMountsFromHub(src, dst)
@@ -854,19 +860,12 @@ func ConvertFromSharedMemorySpec(src *SharedMemorySpec, dst *resource.Quantity) 
 	*dst = src.Size
 }
 
-func convertSharedMemoryToHub(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
-	if src != nil && (src.Disabled || !src.Size.IsZero()) {
-		dst.SharedMemorySize = &resource.Quantity{}
-		ConvertFromSharedMemorySpec(src, dst.SharedMemorySize)
-	}
-}
-
 // ConvertToSharedMemorySpec converts the v1beta1 shared-memory scalar
 // representation into the shared-memory struct.
 func ConvertToSharedMemorySpec(src *resource.Quantity, dst *SharedMemorySpec) {
 	if src.Sign() == 0 {
 		// Canonical v1beta1 "size=0" <-> v1alpha1 Disabled=true. See
-		// convertSharedMemoryToHub for the forward direction.
+		// ConvertFromSharedMemorySpec for the forward direction.
 		//
 		// Size carries the incoming canonical Quantity value (not the Go zero
 		// value) so that every apply produces a spec that is reflect.DeepEqual
@@ -880,13 +879,6 @@ func ConvertToSharedMemorySpec(src *resource.Quantity, dst *SharedMemorySpec) {
 		return
 	}
 	*dst = SharedMemorySpec{Size: *src}
-}
-
-func convertSharedMemoryFromHub(src *resource.Quantity, dst *DynamoComponentDeploymentSharedSpec) {
-	if src != nil {
-		dst.SharedMemory = &SharedMemorySpec{}
-		ConvertToSharedMemorySpec(src, dst.SharedMemory)
-	}
 }
 
 // ---------------------------------------------------------------------------
