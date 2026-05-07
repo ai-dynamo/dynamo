@@ -114,7 +114,6 @@ runs:
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         HF_XET_HIGH_PERFORMANCE: 1
-        HF_HOME: ${{ inputs.hf_home }}
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
@@ -135,6 +134,23 @@ runs:
         else
           WORK_DIR="/tmp"
         fi
+
+        REQUESTED_HF_HOME="${{ inputs.hf_home }}"
+        FALLBACK_HF_HOME="${WORK_DIR}/.cache/huggingface"
+        # Prefer the requested cache path when it is usable in this job container.
+        if
+          [[ -n "${REQUESTED_HF_HOME}" ]] &&          # caller provided a preferred HF cache path
+          mkdir -p "${REQUESTED_HF_HOME}" 2>/dev/null && # path exists or can be created; hide expected permission noise
+          [[ -w "${REQUESTED_HF_HOME}" ]]             # current runner uid can write model/cache metadata there
+        then
+          export HF_HOME="${REQUESTED_HF_HOME}"
+          echo "✅ HF cache available at ${HF_HOME}"
+        else
+          export HF_HOME="${FALLBACK_HF_HOME}"
+          mkdir -p "${HF_HOME}"
+          echo "⚠️  HF cache '${REQUESTED_HF_HOME}' unavailable or not writable; using ${HF_HOME}"
+        fi
+        echo "HF_HOME=${HF_HOME}" >> $GITHUB_ENV
 
         # HOME must stay at GITHUB_WORKSPACE: ARC, upload-artifact, and checkout require it.
         # The ARC runner uid (1001) may have no /etc/passwd entry, causing the shell
