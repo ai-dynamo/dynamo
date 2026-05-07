@@ -15,7 +15,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
@@ -590,6 +590,7 @@ def test_sglang_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     num_system_ports,
+    set_ucx_tls_no_mm,
     predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
@@ -660,6 +661,7 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(DEFAULT_LORA_REPO)
 @pytest.mark.profiled_vram_gib(4.7)
 @pytest.mark.requested_sglang_kv_tokens(2848)
 @pytest.mark.timeout(158)
@@ -667,6 +669,7 @@ def lora_chat_payload(
 def test_sglang_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
     predownload_models,
     minio_lora_service,
     dynamo_dynamic_ports,
