@@ -12,6 +12,10 @@ inputs:
     description: 'Test suite name for test metrics'
     required: false
     default: 'unknown'
+  framework:
+    description: 'Test framework label used in metrics env and artifact names (e.g. vllm, sglang, trtllm)'
+    required: false
+    default: 'unknown'
   test_type:
     description: 'Test type (unit, e2e, integration)'
     required: false
@@ -274,7 +278,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
 
@@ -282,7 +286,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always() && inputs.enable_coverage == 'true'
       with:
-        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/
         include-hidden-files: true
         retention-days: 7
@@ -291,7 +295,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always()
       with:
-        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
