@@ -43,7 +43,7 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 |---------|-------------|--------|----------|------|
 | `ai-dynamo==1.1.0` | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/ai-dynamo/1.1.0/) |
 | `ai-dynamo-runtime==1.1.0` | Core Python bindings for Dynamo runtime | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/ai-dynamo-runtime/1.1.0/) |
-| `kvbm==1.1.0` | KV Block Manager for disaggregated KV cache | `3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/kvbm/1.1.0/) |
+| `kvbm==1.1.0` | KV Block Manager for disaggregated KV cache | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [link](https://pypi.org/project/kvbm/1.1.0/) |
 
 ### Helm Charts
 
@@ -111,7 +111,7 @@ pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]==
 # Install Dynamo core only
 uv pip install ai-dynamo==1.1.0
 
-# Install standalone KVBM (Python 3.12 only)
+# Install standalone KVBM
 uv pip install kvbm==1.1.0
 ```
 
@@ -385,16 +385,16 @@ For a complete list of known issues, refer to the release notes for each version
 
 | Package | Python | Platform | Notes |
 |---------|--------|----------|-------|
-| `kvbm==1.1.0` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==1.0.2` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==1.0.1` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==1.0.0` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==0.9.1` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==0.9.0` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==0.8.1` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==0.8.0` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==0.7.1` | `3.12` | Linux (glibc `v2.28+`) | |
-| `kvbm==0.7.0` | `3.12` | Linux (glibc `v2.28+`) | Initial |
+| `kvbm==1.1.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==1.0.2` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==1.0.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==1.0.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==0.9.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==0.9.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==0.8.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==0.8.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==0.7.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
+| `kvbm==0.7.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | Initial |
 
 ### Helm Charts
 
