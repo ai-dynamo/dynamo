@@ -32,6 +32,27 @@ import kubernetes_asyncio as kubernetes
 import yaml
 from kubernetes_asyncio import client, config
 
+# Container `state.waiting.reason` values that indicate the pod is in a
+# non-recoverable failure state. Once a container reports one of these,
+# kubectl-style retries are pointless — the kubelet has already failed at
+# least once and is in backoff. Used by `wait_for_deployment_ready` to
+# fail fast instead of running out the deployment timeout.
+TERMINAL_POD_WAITING_REASONS: frozenset[str] = frozenset(
+    {
+        "CrashLoopBackOff",
+    }
+)
+
+
+class DeploymentFailedError(RuntimeError):
+    """Raised when a DynamoGraphDeployment's pods enter a terminal failure
+    state (e.g. CrashLoopBackOff) while waiting for readiness.
+
+    Distinct from `TimeoutError` so callers (e.g. the thorough-mode
+    profiler) can skip a candidate immediately rather than waiting out
+    the full deployment timeout.
+    """
+
 
 def find_available_port(start_port: int = 8000) -> int:
     """Find the first available TCP port on 127.0.0.1 starting at start_port (inclusive), scanning up to start_port+99."""
@@ -286,6 +307,65 @@ class DynamoDeploymentClient:
                 print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
+    async def _detect_terminal_pod_failure(self) -> Optional[str]:
+        """Inspect this deployment's worker pods for a terminal failure.
+
+        Returns a human-readable description of the first failing
+        (pod, container, reason, message) tuple if any container is in a
+        `TERMINAL_POD_WAITING_REASONS` state, otherwise None.
+
+        Transient API errors are swallowed (return None) so a single
+        flaky list call never short-circuits readiness polling.
+        """
+        if not self._original_components:
+            return None
+
+        # Match the same labels used by `get_deployment_logs` so the two
+        # paths agree on which pods belong to this deployment.
+        for original_name in self._original_components:
+            label_selector = (
+                f"nvidia.com/dynamo-graph-deployment-name={self.deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
+            )
+            try:
+                pods = await self.core_api.list_namespaced_pod(
+                    namespace=self.namespace, label_selector=label_selector
+                )
+            except kubernetes.client.rest.ApiException:
+                continue
+            except Exception:
+                continue
+
+            for pod in pods.items or []:
+                pod_status = getattr(pod, "status", None)
+                if pod_status is None:
+                    continue
+
+                # Check both init and main container statuses; either can
+                # be the source of a CrashLoopBackOff.
+                container_status_lists = [
+                    getattr(pod_status, "init_container_statuses", None) or [],
+                    getattr(pod_status, "container_statuses", None) or [],
+                ]
+                for cstatuses in container_status_lists:
+                    for cstatus in cstatuses:
+                        waiting = getattr(
+                            getattr(cstatus, "state", None), "waiting", None
+                        )
+                        if waiting is None:
+                            continue
+                        reason = getattr(waiting, "reason", None)
+                        if reason in TERMINAL_POD_WAITING_REASONS:
+                            message = getattr(waiting, "message", "") or ""
+                            pod_name = getattr(pod.metadata, "name", "<unknown>")
+                            container_name = getattr(cstatus, "name", "<unknown>")
+                            detail = f": {message}" if message else ""
+                            return (
+                                f"pod {pod_name} container {container_name} "
+                                f"in {reason}{detail}"
+                            )
+        return None
+
     async def wait_for_deployment_ready(
         self, timeout: int = 1800, verbose: Optional[bool] = None
     ):
@@ -295,6 +375,16 @@ class DynamoDeploymentClient:
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
             verbose: If True, show detailed status updates. If None, uses DYNAMO_VERBOSE env var.
+
+        Raises:
+            DeploymentFailedError: If any worker pod enters a terminal
+                failure state (e.g. ``CrashLoopBackOff``) before the
+                deployment becomes ready. Allows callers (e.g. the
+                thorough-mode profiler) to skip a failing candidate
+                immediately instead of waiting for the full timeout.
+            TimeoutError: If the deployment fails to become ready within
+                ``timeout`` seconds without any detectable terminal pod
+                failure.
         """
         # Allow environment variable to control verbosity
         if verbose is None:
@@ -391,6 +481,25 @@ class DynamoDeploymentClient:
                     )
                     return True
 
+                # Fail fast if any worker pod is in a terminal state
+                # (e.g. CrashLoopBackOff). Without this, the loop runs
+                # the full `timeout` even when the failure is permanent.
+                failure_detail = await self._detect_terminal_pod_failure()
+                if failure_detail is not None:
+                    progress.finish(
+                        f"❌ Deployment '{self.deployment_name}' "
+                        f"failed: {failure_detail}"
+                    )
+                    raise DeploymentFailedError(
+                        f"Deployment '{self.deployment_name}' entered a "
+                        f"terminal failure state after {elapsed:.1f}s: "
+                        f"{failure_detail}"
+                    )
+
+            except DeploymentFailedError:
+                # Terminal failure — propagate so the caller can skip
+                # this deployment instead of waiting for the timeout.
+                raise
             except kubernetes.client.rest.ApiException as e:
                 if verbose:
                     progress.update(
