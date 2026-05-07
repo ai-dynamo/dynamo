@@ -539,7 +539,6 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
-      dynamoNamespace: my-app
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
@@ -626,4 +625,3 @@ DynamoModel provides declarative model management for Dynamo deployments:
 - Try the [Quick Start](#quick-start) example
 - Explore [Common Use Cases](#common-use-cases)
 - Check the [API Reference](../api-reference.md#dynamomodel) for advanced configuration
-

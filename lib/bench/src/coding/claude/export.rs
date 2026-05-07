@@ -214,7 +214,7 @@ where
 
         let hash_ids = hasher.hash_token_blocks(&ready_turn.tokens);
         let row = MooncakeRow {
-            session_id: turn.export_session_id.clone(),
+            session_id: Some(turn.export_session_id.clone()),
             input_length: ready_turn.tokens.len(),
             output_length: turn.output_length,
             hash_ids,

@@ -47,30 +47,36 @@ navigation:
       - page: Glossary
         path: reference/glossary.md
 
-  # ==================== Blog ====================
-  - section: Blog
-    path: blogs/index.mdx
-    slug: blog
+  # ==================== Digest ====================
+  - section: Digest
+    path: digest/index.mdx
+    slug: digest
     contents:
+      - page: "Dynamo Day 0 support for TokenSpeed"
+        path: digest/tokenspeed/tokenspeed-day-0.md
+        slug: tokenspeed-day-0
       - page: "Multi-Turn Agentic Harnesses"
-        path: blogs/agentic-inference/agentic-harnesses.md
+        path: digest/agentic-inference/agentic-harnesses.md
         slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
-        path: blogs/agentic-inference/agentic-inference.md
+        path: digest/agentic-inference/agentic-inference.md
         slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: blogs/flash-indexer/flash-indexer.md
+        path: digest/flash-indexer/flash-indexer.md
         slug: flash-indexer
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
       - section: Deployment Guide
-        path: kubernetes/README.md
         contents:
-          - page: Detailed Installation Guide
+          - page: Quickstart
+            path: kubernetes/README.md
+          - page: Installation Guide
             path: kubernetes/installation-guide.md
-          - page: Deploying Your First Model
+          - page: Model Deployment Guide
+            path: kubernetes/model-deployment-guide.md
+          - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
@@ -92,6 +98,8 @@ navigation:
             path: kubernetes/inference-gateway.md
           - page: Snapshot
             path: kubernetes/snapshot.md
+          - page: Shadow Engine Failover
+            path: kubernetes/shadow-engine-failover.md
           - page: Disagg Communication
             path: kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
@@ -110,6 +118,32 @@ navigation:
             path: kubernetes/grove.md
           - page: Topology Aware Scheduling
             path: kubernetes/topology-aware-scheduling.md
+      - section: Cloud Provider Guides
+        contents:
+          - section: AWS
+            contents:
+              - page: EKS Setup
+                path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFS
+                path: kubernetes/cloud-providers/eks/efs.md
+              - page: ECS
+                path: kubernetes/cloud-providers/ecs/ecs.md
+          - section: Azure
+            contents:
+              - page: AKS Setup
+                path: kubernetes/cloud-providers/aks/aks.md
+              - page: RDMA / InfiniBand
+                path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+              - page: AKS Storage
+                path: kubernetes/cloud-providers/aks/storage.md
+              - page: Azure Lustre CSI Driver
+                path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+              - page: Spot VMs
+                path: kubernetes/cloud-providers/aks/spot-vms.md
+          - section: GCP
+            contents:
+              - page: GKE Setup
+                path: kubernetes/cloud-providers/gke/gke.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -146,18 +180,22 @@ navigation:
         path: features/lora/README.md
       - section: Agents
         slug: agents
-        path: features/agentic_workloads.md
+        path: agents/README.md
         contents:
-          - page: Agent Context and Tracing
+          - page: Agent Context
             path: agents/agent-context.md
+          - page: Agent Tracing
+            path: agents/agent-tracing.md
+          - page: Agent Hints
+            path: agents/agent-hints.md
+          - page: Chat Processors
+            path: agents/chat-processor-options.md
+          - page: Tool Calling
+            path: agents/tool-calling.md
+          - page: Reasoning
+            path: agents/reasoning.md
           - page: SGLang for Agentic Workloads
             path: backends/sglang/agents.md
-      - page: Chat Processors
-        path: agents/chat-processor-options.md
-      - page: Tool Calling
-        path: agents/tool-calling.md
-      - page: Reasoning
-        path: agents/reasoning.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
