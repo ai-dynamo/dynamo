@@ -400,18 +400,18 @@ class Publisher:
 
         # Needed by the events and metrics publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
-        # FPM is emitted as one logical channel per TRT-LLM engine. Under
-        # attention-DP, TRT-LLM rank 0 emits an engine-wide aggregate; ranks
-        # 1..N-1 have no independent planner-visible worker identity.
+        # FPM is emitted as one logical channel per TRT-LLM attention-DP rank.
+        # TRT-LLM tags each IterationStats row with attentionDpRank, which is
+        # forwarded as Dynamo's dp_rank for planner-visible per-rank load.
         self.fpm_publisher: Optional[FpmDirectPublisher] = None
         # One-shot schema probe gate. The first IterationStats delivered to
         # handle_stat is checked against _FPM_REQUIRED_STAT_FIELDS; on mismatch
         # the publisher is shut down and None'd. Prevents silent planner poison
         # when running against a TRT-LLM version that predates #13199.
         self._fpm_schema_checked: bool = False
-        self.kv_event_publishers: Optional[
-            Dict[int, KvEventPublisher]
-        ] = None  # One per attention_dp_rank
+        self.kv_event_publishers: Optional[Dict[int, KvEventPublisher]] = (
+            None  # One per attention_dp_rank
+        )
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
         self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
         self.publish_stats_thread: Optional[ManagedThread] = None
@@ -452,17 +452,18 @@ class Publisher:
             lambda _: logging.debug("metrics publisher endpoint created")
         )
 
-        # Setup the ForwardPassMetrics publisher. Always use a single FPM
-        # channel: non-attention-DP has one logical rank, and attention-DP
-        # reports one rank-0 engine aggregate. If rank 0 stalls, the whole
-        # TRT-LLM engine stalls, so FPM emission is intentionally all-or-nothing.
+        # Setup the ForwardPassMetrics publisher with one internal channel per
+        # attention-DP rank. Non-attention-DP engines report size 1. Under
+        # attention-DP, TRT-LLM emits one IterationStats row per rank and
+        # Dynamo forwards attentionDpRank as the FPM dp_rank.
         try:
+            fpm_dp_size = max(1, int(self.attention_dp_size or 1))
             self.fpm_publisher = FpmDirectPublisher(
                 endpoint=self.endpoint,
                 worker_id=str(self.worker_id),
-                dp_size=1,
+                dp_size=fpm_dp_size,
             )
-            logging.info("FpmDirectPublisher initialized with dp_size=1")
+            logging.info(f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}")
         except RuntimeError as e:
             # PyO3 surfaces all FpmDirectPublisher::new failures as
             # PyRuntimeError (Endpoint missing, tokio runtime missing,
@@ -654,10 +655,11 @@ class Publisher:
 
             # Publish ForwardPassMetrics. TRT-LLM tags each stat dict with
             # top-level attentionDpRank inside BaseWorker._stats_serializer.
-            # Under attention-DP, the companion TRT-LLM change emits one
-            # rank-0 engine aggregate. The FPM source fields live nested under
-            # stat["inflightBatchingStats"] (camelCase from NLOHMANN
-            # serialization). Variance fields are not yet computed in
+            # Under attention-DP, TRT-LLM emits one row per rank. Scheduled
+            # fields are rank-local, while engine-global queued fields are
+            # naturally nonzero only on rank 0. The FPM source fields live
+            # nested under stat["inflightBatchingStats"] (camelCase from
+            # NLOHMANN serialization). Variance fields are not yet computed in
             # TRT-LLM's PyExecutor and default to 0.0 on the Rust side.
             #
             # The first stat delivered here triggers a one-shot schema probe:
@@ -699,8 +701,12 @@ class Publisher:
                     ) + int(ibs.get("numQueuedGenKvTokens", 0))
                     # iterLatencyMS is ms; the Rust snapshot expects seconds.
                     wall_time_secs = float(stat.get("iterLatencyMS", 0.0)) / 1000.0
+                    attention_dp_rank = stat.get("attentionDpRank")
+                    dp_rank = (
+                        int(attention_dp_rank) if attention_dp_rank is not None else 0
+                    )
                     self.fpm_publisher.publish(
-                        dp_rank=int(stat.get("attentionDpRank", 0)),
+                        dp_rank=dp_rank,
                         scheduled_num_prefill_requests=sched_num_prefill,
                         scheduled_sum_prefill_tokens=sched_sum_prefill_tokens,
                         scheduled_sum_prefill_kv_tokens=sched_sum_prefill_kv_tokens,

@@ -11,7 +11,10 @@ Covers (after realignment to the merged TRT-LLM PR #13199):
   * Composite mappings: queued-decode counters are ``numPausedRequests +
     numQueuedGenRequests`` and ``numPausedKvTokens + numQueuedGenKvTokens``.
   * attentionDpRank from the top level of the stat dict is passed through
-    unchanged; missing key defaults to 0.
+    unchanged; missing/null key defaults to 0.
+  * Attention-DP fanout emits one FPM per attentionDpRank; queued fields are
+    forwarded from the stat row as-is, so they remain nonzero only on the
+    rank-0 row produced by TRT-LLM.
   * iterLatencyMS (top-level milliseconds) is converted to wall_time_secs
     (seconds) at the boundary.
   * First-stat schema probe disables the publisher when the nested IBS dict
@@ -89,8 +92,10 @@ def _invoke_handler(stat, fpm_publisher):
     queued_sum_decode_kv_tokens = int(ibs.get("numPausedKvTokens", 0)) + int(
         ibs.get("numQueuedGenKvTokens", 0)
     )
+    attention_dp_rank = stat.get("attentionDpRank")
+    dp_rank = int(attention_dp_rank) if attention_dp_rank is not None else 0
     fpm_publisher.publish(
-        dp_rank=int(stat.get("attentionDpRank", 0)),
+        dp_rank=dp_rank,
         scheduled_num_prefill_requests=int(ibs.get("numContextRequests", 0)),
         scheduled_sum_prefill_tokens=int(ibs.get("numCtxTokens", 0)),
         scheduled_sum_prefill_kv_tokens=int(ibs.get("numCtxKvTokens", 0)),
@@ -178,11 +183,73 @@ def test_handle_stat_routes_per_attention_dp_rank():
         assert call.kwargs["scheduled_sum_prefill_tokens"] == 100 * (i + 1)
 
 
+def test_handle_stat_attention_dp_fanout_preserves_rank0_queue_only():
+    """TRT-LLM emits one stat row per attention-DP rank. Dynamo forwards each
+    row as its own FPM and does not smear rank-0 queued fields onto rank 1."""
+    fpm = MagicMock()
+    rank0 = _build_fake_stat(
+        attentionDpRank=0,
+        iterLatencyMS=2147.591,
+        ibs_overrides={
+            "numContextRequests": 1,
+            "numCtxTokens": 15,
+            "numCtxKvTokens": 1,
+            "numGenRequests": 0,
+            "numGenKvTokens": 0,
+            "numPausedRequests": 0,
+            "numPausedKvTokens": 0,
+            "numQueuedContextRequests": 8664,
+            "numQueuedCtxTokens": 155952,
+            "numQueuedGenRequests": 0,
+            "numQueuedGenKvTokens": 0,
+        },
+    )
+    rank1 = _build_fake_stat(
+        attentionDpRank=1,
+        iterLatencyMS=2147.591,
+        ibs_overrides={
+            "numContextRequests": 0,
+            "numCtxTokens": 0,
+            "numCtxKvTokens": 0,
+            "numGenRequests": 2,
+            "numGenKvTokens": 33,
+            "numPausedRequests": 0,
+            "numPausedKvTokens": 0,
+            "numQueuedContextRequests": 0,
+            "numQueuedCtxTokens": 0,
+            "numQueuedGenRequests": 0,
+            "numQueuedGenKvTokens": 0,
+        },
+    )
+
+    _invoke_handler(rank0, fpm)
+    _invoke_handler(rank1, fpm)
+
+    rank0_call, rank1_call = fpm.publish.call_args_list
+    assert rank0_call.kwargs["dp_rank"] == 0
+    assert rank0_call.kwargs["queued_num_prefill_requests"] == 8664
+    assert rank0_call.kwargs["queued_sum_prefill_tokens"] == 155952
+    assert rank0_call.kwargs["scheduled_num_decode_requests"] == 0
+
+    assert rank1_call.kwargs["dp_rank"] == 1
+    assert rank1_call.kwargs["queued_num_prefill_requests"] == 0
+    assert rank1_call.kwargs["queued_sum_prefill_tokens"] == 0
+    assert rank1_call.kwargs["scheduled_num_decode_requests"] == 2
+    assert rank1_call.kwargs["scheduled_sum_decode_kv_tokens"] == 33
+    assert rank0_call.kwargs["wall_time_secs"] == rank1_call.kwargs["wall_time_secs"]
+
+
 def test_handle_stat_missing_attention_dp_rank_defaults_zero():
     fpm = MagicMock()
     stat = _build_fake_stat()
     stat.pop("attentionDpRank")
     _invoke_handler(stat, fpm)
+    assert fpm.publish.call_args.kwargs["dp_rank"] == 0
+
+
+def test_handle_stat_null_attention_dp_rank_defaults_zero():
+    fpm = MagicMock()
+    _invoke_handler(_build_fake_stat(attentionDpRank=None), fpm)
     assert fpm.publish.call_args.kwargs["dp_rank"] == 0
 
 
@@ -304,7 +371,7 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
 
 def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):
     """Under attention-DP (attention_dp_size > 1), Publisher.initialize()
-    still constructs the single engine-wide FpmDirectPublisher channel."""
+    constructs one FpmDirectPublisher channel per attention-DP rank."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch, attention_dp_size=4, fpm_enabled=False
     )
@@ -312,7 +379,7 @@ def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):
     fake_fpm_cls.assert_called_once()
     kwargs = fake_fpm_cls.call_args.kwargs
     assert kwargs["worker_id"] == "worker-abc"
-    assert kwargs["dp_size"] == 1
+    assert kwargs["dp_size"] == 4
     assert pub.fpm_publisher is not None
 
 
@@ -393,8 +460,8 @@ def test_schema_probe_ibs_not_a_dict_disables_publisher():
 
 
 def test_schema_probe_noop_when_fpm_publisher_already_none():
-    """Attention-DP gate already set fpm_publisher = None; probe must not
-    blow up and must still flip _fpm_schema_checked so we do not re-enter."""
+    """If initialization already disabled fpm_publisher, probe must not blow
+    up and must still flip _fpm_schema_checked so we do not re-enter."""
     pub, _ = _build_schema_probe_publisher(fpm_publisher_mock=None)
     pub.fpm_publisher = None
 
