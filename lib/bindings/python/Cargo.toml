@@ -33,8 +33,10 @@ nvtx = ["dynamo-runtime/nvtx"]
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
+dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
+async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
