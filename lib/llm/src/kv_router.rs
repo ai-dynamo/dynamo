@@ -3,8 +3,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    env,
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -17,6 +18,10 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
         compute_block_hash_for_seq,
+    },
+    remote_g2_plan::{
+        RemoteKvReuseDecision, RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput,
+        RemoteKvReuseSelectionStats, select_remote_g2_reuse_plan,
     },
     scheduling::TierOverlapBlocks,
 };
@@ -65,6 +70,7 @@ use crate::{
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
+    protocols::common::preprocessor::PreprocessedRequest,
 };
 
 // [gluo TODO] shouldn't need to be public
@@ -105,10 +111,49 @@ struct CacheHitEstimates {
     cached_tokens: HashMap<WorkerWithDpRank, usize>,
 }
 
-#[derive(Debug, Clone, Copy)]
+const REMOTE_KV_REUSE_PLAN_TTL_MS: u64 = 30_000;
+const REMOTE_G2_REUSE_ENABLED_ENV: &str = "DYN_REMOTE_G2_REUSE_ENABLED";
+
+#[derive(Debug, Clone)]
 pub(crate) struct BestMatchDetails {
     pub worker: WorkerWithDpRank,
     pub cache_hit: WorkerCacheHitEstimate,
+    pub remote_kv_reuse: RemoteKvReuseDecision,
+}
+
+fn unix_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+fn remote_g2_reuse_enabled() -> bool {
+    env::var(REMOTE_G2_REUSE_ENABLED_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
+}
+
+pub(crate) fn attach_remote_kv_reuse_decision(
+    request: &mut PreprocessedRequest,
+    decision: &RemoteKvReuseDecision,
+) -> serde_json::Result<()> {
+    match decision {
+        RemoteKvReuseDecision::Plan { plan, .. } => {
+            if request.attach_remote_kv_reuse_plan(plan).is_ok() {
+                return Ok(());
+            }
+            request.attach_remote_kv_reuse_no_plan_reason(
+                RemoteKvReuseNoPlanReason::SerializationFailed,
+            )
+        }
+        RemoteKvReuseDecision::NoPlan { reason, .. } => {
+            request.attach_remote_kv_reuse_no_plan_reason(reason.clone())
+        }
+    }
 }
 
 fn cache_hit_weight_for_tier(
@@ -500,7 +545,7 @@ where
             if let Some(ref shared_cache) = self.shared_cache {
                 let indexer_fut = self
                     .indexer
-                    .find_matches_by_tier(block_hashes)
+                    .find_matches_by_tier(block_hashes.clone())
                     .instrument(tracing::info_span!("kv_router.find_matches"));
                 let shared_fut = shared_cache
                     .check_blocks(tokens, self.block_size)
@@ -536,7 +581,7 @@ where
                 let t = Instant::now();
                 let tiered = self
                     .indexer
-                    .find_matches_by_tier(block_hashes)
+                    .find_matches_by_tier(block_hashes.clone())
                     .instrument(tracing::info_span!("kv_router.find_matches"))
                     .await?;
                 (tiered, None, t.elapsed(), None)
@@ -572,6 +617,23 @@ where
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
+        let created_at_ms = unix_epoch_ms();
+        let remote_kv_reuse = if remote_g2_reuse_enabled() {
+            select_remote_g2_reuse_plan(RemoteKvReuseSelectionInput {
+                request_id: context_id.unwrap_or_default(),
+                target: response.best_worker,
+                block_hashes: &block_hashes,
+                block_size_tokens: self.block_size,
+                tiered_matches: &tiered_matches,
+                created_at_ms,
+                expires_at_ms: created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS),
+            })
+        } else {
+            RemoteKvReuseDecision::NoPlan {
+                reason: RemoteKvReuseNoPlanReason::Disabled,
+                stats: RemoteKvReuseSelectionStats::default(),
+            }
+        };
         let total_elapsed = start.elapsed();
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
@@ -597,6 +659,10 @@ where
             m.shared_cache_beyond_blocks.observe(beyond as f64);
         }
 
+        if let Some(m) = metrics::RouterRequestMetrics::get() {
+            m.observe_remote_g2_decision(&remote_kv_reuse, self.block_size);
+        }
+
         #[cfg(feature = "bench")]
         tracing::info!(
             isl_tokens,
@@ -614,6 +680,7 @@ where
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
             },
+            remote_kv_reuse,
         })
     }
 
@@ -935,7 +1002,12 @@ mod tests {
     use async_trait::async_trait;
     use dynamo_kv_router::{
         indexer::{LowerTierMatchDetails, MatchDetails},
-        protocols::{OverlapScores, StorageTier},
+        protocols::{LocalBlockHash, OverlapScores, StorageTier},
+        remote_g2_plan::{
+            REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
+            REMOTE_KV_REUSE_PLAN_VERSION, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+            RemoteKvReuseSelectionStats,
+        },
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
@@ -1154,5 +1226,88 @@ mod tests {
 
         assert_eq!(worker, WorkerWithDpRank::from_worker_id(0));
         assert_eq!(overlap, 0);
+    }
+
+    fn remote_g2_test_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3, 4])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    fn remote_g2_test_plan() -> RemoteKvReusePlan {
+        RemoteKvReusePlan {
+            plan_id: "plan-1".to_string(),
+            request_id: "request-1".to_string(),
+            target_worker_id: 42,
+            target_dp_rank: 2,
+            source_worker_id: 7,
+            source_dp_rank: 0,
+            source_tier: StorageTier::HostPinned,
+            block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            planned_prefix_blocks: 2,
+            block_size_tokens: 16,
+            created_at_ms: 1000,
+            expires_at_ms: 2000,
+            plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+        }
+    }
+
+    #[test]
+    fn router_attaches_remote_g2_plan_after_target_selection() {
+        let mut request = remote_g2_test_request();
+        let decision = RemoteKvReuseDecision::Plan {
+            plan: remote_g2_test_plan(),
+            stats: RemoteKvReuseSelectionStats {
+                rejected_g1_candidates: 1,
+            },
+        };
+
+        attach_remote_kv_reuse_decision(&mut request, &decision).unwrap();
+
+        let extra_args = request.extra_args.unwrap();
+        let plan = &extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY];
+        assert_eq!(plan["target_worker_id"], 42);
+        assert_eq!(plan["target_dp_rank"], 2);
+        assert_eq!(plan["source_worker_id"], 7);
+        assert_eq!(plan["source_dp_rank"], 0);
+        assert_eq!(plan["source_tier"], "host_pinned");
+    }
+
+    #[test]
+    fn router_no_plan_has_reason_without_forbidden_fields() {
+        let mut request = remote_g2_test_request();
+        let decision = RemoteKvReuseDecision::NoPlan {
+            reason: RemoteKvReuseNoPlanReason::NoRemoteG2Candidate,
+            stats: RemoteKvReuseSelectionStats {
+                rejected_g1_candidates: 1,
+            },
+        };
+
+        attach_remote_kv_reuse_decision(&mut request, &decision).unwrap();
+
+        let extra_args = request.extra_args.unwrap();
+        assert_eq!(
+            extra_args[REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY],
+            "no_remote_g2_candidate"
+        );
+        let serialized = serde_json::to_string(&extra_args).unwrap();
+        for forbidden in [
+            "virtual_address",
+            "physical_address",
+            "nixl_descriptor",
+            "descriptor",
+            "source_block_id",
+            "target_g1_block_id",
+            "prompt text",
+            "11",
+            "22",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 }

@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::{
+    protocols::{TokensWithHashes, WorkerWithDpRank},
+    remote_g2_plan::RemoteKvReuseDecision,
+};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
@@ -20,7 +23,7 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter,
+        KvRouter, attach_remote_kv_reuse_decision,
         agent_controller::{AgentController, SessionCloseAction},
         metrics::RouterRequestMetrics,
         sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
@@ -52,6 +55,7 @@ struct WorkerSelection {
     /// Whether the scheduler is tracking this request (add_request or
     /// find_best_match_details with update_states=true was called).
     scheduler_tracked: bool,
+    remote_kv_reuse: Option<RemoteKvReuseDecision>,
 }
 
 /// Drop guard that manages the full lifecycle of a routed request:
@@ -324,6 +328,7 @@ impl KvPushRouter {
             let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
             let cached_tokens = selection.cache_hit.cached_tokens;
             let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let remote_kv_reuse = Some(selection.remote_kv_reuse);
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -353,6 +358,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 scheduler_tracked: !is_query_only,
+                remote_kv_reuse,
             });
         };
 
@@ -380,6 +386,7 @@ impl KvPushRouter {
             let effective_overlap_blocks = selection.cache_hit.effective_overlap_blocks;
             let cached_tokens = selection.cache_hit.cached_tokens;
             let overlap_amount = selection.cache_hit.rounded_overlap_blocks();
+            let remote_kv_reuse = Some(selection.remote_kv_reuse);
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,
@@ -388,6 +395,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 scheduler_tracked: true,
+                remote_kv_reuse,
             });
         }
 
@@ -460,6 +468,7 @@ impl KvPushRouter {
             effective_overlap_blocks,
             cached_tokens,
             scheduler_tracked: !is_query_only && resolved_dp_rank.is_some(),
+            remote_kv_reuse: None,
         })
     }
 }
@@ -536,6 +545,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             effective_overlap_blocks,
             cached_tokens,
             scheduler_tracked,
+            remote_kv_reuse,
         } = selection;
 
         // In approximate mode (use_kv_events=false), record the routing decision
@@ -609,6 +619,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let response = Annotated::from_data(output);
             let stream = stream::iter(vec![response]);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+        }
+
+        if let Some(decision) = remote_kv_reuse.as_ref()
+            && let Err(error) = attach_remote_kv_reuse_decision(&mut request, decision)
+        {
+            tracing::warn!(
+                request_id = %context_id,
+                error = %error,
+                "Failed to attach remote G2 reuse metadata"
+            );
         }
 
         // End route stage — worker has been selected and routing metrics recorded.

@@ -24,6 +24,10 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
+from tensorrt_llm._torch.pyexecutor.connectors.remote_g2 import (
+    REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
+    target_remote_g2_plan_store,
+)
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
@@ -1100,6 +1104,10 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        trtllm_request_id = None
+        remote_g2_plan = (request.get("extra_args") or {}).get(
+            REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY
+        )
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -1111,7 +1119,9 @@ class HandlerBase(BaseGenerativeHandler):
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
                 priority=priority,
+                remote_g2_plan=remote_g2_plan,
             )
+            trtllm_request_id = getattr(generation_result, "request_id", None)
 
             # In disagg decode mode, wrap abort() to defer until first token
             # (KV transfer complete).
@@ -1321,6 +1331,9 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+        finally:
+            if trtllm_request_id is not None:
+                target_remote_g2_plan_store().discard(trtllm_request_id)
 
     @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:

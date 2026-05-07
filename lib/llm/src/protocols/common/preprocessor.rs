@@ -8,6 +8,10 @@ use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, WorkerId},
+    remote_g2_plan::{
+        REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
+        RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -254,6 +258,46 @@ impl PreprocessedRequest {
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
     }
+
+    // TODO: replace extra_args transport with a typed routed request field after v1 hardening.
+    pub fn attach_remote_kv_reuse_plan(
+        &mut self,
+        plan: &RemoteKvReusePlan,
+    ) -> serde_json::Result<()> {
+        let plan_value = serde_json::to_value(plan)?;
+        let mut map = extra_args_object(self.extra_args.take());
+        map.remove(REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY);
+        map.insert(
+            REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY.to_string(),
+            plan_value,
+        );
+        self.extra_args = Some(serde_json::Value::Object(map));
+        Ok(())
+    }
+
+    pub fn attach_remote_kv_reuse_no_plan_reason(
+        &mut self,
+        reason: RemoteKvReuseNoPlanReason,
+    ) -> serde_json::Result<()> {
+        let reason_value = serde_json::to_value(reason)?;
+        let mut map = extra_args_object(self.extra_args.take());
+        map.remove(REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY);
+        map.insert(
+            REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY.to_string(),
+            reason_value,
+        );
+        self.extra_args = Some(serde_json::Value::Object(map));
+        Ok(())
+    }
+}
+
+fn extra_args_object(
+    extra_args: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    match extra_args {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
 }
 
 /// [`PreprocessedEmbeddingRequest`] is the internal representation of an embedding request
@@ -290,5 +334,93 @@ impl PreprocessedEmbeddingRequest {
 impl PreprocessedEmbeddingRequest {
     pub fn builder() -> PreprocessedEmbeddingRequestBuilder {
         PreprocessedEmbeddingRequestBuilder::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::{
+        protocols::{LocalBlockHash, StorageTier},
+        remote_g2_plan::{
+            REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
+            REMOTE_KV_REUSE_PLAN_VERSION, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+        },
+    };
+    use serde_json::json;
+
+    use super::PreprocessedRequest;
+
+    fn test_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1, 2, 3, 4])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .extra_args(Some(json!({ "existing_key": "existing_value" })))
+            .build()
+            .unwrap()
+    }
+
+    fn test_plan() -> RemoteKvReusePlan {
+        RemoteKvReusePlan {
+            plan_id: "plan-1".to_string(),
+            request_id: "request-1".to_string(),
+            target_worker_id: 42,
+            target_dp_rank: 2,
+            source_worker_id: 7,
+            source_dp_rank: 0,
+            source_tier: StorageTier::HostPinned,
+            block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            planned_prefix_blocks: 2,
+            block_size_tokens: 16,
+            created_at_ms: 1000,
+            expires_at_ms: 2000,
+            plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+        }
+    }
+
+    #[test]
+    fn extra_args_preserves_existing_keys_when_attaching_remote_plan() {
+        let mut request = test_request();
+        request.attach_remote_kv_reuse_plan(&test_plan()).unwrap();
+
+        let extra_args = request.extra_args.unwrap();
+        assert_eq!(extra_args["existing_key"], "existing_value");
+        assert_eq!(
+            extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]["source_tier"],
+            "host_pinned"
+        );
+    }
+
+    #[test]
+    fn extra_args_no_plan_reason_is_structured_only() {
+        let mut request = test_request();
+        request
+            .attach_remote_kv_reuse_no_plan_reason(
+                RemoteKvReuseNoPlanReason::NoRemoteG2Candidate,
+            )
+            .unwrap();
+
+        let extra_args = request.extra_args.unwrap();
+        assert_eq!(extra_args["existing_key"], "existing_value");
+        assert_eq!(
+            extra_args[REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY],
+            "no_remote_g2_candidate"
+        );
+        let serialized = serde_json::to_string(&extra_args).unwrap();
+        for forbidden in [
+            "virtual_address",
+            "physical_address",
+            "nixl_descriptor",
+            "descriptor",
+            "source_block_id",
+            "target_g1_block_id",
+            "prompt text",
+            "11",
+            "22",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 }

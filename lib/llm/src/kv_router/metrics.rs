@@ -60,6 +60,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
+use dynamo_kv_router::remote_g2_plan::RemoteKvReuseDecision;
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -512,6 +513,10 @@ pub struct RouterRequestMetrics {
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
+    pub remote_g2_plans_total: prometheus::IntCounter,
+    pub remote_g2_planned_tokens: prometheus::IntCounter,
+    pub remote_g2_rejected_g1_candidates_total: prometheus::IntCounter,
+    pub remote_g2_no_plan_total: IntCounterVec,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -607,6 +612,35 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
                     )
                     .expect("failed to create router_shared_cache_beyond_blocks");
+                let remote_g2_plans_total = metrics
+                    .create_intcounter(
+                        &router_metric("remote_g2_plans_total"),
+                        "Total remote G2 reuse plans attached by the router",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_g2_plans_total");
+                let remote_g2_planned_tokens = metrics
+                    .create_intcounter(
+                        &router_metric("remote_g2_planned_tokens"),
+                        "Total prompt tokens covered by router-planned remote G2 reuse",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_g2_planned_tokens");
+                let remote_g2_rejected_g1_candidates_total = metrics
+                    .create_intcounter(
+                        &router_metric("remote_g2_rejected_g1_candidates_total"),
+                        "Total device-tier candidates rejected as v1 remote G2 sources",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_g2_rejected_g1_candidates_total");
+                let remote_g2_no_plan_total = metrics
+                    .create_intcountervec(
+                        &router_metric("remote_g2_no_plan_total"),
+                        "Total remote G2 no-plan decisions by low-cardinality reason",
+                        &["reason"],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_g2_no_plan_total");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -617,9 +651,38 @@ impl RouterRequestMetrics {
                     kv_transfer_estimated_latency_seconds,
                     shared_cache_hit_rate,
                     shared_cache_beyond_blocks,
+                    remote_g2_plans_total,
+                    remote_g2_planned_tokens,
+                    remote_g2_rejected_g1_candidates_total,
+                    remote_g2_no_plan_total,
                 })
             })
             .clone()
+    }
+
+    pub fn observe_remote_g2_decision(&self, decision: &RemoteKvReuseDecision, block_size: u32) {
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, stats } => {
+                self.remote_g2_plans_total.inc();
+                let block_size_tokens = if plan.block_size_tokens == 0 {
+                    block_size
+                } else {
+                    plan.block_size_tokens
+                };
+                self.remote_g2_planned_tokens.inc_by(
+                    u64::from(plan.planned_prefix_blocks) * u64::from(block_size_tokens),
+                );
+                self.remote_g2_rejected_g1_candidates_total
+                    .inc_by(u64::from(stats.rejected_g1_candidates));
+            }
+            RemoteKvReuseDecision::NoPlan { reason, stats } => {
+                self.remote_g2_no_plan_total
+                    .with_label_values(&[reason.as_str()])
+                    .inc();
+                self.remote_g2_rejected_g1_candidates_total
+                    .inc_by(u64::from(stats.rejected_g1_candidates));
+            }
+        }
     }
 }
 
@@ -853,6 +916,42 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
+    }
+
+    #[test]
+    fn remote_g2_metrics_use_low_cardinality_reason_label() {
+        let registry = prometheus::Registry::new();
+        let remote_g2_no_plan_total = IntCounterVec::new(
+            Opts::new(
+                "remote_g2_no_plan_total",
+                "Total remote G2 no-plan decisions by low-cardinality reason",
+            ),
+            &["reason"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(remote_g2_no_plan_total.clone()))
+            .unwrap();
+
+        remote_g2_no_plan_total
+            .with_label_values(&["no_remote_g2_candidate"])
+            .inc();
+
+        let output = gather_pef(&registry);
+        assert!(output.contains("remote_g2_no_plan_total{reason=\"no_remote_g2_candidate\"} 1"));
+        for forbidden in [
+            "virtual_address",
+            "physical_address",
+            "nixl_descriptor",
+            "descriptor",
+            "source_block_id",
+            "target_g1_block_id",
+            "prompt text",
+            "11",
+            "22",
+        ] {
+            assert!(!output.contains(forbidden));
+        }
     }
 
     #[test]
