@@ -150,12 +150,3 @@ def test_prefill_load_scale_env_uses_kv_router_config_field(monkeypatch) -> None
 
     assert args.prefill_load_scale == 3.5
     assert not hasattr(args, "router_prefill_load_scale")
-
-
-def test_kv_router_config_rejects_negative_prefill_load_scale() -> None:
-    config = KvRouterConfigBase.__new__(KvRouterConfigBase)
-    config.overlap_score_credit = 1.0
-    config.prefill_load_scale = -0.1
-
-    with pytest.raises(ValueError, match="--router-prefill-load-scale must be >= 0.0"):
-        config.validate_kv_router_config()

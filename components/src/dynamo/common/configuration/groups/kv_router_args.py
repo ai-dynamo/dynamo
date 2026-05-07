@@ -121,15 +121,6 @@ class KvRouterConfigBase(ConfigBase):
             kwargs["overlap_score_weight"] = self.overlap_score_weight
         return kwargs
 
-    def validate_kv_router_config(self) -> None:
-        if self.overlap_score_credit < 0.0 or self.overlap_score_credit > 1.0:
-            raise ValueError(
-                "--router-kv-overlap-score-credit must be between 0.0 and 1.0; "
-                "use --router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily"
-            )
-        if self.prefill_load_scale < 0.0:
-            raise ValueError("--router-prefill-load-scale must be >= 0.0")
-
 
 class KvRouterArgGroup(ArgGroup):
     """CLI arguments for the shared KvRouterConfig parameters."""

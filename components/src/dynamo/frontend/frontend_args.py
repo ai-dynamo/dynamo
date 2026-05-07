@@ -89,7 +89,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
-        self.validate_kv_router_config()
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
