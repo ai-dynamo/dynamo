@@ -1466,6 +1466,8 @@ impl OpenAIPreprocessor {
                 Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
             think_start_token: String,
             choices: HashMap<u32, StripChoiceState>,
+            last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+            eof_flushed: bool,
         }
 
         #[derive(Default)]
@@ -1474,56 +1476,120 @@ impl OpenAIPreprocessor {
             decided: bool,
         }
 
+        fn take_undecided_buffer(choice_state: &mut StripChoiceState) -> Option<String> {
+            if choice_state.decided || choice_state.buffer.is_empty() {
+                return None;
+            }
+
+            choice_state.decided = true;
+            Some(std::mem::take(&mut choice_state.buffer))
+        }
+
+        fn drain_undecided_buffers(
+            choices: &mut HashMap<u32, StripChoiceState>,
+        ) -> HashMap<u32, String> {
+            choices
+                .iter_mut()
+                .filter_map(|(index, choice_state)| {
+                    take_undecided_buffer(choice_state).map(|buffer| (*index, buffer))
+                })
+                .collect()
+        }
+
         let state = StripReasoningStartState {
             stream: Box::pin(stream),
             think_start_token,
             choices: HashMap::new(),
+            last_response: None,
+            eof_flushed: false,
         };
 
         stream::unfold(state, |mut state| async move {
-            if let Some(response) = state.stream.next().await {
-                let processed_response = response.map_data(|mut data| {
-                    for choice in data.inner.choices.iter_mut() {
-                        let choice_state = state.choices.entry(choice.index).or_default();
-                        let text = match choice.delta.content.take() {
-                            Some(ChatCompletionMessageContent::Text(text)) => text,
-                            other => {
-                                choice.delta.content = other;
-                                continue;
-                            }
-                        };
+            if let Some(mut response) = state.stream.next().await {
+                let Some(mut data) = response.data.take() else {
+                    return Some((response, state));
+                };
 
-                        let output = if choice_state.decided {
-                            text
-                        } else {
-                            choice_state.buffer.push_str(&text);
-                            if state.think_start_token.starts_with(&choice_state.buffer)
-                                && choice_state.buffer.len() < state.think_start_token.len()
-                            {
-                                choice.delta.content = None;
-                                continue;
-                            }
-
-                            choice_state.decided = true;
-                            if choice_state.buffer.starts_with(&state.think_start_token) {
-                                choice_state.buffer[state.think_start_token.len()..].to_string()
+                for choice in data.inner.choices.iter_mut() {
+                    let choice_state = state.choices.entry(choice.index).or_default();
+                    let text = match choice.delta.content.take() {
+                        Some(ChatCompletionMessageContent::Text(text)) => text,
+                        other => {
+                            if let Some(buffer) = take_undecided_buffer(choice_state) {
+                                choice.delta.content =
+                                    Some(ChatCompletionMessageContent::Text(buffer));
                             } else {
-                                choice_state.buffer.clone()
+                                choice.delta.content = other;
                             }
-                        };
+                            continue;
+                        }
+                    };
 
-                        choice_state.buffer.clear();
-                        choice.delta.content = if output.is_empty() {
-                            None
+                    let output = if choice_state.decided {
+                        text
+                    } else {
+                        choice_state.buffer.push_str(&text);
+                        if state.think_start_token.starts_with(&choice_state.buffer)
+                            && choice_state.buffer.len() < state.think_start_token.len()
+                        {
+                            choice.delta.content = None;
+                            continue;
+                        }
+
+                        choice_state.decided = true;
+                        if choice_state.buffer.starts_with(&state.think_start_token) {
+                            choice_state.buffer[state.think_start_token.len()..].to_string()
                         } else {
-                            Some(ChatCompletionMessageContent::Text(output))
-                        };
-                    }
-                    Ok(data)
-                });
-                Some((processed_response, state))
-            } else {
+                            choice_state.buffer.clone()
+                        }
+                    };
+
+                    choice_state.buffer.clear();
+                    choice.delta.content = if output.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionMessageContent::Text(output))
+                    };
+                }
+
+                response.data = Some(data);
+                state.last_response = Some(response.clone());
+
+                Some((response, state))
+            } else if state.eof_flushed {
                 None
+            } else {
+                state.eof_flushed = true;
+                let mut flushed = drain_undecided_buffers(&mut state.choices);
+                if flushed.is_empty() {
+                    None
+                } else {
+                    let mut response = state.last_response.clone()?;
+                    let data = response.data.as_mut()?;
+                    data.inner.usage = None;
+                    data.inner.choices.retain_mut(|choice| {
+                        if let Some(buffer) = flushed.remove(&choice.index) {
+                            choice.delta.role = None;
+                            choice.delta.content = Some(ChatCompletionMessageContent::Text(buffer));
+                            choice.delta.tool_calls = None;
+                            choice.delta.function_call = None;
+                            choice.delta.refusal = None;
+                            choice.delta.reasoning_content = None;
+                            choice.finish_reason = None;
+                            choice.stop_reason = None;
+                            choice.logprobs = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+
+                    if data.inner.choices.is_empty() {
+                        None
+                    } else {
+                        Some((response, state))
+                    }
+                }
             }
         })
         .fuse()

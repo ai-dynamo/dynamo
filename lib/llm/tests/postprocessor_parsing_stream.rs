@@ -477,6 +477,98 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
     assert_eq!(content, "This is plain content");
 }
 
+/// Regression: if the stream ends after a partial `<think>` prefix, those bytes
+/// are valid content and must be flushed before the terminal chunk is emitted.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_on_finish()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<thi"), mock_final_chunk()];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    let mut finish_reasons = Vec::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+            if let Some(fr) = choice.finish_reason {
+                finish_reasons.push(fr);
+            }
+        }
+    }
+
+    assert_eq!(reasoning, "");
+    assert_eq!(content, "<thi");
+    assert!(finish_reasons.contains(&FinishReason::Stop));
+}
+
+/// Regression: the EOF path has no terminal delta to carry the buffered bytes,
+/// so the postprocessor must emit one final content chunk itself.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_on_eof() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<thi")];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(reasoning, "");
+    assert_eq!(content, "<thi");
+}
+
 /// Dynamo already represents streamed responses as `choices: Vec<_>`, so this
 /// test is not adding new `n > 1` behavior. It verifies that the Nemotron v3
 /// `force_nonempty_content=true` path does not use one shared strip buffer for
