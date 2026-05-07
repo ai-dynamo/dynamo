@@ -48,9 +48,6 @@ pub async fn run(
                 model.namespace(),
                 model.namespace_prefix(),
             );
-            // `--model-path` on the frontend supplies a local copy of
-            // metadata for workers whose path is unreachable from the
-            // frontend host. None means no override.
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             run_watcher(

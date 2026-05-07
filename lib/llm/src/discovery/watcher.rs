@@ -89,12 +89,9 @@ pub struct ModelWatcher {
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
-    /// Frontend's `--model-path`, if provided. When set, file:// (and
-    /// path-only) `CheckedFile` slots are rewritten to live under this
-    /// directory before fetch — basenames and worker-published checksums
-    /// preserved, remote URLs (`http`, `hf`) untouched. Lets a frontend
-    /// host a local copy of metadata when the worker's path is
-    /// unreachable and `source_path` isn't a valid HF repo id.
+    /// Frontend's `--model-path`. Threaded into `download_config` so
+    /// `file://` slots can fall back here when the worker's path is
+    /// unreachable on this host.
     local_model_path: Option<PathBuf>,
 }
 
@@ -183,9 +180,6 @@ impl ModelWatcher {
         self.model_update_tx = Some(tx);
     }
 
-    /// Set the frontend's `--model-path`. When provided, `file://` (and
-    /// path-only) `CheckedFile` slots in worker MDCs are rewritten to
-    /// live under this directory before fetch.
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
     }

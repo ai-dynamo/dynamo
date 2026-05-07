@@ -111,8 +111,6 @@ pub async fn prepare_engine(
                 prefill_load_estimator,
                 metrics,
             );
-            // `--model-path` supplies a local copy of metadata for
-            // workers whose path is unreachable from this host.
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }

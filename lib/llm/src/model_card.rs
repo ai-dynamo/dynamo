@@ -494,10 +494,9 @@ fn checked_file_uri(
 ) -> anyhow::Result<String> {
     use std::borrow::Cow;
 
-    // Coerce path-only CheckedFiles into a synthetic file:// URL, then
-    // dispatch on scheme. `std::path::absolute` doesn't require the
-    // path to exist on the frontend host, unlike `canonicalize` —
-    // worker paths often won't resolve here.
+    // Coerce path-only into a synthetic file:// URL up front so the
+    // scheme dispatch below covers both shapes uniformly. `absolute`
+    // (not `canonicalize`) — worker paths often don't exist here.
     let url: Cow<url::Url> = if let Some(u) = cf.url() {
         Cow::Borrowed(u)
     } else {
@@ -512,12 +511,7 @@ fn checked_file_uri(
     match url.scheme() {
         "http" | "https" | "hf" => Ok(url.to_string()),
         "file" => {
-            // file:// fallback chain:
-            //   1. worker's location resolves locally → use it
-            //   2. else --model-path/<basename> exists → rewrite
-            //   3. else hf://<source>/<filename>
-            // Filenames and worker-published checksums are always
-            // preserved; only the directory portion changes.
+            // worker location → --model-path → hf://. Basename + checksum preserved.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -1012,13 +1006,10 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
-    /// Download the files this card needs to work: config.json, tokenizer.json, etc.
-    ///
-    /// `local_model_path`: if set, the directory (typically the
-    /// frontend's `--model-path`) replaces the directory portion of any
-    /// `file://` (or path-only) `CheckedFile` slot. Filenames and
-    /// worker-published checksums are preserved; remote URLs (`http`,
-    /// `hf`) are honored as-is.
+    /// Resolve every metadata `CheckedFile` through the cache: fetch,
+    /// blake3-verify, content-address. `local_model_path` (frontend's
+    /// `--model-path`) supplies a fallback directory for `file://`
+    /// slots whose worker-published location is unreachable.
     pub async fn download_config(&mut self, local_model_path: Option<&Path>) -> anyhow::Result<()> {
         // TensorBased models don't use metadata files — backend handles
         // everything.
@@ -1840,107 +1831,34 @@ mod tests {
         .unwrap()
     }
 
-    /// Touch a `<dir>/<filename>` zero-byte file and return the absolute path.
-    fn touch(dir: &Path, filename: &str) -> PathBuf {
-        let p = dir.join(filename);
-        std::fs::write(&p, b"").unwrap();
-        p
-    }
-
-    /// Rung 1: http(s):// URLs are never modified, even when
-    /// --model-path is set.
     #[test]
-    fn checked_file_uri_passes_through_http() {
-        let cf = cf_for("http://worker:8080/v1/metadata/slug/base/config.json");
+    fn checked_file_uri_passes_through_remote_urls() {
         let tmp = tempfile::tempdir().unwrap();
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(tmp.path())).unwrap();
-        assert_eq!(got, "http://worker:8080/v1/metadata/slug/base/config.json");
+        for url in [
+            "http://worker:8080/v1/metadata/slug/base/config.json",
+            "hf://Qwen/Qwen3-0.6B/config.json",
+        ] {
+            let got =
+                super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path())).unwrap();
+            assert_eq!(got, url);
+        }
     }
 
-    /// Rung 1: hf:// URLs are never modified.
     #[test]
-    fn checked_file_uri_passes_through_hf() {
-        let cf = cf_for("hf://Qwen/Qwen3-0.6B/config.json");
-        let tmp = tempfile::tempdir().unwrap();
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(tmp.path())).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/config.json");
-    }
-
-    /// Rung 2: file:// URL whose target exists locally is honored as-is
-    /// even when --model-path is set.
-    #[test]
-    fn checked_file_uri_keeps_existing_file_url() {
-        let worker = tempfile::tempdir().unwrap();
-        touch(worker.path(), "config.json");
-        let url = url::Url::from_file_path(worker.path().join("config.json")).unwrap();
-        let cf = cf_for(url.as_str());
-
-        let other = tempfile::tempdir().unwrap();
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(other.path())).unwrap();
-        assert_eq!(got, url.to_string());
-    }
-
-    /// Rung 3: file:// URL whose target is missing AND --model-path
-    /// has the basename → rewrite to the local copy.
-    #[test]
-    fn checked_file_uri_rewrites_missing_file_url_to_local() {
-        let cf = cf_for("file:///nonexistent/worker/path/config.json");
-
-        let local = tempfile::tempdir().unwrap();
-        let local_cfg = touch(local.path(), "config.json");
-
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path())).unwrap();
-        let expected = url::Url::from_file_path(&local_cfg).unwrap().to_string();
-        assert_eq!(got, expected);
-    }
-
-    /// Rung 4: file:// URL whose target is missing AND --model-path
-    /// also lacks the basename → fall back to hf://<source>/<filename>.
-    #[test]
-    fn checked_file_uri_falls_back_to_hf_when_local_lacks_basename() {
-        let cf = cf_for("file:///nonexistent/worker/path/tokenizer.json");
-        let local = tempfile::tempdir().unwrap(); // intentionally empty
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path())).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/tokenizer.json");
-    }
-
-    /// Rung 4: file:// URL whose target is missing AND no --model-path
-    /// → fall back to hf://.
-    #[test]
-    fn checked_file_uri_falls_back_to_hf_without_local_path() {
-        let cf = cf_for("file:///nonexistent/worker/path/config.json");
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/config.json");
-    }
-
-    /// Rung 2 (path-only): worker's path exists on this host → use it
-    /// as a synthesized file:// URL.
-    #[test]
-    fn checked_file_uri_path_only_existing_returns_file_url() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = touch(dir.path(), "config.json");
-        let cf = cf_for(p.to_str().unwrap());
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None).unwrap();
-        let expected = url::Url::from_file_path(&p).unwrap().to_string();
-        assert_eq!(got, expected);
-    }
-
-    /// Rung 3 (path-only): worker's path is missing AND --model-path
-    /// has the basename → rewrite to local.
-    #[test]
-    fn checked_file_uri_path_only_missing_uses_local_model_path() {
+    fn checked_file_uri_uses_local_model_path_when_worker_path_unreachable() {
         let cf = cf_for("/nonexistent/worker/path/config.json");
         let local = tempfile::tempdir().unwrap();
-        let local_cfg = touch(local.path(), "config.json");
+        let local_cfg = local.path().join("config.json");
+        std::fs::write(&local_cfg, b"").unwrap();
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path())).unwrap();
-        let expected = url::Url::from_file_path(&local_cfg).unwrap().to_string();
-        assert_eq!(got, expected);
+        assert_eq!(
+            got,
+            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+        );
     }
 
-    /// Rung 4 (path-only): worker's path is missing AND no
-    /// --model-path → fall back to hf://.
     #[test]
-    fn checked_file_uri_path_only_missing_falls_back_to_hf() {
+    fn checked_file_uri_falls_back_to_hf_when_local_path_unavailable() {
         let cf = cf_for("/nonexistent/worker/path/config.json");
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None).unwrap();
         assert_eq!(got, "hf://Qwen/Qwen3-0.6B/config.json");
