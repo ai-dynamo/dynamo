@@ -142,6 +142,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._save_stream: torch.cuda.Stream | None = None
         self._device: torch.device | None = None
 
+        logger.info(
+            "DynamoMultimodalEmbeddingCacheConnector initialized: "
+            "role=%s, capacity_gb=%.6f, capacity_bytes=%d, bytes_per_embed=%d",
+            role.name,
+            capacity_gb,
+            self._capacity_bytes,
+            self._bytes_per_embed,
+        )
+
     # ==============================
     # Scheduler-side methods
     # ==============================
