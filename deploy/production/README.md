@@ -16,6 +16,8 @@ The production stack has two layers:
 
 This keeps `deploy/helm/charts/platform` close to upstream Dynamo while still providing a repeatable full-stack deployment.
 
+Each add-on under [`addons/`](addons/) has an individual README that records its Argo CD application, chart source, owned responsibilities, exclusions, verification commands, and upgrade notes.
+
 ## Baseline Add-ons
 
 | Capability | Add-on | Why it is external |
