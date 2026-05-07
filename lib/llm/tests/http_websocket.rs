@@ -227,13 +227,42 @@ async fn realtime_websocket_audio_append_streams_response_envelope() {
                     .and_then(|d| d.as_str())
                     .expect("delta is a string");
                 deltas.push_str(delta);
+                let id = event
+                    .pointer("/response_id")
+                    .and_then(|s| s.as_str())
+                    .expect("delta carries response_id");
+                assert_eq!(
+                    Some(id),
+                    response_id.as_deref(),
+                    "delta response_id should match response.created"
+                );
             }
-            "response.output_audio.done" => saw_audio_done = true,
+            "response.output_audio.done" => {
+                saw_audio_done = true;
+                let id = event
+                    .pointer("/response_id")
+                    .and_then(|s| s.as_str())
+                    .expect("audio.done carries response_id");
+                assert_eq!(
+                    Some(id),
+                    response_id.as_deref(),
+                    "audio.done response_id should match response.created"
+                );
+            }
             "response.done" => {
                 response_done_status = event
                     .pointer("/response/status")
                     .and_then(|s| s.as_str())
                     .map(String::from);
+                let id = event
+                    .pointer("/response/id")
+                    .and_then(|s| s.as_str())
+                    .expect("response.done carries response.id");
+                assert_eq!(
+                    Some(id),
+                    response_id.as_deref(),
+                    "response.done id should match response.created"
+                );
             }
             other => panic!("unexpected event type {other:?} in audio echo stream: {event}"),
         }
