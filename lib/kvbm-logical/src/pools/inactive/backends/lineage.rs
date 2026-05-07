@@ -350,6 +350,14 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for LineageBackend<T> {
         matches
     }
 
+    fn find_match(
+        &mut self,
+        hash: PositionalLineageHash,
+        _touch: bool,
+    ) -> Option<Block<T, Registered>> {
+        self.remove(&hash)
+    }
+
     fn scan_matches(
         &mut self,
         hashes: &[PositionalLineageHash],

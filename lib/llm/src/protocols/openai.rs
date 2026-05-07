@@ -20,6 +20,7 @@ pub mod images;
 pub mod models;
 pub mod nvext;
 pub mod responses;
+pub mod stream_aggregator;
 pub mod tools;
 pub mod validate;
 pub mod videos;

@@ -20,10 +20,9 @@ use dynamo_mocker::loadgen::Trace;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{
-    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run,
-    trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines},
-};
+use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
+use dynamo_bench::kv_router_common::results::{BenchmarkRun, compute_benchmark_run};
+use dynamo_bench::kv_router_common::trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,21 +399,6 @@ fn merge_event_worker_traces(
     Ok(WorkerTimelines::new(worker_traces))
 }
 
-fn synthesized_tokens(
-    turn: &dynamo_mocker::loadgen::TurnTrace,
-    trace_block_size: usize,
-) -> Vec<u32> {
-    let mut tokens = Vec::with_capacity(turn.input_length);
-    for &hash_id in &turn.hash_ids {
-        tokens.extend((0..trace_block_size).map(|_| hash_id as u32));
-        if tokens.len() >= turn.input_length {
-            tokens.truncate(turn.input_length);
-            break;
-        }
-    }
-    tokens
-}
-
 fn merge_approx_worker_traces(
     traces: &[Trace],
     block_size: u32,
@@ -430,7 +414,7 @@ fn merge_approx_worker_traces(
                     timestamp_ms += turn.delay_after_previous_ms;
                 }
                 let replay_hashes = turn.to_replay_hashes(trace_block_size, block_size as usize)?;
-                let tokens = synthesized_tokens(turn, trace_block_size);
+                let tokens = turn.synthesize_tokens(trace_block_size)?;
                 let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
                 entries.push(WorkerTrace {
                     timestamp_us,
