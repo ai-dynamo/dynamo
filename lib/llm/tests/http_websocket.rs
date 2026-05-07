@@ -89,8 +89,7 @@ async fn expect_text_event(
 }
 
 /// On connect, the server emits `session.created` as the first wire frame —
-/// per the OpenAI Realtime spec, before any client event arrives. This is the
-/// merge-blocker the rest of the slice gates on.
+/// per the OpenAI Realtime spec, before any client event arrives.
 #[tokio::test]
 async fn realtime_websocket_emits_session_created_on_connect() {
     let (port, token, handle) = spawn_test_service().await;

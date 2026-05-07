@@ -23,6 +23,10 @@ pub use async_openai::types::realtime::*;
 ///
 /// Implemented today only for `RealtimeClientEvent`. The `RealtimeServerEvent`
 /// impl can be added when a consumer needs it.
+///
+/// [NOTE] Could be replaced with a serde-introspection helper (e.g. the
+  /// `serde_variant` crate) that reads the wire tag from `#[serde(rename)]`
+  /// at runtime; deferred until as clean up work.
 pub trait EventType {
     fn event_type(&self) -> &'static str;
 }
