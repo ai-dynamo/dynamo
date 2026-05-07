@@ -32,6 +32,31 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+async def parse_tool_call(
+    parser_name: str,
+    message: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse tool calls from a model output string using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
+        message:     Model output text to parse.
+        tools_json:  Optional JSON-serialized list of tool definitions in the form
+                     `[{"name": "...", "parameters": {...}}, ...]` (or OpenAI shape
+                     with `{"function": {...}}` wrapper). Used by parsers that need
+                     schema-aware coercion (e.g. XML family).
+
+    Returns:
+        JSON-serialized string `{"calls": [...], "normal_text": str | None}`.
+        Each entry in `calls` is `{"id", "type", "function": {"name", "arguments"}}`
+        with `arguments` itself a JSON-serialized string.
+
+    Raises:
+        ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...

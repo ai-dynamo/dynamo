@@ -64,72 +64,78 @@ return preserved if annotation exists
 
 ## Structural Helpers
 
-Conversion helpers should generally follow a `src`, `dst`, `restored`, `save`,
-`ctx` shape:
+Conversion policy belongs in API conversion code. Controllers, reconcilers, and
+internal packages must not implement or wrap conversion. Temporary callers that
+need converted data must call the same exported structural converters used by
+the real conversion path. Read-only getters may live elsewhere; converters may
+not.
+
+Converters for API structs are exported from the `v1alpha1` package and are
+named after the v1alpha1 type:
 
 ```go
-func convertFooFromHub(
-	src *v1beta1.Foo,
-	dst *Foo,
-	restored *Foo,
-	save *v1beta1.Foo,
-	ctx fooConversionContext,
-) error {
-	// Convert representable fields from src to dst.
-
-	// Restore target-only fields that src cannot represent.
-
-	// Save source-only fields that dst cannot represent.
-
-	return nil
-}
+func ConvertFrom<TypeName>(src *TypeName, dst *v1beta1.HubType, ...)
+func ConvertTo<TypeName>(src *v1beta1.HubType, dst *TypeName, ...)
 ```
 
-The parameters have fixed meaning:
+Do not include `V1alpha1` in the name, and do not add wrapper functions with
+alternate names.
 
-- `src`: live source object. It is authoritative for every field representable
-  by the source version, including nil, empty, and zero values.
-- `dst`: converted target object.
-- `restored`: typed target-version data decoded from preservation annotations.
-  It may restore only target fields that `src` cannot represent.
-- `save`: typed source-version data that will be encoded into preservation
-  annotations. It may contain only source fields that `dst` cannot represent,
-  plus matching keys needed to locate those fields later.
-- `ctx`: typed high-level context needed by lower-level helpers.
+The parameter order is fixed:
 
-This mirrors conversion-gen's parameter discipline, not its generated function
-names. Because these conversions are handwritten, context should be typed
-instead of `any`. Avoid one global context type; prefer small family-specific
-contexts such as `dgdConversionContext`, `dcdConversionContext`,
-and `sharedSpecConversionContext`. Context should carry only cross-cutting
-information that leaves cannot derive from their local `src/restored/save`
-arguments.
+- `src`: live source object; authoritative for every representable field,
+  including nil, empty, and zero values.
+- `dst`: caller-owned, non-nil destination object.
+- `restored`: optional target-version data decoded from preservation
+  annotations; use it only for target-only fields.
+- `save`: optional source-version data to encode into preservation annotations;
+  write only source-only fields and keys needed to find them later.
+- `ctx`: optional typed context, always last.
 
-## Helper Naming
+`restored`, `save`, and `ctx` are included only when the converter needs them.
+Return `error` only when conversion can fail.
 
-Conversion helper names should be consistent and reveal the helper's role:
+Exported conversion-only helper types, such as typed contexts needed by
+exported converter signatures, must opt out of Kubernetes object generation and
+API reference docs.
 
-- `convert<Scope><Subject>ToHub` / `convert<Scope><Subject>FromHub`: convert
-  live representable fields and call local restore/save sections.
-- `restore<Scope><TargetOnly|HubOnly|AlphaOnly><Subject>`: copy only fields
-  the source version cannot represent from `restored` into `dst`.
-- `save<Scope><SourceOnly|HubOnly|AlphaOnly><Subject>`: copy only fields the
-  target version cannot represent from `src` into `save`.
-- `ensure<Scope>Save<Subject>...`: allocate nested objects inside the sparse
-  `save` payload and return the location the caller should fill.
-- `<scope><Subject><Predicate>`: answer a side-effect-free question used by
-  restore/save code, such as whether a live object still matches a preserved
-  key.
+Callers perform nil, disabled, zero, or absence checks before calling a
+converter and allocate nested `dst` objects explicitly. Converters do not accept
+`**T` and do not encode absence by setting `dst` to nil.
 
-Use the same `Scope` words that appear in the converted type or shared helper
-family, such as `DGD`, `DCD`, `DGDSA`, and `Shared`. Avoid ambiguous verbs such
-as `preserve` for conversion policy: use `restore` when reading `restored`, and
-`save` when writing `save`.
+Converters must mirror API type structure. A converter handles the fields of
+its own type and delegates each converted nested API struct to that nested
+struct's `ConvertFrom<SubStruct>` or `ConvertTo<SubStruct>` function. Do not
+convert multiple nested API layers at once in a parent converter.
+
+Local helpers are allowed only for conversion-private implementation details
+that are not API-struct converters: `restore*` readers, `save*` writers,
+`ensure*` allocators for sparse save payloads, side-effect-free predicates, and
+field-group projections such as podTemplate composition/decomposition. Use
+`restore` when reading `restored` and `save` when writing `save`.
+
+Converters may share data between `src` and `dst`, but they must never mutate
+`src`. Deep-copy only when the converter will mutate the copy or when separate
+ownership is required.
 
 ## Preservation Annotations
 
 Preservation annotations exist only to make unrepresentable data survive a
 round trip through a version that cannot express it natively.
+
+Preservation annotations are private to conversion code. Only API conversion
+code and its conversion tests may know their keys or payload shape. Controllers,
+reconcilers, webhooks, internal helper packages, and general API helpers must
+not read, write, delete, filter, decode, encode, branch on, or expose them.
+Keep annotation key constants unexported and local to conversion files. Do not
+define shared constants, prefixes, string literals, getters, predicates, or
+wrapper helpers for conversion annotations outside conversion code.
+
+Non-conversion code may copy Kubernetes metadata opaquely as part of normal
+object handling, but it must not identify or interpret individual conversion
+annotations. If non-conversion code needs data that currently appears only in a
+preservation annotation, add or call a real conversion helper instead of
+decoding the annotation.
 
 It is acceptable for the annotation payload to include representable fields as
 context. Restore code must explicitly ignore those fields unless they are needed
@@ -292,11 +298,24 @@ For each helper:
 - Are named-list fields matched by their list-map key, never by index?
 - Is the save payload sparse?
 - Are origin annotations used only as hints, not as shortcuts?
+- Are conversion annotations private to conversion code and absent from
+  controllers/internal helpers?
 - Are nil and empty shapes preserved where round-trip tests require them?
 
 ## Mutability
 
 Conversion functions must not mutate their input object.
+
+`src` and `dst` may share backing data when the converted value can be assigned
+as-is. Do not add `DeepCopy` calls only because a field came from `src`.
+Aliasing is acceptable when the conversion code treats the shared value as
+read-only after assignment.
+
+Use `DeepCopy` only when the conversion needs an independently mutable value:
+for example, before editing, appending to, sorting, normalizing, clearing,
+merging into, or otherwise mutating a value that came from `src`. This applies
+equally to direct mutation through `src` and indirect mutation through a `dst`
+field that aliases `src`; both violate the "do not mutate input" invariant.
 
 The round-trip fuzz tests snapshot inputs through YAML before conversion because
 marshalling observes the actual in-memory shape, including aliasing bugs that a
