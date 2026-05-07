@@ -537,7 +537,6 @@ class TestDiffusionEngineGenerate:
         class FakeDiffusionRequest:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
-                self.extra_params = kwargs.get("extra_params")
                 for k, v in kwargs.items():
                     setattr(self, k, v)
 
