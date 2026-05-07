@@ -254,7 +254,7 @@ runs:
             echo "📊 Coverage collection enabled"
             COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
           fi
-          
+
           # When max_vram_gib is set, the GPU-parallel orchestrator
           # (tests/utils/pytest_parallel_gpu.py via tests/conftest.py) takes over
           # parallelism. We pass `--max-vram-gib=N` plus `-n auto`; the conftest
