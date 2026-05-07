@@ -748,7 +748,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 	log := log.FromContext(ctx)
 	log.Info("Starting generateIngress")
 
-	ingressSpec, hasIngressSpec, err := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
+	ingressSpec, hasIngressSpec, err := r.dcdIngressSpec(opt.dynamoComponentDeployment)
 	if err != nil {
 		return nil, false, err
 	}
@@ -770,7 +770,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 	log := log.FromContext(ctx)
 	log.Info("Starting generateVirtualService")
 
-	ingressSpec, hasIngressSpec, err := preservedAlphaIngressSpec(opt.dynamoComponentDeployment)
+	ingressSpec, hasIngressSpec, err := r.dcdIngressSpec(opt.dynamoComponentDeployment)
 	if err != nil {
 		return nil, false, err
 	}
@@ -790,6 +790,33 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 
 func preservedAlphaIngressSpec(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (dynamo.IngressSpec, bool, error) {
 	return dynamo.GetDCDPreservedAlphaIngressSpec(dcd)
+}
+
+func (r *DynamoComponentDeploymentReconciler) dcdIngressSpec(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (dynamo.IngressSpec, bool, error) {
+	ingressSpec, ok, err := preservedAlphaIngressSpec(dcd)
+	if err != nil || ok {
+		return ingressSpec, ok, err
+	}
+	if dcd == nil || !dcd.IsFrontendComponent() {
+		return dynamo.IngressSpec{}, false, nil
+	}
+	parentDGDName := dcd.GetParentGraphDeploymentName()
+	if parentDGDName == "" && dcd.Labels != nil {
+		parentDGDName = dcd.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+	}
+	if parentDGDName == "" {
+		return dynamo.IngressSpec{}, false, nil
+	}
+	if r == nil || r.Config == nil {
+		return dynamo.IngressSpec{}, false, nil
+	}
+	parentDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      parentDGDName,
+			Namespace: dcd.Namespace,
+		},
+	}
+	return dynamo.GenerateDefaultIngressSpec(parentDGD, r.Config.Ingress), true, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {

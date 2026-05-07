@@ -161,9 +161,6 @@ func GetDCDComponentName(dcd *v1beta1.DynamoComponentDeployment) string {
 	if dcd == nil {
 		return ""
 	}
-	if spec := getDCDAlphaSharedSpec(dcd); spec != nil && spec.ServiceName != "" {
-		return spec.ServiceName
-	}
 	if dcd.Spec.ComponentName != "" {
 		return dcd.Spec.ComponentName
 	}
@@ -171,6 +168,9 @@ func GetDCDComponentName(dcd *v1beta1.DynamoComponentDeployment) string {
 		if componentName := dcd.Labels[commonconsts.KubeLabelDynamoComponent]; componentName != "" {
 			return componentName
 		}
+	}
+	if spec := getDCDAlphaSharedSpec(dcd); spec != nil && spec.ServiceName != "" {
+		return spec.ServiceName
 	}
 	return dcd.Name
 }

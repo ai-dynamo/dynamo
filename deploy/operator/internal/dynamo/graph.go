@@ -458,8 +458,11 @@ func applyDynDeploymentConfig(ctx context.Context, dcd *v1beta1.DynamoComponentD
 		return err
 	}
 	serviceConfig := getDynDeploymentServiceConfig(config, componentName, dcd.IsFrontendComponent())
-	if serviceConfig == nil || serviceConfig.ServiceArgs == nil || serviceConfig.ServiceArgs.Resources == nil {
+	if serviceConfig == nil || serviceConfig.ServiceArgs == nil {
 		return nil
+	}
+	if dcd.Spec.Replicas == nil && serviceConfig.ServiceArgs.Workers != nil {
+		dcd.Spec.Replicas = serviceConfig.ServiceArgs.Workers
 	}
 	return applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources)
 }

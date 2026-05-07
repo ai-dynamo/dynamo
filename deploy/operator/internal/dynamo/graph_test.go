@@ -788,6 +788,54 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 	}
 }
 
+func TestGenerateDynamoComponentsDeployments_UsesDynDeploymentWorkers(t *testing.T) {
+	tests := []struct {
+		name              string
+		componentReplicas *int32
+		wantReplicas      int32
+	}{
+		{
+			name:         "dyn config workers used when component replicas omitted",
+			wantReplicas: 2,
+		},
+		{
+			name:              "component replicas override dyn config workers",
+			componentReplicas: ptr.To(int32(3)),
+			wantReplicas:      3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const (
+				dgdName       = "test-dgd"
+				componentName = "service1"
+			)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: "default",
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Env: []corev1.EnvVar{{
+						Name:  commonconsts.DynamoDeploymentConfigEnvVar,
+						Value: fmt.Sprintf(`{"%s":{"ServiceArgs":{"workers":2}}}`, componentName),
+					}},
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: componentName,
+						ComponentType: v1beta1.ComponentTypeFrontend,
+						Replicas:      tt.componentReplicas,
+					}},
+				},
+			}
+
+			dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			require.NotNil(t, dcds[componentName].Spec.Replicas)
+			assert.Equal(t, tt.wantReplicas, *dcds[componentName].Spec.Replicas)
+		})
+	}
+}
+
 func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnnotations(t *testing.T) {
 	className := "nginx"
 	alpha := &v1alpha1.DynamoGraphDeployment{
