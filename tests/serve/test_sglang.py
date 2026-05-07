@@ -243,7 +243,10 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             # Bisected with tests/utils/profile_pytest.py: min=1104, 2x=2208.
-            pytest.mark.profiled_vram_gib(11.1),
+            # Keep this unprofiled for now so the GPU-parallel stage leaves it
+            # in the sequential stage; parallel E/P/D runs can trip UCX mm
+            # transport init on larger single-GPU runners.
+            # pytest.mark.profiled_vram_gib(11.1),
             pytest.mark.requested_sglang_kv_tokens(2208),
             pytest.mark.timeout(206),  # profiled 34s on RTX 6000 Ada
             pytest.mark.pre_merge,
@@ -590,7 +593,6 @@ def test_sglang_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     num_system_ports,
-    set_ucx_tls_no_mm,
     predownload_models,
 ):
     """Test SGLang deployment scenarios using common helpers"""
@@ -669,7 +671,6 @@ def lora_chat_payload(
 def test_sglang_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
-    set_ucx_tls_no_mm,
     predownload_models,
     minio_lora_service,
     dynamo_dynamic_ports,
