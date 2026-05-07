@@ -55,7 +55,7 @@ spec:
                 --synthetic-input-tokens-stddev 0 \
                 --image-width-mean 480 \
                 --image-width-stddev 0 \
-                --image-height-mean 480 \
+                --image-height-mean 854 \
                 --image-height-stddev 0 \
                 --image-batch-size 20 \
                 --output-tokens-mean $osl \
