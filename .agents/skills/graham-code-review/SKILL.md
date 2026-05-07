@@ -34,7 +34,7 @@ Unless explicitly told otherwise, review **only the recently written/modified co
 
 1. Identify the review target with `git status`, `git diff --stat`, and `git diff`.
 
-2. Loop: Use the philosophy, rules and rubrics in this file to find an issue. Repeat this step several times doing multiple passes over the code, keep findings issues and style comments that this skill cares about until you cannot find any more.
+2. Loop: Use the philosophy, rules and rubrics in this file to find an issue. Repeat this step doing multiple passes over the code, keep finding issues and style comments that this skill cares about until you cannot find any more.
 
 3. Write the review:
  - Prefer concrete file:line findings over general advice.
