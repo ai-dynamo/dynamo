@@ -47,19 +47,22 @@ navigation:
       - page: Glossary
         path: reference/glossary.md
 
-  # ==================== Blog ====================
-  - section: Blog
-    path: blogs/index.mdx
-    slug: blog
+  # ==================== Digest ====================
+  - section: Digest
+    path: digest/index.mdx
+    slug: digest
     contents:
+      - page: "Dynamo Day 0 support for TokenSpeed"
+        path: digest/tokenspeed/tokenspeed-day-0.md
+        slug: tokenspeed-day-0
       - page: "Multi-Turn Agentic Harnesses"
-        path: blogs/agentic-inference/agentic-harnesses.md
+        path: digest/agentic-inference/agentic-harnesses.md
         slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
-        path: blogs/agentic-inference/agentic-inference.md
+        path: digest/agentic-inference/agentic-inference.md
         slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: blogs/flash-indexer/flash-indexer.md
+        path: digest/flash-indexer/flash-indexer.md
         slug: flash-indexer
 
   # ==================== Kubernetes Deployment ====================

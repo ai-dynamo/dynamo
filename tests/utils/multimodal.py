@@ -30,8 +30,16 @@ AUDIO_TEST_URL = (
 # ---------------------------------------------------------------------------
 
 
-def make_image_payload(expected_response: list[str]) -> ChatPayload:
-    """Standard image color-identification payload using MULTIMODAL_IMG_URL."""
+def make_image_payload(
+    expected_response: list[str], *, max_attempts: int = 1
+) -> ChatPayload:
+    """Standard image color-identification payload using MULTIMODAL_IMG_URL.
+
+    ``max_attempts`` is the cap on validation attempts inside
+    ``run_serve_deployment`` — set >1 only for known-flaky multimodal
+    smoke checks (see tests/README.md "Flaky Tests"). The server stays
+    up across attempts; only the request/response is re-issued.
+    """
     return chat_payload(
         [
             {
@@ -48,6 +56,7 @@ def make_image_payload(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,
+        max_attempts=max_attempts,
     )
 
 
@@ -102,6 +111,7 @@ class TopologyConfig:
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
     single_gpu: bool = False  # append --single-gpu to script_args
+    two_gpu: bool = False  # append --two-gpu to script_args (epd only)
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess
 
 
@@ -151,6 +161,8 @@ def make_multimodal_configs(
         script_args = ["--model", profile.name] + profile.extra_vllm_args
         if topo_cfg.single_gpu:
             script_args.append("--single-gpu")
+        if topo_cfg.two_gpu:
+            script_args.append("--two-gpu")
 
         gpu = topo_cfg.gpu_marker or profile.gpu_marker
         marks: list[Any] = [

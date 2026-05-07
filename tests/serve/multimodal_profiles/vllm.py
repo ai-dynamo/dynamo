@@ -125,6 +125,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     ),
     # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
     # We may use less GPUs by squeezing the model onto 2 GPUs.
+    #
+    # Encoder VRAM is STATIC (~13.5 GB peak on a 48 GB RTX 6000 Ada,
+    # independent of --gpu-memory-utilization): the dynamo encode worker
+    # falls through to AutoModel.from_pretrained(..., torch_dtype=fp16) for
+    # non-Qwen-VL models and loads the full LLaVA-1.5-7b weights before
+    # extracting .visual. See disagg_multimodal_e_pd.sh and
+    # components/src/dynamo/vllm/multimodal_utils/model.py:load_vision_model.
+    # PD VRAM is bounded by --kv-cache-memory-bytes (set via
+    # requested_vllm_kv_cache_bytes marker → _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES);
+    # without that marker, the PD fraction $DYN_PD_GPU_MEM applies.
     MultimodalModelProfile(
         name="llava-hf/llava-1.5-7b-hf",
         short_name="llava-1.5-7b",
@@ -132,16 +142,45 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=600,
-                gpu_marker="gpu_4",
+                gpu_marker="gpu_2",
+                # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
+                # 2x RTX 6000 Ada (48 GB each). Encoder GPU peaked ~13.5 GB
+                # (static, full model fp16 load); PD GPU peaked ~19 GB
+                # (weights + KV @ 4 GB cap + activations). 2x safety on KV.
+                profiled_vram_gib=19.0,
+                requested_vllm_kv_cache_bytes=4_308_848_000,
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=600,
                 gpu_marker="gpu_4",
+                # Default 3-GPU layout: encode → GPU 0, prefill → GPU 1,
+                # decode → GPU 2. Each worker has its own GPU; per-GPU peak
+                # ~14-18 GB (single worker + weights + KV). Fits on 24 GB L4
+                # tier.
+                #
+                # The launch script also supports a 2-GPU pack via --two-gpu
+                # (TopologyConfig.two_gpu=True): encode + prefill on GPU 0,
+                # decode on GPU 1. NIXL still transfers KV from prefill→decode
+                # across the GPU boundary, so it preserves the disagg semantic.
+                # Profiled values for the 2-GPU layout (measured on RTX 6000 Ada
+                # 48 GB; not yet enabled because GPU 0 peaks at 30 GB which
+                # doesn't fit on 24 GB L4 cards):
+                #   gpu_marker="gpu_2"
+                #   two_gpu=True
+                #   profiled_vram_gib=32.2  # GPU 0 peak, encoder + prefill
+                #   requested_vllm_kv_cache_bytes=4_297_773_000  # 2× safety over min 2_148_886_016
+                # Re-enable when CI runner pool has ≥32 GB cards on at least
+                # one of the 2 slots.
             ),
         },
         # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
         # keep this as a multimodal serving smoke check, not a color oracle.
+        # The model also occasionally degenerates into newline-padded output
+        # (observed in CI: '\n\nWhat\n\n...' and '\n\n1') even with
+        # temperature=0; this is a known LLaVA-1.5-on-vLLM flake, so the
+        # payload retries the validation in-process (server stays up) before
+        # CI fails. See tests/README.md "Flaky Tests" — In-Process Query Retry.
         request_payloads=[
             make_image_payload(
                 [
@@ -154,7 +193,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "yellow",
                     "blue",
                     "orange",
-                ]
+                ],
+                max_attempts=5,
             )
         ],
     ),

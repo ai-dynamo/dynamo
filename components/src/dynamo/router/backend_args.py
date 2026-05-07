@@ -177,6 +177,6 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-event-threads",
             env_var="DYN_ROUTER_EVENT_THREADS",
             default=4,
-            help="KV Router: Number of event processing threads. >1 uses concurrent radix tree and thread pool for higher throughput. Ignored when --no-router-kv-events is set (approximate mode uses TTL expiration).",
+            help="KV Router: Number of KV indexer worker threads. >1 uses concurrent radix tree and thread pool for higher throughput, including approximate routing with --no-router-kv-events.",
             arg_type=int,
         )

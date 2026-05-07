@@ -22,8 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
-
 
 class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
@@ -230,52 +228,3 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
 
 
 _MAX_REDIRECTS = 3
-
-
-async def fetch_with_revalidation(
-    client: httpx.AsyncClient,
-    url: str,
-    policy: UrlValidationPolicy,
-) -> httpx.Response:
-    """Safely fetch a URL while checking security policy at every redirect.
-
-    Only ``_MAX_REDIRECTS`` hops allowed. ``client`` must have
-    ``follow_redirects=False`` (the default from ``get_http_client``).
-    We follow redirects ourselves and validate each ``Location`` header
-    against the policy first.
-
-    Only plain ``GET`` with no custom headers is supported. httpx normally
-    strips credentials on cross-origin redirects only when
-    ``follow_redirects=True``.
-
-    Raises ``UrlValidationError`` on any policy violation or when the
-    redirect chain exceeds ``_MAX_REDIRECTS``.
-    """
-    current_url = url
-    hops_remaining = _MAX_REDIRECTS
-    visited: list[str] = []
-
-    while True:
-        await validate_url(current_url, policy)
-        visited.append(current_url)
-
-        request = client.build_request("GET", current_url)
-        response = await client.send(request, follow_redirects=False)
-
-        if not response.is_redirect:
-            return response
-
-        location = response.headers.get("location")
-        if not location:
-            return response
-
-        if hops_remaining <= 0:
-            await response.aclose()
-            raise UrlValidationError(
-                f"Too many redirects (max={_MAX_REDIRECTS}); chain={visited}"
-            )
-        hops_remaining -= 1
-
-        next_url = str(response.url.join(location))
-        await response.aclose()
-        current_url = next_url

@@ -390,6 +390,69 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is None
         assert rp is not None
 
+    def test_reasoning_disabled_when_tool_choice_required(self):
+        """Reasoning parser is skipped when guided decoding is active."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        tcp, rp = create_parsers(
+            {"tools": tools, "tool_choice": "required"},
+            tool_call_parser_name="qwen25",
+            reasoning_parser_name="qwen3",
+        )
+        assert tcp is not None
+        assert rp is None
+
+    def test_reasoning_disabled_when_tool_choice_named(self):
+        """Reasoning parser is skipped for named tool_choice (guided decoding)."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        tcp, rp = create_parsers(
+            {
+                "tools": tools,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            },
+            tool_call_parser_name="qwen25",
+            reasoning_parser_name="qwen3",
+        )
+        assert tcp is not None
+        assert rp is None
+
+    def test_reasoning_active_when_tool_choice_auto(self):
+        """Reasoning parser remains active for tool_choice=auto (no guided decoding)."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        tcp, rp = create_parsers(
+            {"tools": tools, "tool_choice": "auto"},
+            tool_call_parser_name="qwen25",
+            reasoning_parser_name="qwen3",
+        )
+        assert tcp is not None
+        assert rp is not None
+
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     def test_none_when_no_tools(self):
@@ -1404,6 +1467,45 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
 
         assert "tools" not in captured["messages"][0]
+
+    @pytest.mark.parametrize("key", ["chat_template_kwargs", "chat_template_args"])
+    def test_enable_thinking_false_forwarded_to_template(self, tokenizer, key):
+        """enable_thinking=False reaches apply_chat_template via both key aliases."""
+        captured = {}
+        original_apply = tokenizer.apply_chat_template
+
+        def spy_apply(messages, **kwargs):
+            captured.update(kwargs)
+            return original_apply(messages, **kwargs)
+
+        tokenizer.apply_chat_template = spy_apply
+        try:
+            request = {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                key: {"enable_thinking": False},
+            }
+            result = preprocess_chat_request(
+                request,
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name="qwen3",
+            )
+            assert captured.get("enable_thinking") is False
+            assert result.force_reasoning is False
+        finally:
+            tokenizer.apply_chat_template = original_apply
+
+    def test_qwen3_defaults_to_thinking_mode(self, tokenizer):
+        """Without enable_thinking=False, qwen3 defaults to force_reasoning=True."""
+        result = preprocess_chat_request(
+            {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]},
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+        assert result.force_reasoning is True
+        assert result.reasoning_parser is not None
 
 
 # ---------------------------------------------------------------------------
