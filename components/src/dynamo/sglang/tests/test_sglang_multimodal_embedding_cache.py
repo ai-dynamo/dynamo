@@ -10,9 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
-from sglang.srt.managers.schedule_batch import Modality
 
-import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as encode_worker_module
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -99,6 +97,12 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     assert torch.equal(full_embeddings[:8], encoded[:8])
     assert torch.equal(full_embeddings[8:12], cached_tensor)
     assert torch.equal(full_embeddings[12:16], encoded[8:12])
+    new_cached_entry = cache_handler._embedding_cache.get(
+        cache_handler._url_hash(urls[0])
+    )
+    assert new_cached_entry is not None
+    assert new_cached_entry.image_grid_thw is None
+    assert new_cached_entry.model_specific_data == {"image_grid_thw": [1, 2, 4]}
 
     new_cached_entry = cache_handler._embedding_cache.get(
         cache_handler._url_hash(urls[0])
@@ -148,7 +152,7 @@ async def test_encode_with_cache_all_hit_no_remote_call(
 
 @pytest.mark.asyncio
 async def test_video_requests_reuse_cached_embeddings(
-    cache_handler: MultimodalEncodeWorkerHandler, monkeypatch: pytest.MonkeyPatch
+    cache_handler: MultimodalEncodeWorkerHandler,
 ) -> None:
     """Second identical video request should reuse cached embeddings."""
 
@@ -157,17 +161,14 @@ async def test_video_requests_reuse_cached_embeddings(
     cache_handler.image_token_id = 151655
     cache_handler.video_token_id = video_token_id
 
-    mm_encode_mock = AsyncMock(
-        return_value=(
-            torch.tensor([[2, 3, 4]]),
-            torch.arange(24, dtype=torch.float32).reshape(6, 4),
-            {
-                "second_per_grid_ts": [0.5],
-                "video_timestamps": [[0.25, 0.75]],
-            },
-        )
+    cache_handler.encoder.encode_mock.return_value = (
+        torch.tensor([[2, 3, 4]]),
+        torch.arange(24, dtype=torch.float32).reshape(6, 4),
+        {
+            "second_per_grid_ts": [0.5],
+            "video_timestamps": [[0.25, 0.75]],
+        },
     )
-    monkeypatch.setattr(encode_worker_module, "mm_encode", mm_encode_mock)
 
     transfer_future = asyncio.get_running_loop().create_future()
     transfer_future.set_result(None)
@@ -214,11 +215,9 @@ async def test_video_requests_reuse_cached_embeddings(
     async for item in cache_handler.generate(raw_request, context=None):
         outputs_second.append(item)
 
-    mm_encode_mock.assert_awaited_once()
-    mm_encode_args = mm_encode_mock.await_args.args
-    assert mm_encode_args[0] is cache_handler.encoder
-    assert mm_encode_args[1] == [video_url]
-    assert mm_encode_args[2] == Modality.VIDEO
+    cache_handler.encoder.encode_mock.assert_awaited_once_with(
+        [video_url], Modality.VIDEO
+    )
 
     assert outputs == [{"token_ids": [7]}]
     assert outputs_second == [{"token_ids": [7]}]
@@ -248,22 +247,19 @@ async def test_video_requests_reuse_cached_embeddings(
 
 @pytest.mark.asyncio
 async def test_video_cache_key_includes_sampling_config(
-    cache_handler: MultimodalEncodeWorkerHandler, monkeypatch: pytest.MonkeyPatch
+    cache_handler: MultimodalEncodeWorkerHandler,
 ) -> None:
     """Changing video sampling config should force a cache miss for the same URL."""
 
     video_url = "https://example.com/clip.mp4"
-    mm_encode_mock = AsyncMock(
-        return_value=(
-            torch.tensor([[2, 3, 4]]),
-            torch.arange(24, dtype=torch.float32).reshape(6, 4),
-            {
-                "second_per_grid_ts": [0.5],
-                "video_timestamps": [[0.25, 0.75]],
-            },
-        )
+    cache_handler.encoder.encode_mock.return_value = (
+        torch.tensor([[2, 3, 4]]),
+        torch.arange(24, dtype=torch.float32).reshape(6, 4),
+        {
+            "second_per_grid_ts": [0.5],
+            "video_timestamps": [[0.25, 0.75]],
+        },
     )
-    monkeypatch.setattr(encode_worker_module, "mm_encode", mm_encode_mock)
 
     first_key = cache_handler._media_cache_key(
         video_url, Modality.VIDEO, cache_handler.encoder
@@ -279,6 +275,6 @@ async def test_video_cache_key_includes_sampling_config(
     await cache_handler._encode_with_cache([video_url], Modality.VIDEO)
 
     assert first_key != second_key
-    assert mm_encode_mock.await_count == 2
+    assert cache_handler.encoder.encode_mock.await_count == 2
     assert cache_handler._embedding_cache.get(first_key) is not None
     assert cache_handler._embedding_cache.get(second_key) is not None

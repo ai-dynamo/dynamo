@@ -253,12 +253,10 @@ class TestCachedEmbeddingNamedTuple:
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
         metadata = {"image_grid_thw": grid}
-        entry = CachedEmbedding(
-            tensor=tensor, image_grid_thw=grid, model_specific_data=metadata
-        )
+        entry = CachedEmbedding(tensor=tensor, model_specific_data=metadata)
 
         assert torch.equal(entry.tensor, tensor)
-        assert entry.image_grid_thw == grid
+        assert entry.image_grid_thw is None
         assert entry.model_specific_data == metadata
 
     def test_none_grid(self):
@@ -271,10 +269,8 @@ class TestCachedEmbeddingNamedTuple:
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
         metadata = {"image_grid_thw": grid}
-        entry = CachedEmbedding(
-            tensor=tensor, image_grid_thw=grid, model_specific_data=metadata
-        )
+        entry = CachedEmbedding(tensor=tensor, model_specific_data=metadata)
         t, g, m = entry
         assert torch.equal(t, tensor)
-        assert g == grid
+        assert g is None
         assert m == metadata

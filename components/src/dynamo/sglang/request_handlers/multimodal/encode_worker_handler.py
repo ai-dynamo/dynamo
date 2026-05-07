@@ -282,7 +282,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         return model_specific_data
 
     async def _encode_with_cache(
-        self, media_urls: list[str], modality: Any = Modality.IMAGE
+        self, media_urls: list[str], modality: Any
     ) -> tuple[Any, torch.Tensor, list[dict[str, Any]]]:
         """Cache-aware multimodal encoding.
 
