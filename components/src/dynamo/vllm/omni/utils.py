@@ -43,7 +43,6 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
 
 
 def _chat_content_to_text(content: Any) -> str:
-    """Extract the text portions from OpenAI chat content."""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -71,16 +70,11 @@ async def parse_omni_request(
       tokenizer_getter: async callable returning a tokenizer (e.g. engine.get_tokenizer).
           When provided, chat requests are formatted through the model's chat template
           so the thinker receives the same prompt as native ``vllm serve --omni``.
-      input_preprocessor_getter: async callable returning vLLM's input preprocessor.
-          When available, chat requests are rendered through vLLM's renderer so
-          processor-owned chat templates and multimodal content are handled the
-          same way as vLLM's OpenAI frontend.
 
     Returns:
       engine_inputs:        text prompt (str or OmniTextPrompt) for the stage 0 engine
       original_prompt:      rich prompt dict with geometry/params for processor functions
       sampling_params_list: raw user overrides dict (height/width/nvext) or None for chat
-      output_modalities:    per-request modalities for router/stage continuation
     """
     _, request_type = parse_request_type(request, output_modalities)
     requested_modalities = _requested_output_modalities(
@@ -149,11 +143,17 @@ async def parse_omni_request(
     # OpenAI API server applies the template before the engine sees it;
     # without it the thinker receives bare text instead of the full
     # chat-formatted prompt.
-    text = await _apply_chat_template(
-        messages,
-        fallback=text,
-        tokenizer_getter=tokenizer_getter,
-    )
+    if messages and tokenizer_getter is not None:
+        try:
+            tokenizer = await tokenizer_getter()
+            if tokenizer is not None:
+                text = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Chat template not available, using raw text"
+            )
 
     return {
         "engine_inputs": text,
@@ -170,17 +170,13 @@ async def _render_chat_engine_prompt(
     *,
     input_preprocessor_getter=None,
 ) -> dict | None:
-    """Render chat messages through vLLM's renderer when the engine exposes it."""
     if not messages or input_preprocessor_getter is None:
         return None
 
     try:
         input_preprocessor = await input_preprocessor_getter()
     except Exception:
-        logging.getLogger(__name__).debug(
-            "vLLM input preprocessor unavailable, falling back to tokenizer template",
-            exc_info=True,
-        )
+        logging.getLogger(__name__).debug("vLLM input preprocessor unavailable")
         return None
 
     renderer = getattr(input_preprocessor, "renderer", None)
@@ -197,15 +193,9 @@ async def _render_chat_engine_prompt(
         default_mm_processor_kwargs=request.get("mm_processor_kwargs"),
     )
 
-    prompt_extras = {
-        key: value
-        for key in ("mm_processor_kwargs", "cache_salt")
-        if (value := request.get(key)) is not None
-    }
     _, engine_prompts = await renderer.render_chat_async(
         [chat_request.messages],
         chat_params,
-        prompt_extras=prompt_extras or None,
     )
     if not engine_prompts:
         return None
@@ -217,15 +207,16 @@ async def _render_chat_engine_prompt(
 
 
 def _copy_chat_audio_metadata(request: dict, prompt: dict) -> None:
-    """Forward chat audio metadata in the shape vLLM-Omni processors expect."""
     audio = request.get("audio") if isinstance(request.get("audio"), dict) else {}
     speaker = request.get("speaker") or request.get("voice") or audio.get("voice")
     language = request.get("language") or audio.get("language")
     instruction = request.get("instructions") or audio.get("instructions")
-    if not any(
-        isinstance(value, str) and value.strip()
-        for value in (speaker, language, instruction)
-    ):
+    values = {
+        "speaker": speaker.lower().strip() if isinstance(speaker, str) else "",
+        "language": language.strip() if isinstance(language, str) else "",
+        "instruction": instruction.strip() if isinstance(instruction, str) else "",
+    }
+    if not any(values.values()):
         return
 
     additional_information = prompt.get("additional_information")
@@ -233,54 +224,31 @@ def _copy_chat_audio_metadata(request: dict, prompt: dict) -> None:
         additional_information = {}
         prompt["additional_information"] = additional_information
 
-    if isinstance(speaker, str) and speaker.strip():
-        additional_information["speaker"] = [speaker.lower().strip()]
-    if isinstance(language, str) and language.strip():
-        additional_information["language"] = [language.strip()]
-    if isinstance(instruction, str) and instruction.strip():
-        additional_information["instruction"] = instruction.strip()
-
-
-async def _apply_chat_template(
-    messages: list[dict], *, fallback: str, tokenizer_getter=None
-) -> str:
-    """Render messages with the model chat template when one is available."""
-    if not messages or tokenizer_getter is None:
-        return fallback
-    try:
-        tokenizer = await tokenizer_getter()
-        if tokenizer is None:
-            return fallback
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    except Exception:
-        logging.getLogger(__name__).debug("Chat template not available, using raw text")
-        return fallback
+    if values["speaker"]:
+        additional_information["speaker"] = [values["speaker"]]
+    if values["language"]:
+        additional_information["language"] = [values["language"]]
+    if values["instruction"]:
+        additional_information["instruction"] = values["instruction"]
 
 
 def _requested_output_modalities(
     request: dict, request_type: RequestType, configured_output_modalities: list
 ) -> list[str]:
-    """Return the modalities that this specific request asks the engine to emit."""
     if request_modalities := _modalities_from_request(request):
         return request_modalities
 
-    if request_type == RequestType.CHAT_COMPLETION:
-        return ["text"]
-    if request_type == RequestType.AUDIO_GENERATION:
-        return ["audio"]
-    if request_type == RequestType.IMAGE_GENERATION:
-        return ["image"]
-    if request_type == RequestType.VIDEO_GENERATION:
-        return ["video"]
-    return normalize_output_modalities(configured_output_modalities)
+    return {
+        RequestType.CHAT_COMPLETION: ["text"],
+        RequestType.AUDIO_GENERATION: ["audio"],
+        RequestType.IMAGE_GENERATION: ["image"],
+        RequestType.VIDEO_GENERATION: ["video"],
+    }.get(request_type, normalize_output_modalities(configured_output_modalities))
 
 
 def stage_satisfies_request(
     stage_config: Any, request_type: RequestType, request: dict
 ) -> bool:
-    """Return whether a stage's final output is the response this request needs."""
     terminal_modality = _terminal_output_modality(request_type, request)
     return bool(
         terminal_modality and stage_output_requested(stage_config, [terminal_modality])
@@ -290,7 +258,6 @@ def stage_satisfies_request(
 def stage_output_requested(
     stage_config: Any, request_output_modalities: list[str] | None
 ) -> bool:
-    """Return whether this final stage output is one of the request modalities."""
     if not getattr(stage_config, "final_output", False):
         return False
     final_output_type = str(getattr(stage_config, "final_output_type", "")).lower()
@@ -299,28 +266,19 @@ def stage_output_requested(
     )
 
 
-def request_includes_output_modality(request: dict, modality: str) -> bool:
-    """Check chat-style output modality hints from OpenAI-compatible payloads."""
-    return modality.lower() in _modalities_from_request(request)
-
-
 def _modalities_from_request(request: dict) -> list[str]:
     raw_modalities = request.get("modalities") or request.get("output_modalities")
-    if raw_modalities is None:
-        return []
     if isinstance(raw_modalities, str):
-        tokens = [raw_modalities]
-    elif isinstance(raw_modalities, list):
-        tokens = [str(token) for token in raw_modalities]
-    else:
-        return []
-    return normalize_output_modalities(tokens)
+        return normalize_output_modalities([raw_modalities])
+    if isinstance(raw_modalities, list):
+        return normalize_output_modalities(raw_modalities)
+    return []
 
 
 def _terminal_output_modality(request_type: RequestType, request: dict) -> str | None:
-    """Return the final modality where a routed request should stop."""
     if request_type == RequestType.CHAT_COMPLETION:
-        return "audio" if request_includes_output_modality(request, "audio") else "text"
+        requested = _modalities_from_request(request)
+        return next((m for m in ("audio", "video", "image") if m in requested), "text")
     return {
         RequestType.AUDIO_GENERATION: "audio",
         RequestType.IMAGE_GENERATION: "image",

@@ -182,21 +182,15 @@ class OmniStageRouter:
 
 
 def _merge_chat_completion_chunks(chunks: list[dict]) -> dict | None:
-    """Merge non-streaming chat chunks when multiple modalities finish together."""
     if len(chunks) < 2 or any(
         chunk.get("object") != "chat.completion.chunk" for chunk in chunks
     ):
         return None
 
     content_parts: list[Any] = []
-    finish_reason = None
-    stop_reason = None
     usage = None
     for chunk in chunks:
-        choices = chunk.get("choices") or []
-        if not choices:
-            return None
-        choice = choices[0]
+        choice = (chunk.get("choices") or [{}])[0]
         delta = choice.get("delta")
         if not isinstance(delta, dict):
             return None
@@ -208,27 +202,14 @@ def _merge_chat_completion_chunks(chunks: list[dict]) -> dict | None:
             content_parts.extend(content)
         elif content is not None:
             return None
-        finish_reason = choice.get("finish_reason") or finish_reason
-        stop_reason = choice.get("stop_reason") or stop_reason
         usage = chunk.get("usage") or usage
 
     if not content_parts:
         return None
 
-    merged = {
-        "id": chunks[-1]["id"],
-        "created": chunks[-1]["created"],
-        "object": "chat.completion.chunk",
-        "model": chunks[-1]["model"],
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": content_parts},
-                "finish_reason": finish_reason,
-                "stop_reason": stop_reason,
-            }
-        ],
-    }
+    merged = dict(chunks[-1])
+    merged["choices"] = [dict(chunks[-1]["choices"][0])]
+    merged["choices"][0]["delta"] = {"role": "assistant", "content": content_parts}
     if usage is not None:
         merged["usage"] = usage
     return merged

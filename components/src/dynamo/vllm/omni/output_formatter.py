@@ -381,12 +381,6 @@ class AudioFormatter:
         speed: float = 1.0,
         base64_encode: bool = False,
     ) -> tuple:
-        upstream = self._encode_audio_with_vllm_omni(
-            audio_np, sample_rate, fmt, speed, base64_encode
-        )
-        if upstream is not None:
-            return upstream
-
         if speed != 1.0:
             try:
                 import librosa
@@ -417,33 +411,6 @@ class AudioFormatter:
         if base64_encode:
             audio_data = base64.b64encode(audio_data).decode("utf-8")
         return audio_data, media_type
-
-    def _encode_audio_with_vllm_omni(
-        self,
-        audio_np: Any,
-        sample_rate: int,
-        fmt: str,
-        speed: float,
-        base64_encode: bool,
-    ) -> tuple | None:
-        try:
-            from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
-            from vllm_omni.entrypoints.openai.protocol.audio import CreateAudio
-
-            audio_response = AudioMixin().create_audio(
-                CreateAudio(
-                    audio_tensor=np.asarray(audio_np, dtype=np.float32),
-                    sample_rate=int(sample_rate),
-                    response_format=fmt or "wav",
-                    speed=speed,
-                    stream_format="audio",
-                    base64_encode=base64_encode,
-                )
-            )
-            return audio_response.audio_data, audio_response.media_type
-        except Exception:
-            logger.debug("vLLM-Omni audio codec unavailable; using local encoder")
-            return None
 
     def _error_response(self, request_id: str, error: str) -> Dict[str, Any]:
         return NvAudioSpeechResponse(

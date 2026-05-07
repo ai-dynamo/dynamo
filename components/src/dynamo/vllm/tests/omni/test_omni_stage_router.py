@@ -308,6 +308,59 @@ async def test_generate_audio_chat_continues_to_audio_stage():
 
 
 @pytest.mark.asyncio
+async def test_generate_image_chat_continues_to_image_stage():
+    stage1_called = False
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"image": "ok"}
+
+    async def stage0_handler(request):
+        return {
+            "original_prompt": {"prompt": "draw"},
+            "stage_connector_refs": {"0": {"name": "ref0"}},
+            "finished": True,
+        }
+
+    async def stage1_handler(request):
+        nonlocal stage1_called
+        stage1_called = True
+        return {"shm_meta": {"image": "meta"}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[
+            _make_stage_cfg(0, final_output=True, final_output_type="text"),
+            _make_stage_cfg(1, final_output=True, final_output_type="image"),
+        ],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
+
+    with patch(
+        "dynamo.vllm.omni.stage_router.parse_request_type",
+        return_value=(None, RequestType.CHAT_COMPLETION),
+    ):
+        with patch(
+            "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-image"
+        ):
+            with patch.object(
+                stage_router,
+                "shm_deserialize",
+                return_value=SimpleNamespace(final_output_type="image"),
+            ):
+                chunks = [
+                    c
+                    async for c in router.generate(
+                        {"messages": [], "modalities": ["text", "image"]}, None
+                    )
+                ]
+
+    assert stage1_called
+    assert chunks == [{"image": "ok"}]
+
+
+@pytest.mark.asyncio
 async def test_generate_combined_chat_merges_text_and_audio_chunks():
     mock_formatter = AsyncMock()
     mock_formatter.format.side_effect = [

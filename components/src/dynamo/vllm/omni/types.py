@@ -33,10 +33,6 @@ class StageEngine(Protocol):
         """Return the tokenizer (may be async — callers should await)."""
         ...
 
-    def get_input_preprocessor(self) -> Any:
-        """Return the vLLM input preprocessor for renderer-based chat parsing."""
-        ...
-
 
 class StageOutput(BaseModel):
     """Validated output dict from a stage worker.

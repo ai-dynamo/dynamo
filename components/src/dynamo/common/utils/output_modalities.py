@@ -69,13 +69,6 @@ def get_output_modalities(cli_input: List[str], model_repo: str) -> Optional[Mod
 
 
 def normalize_output_modalities(cli_input: Iterable[str] | None) -> List[str]:
-    """Normalize modality tokens from CLI/env input.
-
-    ``--output-modalities`` uses ``nargs="*"`` for shell-friendly invocations
-    such as ``--output-modalities text audio``. The environment variable and
-    older launchers can still arrive as a single comma-separated token. Split
-    both forms into the canonical lowercase list while preserving user order.
-    """
     if not cli_input:
         return []
 
@@ -92,20 +85,18 @@ def parse_request_type(
     raw_request: Dict[str, Any],
     output_modalities: List[str],
 ) -> Tuple[Union[BaseModel, Dict[str, Any]], RequestType]:
-    """
-    Classify an OpenAI request by payload shape and enabled output modalities.
-
-    Omni workers can enable multiple modalities behind one Dynamo endpoint.
-    In that mode the endpoint payload, not the first configured modality, is
-    the only reliable discriminator: chat requests contain ``messages``, TTS
-    requests contain ``input``, and image/video generation requests contain a
-    top-level ``prompt`` with modality-specific fields.
-    """
+    """Classify an OpenAI request by payload shape and enabled output modalities."""
     modality_names = normalize_output_modalities(output_modalities)
     if not modality_names:
         raise ValueError("output_modalities must not be empty")
 
     modalities = {OutputModality.from_name(name) for name in modality_names}
+    request_type_hint = raw_request.get("dynamo_request_type")
+
+    if request_type_hint == RequestType.VIDEO_GENERATION.value:
+        if OutputModality.VIDEO not in modalities:
+            raise ValueError("video request received but video modality is disabled")
+        return NvCreateVideoRequest(**raw_request), RequestType.VIDEO_GENERATION
 
     if "messages" in raw_request:
         return raw_request, RequestType.CHAT_COMPLETION
@@ -125,7 +116,6 @@ def parse_request_type(
 
 
 def _looks_like_video_request(raw_request: Dict[str, Any]) -> bool:
-    """Return True for fields that only video generation requests use."""
     if any(key in raw_request for key in ("seconds", "output_format", "stream")):
         return True
 

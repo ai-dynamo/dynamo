@@ -20,6 +20,9 @@ pub struct NvCreateVideoRequest {
     /// The model to use for video generation
     pub model: String,
 
+    #[serde(default = "default_request_type", skip_deserializing)]
+    pub dynamo_request_type: String,
+
     /// Optional image reference that guides generation (for I2V)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
@@ -120,6 +123,10 @@ fn default_progress() -> i32 {
     100
 }
 
+fn default_request_type() -> String {
+    "video_generation".to_string()
+}
+
 impl NvVideosResponse {
     pub fn empty() -> Self {
         Self {
@@ -206,6 +213,7 @@ mod tests {
         let req = NvCreateVideoRequest {
             prompt: "cat".into(),
             model: "wan".into(),
+            dynamo_request_type: default_request_type(),
             input_reference: None,
             seconds: None,
             size: None,

@@ -65,3 +65,17 @@ def test_parse_request_type_uses_video_model_for_video_specific_request():
 
     assert isinstance(parsed, NvCreateVideoRequest)
     assert request_type == RequestType.VIDEO_GENERATION
+
+
+def test_parse_request_type_honors_video_endpoint_hint_for_default_payload():
+    parsed, request_type = parse_request_type(
+        {
+            "prompt": "a short clip",
+            "model": "video-model",
+            "dynamo_request_type": "video_generation",
+        },
+        ["image", "video"],
+    )
+
+    assert isinstance(parsed, NvCreateVideoRequest)
+    assert request_type == RequestType.VIDEO_GENERATION
