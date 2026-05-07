@@ -14,7 +14,7 @@ on:
         type: boolean
         default: true
       run_tests:
-        description: 'Run vllm/sglang/trtllm tests + dynamo-pipeline checks. Schedule always runs them. Push events always skip them.'
+        description: 'Run vllm/sglang/trtllm tests + dynamo-pipeline checks. Schedule always runs them.'
         required: false
         type: boolean
         default: true
@@ -23,11 +23,6 @@ on:
         required: false
         type: boolean
         default: false
-  # REVERT THIS — dev-branch trigger for end-to-end integration testing.
-  # Remove the entire `push:` block before merging to main.
-  push:
-    branches:
-      - pvijayakrish/nightly-release-automate
 
 permissions:
   contents: read
@@ -65,48 +60,23 @@ jobs:
   # ============================================================================
   # RESOLVE SOURCE SHA
   # ============================================================================
-  # On schedule / workflow_dispatch (from main): use github.sha — already main HEAD.
-  # On push (dev-branch testing): pick the latest *successful* post-merge run on
-  # main, so the SHA we build/release is one whose post-merge ECR images already
-  # exist. This keeps every downstream job (shared-build-image, dynamo-pipeline,
-  # shared-test, release.yml) coherent on a single SHA.
+  # Single SHA every downstream job (shared-build-image, dynamo-pipeline,
+  # shared-test, release.yml) builds, tags, and releases against. On schedule
+  # and workflow_dispatch from main, this is just github.sha.
   resolve-source-sha:
     name: Resolve source SHA
     runs-on: ubuntu-slim
     permissions:
       contents: read
-      actions: read
     outputs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
     steps:
       - id: resolve
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # REVERT THIS — the `push` branch resolves main HEAD for dev-branch
-          # testing; once the push trigger is removed this whole if/else
-          # collapses to `SHA="${GITHUB_SHA}"`.
-          #
-          # Use the actual main HEAD (not last successful post-merge): our
-          # build jobs produce and push the ECR images themselves, so we
-          # don't depend on post-merge having already run for this SHA. The
-          # last-successful-post-merge approach picks stale SHAs whenever
-          # post-merge has been red recently, which then mismatches the
-          # current runner image (CUDA/sccache toolchain) and breaks the
-          # docker build.
-          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            SHA=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
-            if [ -z "${SHA}" ]; then
-              echo "::error::Failed to resolve main HEAD via gh api."
-              exit 1
-            fi
-            echo "Resolved push event source SHA from main HEAD: ${SHA}"
-          else
-            SHA="${GITHUB_SHA}"
-            echo "Using caller SHA: ${SHA}"
-          fi
+          SHA="${GITHUB_SHA}"
+          echo "Using caller SHA: ${SHA}"
           echo "source_sha=${SHA}" >> "$GITHUB_OUTPUT"
 
   # ============================================================================
@@ -156,13 +126,6 @@ jobs:
               # cron must keep tests on so a failing nightly blocks the release.
               echo "release=true" >> "$GITHUB_OUTPUT"
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
-              ;;
-            # REVERT THIS — dev-branch integration test path: run release,
-            # skip tests. Remove this whole `push)` case once the push
-            # trigger is removed.
-            push)
-              echo "release=true" >> "$GITHUB_OUTPUT"
-              echo "run_tests=false" >> "$GITHUB_OUTPUT"
               ;;
             workflow_dispatch)
               if [ "${DISPATCH_RELEASE}" = "false" ]; then
@@ -363,9 +326,7 @@ jobs:
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       fresh_builder: true
-      # REVERT THIS — push override hits cache for fast dev-branch iteration;
-      # restore `no_cache: true` once the push trigger is removed.
-      no_cache: ${{ github.event_name != 'push' }}
+      no_cache: true
       build_timeout_minutes: 120
       # TODO: widen beyond `pre_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
@@ -452,11 +413,10 @@ jobs:
   # ============================================================================
   # RELEASE (workflow_call into release.yml)
   # ============================================================================
-  # commit_sha is the SHA `resolve-source-sha` picked: github.sha on schedule
-  # and workflow_dispatch, or the latest successful post-merge SHA on push.
-  # release.yml requires post-merge CI to have already pushed images to ECR
-  # for that SHA; resolve-source-sha guarantees this on push, and on schedule
-  # it's true because post-merge runs on every merge and nightly fires later.
+  # commit_sha is the SHA `resolve-source-sha` picked (github.sha). release.yml
+  # requires post-merge CI to have already pushed images to ECR for that SHA;
+  # on schedule this is true because post-merge runs on every merge to main
+  # and nightly fires later.
   release:
     name: Release Nightly
     needs:

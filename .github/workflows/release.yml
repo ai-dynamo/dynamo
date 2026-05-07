@@ -83,10 +83,7 @@ jobs:
           fi
 
           if [[ "${NIGHTLY}" == "true" ]]; then
-            # REVERT THIS — dev-branch allowlist for nightly→release.yml→GitLab
-            # integration testing; restore the strict `!= "main"` check below
-            # once the integration lands on main.
-            if [[ "${BRANCH_NAME}" != "main" && "${BRANCH_NAME}" != "pvijayakrish/nightly-release-automate" ]]; then
+            if [[ "${BRANCH_NAME}" != "main" ]]; then
               echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
               exit 1
             fi
