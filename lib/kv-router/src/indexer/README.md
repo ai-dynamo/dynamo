@@ -391,7 +391,7 @@ There are five production indexer variants. This section maps deployment scenari
 
 ### Quick decision tree
 
-```
+```text
 Start
   │
   ├─ Single worker or worker-side local index?
