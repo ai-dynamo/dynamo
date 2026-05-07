@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import asyncio
 import re
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from dynamo.sglang.health_check import (
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -175,6 +177,61 @@ def test_routed_experts_kwarg_forwarded_when_flag_on_and_supported():
     assert DecodeWorkerHandler._resolve_routed_experts_kwargs(
         NewEngine(), server_args
     ) == {"return_routed_experts": True}
+
+
+@pytest.mark.asyncio
+async def test_prefill_generated_bootstrap_room_matches_dp_rank(monkeypatch):
+    captured_kwargs = {}
+
+    async def fake_results():
+        yield {"meta_info": {"id": "prefill-test"}}
+
+    class FakeEngine:
+        async def async_generate(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return fake_results()
+
+    class FakeContext:
+        trace_id = "trace-id"
+
+        def id(self):
+            return "context-id"
+
+        def async_killed_or_stopped(self):
+            return asyncio.Future()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = FakeEngine()
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(dp_size=8, enable_streaming_session=False)
+    )
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 30000
+    handler.enable_trace = False
+    handler.shutdown_event = None
+    handler._consume_tasks = set()
+    handler._engine_supports_priority = False
+    handler.lora_id_for_name = {}
+    monkeypatch.setattr(handler, "_get_input_param", lambda _request: {"input_ids": [1]})
+    monkeypatch.setattr(
+        PrefillWorkerHandler, "_generate_bootstrap_room", staticmethod(lambda: 4)
+    )
+
+    request = {
+        "token_ids": [1],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1},
+        "routing": {"dp_rank": 3},
+    }
+
+    outputs = []
+    async for output in handler.generate(request, FakeContext()):
+        outputs.append(output)
+
+    bootstrap_room = captured_kwargs["bootstrap_room"]
+    assert captured_kwargs["data_parallel_rank"] == 3
+    assert bootstrap_room % 8 == 3
+    assert outputs[0]["disaggregated_params"]["bootstrap_room"] == bootstrap_room
 
 
 def test_compat_caches_async_generate_signature_inspection(monkeypatch):

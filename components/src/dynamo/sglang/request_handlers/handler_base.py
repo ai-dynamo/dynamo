@@ -1095,6 +1095,27 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         """
         return random.randint(0, 2**63 - 1)
 
+    @classmethod
+    def _generate_bootstrap_room_for_dp(
+        cls, dp_rank: Optional[int], dp_size: Optional[int]
+    ) -> int:
+        """Generate a bootstrap room aligned to the selected prefill DP rank."""
+        if dp_rank is None or dp_size is None:
+            return cls._generate_bootstrap_room()
+
+        try:
+            rank = int(dp_rank)
+            size = int(dp_size)
+        except (TypeError, ValueError):
+            return cls._generate_bootstrap_room()
+
+        if rank < 0 or size <= 0 or rank >= size:
+            return cls._generate_bootstrap_room()
+
+        max_room = 2**63 - 1
+        max_q = (max_room - rank) // size
+        return random.randint(0, max_q) * size + rank
+
     @staticmethod
     def _get_bootstrap_info(engine: sgl.Engine) -> Tuple[str, int]:
         """Extract bootstrap host and port from SGLang engine.

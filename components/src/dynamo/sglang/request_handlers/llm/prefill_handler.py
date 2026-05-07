@@ -102,6 +102,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         bootstrap_host = self.bootstrap_host
         bootstrap_port = self.bootstrap_port
         bootstrap_room = None
+        routing = inner_request.get("routing") or {}
+        priority = routing.get("priority")
+        dp_rank = routing.get("dp_rank")
+
+        if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
+            dp_rank = None
 
         bootstrap_info_from_req = inner_request.get("bootstrap_info")
         if isinstance(bootstrap_info_from_req, dict):
@@ -121,7 +127,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
 
         if bootstrap_room is None:
-            bootstrap_room = self._generate_bootstrap_room()
+            dp_size = getattr(self.config.server_args, "dp_size", None)
+            bootstrap_room = self._generate_bootstrap_room_for_dp(dp_rank, dp_size)
             logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
         bootstrap_info = {
@@ -131,12 +138,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
-        routing = inner_request.get("routing") or {}
-        priority = routing.get("priority")
-        dp_rank = routing.get("dp_rank")
-
-        if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
-            dp_rank = None
 
         trace_header = build_trace_headers(context) if self.enable_trace else None
 
