@@ -359,7 +359,7 @@ def _make_thorough_patches(backend: str = "trtllm"):
         ),
         patch("dynamo.profiler.thorough.get_num_request_range", return_value=[1, 4, 8]),
         patch(
-            "dynamo.profiler.thorough.get_service_name_by_type",
+            "dynamo.profiler.thorough.pick_decode_component",
             return_value=svc_name,
         ),
     ]
@@ -435,7 +435,7 @@ class TestThoroughMocked:
                 side_effect=mock_profile_decode,
             ),
             patch(
-                "dynamo.profiler.interpolation.get_service_name_by_type",
+                "dynamo.profiler.interpolation.pick_decode_component",
                 return_value="TRTLLMWorker",
             ),
         ]

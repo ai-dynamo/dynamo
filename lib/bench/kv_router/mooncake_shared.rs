@@ -10,7 +10,7 @@ use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, RouterEvent, TokensWithHashes, WorkerWithDpRank,
+    KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
 use dynamo_kv_router::{
     AnchorAwareBranchShardedIndexer, BranchShardedIndexer, ConcurrentRadixTree,
@@ -20,10 +20,9 @@ use dynamo_mocker::loadgen::Trace;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{
-    BenchmarkRun, WorkerReplayArtifacts, compute_benchmark_run,
-    trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines},
-};
+use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
+use dynamo_bench::kv_router_common::results::{BenchmarkRun, compute_benchmark_run};
+use dynamo_bench::kv_router_common::trace_gen::{OrderedMerge, ReplayStartGate, WorkerTimelines};
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,8 +312,14 @@ pub struct MooncakeBenchmarkConfig {
 #[derive(Clone)]
 enum WorkerTraceEntry {
     Request(Vec<LocalBlockHash>),
-    Event(KvCacheEvent),
-    ApproxWrite { tokens: Vec<u32>, num_blocks: usize },
+    Event {
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    },
+    ApproxWrite {
+        tokens: Vec<u32>,
+        num_blocks: usize,
+    },
 }
 
 /// A timestamped entry in a worker's benchmark trace, used to replay requests
@@ -374,7 +379,10 @@ fn merge_event_worker_trace(
         },
         |event| WorkerTrace {
             timestamp_us: event.timestamp_us,
-            entry: WorkerTraceEntry::Event(event.event.clone()),
+            entry: WorkerTraceEntry::Event {
+                event: event.event.clone(),
+                storage_tier: event.storage_tier,
+            },
         },
     )
 }
@@ -389,21 +397,6 @@ fn merge_event_worker_traces(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     Ok(WorkerTimelines::new(worker_traces))
-}
-
-fn synthesized_tokens(
-    turn: &dynamo_mocker::loadgen::TurnTrace,
-    trace_block_size: usize,
-) -> Vec<u32> {
-    let mut tokens = Vec::with_capacity(turn.input_length);
-    for &hash_id in &turn.hash_ids {
-        tokens.extend((0..trace_block_size).map(|_| hash_id as u32));
-        if tokens.len() >= turn.input_length {
-            tokens.truncate(turn.input_length);
-            break;
-        }
-    }
-    tokens
 }
 
 fn merge_approx_worker_traces(
@@ -421,7 +414,7 @@ fn merge_approx_worker_traces(
                     timestamp_ms += turn.delay_after_previous_ms;
                 }
                 let replay_hashes = turn.to_replay_hashes(trace_block_size, block_size as usize)?;
-                let tokens = synthesized_tokens(turn, trace_block_size);
+                let tokens = turn.synthesize_tokens(trace_block_size)?;
                 let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
                 entries.push(WorkerTrace {
                     timestamp_us,
@@ -487,7 +480,7 @@ pub(crate) fn prepare_scaled_benchmark(
                 totals.request_blocks += hashes.len();
                 seq_pool.push(hashes.clone());
             }
-            WorkerTraceEntry::Event(event) => {
+            WorkerTraceEntry::Event { event, .. } => {
                 totals.events += 1;
                 totals.event_blocks += match &event.data {
                     KvCacheEventData::Stored(store) => store.blocks.len(),
@@ -576,10 +569,19 @@ pub(crate) async fn run_prepared_benchmark(
                         indexer.find_matches(request).await?;
                         Ok::<Option<u64>, anyhow::Error>(Some(start.elapsed().as_nanos() as u64))
                     }
-                    WorkerTraceEntry::Event(event) => {
-                        indexer
-                            .apply_event(RouterEvent::new(worker_id as u64, event))
-                            .await;
+                    WorkerTraceEntry::Event {
+                        event,
+                        storage_tier,
+                    } => {
+                        if storage_tier.is_gpu() {
+                            indexer
+                                .apply_event(RouterEvent::with_storage_tier(
+                                    worker_id as u64,
+                                    event,
+                                    storage_tier,
+                                ))
+                                .await;
+                        }
                         Ok(None)
                     }
                     WorkerTraceEntry::ApproxWrite { tokens, .. } => {

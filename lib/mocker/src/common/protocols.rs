@@ -11,7 +11,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::common::perf_model::PerfModel;
-use dynamo_kv_router::protocols::KvCacheEvent;
+use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
 
@@ -36,6 +36,14 @@ pub enum MockerEvictionBackend {
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        _storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.publish(event)
+    }
 }
 
 /// Raw KV event payload used by transport-specific publishers such as the
@@ -44,6 +52,7 @@ pub trait KvCacheEventSink: Send + Sync {
 pub struct RawKvEvent {
     pub event: KvCacheEvent,
     pub block_token_ids: Option<Vec<Vec<u32>>>,
+    pub storage_tier: StorageTier,
 }
 
 /// Trait for publishing transport-specific raw KV event payloads.
@@ -82,14 +91,24 @@ impl KvEventPublishers {
         event: KvCacheEvent,
         block_token_ids: Option<&[Vec<u32>]>,
     ) -> anyhow::Result<()> {
+        self.publish_with_storage_tier(event, block_token_ids, StorageTier::Device)
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        block_token_ids: Option<&[Vec<u32>]>,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
         if let Some(sink) = self.event_sink.as_ref() {
-            sink.publish(event.clone())?;
+            sink.publish_with_storage_tier(event.clone(), storage_tier)?;
         }
 
         if let Some(sink) = self.raw_sink.as_ref() {
             sink.publish(RawKvEvent {
                 event,
                 block_token_ids: block_token_ids.map(|token_ids| token_ids.to_vec()),
+                storage_tier,
             })?;
         }
 
