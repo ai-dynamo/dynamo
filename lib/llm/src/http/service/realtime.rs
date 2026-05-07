@@ -79,7 +79,7 @@ pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static st
 
 /// Convenience installer for tests/dev: registers the echo mock engine.
 pub fn install_echo_engine() -> Result<(), &'static str> {
-    install_engine(EchoBidirectionalEngine {})
+    install_engine(EchoBidirectionalEngine)
 }
 
 pub fn realtime_router(

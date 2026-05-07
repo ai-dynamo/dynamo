@@ -134,40 +134,17 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
     Arc::new(data)
 }
 
-/// Maximum byte length per [`response.output_audio.delta`] frame the echo
-/// engine emits. Slicing on a UTF-8 char boundary at or before this limit
-/// keeps multibyte characters intact; for the spec-shaped pure-ASCII base64
-/// audio that's the only contract this mock is built for, byte length and
-/// character count coincide. Picked small enough to demonstrate streaming
-/// (multiple deltas per append) on typical audio buffers, large enough to
-/// keep the frame count reasonable. No semantic meaning beyond pacing.
+/// Per-delta chunk size for the echo engine's audio output, in UTF-8-aware bytes.
 const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
 
-/// Bidirectional echo engine over the OpenAI Realtime event surface.
+/// Mock realtime engine for `/v1/realtime` end-to-end plumbing.
 ///
-/// For each [`RealtimeClientEvent`] the client sends, the engine emits a
-/// short stream of [`RealtimeServerEvent`]s that demonstrates the round-trip:
-/// * [`RealtimeClientEvent::SessionUpdate`] → one
-///   [`RealtimeServerEvent::SessionUpdated`] echoing the requested `session`.
-/// * [`RealtimeClientEvent::InputAudioBufferAppend`] → a spec-shaped response
-///   envelope:
-///   1. [`RealtimeServerEvent::ResponseCreated`] (`status: in_progress`)
-///   2. one or more [`RealtimeServerEvent::ResponseOutputAudioDelta`] frames
-///      echoing the base64 audio back in `ECHO_AUDIO_DELTA_CHUNK_LEN`-char
-///      chunks
-///   3. [`RealtimeServerEvent::ResponseOutputAudioDone`]
-///   4. [`RealtimeServerEvent::ResponseDone`] (`status: completed`)
-/// * Every other variant → [`RealtimeServerEvent::Error`] with
-///   `code = "echo_engine_unsupported"` and a message naming the variant.
-///
-/// Used by the experimental `/v1/realtime` WebSocket endpoint to demonstrate
-/// end-to-end bidirectional plumbing. The mock is intentionally minimal:
-/// real session lifecycle, audio buffering, transcription, VAD turn
-/// detection, conversation-item bookkeeping, and gating audio output on a
-/// `response.create` trigger all belong to a downstream engine, not here.
-/// Notably, this echo emits the response envelope *immediately on append*
-/// rather than waiting for `response.create` — a real engine would gate it.
-pub struct EchoBidirectionalEngine {}
+/// Echoes `session.update` and wraps `input_audio_buffer.append` in a
+/// spec-shaped response envelope; rejects everything else as
+/// `echo_engine_unsupported`. Unlike a real engine, the response envelope
+/// is emitted immediately on append rather than gated on `response.create` —
+/// the mock has no concept of turn-taking.
+pub struct EchoBidirectionalEngine;
 
 #[async_trait]
 impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
@@ -585,117 +562,9 @@ mod tests {
         serde_json::from_value(json).expect("valid realtime client event")
     }
 
-    /// SessionUpdate frames are echoed back as a single SessionUpdated server event
-    /// that carries the same Session payload — the round-trip the merge-blocker test
-    /// in `http_websocket.rs` relies on.
-    #[tokio::test]
-    async fn echo_bidirectional_session_update_roundtrip() {
-        let session_update = parse_client_event(serde_json::json!({
-            "type": "session.update",
-            "session": { "type": "realtime", "model": "gpt-realtime" }
-        }));
-
-        let engine = EchoBidirectionalEngine {};
-        let mut response_stream = engine
-            .generate(make_input(vec![session_update]))
-            .await
-            .expect("generate");
-
-        let chunk = response_stream.next().await.expect("one server event");
-        assert!(response_stream.next().await.is_none(), "exactly one event");
-
-        match chunk.data.expect("annotated payload") {
-            RealtimeServerEvent::SessionUpdated(updated) => {
-                assert!(!updated.event_id.is_empty());
-                let json = serde_json::to_value(&updated.session).unwrap();
-                assert_eq!(json["type"], "realtime");
-                assert_eq!(json["model"], "gpt-realtime");
-            }
-            other => panic!("expected session.updated, got {other:?}"),
-        }
-    }
-
-    /// `input_audio_buffer.append` produces a spec-shaped response envelope:
-    /// `response.created` → `response.output_audio.delta`×N →
-    /// `response.output_audio.done` → `response.done`. Frame IDs
-    /// (response_id, item_id) are stable across the turn so receivers can
-    /// group them. Statuses transition InProgress → Completed.
-    #[tokio::test]
-    async fn echo_bidirectional_append_streams_response_envelope_with_audio_deltas() {
-        // 200 base64 chars → 4 deltas (3×64 + 1×8) inside the envelope.
-        let audio = "A".repeat(200);
-        let append = parse_client_event(serde_json::json!({
-            "type": "input_audio_buffer.append",
-            "audio": audio.clone(),
-        }));
-
-        let engine = EchoBidirectionalEngine {};
-        let mut response_stream = engine
-            .generate(make_input(vec![append]))
-            .await
-            .expect("generate");
-
-        let mut events: Vec<RealtimeServerEvent> = Vec::new();
-        while let Some(chunk) = response_stream.next().await {
-            events.push(chunk.data.expect("annotated payload"));
-        }
-
-        // Envelope order: created, deltas..., audio.done, response.done.
-        let expected_deltas = 200_usize.div_ceil(ECHO_AUDIO_DELTA_CHUNK_LEN);
-        assert_eq!(events.len(), expected_deltas + 3);
-
-        let RealtimeServerEvent::ResponseCreated(created) = &events[0] else {
-            panic!(
-                "first event should be response.created, got {:?}",
-                events[0]
-            );
-        };
-        assert!(matches!(
-            created.response.status,
-            RealtimeResponseStatus::InProgress
-        ));
-        let response_id = created.response.id.clone();
-
-        let RealtimeServerEvent::ResponseDone(done) = events.last().unwrap() else {
-            panic!(
-                "last event should be response.done, got {:?}",
-                events.last().unwrap()
-            );
-        };
-        assert!(matches!(
-            done.response.status,
-            RealtimeResponseStatus::Completed
-        ));
-        assert_eq!(done.response.id, response_id);
-
-        let deltas: Vec<&RealtimeServerEventResponseAudioDelta> = events
-            .iter()
-            .filter_map(|e| match e {
-                RealtimeServerEvent::ResponseOutputAudioDelta(d) => Some(d),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(deltas.len(), expected_deltas);
-        assert_eq!(
-            deltas.iter().map(|d| d.delta.as_str()).collect::<String>(),
-            audio,
-            "concatenated deltas should equal the input audio"
-        );
-        assert!(deltas.iter().all(|d| d.response_id == response_id));
-
-        let audio_done: &RealtimeServerEventResponseAudioDone = events
-            .iter()
-            .find_map(|e| match e {
-                RealtimeServerEvent::ResponseOutputAudioDone(d) => Some(d),
-                _ => None,
-            })
-            .expect("response.output_audio.done missing");
-        assert_eq!(audio_done.response_id, response_id);
-    }
-
-    /// Client events the echo engine doesn't model (anything other than
-    /// SessionUpdate / InputAudioBufferAppend) are rejected with a single
-    /// Error server event naming the wire-tag of the offending variant.
+    /// Unsupported client events are rejected as a single Error server event;
+    /// the SessionUpdate / InputAudioBufferAppend round-trips are covered
+    /// end-to-end in `tests/http_websocket.rs`.
     #[tokio::test]
     async fn echo_bidirectional_unknown_event_emits_error() {
         let item_create = parse_client_event(serde_json::json!({
@@ -703,7 +572,7 @@ mod tests {
             "item": { "type": "message", "role": "user", "content": [] }
         }));
 
-        let engine = EchoBidirectionalEngine {};
+        let engine = EchoBidirectionalEngine;
         let mut response_stream = engine
             .generate(make_input(vec![item_create]))
             .await
