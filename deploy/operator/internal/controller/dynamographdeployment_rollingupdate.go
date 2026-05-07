@@ -39,27 +39,33 @@ import (
 // shouldTriggerRollingUpdate determines if worker spec changes require a rolling update.
 func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) bool {
-	computedHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+) (bool, error) {
+	computedHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return false, fmt.Errorf("failed to compute worker hash: %w", err)
+	}
 
 	currentHash := r.getCurrentWorkerHash(dgd)
 
 	// If no current hash exists (new deployment), no rolling update needed
 	if currentHash == "" {
-		return false
+		return false, nil
 	}
 
 	if r.getCurrentWorkerHashVersion(dgd) != consts.CurrentWorkerHashVersionV2 {
 		if currentHash == computedHash {
-			return false
+			return false, nil
 		}
 		legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-		if err == nil && currentHash == legacyHash {
-			return false
+		if err != nil {
+			return false, fmt.Errorf("failed to compute legacy worker hash: %w", err)
+		}
+		if currentHash == legacyHash {
+			return false, nil
 		}
 	}
 
-	return computedHash != currentHash
+	return computedHash != currentHash, nil
 }
 
 // initializeWorkerHashIfNeeded sets the current worker hash annotation on first deployment.
@@ -112,7 +118,10 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	}
 
 	// Normal first deploy — set the actual computed hash
-	hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to compute worker hash: %w", err)
+	}
 	r.setCurrentWorkerHash(dgd, hash)
 
 	if err := r.Update(ctx, dgd); err != nil {
@@ -138,7 +147,10 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 		return nil
 	}
 
-	computedHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	computedHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to compute worker hash: %w", err)
+	}
 	if currentHash != computedHash {
 		legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
 		if err != nil {
@@ -283,7 +295,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
-	newWorkerHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	newWorkerHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return fmt.Errorf("failed to compute worker hash: %w", err)
+	}
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
 	logger.Info("Reconciling rolling update",
@@ -878,7 +893,10 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 ) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
-	newWorkerHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	newWorkerHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to compute worker hash: %w", err)
+	}
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
 	if prevWorkerHash == newWorkerHash {

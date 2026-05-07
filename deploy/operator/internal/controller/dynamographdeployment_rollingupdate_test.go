@@ -181,7 +181,7 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 			dgd := createTestDGD("test-dgd", tt.services)
 
 			if tt.existingHash == "compute" {
-				hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+				hash := betaDGDWorkersSpecHash(t, dgd)
 				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 			} else if tt.existingHash == "legacy-compute" {
 				hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
@@ -192,7 +192,8 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 			}
 
 			r := createTestReconcilerWithStatus(dgd)
-			result := r.shouldTriggerRollingUpdate(dgd)
+			result, err := r.shouldTriggerRollingUpdate(dgd)
+			require.NoError(t, err)
 
 			if result != tt.expected {
 				t.Errorf("shouldTriggerRollingUpdate() = %v, expected %v", result, tt.expected)
@@ -224,7 +225,7 @@ func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
 	assert.NotEmpty(t, hash, "Hash should be set after initialization")
 
 	// Verify the hash is correct
-	expectedHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	expectedHash := betaDGDWorkersSpecHash(t, dgd)
 	assert.Equal(t, expectedHash, hash, "Hash should match computed value")
 	assert.Equal(t, consts.CurrentWorkerHashVersionV2, dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion])
 }
@@ -281,7 +282,7 @@ func TestInitializeWorkerHashIfNeeded_MigratesLegacyAlphaHash(t *testing.T) {
 	require.NoError(t, alpha.ConvertTo(dgd))
 	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
-	v2Hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
 	require.NotEqual(t, legacyHash, v2Hash)
 	if dgd.Annotations == nil {
 		dgd.Annotations = map[string]string{}
@@ -295,7 +296,9 @@ func TestInitializeWorkerHashIfNeeded_MigratesLegacyAlphaHash(t *testing.T) {
 	assert.Equal(t, v2Hash, r.getCurrentWorkerHash(dgd))
 	assert.Equal(t, consts.CurrentWorkerHashVersionV2, dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion])
 	assert.Empty(t, dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash])
-	assert.False(t, r.shouldTriggerRollingUpdate(dgd))
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	assert.False(t, trigger)
 }
 
 func TestSupportsManagedRollingUpdate(t *testing.T) {
@@ -346,7 +349,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: frontendEnvs},
 	})
 
-	hash1 := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd1)
+	hash1 := betaDGDWorkersSpecHash(t, dgd1)
 
 	// Change only frontend envs
 	dgd2 := createTestDGD("test", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -354,7 +357,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "changed"}}},
 	})
 
-	hash2 := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd2)
+	hash2 := betaDGDWorkersSpecHash(t, dgd2)
 	assert.Equal(t, hash1, hash2, "Hash should not change when only frontend changes")
 
 	// Change worker envs
@@ -363,7 +366,7 @@ func TestWorkerHashChanges_OnlyWhenWorkerSpecChanges(t *testing.T) {
 		"frontend": {ComponentType: consts.ComponentTypeFrontend, Envs: frontendEnvs},
 	})
 
-	hash3 := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd3)
+	hash3 := betaDGDWorkersSpecHash(t, dgd3)
 	assert.NotEqual(t, hash1, hash3, "Hash should change when worker specs change")
 }
 
@@ -374,7 +377,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 	})
 
-	hash1 := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd1)
+	hash1 := betaDGDWorkersSpecHash(t, dgd1)
 	assert.NotEmpty(t, hash1, "Hash should be computed for prefill/decode")
 
 	// Change prefill spec
@@ -383,7 +386,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v1"}}},
 	})
 
-	hash2 := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd2)
+	hash2 := betaDGDWorkersSpecHash(t, dgd2)
 	assert.NotEqual(t, hash1, hash2, "Hash should change when prefill specs change")
 
 	// Change decode spec
@@ -392,7 +395,7 @@ func TestWorkerHashChanges_PrefillAndDecode(t *testing.T) {
 		"decode":  {ComponentType: consts.ComponentTypeDecode, Envs: []corev1.EnvVar{{Name: "VAR", Value: "v2"}}},
 	})
 
-	hash3 := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd3)
+	hash3 := betaDGDWorkersSpecHash(t, dgd3)
 	assert.NotEqual(t, hash1, hash3, "Hash should change when decode specs change")
 }
 
@@ -1267,7 +1270,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 			},
 		})
 		// Annotation hash can differ from computed hash — function uses computed hash
-		computedHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+		computedHash := betaDGDWorkersSpecHash(t, dgd)
 		dgd.Annotations = map[string]string{
 			consts.AnnotationCurrentWorkerHash: "oldhash",
 		}
@@ -2623,7 +2626,7 @@ func TestReconcileRollingUpdate_NoChange(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
-	hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	hash := betaDGDWorkersSpecHash(t, dgd)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
 		Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
@@ -2672,7 +2675,7 @@ func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
-	hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	hash := betaDGDWorkersSpecHash(t, dgd)
 	// Hash matches current but phase is InProgress — stuck
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
@@ -2753,7 +2756,7 @@ func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate
 		"prefill": {ComponentType: consts.ComponentTypePrefill},
 		"decode":  {ComponentType: consts.ComponentTypeDecode},
 	})
-	hash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	hash := betaDGDWorkersSpecHash(t, dgd)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
 	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
 		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
@@ -3042,7 +3045,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			}
 
 			// Compute the actual new hash from the DGD spec (same as buildRollingUpdateContext does)
-			newHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+			newHash := betaDGDWorkersSpecHash(t, dgd)
 			require.NotEqual(t, testOldWorkerHash, newHash, "test setup: computed hash must differ from old hash")
 
 			// Collect all mock objects
@@ -3108,7 +3111,7 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 		},
 	})
 
-	newHash := dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd)
+	newHash := betaDGDWorkersSpecHash(t, dgd)
 	assert.NotEqual(t, testOldWorkerHash, newHash, "test setup: computed hash must differ from old hash")
 
 	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD))
@@ -3134,7 +3137,7 @@ func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {
 		consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 	}
 
-	assert.NotEqual(t, testOldWorkerHash, dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd),
+	assert.NotEqual(t, testOldWorkerHash, betaDGDWorkersSpecHash(t, dgd),
 		"test setup: computed hash must differ so we proceed past the early-return")
 
 	injectedErr := errors.New("simulated apiserver list failure")
@@ -3165,7 +3168,7 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 		consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 	}
 
-	require.NotEqual(t, testOldWorkerHash, dynamo.ComputeV1beta1DGDWorkersSpecHash(dgd),
+	require.NotEqual(t, testOldWorkerHash, betaDGDWorkersSpecHash(t, dgd),
 		"test setup: computed hash must differ so we proceed past the early-return")
 
 	injectedErr := errors.New("simulated apiserver get failure")

@@ -76,6 +76,15 @@ func mustBetaDGD(src *v1alpha1.DynamoGraphDeployment) *v1beta1.DynamoGraphDeploy
 	return dst
 }
 
+func betaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
+	t.Helper()
+	hash, err := v1beta1.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		t.Fatalf("compute v1beta1 DGD worker hash: %v", err)
+	}
+	return hash
+}
+
 func betaRestartStatus(src *v1alpha1.RestartStatus) *v1beta1.RestartStatus {
 	if src == nil {
 		return nil
