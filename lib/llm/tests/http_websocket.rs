@@ -76,14 +76,14 @@ async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
         "model": "echo",
         "messages": [{ "role": "user", "content": "hi" }],
     });
-    ws.send(Message::Text(body1.to_string()))
+    ws.send(Message::Text(body1.to_string().into()))
         .await
         .expect("send first request");
     let body2 = serde_json::json!({
         "model": "echo",
         "messages": [{ "role": "user", "content": "ok" }],
     });
-    ws.send(Message::Text(body2.to_string()))
+    ws.send(Message::Text(body2.to_string().into()))
         .await
         .expect("send second request");
 
@@ -163,7 +163,7 @@ async fn realtime_websocket_emits_close_after_client_close() {
         "model": "echo",
         "messages": [{ "role": "user", "content": "hi" }],
     });
-    ws.send(Message::Text(body.to_string()))
+    ws.send(Message::Text(body.to_string().into()))
         .await
         .expect("send");
 
@@ -225,7 +225,7 @@ async fn realtime_websocket_rejects_binary_frame() {
         .await
         .expect("ws connect");
 
-    ws.send(Message::Binary(vec![0u8, 1, 2, 3]))
+    ws.send(Message::Binary(vec![0u8, 1, 2, 3].into()))
         .await
         .expect("send binary");
 
