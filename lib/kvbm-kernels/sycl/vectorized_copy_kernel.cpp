@@ -15,6 +15,7 @@
 #include <sycl/sycl.hpp>
 
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 
 namespace {
@@ -118,6 +119,7 @@ int kvbm_kernels_sycl_launch_vectorized_copy(
       }
     );
   } catch (const sycl::exception& e) {
+    fprintf(stderr, "kvbm_kernels_sycl: vectorized_copy failed: %s\n", e.what());
     return -1;
   }
   return 0;

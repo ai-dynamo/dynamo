@@ -189,15 +189,16 @@ Inside every launcher:
 try {
     q.parallel_for( ... );
 } catch (const sycl::exception& e) {
+    fprintf(stderr, "kvbm_kernels_sycl: <launcher> failed: %s\n", e.what());
     return -1;
 }
 ```
 
-This swallows the message. In practice `e.what()` usually contains the
-OpenCL / Level-Zero underlying error string, which is invaluable for
-debugging. A follow-up is to log the message through a logging hook
-before returning, mirroring how `ccl_rs_result_t` failures are
-formatted by `check_ccl_result` in `kvbm-engine`.
+Each launcher prints the exception message (`e.what()`, which typically
+contains the underlying Level-Zero error string) to stderr before
+returning `-1`. The Rust-side FFI wrapper then converts the non-zero
+return code into a descriptive `anyhow::anyhow!("... failed (rc={ret})")`
+that propagates up through the executor.
 
 ## Feature graph
 

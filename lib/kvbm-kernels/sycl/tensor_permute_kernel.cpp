@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 namespace {
 
@@ -143,6 +144,7 @@ int kvbm_kernels_sycl_launch_universal_from_block(
       }
     );
   } catch (const sycl::exception& e) {
+    fprintf(stderr, "kvbm_kernels_sycl: universal_from_block failed: %s\n", e.what());
     return -1;
   }
   return 0;
@@ -206,6 +208,7 @@ int kvbm_kernels_sycl_launch_block_from_universal(
       }
     );
   } catch (const sycl::exception& e) {
+    fprintf(stderr, "kvbm_kernels_sycl: block_from_universal failed: %s\n", e.what());
     return -1;
   }
   return 0;
