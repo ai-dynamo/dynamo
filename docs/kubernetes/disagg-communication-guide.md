@@ -261,9 +261,9 @@ env:
   - name: UCX_TLS
     value: "rc_x,rc,cuda_copy,cuda_ipc"
   - name: UCX_NET_DEVICES
-    value: "mlx5_0:1"
+    value: "<ib-device>:1"       # e.g. "mlx5_0:1" — run `ibv_devinfo` to find your device
   - name: UCX_IB_ADDR_TYPE
-    value: "eth"
+    value: "eth"                 # required for cross-pod IB on Kubernetes
   - name: UCX_RNDV_SCHEME
     value: "get_zcopy"
   - name: UCX_RNDV_THRESH
@@ -272,52 +272,25 @@ env:
     value: "600s"
   - name: UCX_KEEPALIVE_INTERVAL
     value: "300s"
-
-  # --- NCCL ---
-  - name: NCCL_IB_DISABLE
-    value: "0"
-  - name: NCCL_STORE_TIMEOUT
-    value: "7200"
-  - name: NCCL_DEBUG
-    value: INFO
-
-  # --- NIXL ---
-  - name: NIXL_LOG_LEVEL
-    value: INFO           # use DEBUG during bringup
-  - name: NIXL_TELEMETRY_ENABLE
-    value: "y"
-  - name: NIXL_TELEMETRY_EXPORTER
-    value: prometheus
-  - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-    value: "19090"
 ```
 
-**Shared networking env vars (spec-level, all services):**
+| Variable | Description |
+|----------|-------------|
+| `UCX_TLS` | `rc_x` (accelerated RC) listed first for optimal RDMA performance |
+| `UCX_NET_DEVICES` | Bind to a specific IB device. Run `ibv_devinfo` inside a pod to list available devices. Use a non-bonded device with a valid LID. |
+| `UCX_IB_ADDR_TYPE` | Must be `eth` for cross-pod communication on Kubernetes. Without this, UCX uses LID-based addressing which does not route between pods. |
+| `UCX_RNDV_SCHEME` | `get_zcopy` enables zero-copy RDMA GET, optimal for large KV cache transfers |
 
-```yaml
-spec:
-  envs:
-    - name: GLOO_SOCKET_IFNAME
-      value: eth0
-    - name: NCCL_SOCKET_IFNAME
-      value: eth0
-    - name: NATS_SERVER
-      value: nats://dynamo-platform-nats.<namespace>.svc.cluster.local:4222
-```
+> **Note**: `UCX_IB_ADDR_TYPE=eth` is the most common missing setting when bringing up NIXL disagg on InfiniBand clusters. If NIXL init succeeds but transfers fail with `NIXL_ERR_REMOTE_DISCONNECT`, this is likely the cause.
 
 **Known Issue — Bonded IB devices:**
 
-Some clusters expose bonded InfiniBand devices (e.g., `mlx5_bond_0`) with LID=0. UCX's UD transport fails on devices with invalid LIDs. If you see `ibv_create_ah failed: No such device`, verify the LID:
+Some clusters expose bonded InfiniBand devices (e.g., `mlx5_bond_0`) with LID=0. If UCX selects a bonded device, transfers may fail. Verify device LIDs and select a non-bonded device:
 
 ```bash
+# Inside a pod with rdma/ib resources:
 ibv_devinfo | grep -E "hca_id|lid"
-```
-
-If `mlx5_bond_0` shows LID=0, use a non-bonded device:
-
-```yaml
-- name: UCX_NET_DEVICES
-  value: "mlx5_0:1"
+# Use a device with a non-zero LID in UCX_NET_DEVICES
 ```
 
 ### AWS EFA Configuration
