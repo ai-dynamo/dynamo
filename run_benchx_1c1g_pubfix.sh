@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=core_dlfw_ci-benchx.1ctx1gen.convrouter.no_router
+#SBATCH --job-name=core_dlfw_ci-benchx.1ctx1gen.convrouter.router
 #SBATCH --nodes=1
 #SBATCH --partition=gb200
 #SBATCH --account=core_dlfw_ci
@@ -58,7 +58,7 @@ DYN_SYS_PORT_GEN=8082
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
-mkdir -p "$RESULTS_DIR" "$REPO_DIR/bench/logs"
+mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 
 {
     echo "exp_name: $EXP_NAME"
@@ -70,9 +70,14 @@ mkdir -p "$RESULTS_DIR" "$REPO_DIR/bench/logs"
 
 SRUN_PIDS=()
 ROUTER_METRICS_PID=""
+METRICS_PID=""
 
 cleanup() {
     local exit_code=$?
+    if [ -n "${METRICS_PID}" ] && kill -0 "${METRICS_PID}" 2>/dev/null; then
+        kill -TERM "${METRICS_PID}" 2>/dev/null || true
+        wait "${METRICS_PID}" 2>/dev/null || true
+    fi
     if [ -n "${ROUTER_METRICS_PID}" ] && kill -0 "${ROUTER_METRICS_PID}" 2>/dev/null; then
         kill -TERM "${ROUTER_METRICS_PID}" 2>/dev/null || true
         wait "${ROUTER_METRICS_PID}" 2>/dev/null || true
@@ -381,7 +386,8 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
       --model-path $MODEL_PATH --served-model-name $MODEL \
       --disaggregation-mode decode \
       --extra-engine-args $RESULTS_DIR/gen.yaml \
-      --request-plane ${DYNAMO_REQUEST_PLANE}"
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --publish-events-and-metrics"
 GEN_PID="${SRUN_PIDS[-1]}"
 
 # --- ctx worker on $NODE0 GPU 0 (prefill) ---
@@ -397,7 +403,8 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
       --model-path $MODEL_PATH --served-model-name $MODEL \
       --disaggregation-mode prefill \
       --extra-engine-args $RESULTS_DIR/ctx.yaml \
-      --request-plane ${DYNAMO_REQUEST_PLANE}"
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --publish-events-and-metrics"
 CTX_PID="${SRUN_PIDS[-1]}"
 
 require_alive "${GEN_PID}" "GEN_PID"
@@ -418,7 +425,10 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
     export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && \
     python3 -m dynamo.frontend \
       --http-port ${FRONTEND_PORT} \
-      --request-plane ${DYNAMO_REQUEST_PLANE}"
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --router-mode kv \
+      --no-router-kv-events \
+      --router-ttl-secs 480.0"
 FRONTEND_PID="${SRUN_PIDS[-1]}"
 require_alive "${FRONTEND_PID}" "FRONTEND_PID"
 
@@ -439,6 +449,17 @@ if ! verify_model_ready "${NODE0}" "${FRONTEND_PORT}" 120; then
 fi
 
 echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
+
+# --- metrics sidecar ---
+echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
+python3 "$REPO_DIR/bench/capture_metrics.py" \
+  --endpoints "${NODE0}:${DYN_SYS_PORT_CTX},${NODE0}:${DYN_SYS_PORT_GEN}" \
+  --labels "ctx_g0,gen_g0" \
+  --output-dir "$RESULTS_DIR/metrics" \
+  --interval 2 \
+  > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &
+METRICS_PID=$!
+sleep 2
 
 # --- RWLT @ CONCURRENCY ---
 cat > "$RESULTS_DIR/rwlt_config.yaml" << RWLTEOF
@@ -495,6 +516,11 @@ echo "Bench exit: $?"
 
 kill -TERM "$ROUTER_METRICS_PID" 2>/dev/null; wait "$ROUTER_METRICS_PID" 2>/dev/null || true
 ROUTER_METRICS_PID=""
+
+if [ -n "$METRICS_PID" ]; then
+    kill -TERM "$METRICS_PID" 2>/dev/null; wait "$METRICS_PID" 2>/dev/null || true
+    METRICS_PID=""
+fi
 
 echo "Snapshotting frontend metrics (post-bench)..."
 curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \

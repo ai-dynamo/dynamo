@@ -63,7 +63,7 @@ DYN_SYS_PORT_GEN=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
-mkdir -p "$RESULTS_DIR" "$REPO_DIR/bench/logs"
+mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 
 {
     echo "exp_name: $EXP_NAME"
@@ -74,9 +74,19 @@ mkdir -p "$RESULTS_DIR" "$REPO_DIR/bench/logs"
 } > "$RESULTS_DIR/job_info.txt"
 
 SRUN_PIDS=()
+ROUTER_METRICS_PID=""
+METRICS_PID=""
 
 cleanup() {
     local exit_code=$?
+    if [ -n "${METRICS_PID}" ] && kill -0 "${METRICS_PID}" 2>/dev/null; then
+        kill -TERM "${METRICS_PID}" 2>/dev/null || true
+        wait "${METRICS_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${ROUTER_METRICS_PID}" ] && kill -0 "${ROUTER_METRICS_PID}" 2>/dev/null; then
+        kill -TERM "${ROUTER_METRICS_PID}" 2>/dev/null || true
+        wait "${ROUTER_METRICS_PID}" 2>/dev/null || true
+    fi
     if [ "${#SRUN_PIDS[@]}" -gt 0 ]; then
         echo "Cleaning up ${#SRUN_PIDS[@]} background srun steps..."
         kill "${SRUN_PIDS[@]}" 2>/dev/null || true
@@ -382,7 +392,8 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
       --model-path $MODEL_PATH --served-model-name $MODEL \
       --disaggregation-mode decode \
       --extra-engine-args $RESULTS_DIR/gen.yaml \
-      --request-plane ${DYNAMO_REQUEST_PLANE}"
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --publish-events-and-metrics"
 GEN_PID="${SRUN_PIDS[-1]}"
 
 # --- 4 ctx workers on $NODE0 GPUs 0-3 (prefill) ---
@@ -402,7 +413,8 @@ for GPU in 0 1 2 3; do
         --model-path $MODEL_PATH --served-model-name $MODEL \
         --disaggregation-mode prefill \
         --extra-engine-args $RESULTS_DIR/ctx.yaml \
-        --request-plane ${DYNAMO_REQUEST_PLANE}"
+        --request-plane ${DYNAMO_REQUEST_PLANE} \
+        --publish-events-and-metrics"
   CTX_PIDS+=("${SRUN_PIDS[-1]}")
 done
 
@@ -451,6 +463,35 @@ fi
 
 echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
 
+# --- frontend metrics: pre-bench snapshot + periodic scraper ---
+echo "Snapshotting frontend metrics (pre-bench)..."
+curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
+  > "$RESULTS_DIR/frontend_metrics_pre.prom" || echo "  WARN: pre snapshot failed"
+
+echo "Starting periodic frontend metrics scraper (interval=10s)..."
+(
+  while true; do
+    TS=$(date +%s)
+    if RESP=$(curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" 2>/dev/null); then
+      echo "$RESP" | awk -v ts="$TS" '/^[a-zA-Z]/ {print ts" "$0}' \
+        >> "$RESULTS_DIR/frontend_metrics_timeseries.prom"
+    fi
+    sleep 10
+  done
+) &
+ROUTER_METRICS_PID=$!
+
+# --- worker metrics sidecar (4 ctx on NODE0, 1 gen on NODE1) ---
+echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
+python3 "$REPO_DIR/bench/capture_metrics.py" \
+  --endpoints "${NODE0}:${DYN_SYS_PORT_CTX_0},${NODE0}:${DYN_SYS_PORT_CTX_1},${NODE0}:${DYN_SYS_PORT_CTX_2},${NODE0}:${DYN_SYS_PORT_CTX_3},${NODE1}:${DYN_SYS_PORT_GEN}" \
+  --labels "ctx_g0,ctx_g1,ctx_g2,ctx_g3,gen_g0" \
+  --output-dir "$RESULTS_DIR/metrics" \
+  --interval 2 \
+  > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &
+METRICS_PID=$!
+sleep 2
+
 # --- RWLT @ CONCURRENCY ---
 cat > "$RESULTS_DIR/rwlt_config.yaml" << RWLTEOF
 base_url: http://${NODE0}:${FRONTEND_PORT}/v1
@@ -486,6 +527,23 @@ srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
       python rwlt/run.py --config $RESULTS_DIR/rwlt_config.yaml" \
   > "$RESULTS_DIR/benchmark.log" 2>&1
 echo "Bench exit: $?"
+
+if [ -n "$ROUTER_METRICS_PID" ]; then
+    kill -TERM "$ROUTER_METRICS_PID" 2>/dev/null; wait "$ROUTER_METRICS_PID" 2>/dev/null || true
+    ROUTER_METRICS_PID=""
+fi
+
+if [ -n "$METRICS_PID" ]; then
+    kill -TERM "$METRICS_PID" 2>/dev/null; wait "$METRICS_PID" 2>/dev/null || true
+    METRICS_PID=""
+fi
+
+echo "Snapshotting frontend metrics (post-bench)..."
+curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
+  > "$RESULTS_DIR/frontend_metrics_post.prom" || echo "  WARN: post snapshot failed"
+echo "  pre:  $(wc -l < "$RESULTS_DIR/frontend_metrics_pre.prom"  2>/dev/null || echo 0) lines"
+echo "  post: $(wc -l < "$RESULTS_DIR/frontend_metrics_post.prom" 2>/dev/null || echo 0) lines"
+echo "  ts:   $(wc -l < "$RESULTS_DIR/frontend_metrics_timeseries.prom" 2>/dev/null || echo 0) lines"
 
 # --- full unified iter-stats plot ---
 echo "==== Plotting iter_stats_unified.png ===="
