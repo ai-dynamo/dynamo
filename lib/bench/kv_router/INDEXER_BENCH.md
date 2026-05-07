@@ -277,7 +277,7 @@ Trace: `mooncake_trace.jsonl` (Mooncake FAST25 arxiv trace). Config: 2 shards ×
 
 All indexers keep up with the offered trace rate. On this arxiv trace, branch-sharded depth=2 is about **15% lower p99** than CRTC, and depth=4 is about **23% lower p99**. This is a modest latency win, not the large win seen on the smaller `conversation_trace.jsonl` workload; do not compare those results directly.
 
-The true-miss rate remains effectively zero. Shallow fallback accounts for about **40%** of branch-sharded lookups, which means those lookups did not find the exact requested prefix alias but did find a shorter registered prefix and could still return the shallow overlap score from one shard. That is the accuracy-preserving behavior this branch is meant to protect.
+The true-miss rate remains effectively zero. Shallow fallback accounts for about **40%** of branch-sharded lookups, which means those lookups did not find the exact requested prefix alias but did find a shorter registered prefix and could still return the shallow overlap score from one shard. That is the accuracy-preserving behavior this benchmark is meant to track.
 
 Anchor-aware BSI is slower than both CRTC and branch-sharded in this steady-state run. Its routing TRIE provides a stronger structural routing model, but on this hot-prefix trace the routing work is materially higher and the shard load collapses almost entirely onto one shard.
 
