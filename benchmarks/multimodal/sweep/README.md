@@ -95,6 +95,7 @@ Given the config above with two input files and two configs (`cache-off`,
 │   │   │   ├── profile_export_aiperf.json
 │   │   │   ├── profile_export_aiperf.csv
 │   │   │   ├── gpu_telemetry_export.jsonl
+│   │   │   ├── power_summary.json
 │   │   │   ├── inputs.json
 │   │   │   └── logs/
 │   │   │       └── aiperf.log
@@ -115,6 +116,54 @@ Given the config above with two input files and two configs (`cache-off`,
     └── plots/
         └── ...
 ```
+
+## Power Summary Artifacts
+
+After each successful `aiperf` run, the sweep looks for
+`gpu_telemetry_export.jsonl` in the run artifact directory. If GPU power
+samples are present, it writes a sibling `power_summary.json`.
+
+The summary includes:
+
+| Field | Meaning |
+|---|---|
+| `duration_s` | Wall-clock telemetry span covered by timestamped samples. |
+| `total_energy_j` / `total_energy_wh` | Integrated GPU energy across all GPUs using trapezoidal integration of power samples. |
+| `average_power_w` | Aggregate average GPU power over `duration_s`; falls back to the sum of per-GPU sample averages when timestamps are absent. |
+| `sum_peak_power_w` | Sum of each GPU's observed peak power. |
+| `gpus[]` | Per-GPU sample count, duration, energy, average/min/peak power, utilization, and memory summaries. |
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "telemetry_file": "gpu_telemetry_export.jsonl",
+  "sample_count": 3,
+  "gpu_count": 1,
+  "duration_s": 2.0,
+  "total_energy_j": 300.0,
+  "total_energy_wh": 0.083333,
+  "average_power_w": 150.0,
+  "sum_peak_power_w": 200.0,
+  "gpus": [
+    {
+      "gpu_index": "0",
+      "sample_count": 3,
+      "duration_s": 2.0,
+      "energy_j": 300.0,
+      "energy_wh": 0.083333,
+      "average_power_w": 150.0,
+      "min_power_w": 100.0,
+      "peak_power_w": 200.0
+    }
+  ]
+}
+```
+
+The parser accepts both nested telemetry records such as `{"timestamp": 0,
+"gpus": [...]}` and common `nvidia-smi`-style keys such as `power.draw [W]`,
+`utilization.gpu [%]`, and `memory.used [MiB]`.
 
 ## Existing Experiments
 
