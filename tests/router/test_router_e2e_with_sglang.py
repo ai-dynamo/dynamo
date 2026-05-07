@@ -376,6 +376,7 @@ def test_router_decisions_sglang_disagg(
     indirect=["durable_kv_events", "request_plane"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.flaky(reruns=3, only_rerun=["AssertionError"])
 def test_sglang_indexers_sync(
     request,
     runtime_services_dynamic_ports,

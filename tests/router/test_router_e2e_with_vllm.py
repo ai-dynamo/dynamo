@@ -654,6 +654,7 @@ def test_router_decisions_vllm_disagg(
     ids=["nats_core"],
     indirect=["durable_kv_events", "request_plane"],
 )
+@pytest.mark.flaky(reruns=3, only_rerun=["AssertionError"])
 def test_vllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,

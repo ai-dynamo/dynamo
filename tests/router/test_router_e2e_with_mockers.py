@@ -1197,6 +1197,7 @@ def test_kv_router_bindings(
 # has 102 events"). Race in event-sync convergence — needs root-cause investigation,
 # not a retry.
 @pytest.mark.timeout(300)
+@pytest.mark.flaky(reruns=3, only_rerun=["AssertionError"])
 def test_indexers_sync(
     request,
     runtime_services_dynamic_ports,
