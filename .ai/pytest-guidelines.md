@@ -256,6 +256,21 @@ Every test must have **at least**:
    - `integration` -- integration test
    - `e2e` -- end-to-end test
 
+4. **A component marker** -- which backend component the test exercises (only required
+   when the test also has a framework marker like `vllm`/`trtllm`/`sglang`). Pick
+   **exactly one** so CI can fan out one job per (backend × component):
+   - `multimodal` -- exercises image/video/audio paths, VL models, omni pipeline,
+     multimodal embedding caches, multimodal hashing/routing
+   - `router` -- exercises the dynamo request router (worker selection, KV-prefix
+     routing, KV cache events on the router path); not the same as omni's internal
+     stage_router
+   - `kvbm` -- exercises the KV Block Manager (cross-engine determinism, offload/
+     onboard, eviction, the consolidator); use `kvbm_concurrency` *additionally*
+     for stress tests that should run separately
+   - `core` -- residual: anything that isn't multimodal/router/kvbm. Worker handlers,
+     scheduler, prefill/decode, fault tolerance, frontend HTTP/gRPC, CUDA version
+     checks, predownload, etc.
+
 ### Scheduling marker guidance
 
 CI compute is finite. Choose placement carefully:
@@ -273,6 +288,13 @@ CI compute is finite. Choose placement carefully:
 
 Apply when the test depends on a specific inference backend:
 - `vllm`, `trtllm`, `sglang`
+
+Framework markers say **which backend** the test runs against. They are independent
+of the component marker (`multimodal` / `router` / `kvbm` / `core`), which says
+**which part of the backend** the test exercises. CI fans out one job per
+(framework × component), e.g. `pytest -m "vllm and multimodal"`. A test with a
+framework marker but no component marker is silently dropped from every component
+job — see "Required markers" #4 above.
 
 ### Timeouts
 
@@ -303,6 +325,8 @@ def test_poll_server():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
+@pytest.mark.vllm
+@pytest.mark.core  # component bucket: pick one of core, multimodal, router, kvbm
 def test_vllm_aggregated(...):
     ...
 ```
