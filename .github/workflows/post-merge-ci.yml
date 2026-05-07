@@ -210,6 +210,8 @@ jobs:
 
   sglang-efa-build:
     name: sglang-runtime-efa
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
