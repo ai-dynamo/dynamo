@@ -252,9 +252,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_EVENT_THREADS",
             default=4,
             help=(
-                "KV Router: Number of event processing threads. When > 1, uses a concurrent "
-                "radix tree with a thread pool for higher throughput. Ignored when "
-                "--no-router-kv-events is set."
+                "KV Router: Number of KV indexer worker threads. When > 1, uses a concurrent "
+                "radix tree with a thread pool for higher throughput, including "
+                "approximate routing when --no-router-kv-events is set."
             ),
             arg_type=int,
         )

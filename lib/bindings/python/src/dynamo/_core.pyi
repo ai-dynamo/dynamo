@@ -1296,8 +1296,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_event_threads: Number of event processing threads (default: 4).
-                When > 1, uses a concurrent radix tree with a thread pool.
+            router_event_threads: Number of KV indexer worker threads (default: 4).
+                When > 1, uses a concurrent radix tree with a thread pool,
+                including for approximate routing when KV events are disabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
