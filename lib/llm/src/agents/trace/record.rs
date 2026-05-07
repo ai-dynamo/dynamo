@@ -101,10 +101,10 @@ mod tests {
 
         emit_request_end(
             AgentContext {
-                workflow_type_id: "ms_agent".to_string(),
-                workflow_id: "run-non-finite".to_string(),
-                program_id: "run-non-finite:agent".to_string(),
-                parent_program_id: None,
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-non-finite".to_string(),
+                trajectory_id: "run-non-finite:agent".to_string(),
+                parent_trajectory_id: None,
             },
             AgentRequestMetrics {
                 request_id: "req-non-finite".to_string(),
@@ -150,10 +150,10 @@ mod tests {
             event_time_unix_ms: 2000,
             event_source: TraceEventSource::Harness,
             agent_context: AgentContext {
-                workflow_type_id: "ms_agent".to_string(),
-                workflow_id: "run-1".to_string(),
-                program_id: "run-1:agent".to_string(),
-                parent_program_id: None,
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-1".to_string(),
+                trajectory_id: "run-1:agent".to_string(),
+                parent_trajectory_id: None,
             },
             request: None,
             tool: Some(AgentToolEvent {

@@ -4,6 +4,7 @@
 # Core runtime dependencies shared by ALL Dynamo containers.
 # See README.md in this directory for version pinning strategy.
 
+aiohttp>=3.9.0,<4.0
 fastapi==0.120.1
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
 httpx==0.28.1

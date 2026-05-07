@@ -43,7 +43,7 @@ Coordination and messaging support:
 - **HTTP/NATS**: Alternative transports configurable via `DYN_REQUEST_PLANE`.
 
 ### NATS Connections (Optional, for KV routing)
-- **KV Events**: Cache state events for KV-aware routing (can be disabled with `--no-kv-events`)
+- **KV Events**: Cache state events for KV-aware routing (can be disabled with `--no-router-kv-events`)
 
 ### Planning Connections (Gold, dotted)
 - **Frontend → Planner**: Metrics collection for auto-scaling decisions

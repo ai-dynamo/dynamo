@@ -83,6 +83,11 @@ on:
         required: false
         type: string
         default: ''
+      source_ref:
+        description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -109,6 +114,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -118,7 +125,8 @@ jobs:
           CUDA_VERSION="${{ matrix.cuda_version }}"
           TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
 
-          IMAGE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
+          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          IMAGE_TAG=${SOURCE_SHA}-${TARGET_TAG_PLAIN}
           if [ -n "${CUDA_VERSION}" ]; then
             CUDA_MAJOR=${CUDA_VERSION%%.*}
             IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
