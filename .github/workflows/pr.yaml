@@ -55,8 +55,15 @@ jobs:
       - snapshot-agent
       - vllm-build
       - vllm-dev-build
-      - vllm-test
-      - vllm-multi-gpu-test
+      - vllm-test-cpu
+      - vllm-test-core
+      - vllm-test-multimodal
+      - vllm-test-router
+      - vllm-test-kvbm
+      - vllm-multi-gpu-core
+      - vllm-multi-gpu-multimodal
+      - vllm-multi-gpu-router
+      - vllm-multi-gpu-kvbm
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
@@ -276,21 +283,36 @@ jobs:
   # TEST PIPELINES
   # ============================================================================
 
-  vllm-test:
+  vllm-test-cpu:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
-      test_type: Test
+      test_type: Test (cpu)
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
-      gpu_test_markers: pre_merge and vllm and gpu_1
+      run_gpu_tests: false # gpu_1 split out into per-component jobs below
+    secrets: inherit
+
+  vllm-test-core:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test (core)
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+      gpu_test_markers: pre_merge and vllm and gpu_1 and core
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -298,20 +320,124 @@ jobs:
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
-  vllm-multi-gpu-test:
+  vllm-test-multimodal:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
-      test_type: Multi-GPU Test
+      test_type: Test (multimodal)
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+      gpu_test_markers: pre_merge and vllm and gpu_1 and multimodal
+      gpu_test_timeout_minutes: 45
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
+
+  vllm-test-router:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test (router)
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+      gpu_test_markers: pre_merge and vllm and gpu_1 and router
+      gpu_test_timeout_minutes: 45
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
+
+  vllm-test-kvbm:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test (kvbm)
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+      gpu_test_markers: pre_merge and vllm and gpu_1 and kvbm
+      gpu_test_timeout_minutes: 45
+      # kvbm bucket has no profiled_vram_gib tests, so parallel orchestration adds no value.
+    secrets: inherit
+
+  vllm-multi-gpu-core:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test (core)
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and core
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-multi-gpu-multimodal:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test (multimodal)
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and multimodal
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-multi-gpu-router:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test (router)
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and router
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-multi-gpu-kvbm:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test (kvbm)
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and kvbm
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -501,12 +627,12 @@ jobs:
 
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files, vllm-build, vllm-test]
+    needs: [changed-files, vllm-build, vllm-test-cpu]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.vllm-build.result == 'success' &&
-      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
+      (needs.vllm-test-cpu.result == 'success' || needs.vllm-test-cpu.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -649,7 +775,10 @@ jobs:
       - operator
       - planner-test
       - vllm-copy-to-acr
-      - vllm-multi-gpu-test
+      - vllm-multi-gpu-core
+      - vllm-multi-gpu-multimodal
+      - vllm-multi-gpu-router
+      - vllm-multi-gpu-kvbm
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
       - trtllm-copy-to-acr
@@ -680,8 +809,15 @@ jobs:
       - changed-files
       - operator
       - vllm-build
-      - vllm-test
-      - vllm-multi-gpu-test
+      - vllm-test-cpu
+      - vllm-test-core
+      - vllm-test-multimodal
+      - vllm-test-router
+      - vllm-test-kvbm
+      - vllm-multi-gpu-core
+      - vllm-multi-gpu-multimodal
+      - vllm-multi-gpu-router
+      - vllm-multi-gpu-kvbm
       - vllm-copy-to-acr
       - sglang-build
       - sglang-test
