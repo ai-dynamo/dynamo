@@ -11,7 +11,7 @@
     ]]></style>
 <rect width="100%" height="100%" fill="#f8fafc"/>
 <rect x="228" y="240" width="1666" height="1232" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
-<text class="title" x="240" y="64">Dynamo vLLM Snapshot Restore</text>
+<text class="title" x="240" y="64">Dynamo vLLM Snapshot Restore (Unoptimized)</text>
 <text class="subtitle" x="240" y="110">Single-GPU B200 (VAST), TP=1</text>
 <line x1="240.0" y1="262" x2="240.0" y2="1484" stroke="#e5e7eb"/>
 <line x1="240.0" y1="256" x2="240.0" y2="262" stroke="#64748b"/>
