@@ -378,9 +378,10 @@ RUN if [ ! -d /opt/nvidia/nvda_nixl/include ] && \
        /opt/dynamo/venv/bin/python3 -c "import importlib.metadata; importlib.metadata.version('nixl-cu${CUDA_MAJOR}')" 2>/dev/null; then \
         NIXL_VER=$(/opt/dynamo/venv/bin/python3 -c "import importlib.metadata; print(importlib.metadata.version('nixl-cu${CUDA_MAJOR}'))") && \
         echo "Auto-detected nixl-cu${CUDA_MAJOR} version: ${NIXL_VER} — fetching matching SDK headers" && \
-        mkdir -p /opt/nvidia/nvda_nixl/include /opt/nvidia/nvda_nixl/lib64 /etc/ld.so.conf.d && \
+        mkdir -p /opt/nvidia/nvda_nixl/include /opt/nvidia/nvda_nixl/lib64/plugins /etc/ld.so.conf.d && \
         cd /tmp && \
-        curl -fsSL "https://github.com/ai-dynamo/nixl/archive/refs/tags/v${NIXL_VER}.tar.gz" -o nixl-src.tar.gz && \
+        curl -fsSL --retry 5 --retry-delay 3 --max-time 90 \
+            "https://github.com/ai-dynamo/nixl/archive/refs/tags/v${NIXL_VER}.tar.gz" -o nixl-src.tar.gz && \
         mkdir -p nixl-extract && cd nixl-extract && \
         tar -xzf /tmp/nixl-src.tar.gz && \
         cp -r "nixl-${NIXL_VER}/src/api/cpp/." /opt/nvidia/nvda_nixl/include/ && \
@@ -388,8 +389,15 @@ RUN if [ ! -d /opt/nvidia/nvda_nixl/include ] && \
         cd /tmp && rm -rf nixl-src.tar.gz nixl-extract && \
         WHEEL_LIBS="/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/.nixl_cu${CUDA_MAJOR}.mesonpy.libs" && \
         for f in libnixl libnixl_build libnixl_capi libnixl_common libnixl_test_utils libserdes libstream libfile_utils libobj_utils; do \
-            [ -f "${WHEEL_LIBS}/${f}.so" ] && ln -sf "${WHEEL_LIBS}/${f}.so" "/opt/nvidia/nvda_nixl/lib64/${f}.so"; \
-        done && \
+            if [ -f "${WHEEL_LIBS}/${f}.so" ]; then \
+                ln -sf "${WHEEL_LIBS}/${f}.so" "/opt/nvidia/nvda_nixl/lib64/${f}.so"; \
+            fi; \
+        done; \
+        for plugin in "${WHEEL_LIBS}/plugins/"*.so; do \
+            if [ -f "${plugin}" ]; then \
+                ln -sf "${plugin}" "/opt/nvidia/nvda_nixl/lib64/plugins/$(basename "${plugin}")"; \
+            fi; \
+        done; \
         echo "/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/nixl_cu${CUDA_MAJOR}.libs" > /etc/ld.so.conf.d/nixl_cu_deps.conf && \
         ldconfig; \
     fi
