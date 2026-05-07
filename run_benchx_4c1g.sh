@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=core_dlfw_ci-benchx.4ctx1gen.convrouter.pr13675.4c1g
+#SBATCH --job-name=core_dlfw_ci-benchx.4ctx1gen.dynamo.kvrouter.4c1g
 #SBATCH --nodes=2
 #SBATCH --partition=gb200
 #SBATCH --account=core_dlfw_ci
 #SBATCH --time=04:00:00
-#SBATCH --output=bench/logs/run_benchx_4ctx1gen_convrouter_pr13675_%j.log
-#SBATCH --error=bench/logs/run_benchx_4ctx1gen_convrouter_pr13675_%j.err
+#SBATCH --output=bench/logs/run_benchx_4ctx1gen_dynamo_kvrouter_%j.log
+#SBATCH --error=bench/logs/run_benchx_4ctx1gen_dynamo_kvrouter_%j.err
 
 # =============================================================================
 # benchx (feat/bench_x sha 11e16c) — 4 ctx + 1 gen with ConversationRouter,
@@ -24,7 +24,7 @@
 #                  0 = no host offloading (default)
 #
 # Submit:
-#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0 bench/run_benchx_4ctx1gen_convrouter_pr13675.sh
+#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0 bench/run_benchx_4ctx1gen_dynamo_kvrouter.sh
 # =============================================================================
 
 set -uo pipefail
@@ -34,8 +34,8 @@ HOSTCACHE="${HOSTCACHE:-0}"
 
 if [ "$HOSTCACHE" = "1" ]; then HCTAG="hcon"; else HCTAG="hcoff"; fi
 
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-2.sqsh}"
-EXP_NAME="run_benchx_4ctx1gen_convrouter_pr13675_${HCTAG}_c${CONCURRENCY}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-publisherfix.sqsh}"
+EXP_NAME="run_benchx_4ctx1gen_dynamo_kvrouter_${HCTAG}_c${CONCURRENCY}"
 
 HF_TOKEN="${HF_TOKEN:-}"
 REPO_DIR="${REPO_DIR:-/lustre/fsw/core_dlfw_ci/rihuo/artificial-analysis}"
@@ -62,7 +62,7 @@ DYN_SYS_PORT_CTX_3=8084
 DYN_SYS_PORT_GEN=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 

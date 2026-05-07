@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=core_dlfw_ci-benchx.3ctx1gen.convrouter.pr13675
+#SBATCH --job-name=core_dlfw_ci-benchx.3ctx1gen.dynamo.kvrouter
 #SBATCH --nodes=2
 #SBATCH --partition=gb200
 #SBATCH --account=core_dlfw_ci
 #SBATCH --time=04:00:00
-#SBATCH --output=bench/logs/run_benchx_3ctx1gen_convrouter_pr13675_%j.log
-#SBATCH --error=bench/logs/run_benchx_3ctx1gen_convrouter_pr13675_%j.err
+#SBATCH --output=bench/logs/run_benchx_3ctx1gen_dynamo_kvrouter_%j.log
+#SBATCH --error=bench/logs/run_benchx_3ctx1gen_dynamo_kvrouter_%j.err
 
 # =============================================================================
 # benchx (feat/bench_x sha 11e16c) — 3 ctx + 1 gen with ConversationRouter,
@@ -19,23 +19,33 @@
 # RWLT sends X-Session-ID + X-Correlation-ID via send_conversation_routing_headers.
 #
 # Env:
-#   CONCURRENCY  — single concurrency (default 48)
-#   HOSTCACHE    — 1 = enable kv_cache_config.host_cache_size: 80GB on ctx
-#                  0 = no host offloading (default)
+#   CONCURRENCY    — single concurrency (default 48)
+#   HOSTCACHE      — 1 = enable kv_cache_config.host_cache_size: 80GB on ctx
+#                    0 = no host offloading (default)
+#   WORKER_METRICS — 1 = pass --publish-events-and-metrics to dynamo.trtllm workers
+#                        AND run capture_metrics.py sidecar against worker /metrics
+#                    0 = neither (default; reduces publisher GIL pressure on workers)
 #
 # Submit:
-#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0 bench/run_benchx_3ctx1gen_convrouter_pr13675.sh
+#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_3ctx1gen_dynamo_kvrouter.sh
 # =============================================================================
 
 set -uo pipefail
 
 CONCURRENCY="${CONCURRENCY:-48}"
 HOSTCACHE="${HOSTCACHE:-0}"
+WORKER_METRICS="${WORKER_METRICS:-0}"
 
 if [ "$HOSTCACHE" = "1" ]; then HCTAG="hcon"; else HCTAG="hcoff"; fi
 
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/trtllm_d236c0_release_dynamo_8db5ad.sqsh}"
-EXP_NAME="run_benchx_3ctx1gen_convrouter_pr13675_${HCTAG}_c${CONCURRENCY}"
+if [ "$WORKER_METRICS" = "1" ]; then
+    WORKER_METRICS_FLAG="--publish-events-and-metrics"
+else
+    WORKER_METRICS_FLAG=""
+fi
+
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-publisherfix.sqsh}"
+EXP_NAME="run_benchx_3ctx1gen_dynamo_kvrouter_${HCTAG}_c${CONCURRENCY}"
 
 HF_TOKEN="${HF_TOKEN:-}"
 REPO_DIR="${REPO_DIR:-/lustre/fsw/core_dlfw_ci/rihuo/artificial-analysis}"
@@ -61,7 +71,7 @@ DYN_SYS_PORT_CTX_2=8083
 DYN_SYS_PORT_GEN=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
@@ -74,6 +84,7 @@ cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 } > "$RESULTS_DIR/job_info.txt"
 
 SRUN_PIDS=()
+ROUTER_METRICS_PID=""
 METRICS_PID=""
 
 cleanup() {
@@ -82,6 +93,10 @@ cleanup() {
         echo "Stopping metrics sidecar (PID ${METRICS_PID})..."
         kill -TERM "${METRICS_PID}" 2>/dev/null || true
         wait "${METRICS_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${ROUTER_METRICS_PID}" ] && kill -0 "${ROUTER_METRICS_PID}" 2>/dev/null; then
+        kill -TERM "${ROUTER_METRICS_PID}" 2>/dev/null || true
+        wait "${ROUTER_METRICS_PID}" 2>/dev/null || true
     fi
     if [ "${#SRUN_PIDS[@]}" -gt 0 ]; then
         echo "Cleaning up ${#SRUN_PIDS[@]} background srun steps..."
@@ -208,7 +223,7 @@ print(len(models))
 }
 
 echo "============================================"
-echo "$EXP_NAME (job $SLURM_JOB_ID) ctx=$NODE0 gen=$NODE1  CONCURRENCY=$CONCURRENCY HOSTCACHE=$HOSTCACHE"
+echo "$EXP_NAME (job $SLURM_JOB_ID) ctx=$NODE0 gen=$NODE1  CONCURRENCY=$CONCURRENCY HOSTCACHE=$HOSTCACHE WORKER_METRICS=$WORKER_METRICS"
 echo "Container: $CONTAINER_IMAGE"
 echo "Results: $RESULTS_DIR"
 echo "============================================"
@@ -307,7 +322,8 @@ enable_iter_req_stats: true
 print_iter_log: true
 EOF
 
-COMMON_ENV="export TRTLLM_WORKER_DISABLE_GC=1 && \
+COMMON_ENV="export TRTLLM_SERVER_DISABLE_GC=1 && \
+export TRTLLM_WORKER_DISABLE_GC=1 && \
 export DYN_ROUTER_QUEUE_THRESHOLD=100000"
 
 DYN_TCP_WORKER_POOL_SIZE=100000
@@ -386,7 +402,7 @@ start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
       --disaggregation-mode decode \
       --extra-engine-args $RESULTS_DIR/gen.yaml \
       --request-plane ${DYNAMO_REQUEST_PLANE} \
-      --publish-events-and-metrics"
+      ${WORKER_METRICS_FLAG}"
 GEN_PID="${SRUN_PIDS[-1]}"
 
 # --- 3 ctx workers on $NODE0 GPUs 0-2 (prefill) ---
@@ -407,7 +423,7 @@ for GPU in 0 1 2; do
         --disaggregation-mode prefill \
         --extra-engine-args $RESULTS_DIR/ctx.yaml \
         --request-plane ${DYNAMO_REQUEST_PLANE} \
-        --publish-events-and-metrics"
+        ${WORKER_METRICS_FLAG}"
   CTX_PIDS+=("${SRUN_PIDS[-1]}")
 done
 
@@ -456,16 +472,20 @@ fi
 
 echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
 
-# --- metrics sidecar ---
-echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
-python3 "$REPO_DIR/bench/capture_metrics.py" \
-  --endpoints "${NODE0}:${DYN_SYS_PORT_CTX_0},${NODE0}:${DYN_SYS_PORT_CTX_1},${NODE0}:${DYN_SYS_PORT_CTX_2},${NODE1}:${DYN_SYS_PORT_GEN}" \
-  --labels "ctx_g0,ctx_g1,ctx_g2,gen_g0" \
-  --output-dir "$RESULTS_DIR/metrics" \
-  --interval 2 \
-  > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &
-METRICS_PID=$!
-sleep 2
+# --- metrics sidecar (gated by WORKER_METRICS) ---
+if [ "$WORKER_METRICS" = "1" ]; then
+  echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
+  python3 "$REPO_DIR/bench/capture_metrics.py" \
+    --endpoints "${NODE0}:${DYN_SYS_PORT_CTX_0},${NODE0}:${DYN_SYS_PORT_CTX_1},${NODE0}:${DYN_SYS_PORT_CTX_2},${NODE1}:${DYN_SYS_PORT_GEN}" \
+    --labels "ctx_g0,ctx_g1,ctx_g2,gen_g0" \
+    --output-dir "$RESULTS_DIR/metrics" \
+    --interval 2 \
+    > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &
+  METRICS_PID=$!
+  sleep 2
+else
+  echo "[$(date +%H:%M:%S)] WORKER_METRICS=0 — skipping per-worker metrics sidecar"
+fi
 
 # --- RWLT @ CONCURRENCY ---
 cat > "$RESULTS_DIR/rwlt_config.yaml" << RWLTEOF
@@ -493,6 +513,23 @@ exp_prefix: ${EXP_NAME}
 results_dir: $RESULTS_DIR/rwlt_results
 RWLTEOF
 
+echo "Snapshotting frontend metrics (pre-bench)..."
+curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
+  > "$RESULTS_DIR/frontend_metrics_pre.prom" || echo "  WARN: pre snapshot failed"
+
+echo "Starting periodic frontend metrics scraper (interval=10s)..."
+(
+  while true; do
+    TS=$(date +%s)
+    if RESP=$(curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" 2>/dev/null); then
+      echo "$RESP" | awk -v ts="$TS" '/^[a-zA-Z]/ {print ts" "$0}' \
+        >> "$RESULTS_DIR/frontend_metrics_timeseries.prom"
+    fi
+    sleep 10
+  done
+) &
+ROUTER_METRICS_PID=$!
+
 echo "==== Running RWLT @ c=${CONCURRENCY} (X-Session-ID enabled) ===="
 srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
@@ -503,32 +540,20 @@ srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
   > "$RESULTS_DIR/benchmark.log" 2>&1
 echo "Bench exit: $?"
 
-# --- shut down metrics sidecar ---
-kill -TERM "$METRICS_PID" 2>/dev/null; wait "$METRICS_PID" 2>/dev/null || true
-METRICS_PID=""
-echo "Metrics samples per worker:"
-for f in "$RESULTS_DIR/metrics"/*_metrics.jsonl; do
-  [ -f "$f" ] && printf "  %s: %s lines\n" "$(basename "$f")" "$(wc -l < "$f")"
-done
+kill -TERM "$ROUTER_METRICS_PID" 2>/dev/null; wait "$ROUTER_METRICS_PID" 2>/dev/null || true
+ROUTER_METRICS_PID=""
 
-# --- final per-worker /metrics snapshot ---
-echo "Dumping final /metrics per worker..."
-for ENTRY in \
-  "ctx_g0:${NODE0}:${DYN_SYS_PORT_CTX_0}" \
-  "ctx_g1:${NODE0}:${DYN_SYS_PORT_CTX_1}" \
-  "ctx_g2:${NODE0}:${DYN_SYS_PORT_CTX_2}" \
-  "gen_g0:${NODE1}:${DYN_SYS_PORT_GEN}"; do
-  ROLE="${ENTRY%%:*}"
-  REST="${ENTRY#*:}"
-  HOST="${REST%%:*}"
-  PORT="${REST##*:}"
-  OUT="$RESULTS_DIR/metrics/${ROLE}_${HOST}_${PORT}_final.prom"
-  if curl -fsS --max-time 5 "http://${HOST}:${PORT}/metrics" -o "$OUT"; then
-    printf "  %s: %s lines (%s)\n" "$(basename "$OUT")" "$(wc -l < "$OUT")" "http://${HOST}:${PORT}/metrics"
-  else
-    echo "  WARN: failed to fetch /metrics from ${ROLE} (${HOST}:${PORT})"
-  fi
-done
+if [ -n "$METRICS_PID" ]; then
+    kill -TERM "$METRICS_PID" 2>/dev/null; wait "$METRICS_PID" 2>/dev/null || true
+    METRICS_PID=""
+fi
+
+echo "Snapshotting frontend metrics (post-bench)..."
+curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
+  > "$RESULTS_DIR/frontend_metrics_post.prom" || echo "  WARN: post snapshot failed"
+echo "  pre:  $(wc -l < "$RESULTS_DIR/frontend_metrics_pre.prom"  2>/dev/null || echo 0) lines"
+echo "  post: $(wc -l < "$RESULTS_DIR/frontend_metrics_post.prom" 2>/dev/null || echo 0) lines"
+echo "  ts:   $(wc -l < "$RESULTS_DIR/frontend_metrics_timeseries.prom" 2>/dev/null || echo 0) lines"
 
 # --- full unified iter-stats plot ---
 echo "==== Plotting iter_stats_unified.png ===="

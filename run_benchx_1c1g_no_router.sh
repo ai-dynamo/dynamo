@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=core_dlfw_ci-benchx.1ctx1gen.convrouter.no_router
+#SBATCH --job-name=core_dlfw_ci-benchx.1ctx1gen.dynamo.kvrouter.no_router
 #SBATCH --nodes=1
 #SBATCH --partition=gb200
 #SBATCH --account=core_dlfw_ci
 #SBATCH --time=04:00:00
-#SBATCH --output=bench/logs/run_benchx_1ctx1gen_convrouter_pr13675_%j.log
-#SBATCH --error=bench/logs/run_benchx_1ctx1gen_convrouter_pr13675_%j.err
+#SBATCH --output=bench/logs/run_benchx_1ctx1gen_dynamo_kvrouter_%j.log
+#SBATCH --error=bench/logs/run_benchx_1ctx1gen_dynamo_kvrouter_%j.err
 
 # =============================================================================
 # benchx (feat/bench_x sha 11e16c) — 1 ctx + 1 gen with ConversationRouter.
@@ -23,7 +23,7 @@
 #                  0 = no host offloading (default)
 #
 # Submit:
-#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0 bench/run_benchx_1ctx1gen_convrouter_pr13675.sh
+#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0 bench/run_benchx_1ctx1gen_dynamo_kvrouter.sh
 # =============================================================================
 
 set -uo pipefail
@@ -34,7 +34,7 @@ HOSTCACHE="${HOSTCACHE:-0}"
 if [ "$HOSTCACHE" = "1" ]; then HCTAG="hcon"; else HCTAG="hcoff"; fi
 
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-2.sqsh}"
-EXP_NAME="run_benchx_1ctx1gen_convrouter_pr13675_${HCTAG}_c${CONCURRENCY}"
+EXP_NAME="run_benchx_1ctx1gen_dynamo_kvrouter_${HCTAG}_c${CONCURRENCY}"
 
 HF_TOKEN="${HF_TOKEN:-}"
 REPO_DIR="${REPO_DIR:-/lustre/fsw/core_dlfw_ci/rihuo/artificial-analysis}"
@@ -57,7 +57,7 @@ DYN_SYS_PORT_CTX=8081
 DYN_SYS_PORT_GEN=8082
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 

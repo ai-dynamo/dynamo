@@ -580,7 +580,6 @@ class Publisher:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
 
             if not had_data:
-                await asyncio.sleep(sleep_s)
                 sleep_s = min(max_sleep, sleep_s * backoff_factor)
             else:
                 sleep_s = min_sleep
