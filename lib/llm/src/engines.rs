@@ -24,9 +24,11 @@ use crate::protocols::openai::{
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
 use dynamo_protocols::types::realtime::{
-    EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent,
-    RealtimeServerEventError, RealtimeServerEventResponseAudioDelta,
-    RealtimeServerEventResponseAudioDone, RealtimeServerEventSessionUpdated,
+    EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent, RealtimeResponse,
+    RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,
+    RealtimeServerEventResponseAudioDelta, RealtimeServerEventResponseAudioDone,
+    RealtimeServerEventResponseCreated, RealtimeServerEventResponseDone,
+    RealtimeServerEventSessionUpdated,
 };
 
 //
@@ -144,18 +146,24 @@ const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
 /// short stream of [`RealtimeServerEvent`]s that demonstrates the round-trip:
 /// * [`RealtimeClientEvent::SessionUpdate`] → one
 ///   [`RealtimeServerEvent::SessionUpdated`] echoing the requested `session`.
-/// * [`RealtimeClientEvent::InputAudioBufferAppend`] → one or more
-///   [`RealtimeServerEvent::ResponseOutputAudioDelta`] frames echoing the
-///   base64 audio back in `ECHO_AUDIO_DELTA_CHUNK_LEN`-character chunks,
-///   terminated by [`RealtimeServerEvent::ResponseOutputAudioDone`].
+/// * [`RealtimeClientEvent::InputAudioBufferAppend`] → a spec-shaped response
+///   envelope:
+///   1. [`RealtimeServerEvent::ResponseCreated`] (`status: in_progress`)
+///   2. one or more [`RealtimeServerEvent::ResponseOutputAudioDelta`] frames
+///      echoing the base64 audio back in `ECHO_AUDIO_DELTA_CHUNK_LEN`-char
+///      chunks
+///   3. [`RealtimeServerEvent::ResponseOutputAudioDone`]
+///   4. [`RealtimeServerEvent::ResponseDone`] (`status: completed`)
 /// * Every other variant → [`RealtimeServerEvent::Error`] with
 ///   `code = "echo_engine_unsupported"` and a message naming the variant.
 ///
 /// Used by the experimental `/v1/realtime` WebSocket endpoint to demonstrate
 /// end-to-end bidirectional plumbing. The mock is intentionally minimal:
-/// real session lifecycle, audio buffering, transcription, and full response
-/// generation (including `response.created` / `response.done` envelope events)
-/// belong to a downstream engine, not here.
+/// real session lifecycle, audio buffering, transcription, VAD turn
+/// detection, conversation-item bookkeeping, and gating audio output on a
+/// `response.create` trigger all belong to a downstream engine, not here.
+/// Notably, this echo emits the response envelope *immediately on append*
+/// rather than waiting for `response.create` — a real engine would gate it.
 pub struct EchoBidirectionalEngine {}
 
 #[async_trait]
@@ -197,12 +205,25 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                         );
                     }
                     RealtimeClientEvent::InputAudioBufferAppend(req) => {
-                        // Echo the base64 audio back in `ECHO_AUDIO_DELTA_CHUNK_LEN`-sized
-                        // deltas so observers see real streaming, then terminate
-                        // with a single `output_audio.done`. Note: chunking is on
-                        // base64-character boundaries, not byte boundaries, which
-                        // is fine for transport echo — receivers concatenate the
-                        // deltas before decoding.
+                        // Spec shape: response.created → output_audio.delta×N
+                        // → output_audio.done → response.done. Chunking is on
+                        // base64-character boundaries (not byte boundaries),
+                        // which is fine for transport echo — receivers
+                        // concatenate the deltas before decoding.
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::ResponseCreated(
+                                RealtimeServerEventResponseCreated {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    response: echo_response(
+                                        &response_id,
+                                        RealtimeResponseStatus::InProgress,
+                                    ),
+                                },
+                            ),
+                        );
+
                         let chars: Vec<char> = req.audio.chars().collect();
                         for chunk in chars.chunks(ECHO_AUDIO_DELTA_CHUNK_LEN) {
                             if ctx.is_stopped() {
@@ -236,6 +257,19 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                                     item_id: item_id.clone(),
                                     output_index: 0,
                                     content_index: 0,
+                                },
+                            ),
+                        );
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::ResponseDone(
+                                RealtimeServerEventResponseDone {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    response: echo_response(
+                                        &response_id,
+                                        RealtimeResponseStatus::Completed,
+                                    ),
                                 },
                             ),
                         );
@@ -274,6 +308,26 @@ fn annotated_event(frame: u64, event: RealtimeServerEvent) -> Annotated<Realtime
         event: None,
         comment: None,
         error: None,
+    }
+}
+
+/// Minimal `RealtimeResponse` payload for the echo engine's `response.created`
+/// and `response.done` envelope frames. Real engines populate `output`,
+/// `usage`, etc.; the mock leaves them empty so the spec shape is intact
+/// without pretending to have generated tokens.
+fn echo_response(id: &str, status: RealtimeResponseStatus) -> RealtimeResponse {
+    RealtimeResponse {
+        audio: None,
+        conversation_id: None,
+        id: id.to_string(),
+        max_output_tokens: MaxOutputTokens::Inf,
+        metadata: None,
+        object: "realtime.response".to_string(),
+        output: Vec::new(),
+        output_modalities: vec!["audio".to_string()],
+        status,
+        status_details: None,
+        usage: None,
     }
 }
 
@@ -558,14 +612,14 @@ mod tests {
         }
     }
 
-    /// `input_audio_buffer.append` echoes the supplied base64 audio back as one
-    /// or more `response.output_audio.delta` frames sized at most
-    /// `ECHO_AUDIO_DELTA_CHUNK_LEN`, terminated by a single
-    /// `response.output_audio.done`. Frame IDs (response_id, item_id) are
-    /// stable across the deltas + done so receivers can group them.
+    /// `input_audio_buffer.append` produces a spec-shaped response envelope:
+    /// `response.created` → `response.output_audio.delta`×N →
+    /// `response.output_audio.done` → `response.done`. Frame IDs
+    /// (response_id, item_id) are stable across the turn so receivers can
+    /// group them. Statuses transition InProgress → Completed.
     #[tokio::test]
-    async fn echo_bidirectional_append_streams_audio_deltas_then_done() {
-        // 200 base64 chars → 4 deltas (3×64 + 1×8) + 1 done.
+    async fn echo_bidirectional_append_streams_response_envelope_with_audio_deltas() {
+        // 200 base64 chars → 4 deltas (3×64 + 1×8) inside the envelope.
         let audio = "A".repeat(200);
         let append = parse_client_event(serde_json::json!({
             "type": "input_audio_buffer.append",
@@ -578,34 +632,62 @@ mod tests {
             .await
             .expect("generate");
 
-        let mut deltas: Vec<RealtimeServerEventResponseAudioDelta> = Vec::new();
-        let mut done: Option<RealtimeServerEventResponseAudioDone> = None;
+        let mut events: Vec<RealtimeServerEvent> = Vec::new();
         while let Some(chunk) = response_stream.next().await {
-            match chunk.data.expect("annotated payload") {
-                RealtimeServerEvent::ResponseOutputAudioDelta(d) => deltas.push(d),
-                RealtimeServerEvent::ResponseOutputAudioDone(d) => {
-                    assert!(done.is_none(), "exactly one done frame");
-                    done = Some(d);
-                }
-                other => panic!("unexpected event in audio echo stream: {other:?}"),
-            }
+            events.push(chunk.data.expect("annotated payload"));
         }
-        let done = done.expect("done frame missing");
 
-        assert_eq!(deltas.len(), 200_usize.div_ceil(ECHO_AUDIO_DELTA_CHUNK_LEN));
+        // Envelope order: created, deltas..., audio.done, response.done.
+        let expected_deltas = 200_usize.div_ceil(ECHO_AUDIO_DELTA_CHUNK_LEN);
+        assert_eq!(events.len(), expected_deltas + 3);
+
+        let RealtimeServerEvent::ResponseCreated(created) = &events[0] else {
+            panic!(
+                "first event should be response.created, got {:?}",
+                events[0]
+            );
+        };
+        assert!(matches!(
+            created.response.status,
+            RealtimeResponseStatus::InProgress
+        ));
+        let response_id = created.response.id.clone();
+
+        let RealtimeServerEvent::ResponseDone(done) = events.last().unwrap() else {
+            panic!(
+                "last event should be response.done, got {:?}",
+                events.last().unwrap()
+            );
+        };
+        assert!(matches!(
+            done.response.status,
+            RealtimeResponseStatus::Completed
+        ));
+        assert_eq!(done.response.id, response_id);
+
+        let deltas: Vec<&RealtimeServerEventResponseAudioDelta> = events
+            .iter()
+            .filter_map(|e| match e {
+                RealtimeServerEvent::ResponseOutputAudioDelta(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas.len(), expected_deltas);
         assert_eq!(
             deltas.iter().map(|d| d.delta.as_str()).collect::<String>(),
             audio,
             "concatenated deltas should equal the input audio"
         );
+        assert!(deltas.iter().all(|d| d.response_id == response_id));
 
-        // response_id + item_id must be stable across all frames in the turn.
-        let response_id = &deltas[0].response_id;
-        let item_id = &deltas[0].item_id;
-        assert!(deltas.iter().all(|d| &d.response_id == response_id));
-        assert!(deltas.iter().all(|d| &d.item_id == item_id));
-        assert_eq!(&done.response_id, response_id);
-        assert_eq!(&done.item_id, item_id);
+        let audio_done: &RealtimeServerEventResponseAudioDone = events
+            .iter()
+            .find_map(|e| match e {
+                RealtimeServerEvent::ResponseOutputAudioDone(d) => Some(d),
+                _ => None,
+            })
+            .expect("response.output_audio.done missing");
+        assert_eq!(audio_done.response_id, response_id);
     }
 
     /// Client events the echo engine doesn't model (anything other than

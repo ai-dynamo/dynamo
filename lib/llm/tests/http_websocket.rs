@@ -151,12 +151,14 @@ async fn realtime_websocket_session_update_echoes_session_updated() {
     let _ = handle.await;
 }
 
-/// `input_audio_buffer.append` round-trips through the engine: client sends
-/// base64 audio, server emits one or more `response.output_audio.delta`
-/// frames echoing it back, terminated by `response.output_audio.done`. End-to-
-/// end check that streamed multi-frame engine output reaches the wire.
+/// `input_audio_buffer.append` produces a spec-shaped response envelope on
+/// the wire: `response.created` (`status: in_progress`) → one or more
+/// `response.output_audio.delta` frames echoing the input audio →
+/// `response.output_audio.done` → `response.done` (`status: completed`).
+/// End-to-end check that streamed multi-frame engine output reaches the wire
+/// in the right order with stable response_id across the turn.
 #[tokio::test]
-async fn realtime_websocket_audio_append_streams_deltas_then_done() {
+async fn realtime_websocket_audio_append_streams_response_envelope() {
     ensure_echo_engine_installed();
 
     let port = get_random_port().await;
@@ -182,9 +184,12 @@ async fn realtime_websocket_audio_append_streams_deltas_then_done() {
         .expect("send append");
 
     let mut deltas = String::new();
-    let mut got_done = false;
+    let mut response_id: Option<String> = None;
+    let mut saw_audio_done = false;
+    let mut response_done_status: Option<String> = None;
+    let mut events_seen: Vec<String> = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while !got_done && tokio::time::Instant::now() < deadline {
+    while response_done_status.is_none() && tokio::time::Instant::now() < deadline {
         let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
             .await
             .expect("frame within 2s")
@@ -194,15 +199,35 @@ async fn realtime_websocket_audio_append_streams_deltas_then_done() {
             panic!("expected Text frame, got {frame:?}");
         };
         let event: Value = serde_json::from_str(&text).expect("response is valid JSON");
-        match event.get("type").and_then(|t| t.as_str()) {
-            Some("response.output_audio.delta") => {
+        let event_type = event
+            .get("type")
+            .and_then(|t| t.as_str())
+            .expect("event has type")
+            .to_string();
+        events_seen.push(event_type.clone());
+        match event_type.as_str() {
+            "response.created" => {
+                let id = event
+                    .pointer("/response/id")
+                    .and_then(|s| s.as_str())
+                    .expect("response.created carries response.id")
+                    .to_string();
+                response_id = Some(id);
+            }
+            "response.output_audio.delta" => {
                 let delta = event
                     .get("delta")
                     .and_then(|d| d.as_str())
                     .expect("delta is a string");
                 deltas.push_str(delta);
             }
-            Some("response.output_audio.done") => got_done = true,
+            "response.output_audio.done" => saw_audio_done = true,
+            "response.done" => {
+                response_done_status = event
+                    .pointer("/response/status")
+                    .and_then(|s| s.as_str())
+                    .map(String::from);
+            }
             other => panic!("unexpected event type {other:?} in audio echo stream: {event}"),
         }
     }
@@ -211,7 +236,20 @@ async fn realtime_websocket_audio_append_streams_deltas_then_done() {
     token.cancel();
     let _ = handle.await;
 
-    assert!(got_done, "engine should emit response.output_audio.done");
+    assert_eq!(
+        events_seen.first().map(String::as_str),
+        Some("response.created")
+    );
+    assert_eq!(
+        events_seen.last().map(String::as_str),
+        Some("response.done")
+    );
+    assert!(
+        saw_audio_done,
+        "engine should emit response.output_audio.done"
+    );
+    assert_eq!(response_done_status.as_deref(), Some("completed"));
+    assert!(response_id.is_some());
     assert_eq!(
         deltas, audio,
         "concatenated deltas should reproduce the input audio"
