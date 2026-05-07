@@ -102,16 +102,18 @@ impl InactiveIndex for MultiLruBackend {
         matches
     }
 
-    fn find_match(&mut self, hash: SequenceHash, touch: bool) -> Option<Block<T, Registered>> {
+    fn find_match(
+        &mut self,
+        hash: SequenceHash,
+        // See find_matches: registry calls frequency_tracker.touch()
+        // at the API boundary; backends must not touch again.
+        _touch: bool,
+    ) -> Option<(SequenceHash, BlockId)> {
         for pool in &mut self.priority_pools {
-            if let Some(block) = pool.pop(&hash) {
-                if touch {
-                    self.frequency_tracker.touch(hash.as_u128());
-                }
-                return Some(block);
+            if let Some(block_id) = pool.pop(&hash) {
+                return Some((hash, block_id));
             }
         }
-
         None
     }
 

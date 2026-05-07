@@ -327,12 +327,8 @@ impl InactiveIndex for LineageBackend {
         matches
     }
 
-    fn find_match(
-        &mut self,
-        hash: PositionalLineageHash,
-        _touch: bool,
-    ) -> Option<Block<T, Registered>> {
-        self.remove(&hash)
+    fn find_match(&mut self, hash: SequenceHash, _touch: bool) -> Option<(SequenceHash, BlockId)> {
+        self.remove_by_hash(&hash)
     }
 
     fn scan_matches(
