@@ -1276,6 +1276,9 @@ class KvRouterConfig:
     def __init__(
         self,
         overlap_score_weight: float = 1.0,
+        prefill_load_scale: float = 1.0,
+        host_cache_hit_weight: float = 0.75,
+        disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
         durable_kv_events: bool = False,
@@ -1291,13 +1294,20 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
+        use_remote_indexer: bool = False,
+        serve_indexer: bool = False,
+        shared_cache_multiplier: float = 0.0,
+        shared_cache_type: str = "none",
     ) -> None:
         """
         Create a KV router configuration.
 
         Args:
-            overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
-            router_temperature: Temperature for worker sampling via softmax (default: 0.0)
+            overlap_score_weight: Credit multiplier for device-local prefix overlap (default: 1.0)
+            prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
+            disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
+            router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
             durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
                 This option will be removed in a future release. The event-plane subscriber
@@ -1328,6 +1338,10 @@ class KvRouterConfig:
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+            use_remote_indexer: Query a remote KV indexer served from the worker component (default: False).
+            serve_indexer: Serve this router's local indexer from the worker component (default: False).
+            shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
+            shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
         """
         ...
 
@@ -1344,10 +1358,15 @@ class KvRouterConfig:
 
     @overlap_score_weight.setter
     def overlap_score_weight(self, value: float) -> None: ...
+    @property
+    def prefill_load_scale(self) -> float: ...
+    @prefill_load_scale.setter
+    def prefill_load_scale(self, value: float) -> None: ...
 
     def with_overrides(
         self,
         overlap_score_weight: Optional[float] = None,
+        prefill_load_scale: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:

@@ -566,6 +566,12 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
         cfg.overlap_score_weight = v;
     }
+    if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT") {
+        cfg.overlap_score_weight = v;
+    }
+    if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
+        cfg.prefill_load_scale = v;
+    }
     if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
         cfg.router_temperature = v;
     }
@@ -590,6 +596,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 
     tracing::info!(
         overlap_score_weight = cfg.overlap_score_weight,
+        prefill_load_scale = cfg.prefill_load_scale,
         router_temperature = cfg.router_temperature,
         use_kv_events = cfg.use_kv_events,
         router_replica_sync = cfg.router_replica_sync,

@@ -43,6 +43,10 @@ const fn default_disk_cache_hit_weight() -> f64 {
     0.25
 }
 
+const fn default_prefill_load_scale() -> f64 {
+    1.0
+}
+
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -151,8 +155,17 @@ impl FromStr for RouterQueuePolicy {
 /// Override configuration for router settings that can be specified per-request
 #[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
 pub struct RouterConfigOverride {
+    /// Device-local prefix-overlap credit multiplier applied to the prefill
+    /// load before sampling. Set to 0.0 to ignore prefix matching.
     #[builder(default)]
+    #[validate(range(min = 0.0))]
     pub overlap_score_weight: Option<f64>,
+
+    /// Scale applied to the adjusted prefill load after device/lower-tier
+    /// cache-hit credits have been subtracted.
+    #[builder(default)]
+    #[validate(range(min = 0.0))]
+    pub prefill_load_scale: Option<f64>,
 
     #[builder(default)]
     #[validate(range(min = 0.0))]
@@ -175,8 +188,16 @@ pub struct RouterConfigOverride {
 #[serde(default)]
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
+    /// Device-local prefix-overlap credit multiplier applied to the prefill
+    /// load before sampling. Set to 0.0 to ignore prefix matching.
     #[validate(range(min = 0.0))]
     pub overlap_score_weight: f64,
+
+    /// Scale applied after overlap/cache-hit credits reduce the prompt-side
+    /// prefill load. Defaults to 1.0.
+    #[serde(default = "default_prefill_load_scale")]
+    #[validate(range(min = 0.0))]
+    pub prefill_load_scale: f64,
 
     #[serde(default = "default_host_cache_hit_weight")]
     #[validate(range(min = 0.0, max = 1.0))]
@@ -277,6 +298,7 @@ impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
+            prefill_load_scale: default_prefill_load_scale(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -496,6 +518,7 @@ mod tests {
     fn test_router_config_override_rejects_out_of_range_shared_cache_multiplier() {
         let too_small = RouterConfigOverride {
             overlap_score_weight: None,
+            prefill_load_scale: None,
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,
@@ -503,6 +526,7 @@ mod tests {
         };
         let too_large = RouterConfigOverride {
             overlap_score_weight: None,
+            prefill_load_scale: None,
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,

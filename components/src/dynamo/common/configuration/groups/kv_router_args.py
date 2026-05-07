@@ -19,6 +19,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
+    "prefill_load_scale",
     "router_temperature",
     "use_kv_events",
     "durable_kv_events",
@@ -45,6 +46,7 @@ class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
     overlap_score_weight: float
+    prefill_load_scale: float
     router_temperature: float
     use_kv_events: bool
     durable_kv_events: bool
@@ -82,8 +84,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
             default=1.0,
             help=(
-                "KV Router: Weight for overlap score in worker selection. "
-                "Higher values prioritize KV cache reuse."
+                "KV Router: Credit multiplier for device-local prefix overlap. "
+                "Higher values more strongly prefer KV cache reuse."
             ),
             arg_type=float,
             dest="overlap_score_weight",
@@ -91,12 +93,24 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--router-prefill-load-scale",
+            env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
+            default=1.0,
+            help=(
+                "KV Router: Scale applied to adjusted prompt-side prefill load after "
+                "overlap and lower-tier cache-hit credits are subtracted."
+            ),
+            arg_type=float,
+            dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
             flag_name="--router-temperature",
             env_var="DYN_ROUTER_TEMPERATURE",
             default=0.0,
             help=(
-                "KV Router: Temperature for worker sampling via softmax. Higher values "
-                "promote more randomness, and 0 fallbacks to deterministic."
+                "KV Router: Temperature for normalized worker sampling via softmax. "
+                "Higher values promote more randomness, and 0 falls back to deterministic."
             ),
             arg_type=float,
         )

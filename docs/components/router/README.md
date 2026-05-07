@@ -19,7 +19,9 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
-| `--router-kv-overlap-score-weight` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--router-mode token-dp-balance` | `round_robin` | Use the KV scheduler for DP-rank-aware load balancing without prefix matching |
+| `--router-kv-overlap-score-weight` | `1.0` | Credit multiplier for device-local prefix overlap |
+| `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
 | `--router-queue-threshold` | `4.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.priority` |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |

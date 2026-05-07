@@ -197,6 +197,15 @@ fn tier_overlap_blocks_from_tiered_matches(
 ) -> TierOverlapBlocks {
     let mut tier_overlap_blocks = TierOverlapBlocks::default();
 
+    tier_overlap_blocks.device.extend(
+        tiered_matches
+            .device
+            .overlap_scores
+            .scores
+            .iter()
+            .map(|(worker, hits)| (*worker, *hits as usize)),
+    );
+
     if let Some(host_matches) = tiered_matches
         .lower_tier
         .get(&dynamo_kv_router::protocols::StorageTier::HostPinned)

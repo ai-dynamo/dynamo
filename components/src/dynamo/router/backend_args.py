@@ -17,6 +17,7 @@ class DynamoRouterConfig(ConfigBase):
     endpoint: str
     router_block_size: int
     router_kv_overlap_score_weight: float
+    router_prefill_load_scale: float
     router_temperature: float
     router_use_kv_events: bool
     router_replica_sync: bool
@@ -78,9 +79,18 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-kv-overlap-score-weight",
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
             default=1.0,
-            help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse",
+            help="KV Router: Credit multiplier for device-local prefix overlap. Higher values more strongly prefer KV cache reuse",
             arg_type=float,
             obsolete_flag="--kv-overlap-score-weight",
+        )
+
+        add_argument(
+            g,
+            flag_name="--router-prefill-load-scale",
+            env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
+            default=1.0,
+            help="KV Router: Scale applied to adjusted prompt-side prefill load after overlap and lower-tier cache-hit credits are subtracted",
+            arg_type=float,
         )
 
         add_argument(
@@ -88,7 +98,7 @@ class DynamoRouterArgGroup(ArgGroup):
             flag_name="--router-temperature",
             env_var="DYN_ROUTER_TEMPERATURE",
             default=0.0,
-            help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
+            help="KV Router: Temperature for normalized worker sampling via softmax. Higher values promote more randomness, and 0 falls back to deterministic.",
             arg_type=float,
         )
 

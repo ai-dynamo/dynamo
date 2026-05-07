@@ -111,9 +111,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
         if self.router_prefill_load_model == "aic":
-            if self.router_mode != "kv":
+            if self.router_mode not in {"kv", "token-dp-balance"}:
                 raise ValueError(
-                    "--router-prefill-load-model=aic requires --router-mode=kv"
+                    "--router-prefill-load-model=aic requires "
+                    "--router-mode=kv or --router-mode=token-dp-balance"
                 )
             if self.chat_processor != "dynamo":
                 raise ValueError(
