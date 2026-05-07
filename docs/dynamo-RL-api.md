@@ -1,9 +1,6 @@
 # Dynamo RL API
 
-**Branch:** `bis/dynamo-rl` (HEAD: `a2cc90da6d`)
-**Pull request:** [ai-dynamo/dynamo#9131](https://github.com/ai-dynamo/dynamo/pull/9131)
-
-This document describes the RL training API surface on the Dynamo serving stack. The Dynamo Rust frontend exposes a small, focused set of endpoints that let an RL trainer (prime-rl, NeMo-rl, or any OpenAI-compatible client) drive a vLLM-served model through pause / weight-update / resume cycles, hot-swap LoRA adapters, and post pre-tokenized inputs on the standard chat-completions endpoint.
+This document describes the RL training API surface on the Dynamo serving stack. The Dynamo Rust frontend exposes a small, focused set of endpoints that let an RL trainer drive a vLLM-served model through pause / weight-update / resume cycles, hot-swap LoRA adapters, and post pre-tokenized inputs on the standard chat-completions endpoint.
 
 ## Table of Contents
 
@@ -52,7 +49,7 @@ Endpoints intentionally **not** present (returned 404):
 | Removed | Reason |
 |---|---|
 | `/v1/chat/completions/tokens` | TITO collapsed into `/v1/chat/completions` via the `prompt_token_ids` top-level extension |
-| `/v1/tokenize` | Owned by [#7699](https://github.com/ai-dynamo/dynamo/pull/7699) (NeMo-rl scope), not used by prime-rl |
+| `/v1/tokenize` | Out of scope for this surface (covered by a separate PR) |
 | `/v1/detokenize` | Same as above |
 
 The handler functions and route helpers are kept in source under `#[allow(dead_code)]` so downstream code that still references them compiles; physical deletion is a follow-up cleanup commit.
@@ -65,9 +62,9 @@ The handler functions and route helpers are kept in source under `#[allow(dead_c
 
 ```mermaid
 flowchart TD
-    subgraph prime_rl["prime-rl"]
-        orch["Orchestrator<br/>(prime_rl.orchestrator)"]
-        trainer["Trainer<br/>(prime_rl.trainer.rl.train)<br/>torchrun --nproc-per-node=N"]
+    subgraph rl_client["RL Trainer (external)"]
+        orch["Orchestrator<br/>(rollouts + admin calls)"]
+        trainer["Trainer<br/>(torchrun, FSDP/EP/etc.)"]
     end
 
     subgraph dynamo["Dynamo Serving Stack"]
