@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # External Secrets Operator - Production Addon
 
-External Secrets Operator (ESO) syncs secrets from an external provider into Kubernetes `Secret` resources. In this profile it is the baseline secret bridge for Hugging Face tokens, SMG secrets, and any future cloud-provider credentials that should not live directly in Git.
+External Secrets Operator (ESO) syncs secrets from an external provider into Kubernetes `Secret` resources. In this profile it is the baseline secret bridge for Hugging Face tokens and future cloud-provider credentials that should not live directly in Git.
 
 ## Deployment
 
@@ -36,7 +36,7 @@ External Secrets Operator (ESO) syncs secrets from an external provider into Kub
 
 ## Production Contract
 
-Any addon that needs secrets should reference ESO through explicit `ExternalSecret` manifests. The current SMG secret mirror expects a `ClusterSecretStore` named `aws-secrets`; see [`examples/clustersecretstore-aws.yaml`](../../examples/clustersecretstore-aws.yaml).
+Any addon that needs secrets should reference ESO through explicit `ExternalSecret` manifests. The example Hugging Face token manifest uses a `ClusterSecretStore`; see [`examples/clustersecretstore-aws.yaml`](../../examples/clustersecretstore-aws.yaml) and [`examples/hf-token-externalsecret.yaml`](../../examples/hf-token-externalsecret.yaml).
 
 ## Verify
 

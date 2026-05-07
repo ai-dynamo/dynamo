@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# End-to-end verification: client → SMG → Dynamo Frontend → SGLang.
+# End-to-end verification: client -> SMG -> Dynamo Frontend -> SGLang.
 #
 # Usage:
 #   ./tests/smg-roundtrip.sh                     # default ports + namespaces
 #   SMG_NS=smg DYNAMO_NS=dynamo-system ./tests/smg-roundtrip.sh
-#   MODEL=BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1 ./tests/smg-roundtrip.sh
+#   MODEL=BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1 ./tests/smg-roundtrip.sh
 #
 # Exit codes:
 #   0  full chain healthy
 #   2  SMG /health failed (gateway down)
-#   3  Dynamo Frontend /health failed (router down — SMG would also fail, but
+#   3  Dynamo Frontend /health failed (router down; SMG would also fail, but
 #      we differentiate so the failure points at the right layer)
 #   4  SMG returned non-200 on a /v1/chat/completions probe
 #   5  response did not parse as a chat.completion (engine returned an error)
@@ -25,7 +25,7 @@ SMG_PORT=${SMG_PORT:-80}
 DYNAMO_NS=${DYNAMO_NS:-dynamo-system}
 DYNAMO_SVC=${DYNAMO_SVC:-deepseek-v32-reap-sglang-frontend}
 DYNAMO_PORT=${DYNAMO_PORT:-8000}
-MODEL=${MODEL:-BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-GatedNorm-G1}
+MODEL=${MODEL:-BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1}
 LOCAL_SMG_PORT=${LOCAL_SMG_PORT:-18080}
 LOCAL_DYNAMO_PORT=${LOCAL_DYNAMO_PORT:-18000}
 
@@ -62,13 +62,13 @@ start_pf "$DYNAMO_NS" "$DYNAMO_SVC" "$LOCAL_DYNAMO_PORT" "$DYNAMO_PORT" \
 
 warn "SMG /health"
 if ! curl -sS -fL --max-time 5 "http://127.0.0.1:$LOCAL_SMG_PORT/health" >/dev/null; then
-  err "SMG /health failed — gateway down"; exit 2
+  err "SMG /health failed: gateway down"; exit 2
 fi
 ok "SMG healthy"
 
 warn "Dynamo Frontend /health"
 if ! curl -sS -fL --max-time 5 "http://127.0.0.1:$LOCAL_DYNAMO_PORT/health" >/dev/null; then
-  err "Dynamo Frontend /health failed — router down"; exit 3
+  err "Dynamo Frontend /health failed: router down"; exit 3
 fi
 ok "Dynamo Frontend healthy"
 

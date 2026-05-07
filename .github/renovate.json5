@@ -19,7 +19,7 @@
 // from the gitops/apps/ directory -- no config edit needed unless the
 // addon also pins something *outside* an ArgoCD Application (image tags
 // inside a values.yaml, for instance). For those, add a customManagers
-// entry following the SMG and Postgres patterns below.
+// entry following the SMG pattern below.
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["config:recommended", ":prHourlyLimitNone"],

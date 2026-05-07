@@ -18,6 +18,7 @@ The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200
 - no SGLang HiCache in this profile because HiSparse requires the decode no-radix path
 - no LayerSplit flags in this 4+4 DP=4 profile because the prefill worker does not have effective attention CP size greater than 1
 - Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
+- Dynamo-native chat preprocessing via frontend `--dyn-chat-processor dynamo` and worker parser flags `--dyn-tool-call-parser deepseek_v3_2 --dyn-reasoning-parser deepseek_r1`
 - prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
 - decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled, radix cache disabled as required by HiSparse
 - SMC-SD draft on decode only: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
@@ -133,7 +134,18 @@ kubectl get dgd,dgdr,dgdsa,dm,pods -n dynamo-system
 kubectl logs -n dynamo-system -l app.kubernetes.io/name=deepseek-v32-reap-sglang --all-containers --tail=200
 ```
 
-The worker launches SGLang through Dynamo with the core stack enabled:
+The frontend starts with event-backed KV routing and Dynamo-native chat preprocessing:
+
+```bash
+python3 -m dynamo.frontend \
+  --router-mode kv \
+  --router-kv-events \
+  --router-reset-states \
+  --dyn-chat-processor dynamo \
+  --http-port 8000
+```
+
+The workers launch SGLang through Dynamo with the core stack enabled:
 
 ```bash
 python3 -m dynamo.sglang \
@@ -154,7 +166,9 @@ python3 -m dynamo.sglang \
   --turboquant-execution-mode fused_decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 12345 \
-  --disaggregation-mode prefill|decode
+  --disaggregation-mode prefill|decode \
+  --dyn-tool-call-parser deepseek_v3_2 \
+  --dyn-reasoning-parser deepseek_r1
 ```
 
 Omit the HiSparse and SMC-SD flags on the prefill role. The manifest sets them
