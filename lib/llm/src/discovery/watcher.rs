@@ -410,10 +410,8 @@ impl ModelWatcher {
 
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
-            if let Some(_removed_ws) = self.manager.remove_worker_set(&model_name, &ws_key) {
-                // remove_prefill_activator uses deployment namespace (not ws_key)
-                self.manager
-                    .remove_prefill_activator(&model_name, worker_namespace);
+            let removed = self.manager.remove_worker_set(&model_name, &ws_key);
+            if removed.is_some() {
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
@@ -421,13 +419,40 @@ impl ModelWatcher {
                 );
             }
 
-            // If the removed component was a prefill worker, deactivate the decode-side
-            // prefill router so requests fall back to aggregated mode (or fail cleanly
-            // with enforce_disagg). The decode WorkerSet's namespace matches the
-            // deployment namespace, not the ws_key.
+            // Activator-state cleanup depends on which component just went away.
+            //
+            // PREFILL teardown (cached endpoint is stale): drop everything for
+            // this key and deactivate the decode-side router so requests fall
+            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            //
+            // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
+            // valid for future decode rebuilds — that's PR 8965's primary
+            // contribution) but DO drop any stale `DecodeWaiting(sender)`. The
+            // sender pointed at a `oneshot::Receiver` held by the now-dropped
+            // PrefillRouter; leaving it in the map causes the next decode
+            // rebuild's `register_prefill_router` to find a stale `DecodeWaiting`,
+            // return `None`, and produce a WorkerSet with no PrefillRouter at
+            // all. The stale-DecodeWaiting cleanup tests cover this rebuild
+            // path.
             if card.model_type.supports_prefill() {
+                if removed.is_some() {
+                    self.manager
+                        .remove_prefill_activator(&model_name, worker_namespace);
+                }
                 self.manager
                     .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
+            } else {
+                // Decode-component teardown: always run the waiter cleanup,
+                // regardless of whether `remove_worker_set` found an entry. If
+                // a decode worker registered (creating a `DecodeWaiting`
+                // activator entry) but `handle_add_helper` later failed before
+                // `add_worker_set`, the WorkerSet is absent here yet the stale
+                // `DecodeWaiting` still needs to be cleared. The helper is
+                // state-safe (`remove_if(|_, v| matches!(v, DecodeWaiting(_)))`)
+                // so calling it on a key that's vacant or holds `PrefillReady`
+                // is a no-op.
+                self.manager
+                    .remove_decode_prefill_waiter(&model_name, worker_namespace);
             }
         }
 
@@ -650,6 +675,10 @@ impl ModelWatcher {
     ) -> anyhow::Result<()> {
         card.download_config().await?;
 
+        // Use per-worker-set router config if the worker provided one in its MDC,
+        // otherwise fall back to the frontend-level global config.
+        let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
+
         let component = self
             .drt
             .namespace(&mcid.namespace)?
@@ -687,7 +716,7 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let kv_chooser = if self.router_config.router_mode == RouterMode::KV
+            let kv_chooser = if router_config.router_mode == RouterMode::KV
                 && (needs_local_chat_pipeline || needs_local_completions_pipeline)
             {
                 Some(
@@ -695,7 +724,7 @@ impl ModelWatcher {
                         .kv_chooser_for(
                             &endpoint,
                             card.kv_cache_block_size,
-                            Some(self.router_config.kv_router_config.clone()),
+                            Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
@@ -729,17 +758,17 @@ impl ModelWatcher {
                 .register_prefill_router(&model_name, &namespace)
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.router_config.kv_router_config.clone();
+                    let mut prefill_config = router_config.kv_router_config.clone();
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
                         rx,
                         self.manager.clone(),
-                        self.router_config.router_mode,
+                        router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.prefill_load_estimator.clone(),
-                        self.router_config.enforce_disagg,
+                        router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),
                         card.runtime_config.enable_eagle,
@@ -762,7 +791,7 @@ impl ModelWatcher {
                 .unwrap_or_else(|| client.clone());
             let worker_monitor = Some(KvWorkerMonitor::new(
                 monitor_client,
-                self.router_config.load_threshold_config.clone(),
+                router_config.load_threshold_config.clone(),
             ));
 
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
@@ -800,12 +829,12 @@ impl ModelWatcher {
                         card,
                         &client,
                         self.manager.clone(),
-                        self.router_config.router_mode,
+                        router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         tk,
                         prefill_chooser.clone(),
-                        self.router_config.enforce_disagg,
+                        router_config.enforce_disagg,
                         self.migration_limit,
                         self.migration_max_seq_len,
                         self.metrics.clone(),
@@ -833,13 +862,13 @@ impl ModelWatcher {
                         card,
                         &client,
                         self.manager.clone(),
-                        self.router_config.router_mode,
+                        router_config.router_mode,
                         worker_monitor,
                         kv_chooser,
                         preprocessor,
                         tk,
                         prefill_chooser,
-                        self.router_config.enforce_disagg,
+                        router_config.enforce_disagg,
                         self.migration_limit,
                         self.migration_max_seq_len,
                         self.metrics.clone(),
@@ -873,7 +902,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_monitor(
-                client, self.router_config.router_mode, None
+                client, router_config.router_mode, None
             )
             .await?;
             worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -893,7 +922,7 @@ impl ModelWatcher {
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), self.router_config.router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -904,7 +933,7 @@ impl ModelWatcher {
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), self.router_config.router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
@@ -915,7 +944,7 @@ impl ModelWatcher {
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), self.router_config.router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
@@ -926,20 +955,19 @@ impl ModelWatcher {
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), self.router_config.router_mode, None
+                    client.clone(), router_config.router_mode, None
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case: Text + Chat (pure text-to-text, no diffusion)
-            let push_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_monitor(
-                client, self.router_config.router_mode, None
-            )
-            .await?;
+            let push_router =
+                PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_monitor(client, router_config.router_mode, None)
+                .await?;
             worker_set.chat_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case: Text + Completions
@@ -947,7 +975,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_monitor(
-                client, self.router_config.router_mode, None
+                client, router_config.router_mode, None
             )
             .await?;
             worker_set.completions_engine = Some(Arc::new(push_router));
@@ -966,7 +994,7 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_monitor(
-                client, self.router_config.router_mode, None
+                client, router_config.router_mode, None
             )
             .await?;
 
@@ -990,7 +1018,7 @@ impl ModelWatcher {
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_monitor(
-                client, self.router_config.router_mode, None
+                client, router_config.router_mode, None
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));

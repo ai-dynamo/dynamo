@@ -75,6 +75,11 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
+	// Checkpoint Jobs always capture exactly the main container. Other
+	// containers in the pod template (e.g. GMS saver sidecars the operator
+	// adds below) are preserved but not checkpointed. The annotation is
+	// the contract the snapshot-agent reads.
+	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{consts.MainContainerName})
 	if podTemplate.Spec.ServiceAccountName == "" {
 		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
@@ -84,7 +89,10 @@ func buildCheckpointJob(
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer := &podTemplate.Spec.Containers[0]
+	mainContainer, err := checkpoint.RequireMainContainer(&podTemplate.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	}
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,
@@ -141,7 +149,7 @@ func buildCheckpointJob(
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,

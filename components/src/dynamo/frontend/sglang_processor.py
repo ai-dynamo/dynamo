@@ -28,14 +28,17 @@ from dynamo.llm import (
     RouterMode,
     fetch_model,
 )
+from dynamo.llm.exceptions import InvalidArgument, Unknown
 from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
     ToolCallParserType,
+    _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
     convert_tools,
     create_parsers,
+    detect_force_reasoning_from_template,
     preprocess_chat_request,
 )
 from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
@@ -54,18 +57,19 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
-def _unsupported_n_error(n: int) -> dict[str, Any]:
-    return {
-        "error": {
-            "message": (
-                f"Unsupported value: 'n={n}'. "
-                "This endpoint currently supports only n=1."
-            ),
-            "type": "invalid_request_error",
-            "param": "n",
-            "code": "unsupported_value",
-        }
-    }
+def _unsupported_n_message(n: int) -> str:
+    return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
+
+
+def _engine_error_message(
+    engine_response: Any,
+    request_id: str,
+) -> str:
+    """Extract a human-readable message from an invalid engine response."""
+    if isinstance(engine_response, dict) and engine_response.get("status") == "error":
+        backend_msg = engine_response.get("message") or "unknown backend error"
+        return f"Backend error for request {request_id}: {backend_msg}"
+    return f"Invalid engine response for request {request_id}"
 
 
 _FINISH_REASON_MAP: dict[str, str] = {
@@ -104,6 +108,7 @@ _w_tokenizer: Any = None
 _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
+_w_template_force_reasoning: bool = False
 
 
 @dataclass
@@ -113,6 +118,12 @@ class SglangPreprocessWorkerResult:
     prompt_token_ids: list[int]
     dynamo_preproc: dict[str, Any]
     request: dict[str, Any]
+    force_reasoning: bool = False
+    # ``effective_reasoning_parser_name`` is None when the request opted out
+    # via ``separate_reasoning=False``; the main process must skip creating
+    # a reasoning parser in that case so the pool path matches the inline
+    # path byte-for-byte.
+    effective_reasoning_parser_name: str | None = None
 
 
 def _init_worker(
@@ -121,14 +132,16 @@ def _init_worker(
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
     trust_remote_code: bool = False,
+    template_force_reasoning: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
-    global _w_exclude_tools_when_tool_choice_none
+    global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     _w_tokenizer = get_tokenizer(model_path, trust_remote_code=trust_remote_code)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+    _w_template_force_reasoning = template_force_reasoning
 
 
 def _preprocess_worker(
@@ -143,11 +156,12 @@ def _preprocess_worker(
         tool_call_parser_name=_w_tool_call_parser_name,
         reasoning_parser_name=_w_reasoning_parser_name,
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
+        template_force_reasoning=_w_template_force_reasoning,
     )
 
     n = request.get("n", 1)
     if n != 1:
-        raise PreprocessError(_unsupported_n_error(n))
+        raise PreprocessError(_unsupported_n_message(n))
 
     dynamo_preproc = _build_dynamo_preproc(
         request,
@@ -158,10 +172,16 @@ def _preprocess_worker(
         pre.tool_call_parser,
     )
 
+    effective_reasoning_parser_name = (
+        _w_reasoning_parser_name if _client_wants_separate_reasoning(request) else None
+    )
+
     return SglangPreprocessWorkerResult(
         prompt_token_ids=pre.prompt_token_ids,
         dynamo_preproc=dynamo_preproc,
         request=request,
+        force_reasoning=pre.force_reasoning,
+        effective_reasoning_parser_name=effective_reasoning_parser_name,
     )
 
 
@@ -254,6 +274,20 @@ class SglangProcessor:
         stream_interval: int = 1,
     ):
         self.tokenizer = tokenizer
+        # Detect force_reasoning once from the chat template, matching
+        # sglang's template_manager. Per-request overrides still apply
+        # (see resolve_request_force_reasoning).
+        self.template_force_reasoning = detect_force_reasoning_from_template(
+            getattr(tokenizer, "chat_template", None)
+        )
+        if self.template_force_reasoning:
+            logger.info(
+                "Detected force-reasoning pattern in chat template; "
+                "thinking tokens will route to delta.reasoning_content by "
+                "default (clients can opt out via "
+                "separate_reasoning=false or "
+                "chat_template_kwargs.enable_thinking=false)."
+            )
         self.router = router
         self.is_kv_router = isinstance(router, KvRouter)
         self.tool_call_parser_name = tool_call_parser_name
@@ -317,6 +351,7 @@ class SglangProcessor:
                 tool_call_parser_name=self.tool_call_parser_name,
                 reasoning_parser_name=self.reasoning_parser_name,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+                template_force_reasoning=self.template_force_reasoning,
             )
 
             if self.debug_perf:
@@ -332,8 +367,7 @@ class SglangProcessor:
             n = request.get("n", 1)
             if n != 1:
                 logger.error("Unsupported n=%d, only n=1 is supported", n)
-                yield _unsupported_n_error(n)
-                return
+                raise InvalidArgument(_unsupported_n_message(n))
 
             dynamo_preproc = _build_dynamo_preproc(
                 request,
@@ -343,15 +377,11 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
+        except InvalidArgument:
+            raise
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
-            yield {
-                "error": {
-                    "message": f"Preprocessing error: {exc}",
-                    "type": "internal_error",
-                }
-            }
-            return
+            raise Unknown(f"Preprocessing error: {exc}") from exc
 
         post = SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -390,25 +420,23 @@ class SglangProcessor:
                     await asyncio.wrap_future(future)
                 )
         except PreprocessError as exc:
-            yield exc.error_dict
-            return
+            raise InvalidArgument(str(exc)) from exc
         except Exception as exc:
             logger.exception(
                 "SGLang worker preprocessing failed for request %s", request_id
             )
-            yield {
-                "error": {
-                    "message": f"Worker error: {exc}",
-                    "type": "internal_error",
-                }
-            }
-            return
+            raise Unknown(f"Worker error: {exc}") from exc
 
         # --- Phase 2: Recreate parsers in main process (not picklable) ---
+        # The worker already decided effective_reasoning_parser_name based on
+        # the request's separate_reasoning flag and computed force_reasoning;
+        # we mirror those choices to keep pool- and inline-path outputs
+        # identical.
         tool_call_parser, reasoning_parser = create_parsers(
             request,
             tool_call_parser_name=self.tool_call_parser_name,
-            reasoning_parser_name=self.reasoning_parser_name,
+            reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
+            force_reasoning=preproc_result.force_reasoning,
         )
 
         post = SglangStreamingPostProcessor(
@@ -476,17 +504,17 @@ class SglangProcessor:
                 else:
                     engine_response = dynamo_response
 
-                if engine_response is None or "token_ids" not in engine_response:
-                    logger.error("No outputs from engine for request %s", request_id)
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine response for request {request_id}"
-                            ),
-                            "type": "internal_error",
-                        }
-                    }
-                    break
+                if (
+                    not isinstance(engine_response, dict)
+                    or "token_ids" not in engine_response
+                ):
+                    msg = _engine_error_message(engine_response, request_id)
+                    logger.error(
+                        "Engine returned an invalid response for request %s: %s",
+                        request_id,
+                        engine_response,
+                    )
+                    raise Unknown(msg)
 
                 new_ids = engine_response["token_ids"]
                 raw_finish = engine_response.get("finish_reason")
@@ -532,6 +560,13 @@ class SglangProcessor:
                     pending_token_ids = []
                     pending_usage = None
                     first_chunk = False
+        except Unknown:
+            raise
+        except Exception as e:
+            logger.exception("Error generating response for request %s", request_id)
+            raise Unknown(
+                f"Error generating response for request {request_id}: {e}"
+            ) from e
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(
@@ -596,6 +631,13 @@ class SglangEngineFactory:
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
+        # Static reasoning-template scan (mirrors sglang's template_manager).
+        # Shared with worker-pool processes via initargs so they compute the
+        # same per-request force_reasoning flag as the main process.
+        template_force_reasoning = detect_force_reasoning_from_template(
+            getattr(tokenizer, "chat_template", None)
+        )
+
         tool_call_parser_name = (
             self.tool_call_parser_name
             or _runtime_config_parser_name(mdc, "tool_call_parser")
@@ -643,6 +685,7 @@ class SglangEngineFactory:
                     reasoning_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,
                     self.trust_remote_code,
+                    template_force_reasoning,
                 ),
             )
             futures = [

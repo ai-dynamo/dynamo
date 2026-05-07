@@ -36,9 +36,20 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// Response format: "url" or "b64_json" (default: "url")
+    /// How the generated data should be returned: "url" or "b64_json" (default: "url")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
+
+    /// Output container format: "mp4", "webm", "gif", etc.
+    /// This field is used as model hint and the model may not
+    /// return the requested format, should check with output_format
+    /// field in the response data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<String>,
+
+    /// Whether to stream the video generation (default: false)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +59,9 @@ pub struct NvCreateVideoRequest {
 /// Video data in response
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VideoData {
+    /// Actual container format of this video: "mp4", "webm", "gif"
+    pub output_format: String,
+
     /// URL of the generated video (if response_format is "url")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -154,5 +168,110 @@ impl AnnotationsProvider for NvCreateVideoRequest {
             .and_then(|nvext| nvext.annotations.as_ref())
             .map(|annotations| annotations.contains(&annotation.to_string()))
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- NvCreateVideoRequest ---
+
+    #[test]
+    fn video_request_stream_field_round_trips() {
+        let json = r#"{"prompt":"cat","model":"wan","stream":true}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.stream, Some(true));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"stream\":true"));
+    }
+
+    #[test]
+    fn video_request_stream_false_round_trips() {
+        let json = r#"{"prompt":"cat","model":"wan","stream":false}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.stream, Some(false));
+    }
+
+    #[test]
+    fn video_request_stream_absent_deserializes_as_none() {
+        let json = r#"{"prompt":"cat","model":"wan"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.stream, None);
+    }
+
+    #[test]
+    fn video_request_stream_none_omitted_from_serialization() {
+        let req = NvCreateVideoRequest {
+            prompt: "cat".into(),
+            model: "wan".into(),
+            input_reference: None,
+            seconds: None,
+            size: None,
+            user: None,
+            response_format: None,
+            output_format: None,
+            stream: None,
+            nvext: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("stream"));
+    }
+
+    #[test]
+    fn video_request_output_format_optional_absent_is_none() {
+        let json = r#"{"prompt":"cat","model":"wan"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.output_format, None);
+    }
+
+    #[test]
+    fn video_request_output_format_mp4_round_trips() {
+        let json = r#"{"prompt":"cat","model":"wan","output_format":"mp4"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.output_format.as_deref(), Some("mp4"));
+    }
+
+    // --- VideoData ---
+
+    #[test]
+    fn video_data_output_format_required_present() {
+        let json = r#"{"output_format":"mp4","url":"http://example.com/v.mp4"}"#;
+        let d: VideoData = serde_json::from_str(json).unwrap();
+        assert_eq!(d.output_format, "mp4");
+        assert_eq!(d.url.as_deref(), Some("http://example.com/v.mp4"));
+    }
+
+    #[test]
+    fn video_data_output_format_required_missing_fails() {
+        let json = r#"{"url":"http://example.com/v.mp4"}"#;
+        assert!(serde_json::from_str::<VideoData>(json).is_err());
+    }
+
+    #[test]
+    fn video_data_url_omitted_when_none() {
+        let d = VideoData {
+            output_format: "mp4".into(),
+            url: None,
+            b64_json: Some("abc==".into()),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("url"));
+        assert!(json.contains("b64_json"));
+    }
+
+    #[test]
+    fn video_data_round_trip_with_both_fields() {
+        let d = VideoData {
+            output_format: "webm".into(),
+            url: Some("http://x/v.webm".into()),
+            b64_json: None,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: VideoData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2.output_format, "webm");
+        assert_eq!(d2.url.as_deref(), Some("http://x/v.webm"));
+        assert!(d2.b64_json.is_none());
     }
 }

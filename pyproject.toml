@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "1.1.0"
+version = "1.2.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,8 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==1.1.0",
+    "ai-dynamo-runtime==1.2.0",
+    "aiohttp>=3.9.0,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -50,7 +51,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.19.1",
+    "vllm[flashinfer,runai,otel]==0.20.1",
     # vllm-omni is installed separately in container builds (see
     # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
     # pip/uv dependency resolution for omni can override the vLLM torch stack.
@@ -149,7 +150,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -180,6 +181,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
+    # charset_normalizer is used at runtime so the warning is benign.
+    "ignore:.*doesn't match a supported version",
     # CUDA deprecation warnings from tensorrt_llm
     "ignore:.*cuda*:DeprecationWarning",
     # cuda.cudart/cuda.nvrtc deprecated in favor of cuda.bindings.* (cuda-python >=13)
@@ -225,6 +229,9 @@ filterwarnings = [
     # SGLang quantization warnings on CPU-only runners
     "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
     "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
+    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
+    # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
+    "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
 ]
 
 
@@ -288,6 +295,7 @@ markers = [
     "asyncio: asyncio test marker",
     # Third-party plugin markers
     "timeout: test timeout in seconds (pytest-timeout plugin)",
+    "flaky: rerun a flaky test on failure (pytest-rerunfailures plugin)",
 ]
 
 # Linting/formatting
