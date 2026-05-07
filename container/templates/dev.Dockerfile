@@ -167,6 +167,7 @@ USER root
 
 # Redeclare build args for use in this stage
 ARG PYTHON_VERSION
+ARG CUDA_MAJOR
 
 # Ensure the runtime stage always has /usr/bin/python3.
 # - vLLM/TRTLLM runtime images may only have Python in /opt/dynamo/venv/bin/{python,python3}
@@ -188,8 +189,12 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
     fi
 
 # NIXL C++ SDK (+ ucx, libfabric, gdrcopy) for cargo to link nixl-sys.
-# - sglang: upstream runtime ships only the Python wheel; SDK comes from here.
-# - vllm/trtllm/none: SDK already in runtime; this COPY is a no-op overwrite.
+# - vllm/trtllm/none: wheel_builder built NIXL (nixl_ref set in context.yaml),
+#   so /wheel_builder/opt/nvidia/nvda_nixl exists — copy it in.
+# - sglang: nixl_ref is intentionally unset (we don't rebuild NIXL), so
+#   /wheel_builder/opt/nvidia/nvda_nixl does NOT exist and this COPY is a
+#   no-op. The SDK is constructed below from the upstream wheel after the
+#   venv is set up (see "nixl-cu detect").
 {% if device == "cuda" %}
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     if [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
@@ -209,6 +214,7 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             echo "/usr/lib64" > /etc/ld.so.conf.d/gdrcopy.conf; \
         fi; \
     fi
+
 {% endif %}
 
 {% if device == "xpu" %}
@@ -362,6 +368,32 @@ RUN if command -v uv >/dev/null 2>&1; then \
     else \
         python3 -m pip install maturin[patchelf] ; \
     fi
+
+# nixl-cu detect: on sglang the upstream runtime image ships a pre-installed
+# nixl-cu${CUDA_MAJOR} Python wheel but no C++ SDK, so this builds /opt/nvidia/
+# nvda_nixl/ from the wheel's bundled libs + headers fetched from GitHub at
+# the wheel's exact version. No-op on vllm/trtllm/none (SDK already present).
+{% if device == "cuda" %}
+RUN if [ ! -d /opt/nvidia/nvda_nixl/include ] && \
+       /opt/dynamo/venv/bin/python3 -c "import importlib.metadata; importlib.metadata.version('nixl-cu${CUDA_MAJOR}')" 2>/dev/null; then \
+        NIXL_VER=$(/opt/dynamo/venv/bin/python3 -c "import importlib.metadata; print(importlib.metadata.version('nixl-cu${CUDA_MAJOR}'))") && \
+        echo "Auto-detected nixl-cu${CUDA_MAJOR} version: ${NIXL_VER} — fetching matching SDK headers" && \
+        mkdir -p /opt/nvidia/nvda_nixl/include /opt/nvidia/nvda_nixl/lib64 /etc/ld.so.conf.d && \
+        cd /tmp && \
+        curl -fsSL "https://github.com/ai-dynamo/nixl/archive/refs/tags/v${NIXL_VER}.tar.gz" -o nixl-src.tar.gz && \
+        mkdir -p nixl-extract && cd nixl-extract && \
+        tar -xzf /tmp/nixl-src.tar.gz && \
+        cp -r "nixl-${NIXL_VER}/src/api/cpp/." /opt/nvidia/nvda_nixl/include/ && \
+        cp -r "nixl-${NIXL_VER}/src/utils" /opt/nvidia/nvda_nixl/include/utils && \
+        cd /tmp && rm -rf nixl-src.tar.gz nixl-extract && \
+        WHEEL_LIBS="/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/.nixl_cu${CUDA_MAJOR}.mesonpy.libs" && \
+        for f in libnixl libnixl_build libnixl_capi libnixl_common libnixl_test_utils libserdes libstream libfile_utils libobj_utils; do \
+            [ -f "${WHEEL_LIBS}/${f}.so" ] && ln -sf "${WHEEL_LIBS}/${f}.so" "/opt/nvidia/nvda_nixl/lib64/${f}.so"; \
+        done && \
+        echo "/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/nixl_cu${CUDA_MAJOR}.libs" > /etc/ld.so.conf.d/nixl_cu_deps.conf && \
+        ldconfig; \
+    fi
+{% endif %}
 
 # Set commit SHA for tests (passed via docker build as --build-arg)
 ARG DYNAMO_COMMIT_SHA
