@@ -164,6 +164,19 @@ as `preserve` for conversion policy: use `restore` when reading `restored`, and
 Preservation annotations exist only to make unrepresentable data survive a
 round trip through a version that cannot express it natively.
 
+Preservation annotations are private to conversion code. Only API conversion
+code and its conversion tests may know their keys or payload shape. Controllers,
+reconcilers, webhooks, internal helper packages, and general API helpers must
+not read, write, delete, filter, decode, encode, branch on, or expose them.
+Do not define shared constants, prefixes, string literals, getters, predicates,
+or wrapper helpers for conversion annotations outside the conversion package.
+
+Non-conversion code may copy Kubernetes metadata opaquely as part of normal
+object handling, but it must not identify or interpret individual conversion
+annotations. If non-conversion code needs data that currently appears only in a
+preservation annotation, add or call a real conversion helper instead of
+decoding the annotation.
+
 It is acceptable for the annotation payload to include representable fields as
 context. Restore code must explicitly ignore those fields unless they are needed
 only to locate the unrepresentable data.
@@ -325,6 +338,8 @@ For each helper:
 - Are named-list fields matched by their list-map key, never by index?
 - Is the save payload sparse?
 - Are origin annotations used only as hints, not as shortcuts?
+- Are conversion annotations private to conversion code and absent from
+  controllers/internal helpers?
 - Are nil and empty shapes preserved where round-trip tests require them?
 
 ## Mutability
