@@ -8,7 +8,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -207,48 +206,6 @@ func TestGetDCDPreservedAlphaIngressSpecReturnsMalformedAnnotationError(t *testi
 
 	if _, _, err := GetDCDPreservedAlphaIngressSpec(dcd); err == nil {
 		t.Fatalf("GetDCDPreservedAlphaIngressSpec() error = nil, want malformed JSON error")
-	}
-}
-
-func TestToAlphaCheckpointConfigSetsNilIdentityThroughConverter(t *testing.T) {
-	got := ToAlphaCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
-		Mode:          v1beta1.CheckpointMode("auto"),
-		CheckpointRef: ptr.To("checkpoint"),
-	})
-	if got == nil {
-		t.Fatalf("ToAlphaCheckpointConfig() = nil")
-	}
-	if got.Identity != nil {
-		t.Fatalf("ToAlphaCheckpointConfig().Identity = %#v, want nil", got.Identity)
-	}
-}
-
-func TestToBetaSharedMemorySize(t *testing.T) {
-	size := resource.MustParse("2Gi")
-	tests := []struct {
-		name string
-		src  *v1alpha1.SharedMemorySpec
-		want string
-	}{
-		{name: "nil"},
-		{name: "zero size", src: &v1alpha1.SharedMemorySpec{}},
-		{name: "disabled", src: &v1alpha1.SharedMemorySpec{Disabled: true}, want: "0"},
-		{name: "size", src: &v1alpha1.SharedMemorySpec{Size: size}, want: "2Gi"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ToBetaSharedMemorySize(tt.src)
-			if tt.want == "" {
-				if got != nil {
-					t.Fatalf("ToBetaSharedMemorySize() = %s, want nil", got.String())
-				}
-				return
-			}
-			if got == nil || got.String() != tt.want {
-				t.Fatalf("ToBetaSharedMemorySize() = %v, want %s", got, tt.want)
-			}
-		})
 	}
 }
 

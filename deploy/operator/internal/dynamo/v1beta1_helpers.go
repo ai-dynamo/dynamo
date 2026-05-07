@@ -14,7 +14,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -86,22 +85,6 @@ func GetCheckpoint(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1be
 		return nil
 	}
 	return component.Experimental.Checkpoint
-}
-
-func ToAlphaCheckpointConfig(src *v1beta1.ComponentCheckpointConfig) *v1alpha1.ServiceCheckpointConfig {
-	return v1alpha1.ConvertToV1alpha1ComponentCheckpoint(src)
-}
-
-func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.DynamoCheckpointIdentity {
-	return v1alpha1.ConvertToV1alpha1CheckpointIdentity(src)
-}
-
-func ToAlphaGPUMemoryService(src *v1beta1.GPUMemoryServiceSpec) *v1alpha1.GPUMemoryServiceSpec {
-	return v1alpha1.ConvertToV1alpha1GPUMemoryService(src)
-}
-
-func ToBetaSharedMemorySize(src *v1alpha1.SharedMemorySpec) *resource.Quantity {
-	return v1alpha1.ConvertToV1beta1SharedMemorySize(src)
 }
 
 func GetDCDComponentName(dcd *v1beta1.DynamoComponentDeployment) string {
