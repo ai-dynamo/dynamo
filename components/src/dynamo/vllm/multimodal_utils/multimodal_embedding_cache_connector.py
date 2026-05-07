@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ctypes
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -14,7 +15,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = init_logger("vllm.dynamo_ec_connector")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
