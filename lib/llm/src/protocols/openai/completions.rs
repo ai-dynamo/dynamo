@@ -697,19 +697,30 @@ mod tests {
         let token_id_stop = json!({
             "model": "test-model",
             "prompt": [1, 2, 3],
-            "stop": [576]
+            "stop": [32, 34]
         });
         let request: NvCreateCompletionRequest =
             serde_json::from_value(token_id_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), None);
-        assert_eq!(request.get_stop_token_ids(), Some(vec![576]));
+        assert_eq!(request.get_stop_token_ids(), Some(vec![32, 34]));
 
         let stop_conditions = request
             .extract_stop_conditions()
             .expect("extract stop conditions");
         assert_eq!(stop_conditions.stop, None);
-        assert_eq!(stop_conditions.stop_token_ids, Some(vec![576]));
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![32, 34]));
         assert_eq!(stop_conditions.stop_token_ids_hidden, None);
+
+        let token_id_display_string_scalar_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": "token_id:576"
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_display_string_scalar_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let token_id_display_string_stop = json!({
             "model": "test-model",
@@ -721,5 +732,14 @@ mod tests {
                 .expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
         assert_eq!(request.get_stop_token_ids(), None);
+
+        let unsupported_stop_token_ids = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop_token_ids": [576]
+        });
+        let request: NvCreateCompletionRequest = serde_json::from_value(unsupported_stop_token_ids)
+            .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&request).is_err());
     }
 }

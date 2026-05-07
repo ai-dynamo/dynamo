@@ -97,7 +97,7 @@ def test_user_stop_token_ids_handles_null_fields():
 
 
 def test_user_stop_token_ids_accepts_stop_token_id_array():
-    assert _user_stop_token_ids({"stop": [576]}) == {576}
+    assert _user_stop_token_ids({"stop": [32, 34]}) == {32, 34}
 
 
 def test_user_stop_token_ids_treats_token_id_display_as_string_stop():
@@ -113,9 +113,11 @@ def test_openai_stop_sampling_params_preserves_string_stops():
 
 
 def test_openai_stop_sampling_params_maps_token_id_stop_array():
-    assert _openai_stop_sampling_params({"stop": [576]}) == {"stop_token_ids": [576]}
-    assert _openai_stop_sampling_params({"stop_token_ids": [576]}) == {
-        "stop_token_ids": [576]
+    assert _openai_stop_sampling_params({"stop": [32, 34]}) == {
+        "stop_token_ids": [32, 34]
+    }
+    assert _openai_stop_sampling_params({"stop_token_ids": [32, 34]}) == {
+        "stop_token_ids": [32, 34]
     }
 
 
@@ -168,14 +170,14 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
             "top_p": 0.9,
             "n": 2,
             "max_tokens": 8,
-            "stop": [576],
+            "stop": [32, 34],
         }
     )
 
     assert sampling_params["n"] == 2
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
-    assert sampling_params["stop_token_ids"] == [576]
+    assert sampling_params["stop_token_ids"] == [32, 34]
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):

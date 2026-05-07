@@ -836,16 +836,41 @@ mod tests {
 
     #[test]
     fn stop_accepts_token_id_array() {
-        let stop: Stop = serde_json::from_value(serde_json::json!([576])).unwrap();
+        let stop: Stop = serde_json::from_value(serde_json::json!([32, 34])).unwrap();
 
-        assert_eq!(stop, Stop::TokenIdArray(vec![576]));
+        assert_eq!(stop, Stop::TokenIdArray(vec![32, 34]));
+    }
+
+    #[test]
+    fn stop_accepts_string_and_string_array() {
+        let stop: Stop = serde_json::from_value(serde_json::json!(" The")).unwrap();
+
+        assert_eq!(stop, Stop::String(" The".to_string()));
+
+        let stop: Stop = serde_json::from_value(serde_json::json!(["A", "B"])).unwrap();
+
+        assert_eq!(
+            stop,
+            Stop::StringArray(vec!["A".to_string(), "B".to_string()])
+        );
     }
 
     #[test]
     fn stop_token_id_display_string_remains_string_stop() {
+        let stop: Stop = serde_json::from_value(serde_json::json!("token_id:576")).unwrap();
+
+        assert_eq!(stop, Stop::String("token_id:576".to_string()));
+
         let stop: Stop = serde_json::from_value(serde_json::json!(["token_id:576"])).unwrap();
 
         assert_eq!(stop, Stop::StringArray(vec!["token_id:576".to_string()]));
+    }
+
+    #[test]
+    fn stop_rejects_single_token_id() {
+        let result = serde_json::from_value::<Stop>(serde_json::json!(576));
+
+        assert!(result.is_err());
     }
 
     #[test]

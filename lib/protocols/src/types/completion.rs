@@ -190,14 +190,35 @@ mod tests {
 
     #[test]
     fn stop_accepts_token_id_array() {
-        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": [576]}"#;
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": [32, 34]}"#;
         let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
 
-        assert_eq!(request.stop, Some(Stop::TokenIdArray(vec![576])));
+        assert_eq!(request.stop, Some(Stop::TokenIdArray(vec![32, 34])));
+    }
+
+    #[test]
+    fn stop_accepts_string_and_string_array() {
+        let one_stop = r#"{"model": "test_model", "prompt": "hello", "stop": " The"}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(one_stop).unwrap();
+
+        assert_eq!(request.stop, Some(Stop::String(" The".to_string())));
+
+        let many_stops = r#"{"model": "test_model", "prompt": "hello", "stop": ["A", "B"]}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(many_stops).unwrap();
+
+        assert_eq!(
+            request.stop,
+            Some(Stop::StringArray(vec!["A".to_string(), "B".to_string()]))
+        );
     }
 
     #[test]
     fn stop_token_id_display_string_remains_string_stop() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": "token_id:576"}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.stop, Some(Stop::String("token_id:576".to_string())));
+
         let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": ["token_id:576"]}"#;
         let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
 

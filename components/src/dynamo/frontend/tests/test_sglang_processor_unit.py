@@ -262,17 +262,49 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
     def test_stop_token_id_array_maps_to_stop_token_ids(self):
         """Integer stop arrays are token-id stops, not string stops."""
         result = _build_dynamo_preproc(
-            {"model": "test", "stop": [576]},
+            {"model": "test", "stop": [32, 34]},
             [1],
             "test",
             None,
         )
 
         assert result["stop_conditions"]["stop"] == []
-        assert result["stop_conditions"]["stop_token_ids"] == [576]
+        assert result["stop_conditions"]["stop_token_ids"] == [32, 34]
+
+    def test_string_stops_remain_string_stops(self):
+        """String stops are forwarded as string stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": " The"},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == [" The"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": ["A", "B"]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["A", "B"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
 
     def test_token_id_display_string_remains_string_stop(self):
         """token_id:N strings are output display strings, not token-id stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": "token_id:576"},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["token_id:576"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
         result = _build_dynamo_preproc(
             {"model": "test", "stop": ["token_id:576"]},
             [1],
