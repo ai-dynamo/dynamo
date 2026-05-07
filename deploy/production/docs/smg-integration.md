@@ -1,96 +1,87 @@
-# SMG × Dynamo × HiSparse — Integration Boundary
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-This doc is the *single source of truth* for what each layer is responsible for in the production inference path on the B200 A4 deployment. If you're about to add prefix awareness, KV state, or model-selection logic, find the right layer below before touching code.
+# SMG, Dynamo, and HiSparse Integration Boundary
 
-## The chain
+This document records what the production SMG path actually wires today. The SMG integration is HTTP-only. It does not add a gRPC integration path and it does not move Dynamo or SGLang request-processing features into SMG.
 
-```
-                                                                 ┌─────────────────────┐
-                                                                 │ HiSparse / IndexCache│
-                                                                 │   / TurboQuant 2.5b │
-                                                                 │  (kernel level)     │
-                                                                 └─────────▲───────────┘
-                                                                           │
-client    ───►   SMG router   ───►  Dynamo Frontend  ───►  SGLang prefill  │
-(OpenAI)         (CPU only)         (KV-aware route)        (4× B200)      │
-                                                                          │
-                                                                ┌─────────┴───────────┐
-                                                                │ SGLang decode       │
-                                                                │ (4× B200)           │
-                                                                │ + HiSparse + SMC-SD │
-                                                                └─────────────────────┘
-                                              ▲
-                                              │
-                       Dynamo's KV router consumes ZMQ kv-events from
-                       prefill and decode workers (port 5557) to know
-                       *exactly* which worker has which prefix in its
-                       SGLang KV cache. This is the only prefix tree
-                       in the system.
+## Request Chain
+
+```text
+client -> SMG router -> Dynamo Frontend -> SGLang prefill/decode -> HiSparse / IndexCache / TurboQuant
 ```
 
-The boundary is not arbitrary — it follows directly from the LightSeek SMG team's PyTorch blog observation: "these approaches compose. You can run SMG in front of vLLM managed by llm-d, or in front of TensorRT-LLM with Dynamo handling GPU orchestration. The boundaries are clean because the responsibilities are different."
+The Dynamo Frontend remains the KV-aware routing owner. It consumes SGLang ZMQ KV events from the prefill and decode workers and decides which worker owns each prefix.
 
-## Responsibility split
+## Responsibility Split
 
 | Layer | Owns | Does not own |
 |---|---|---|
-| **SMG** (`addons/smg/`) | Client-facing OpenAI-compatible HTTP surface, model selection (`/v1/models`), tokenization (for token-counting + parser invocation), tool-call + reasoning parsing (`router.toolCallParser`, `router.reasoningParser`), retry, circuit-breaker, request timeouts, server-sent observability (Prometheus + OTel traces to `dynamo-collector.observability:4317` + Grafana dashboard), chat history / audit log (sibling Postgres in `smg` namespace), MCP tool registry | Prefix routing, KV state, GPU orchestration, kernel selection |
-| **Dynamo Frontend** (`examples/deepseek-v32-reap-sglang.yaml` Frontend service) | KV-aware routing across prefill/decode workers (`--router-mode kv --router-kv-events`), disaggregation orchestration (handing prefill output to decode), per-request scheduling | Client TLS termination, model catalog, history |
-| **SGLang prefill / decode workers** | Kernel-level inference: forward pass, KV cache management, speculative decoding (SMC-SD), HiSparse top-k selection (decode only), IndexCache / TurboQuant for the DSA indexer and dense KV | Routing decisions across workers (Dynamo owns that), chat-template structured-output parsing (SMG owns that — the `--tool-call-parser` / `--reasoning-parser` engine flags are intentionally absent) |
-| **HiSparse** (kernel level inside SGLang decode) | Top-k attention with hierarchical sparse pattern (`top_k=2048, device_buffer_size=6144, host_to_device_ratio=10`), no-radix decode | Anything above the kernel boundary |
+| SMG (`addons/smg/`) | OpenAI-compatible HTTP gateway, static backend forwarding to Dynamo Frontend, retry, circuit breaker, backend health checks, request timeout settings, Prometheus metrics, OpenTelemetry export, structured logs, Grafana dashboard export | Tokenization, detokenization, reasoning parsing, tool-call parsing, multimodal processing, MCP tool orchestration, chat history, prefix routing, KV state, GPU orchestration |
+| Dynamo Frontend (`examples/deepseek-v32-reap-sglang.yaml` Frontend service) | KV-aware routing with `--router-mode kv --router-kv-events`, request preprocessing for the Dynamo HTTP path, disaggregation orchestration, per-request scheduling | Client TLS termination, external auth, MCP tool execution, durable chat history |
+| SGLang prefill/decode workers | Forward pass, KV cache management, SMC-SD, HiSparse top-k selection on decode, IndexCache, TurboQuant, model-specific parser configuration exported to Dynamo | Routing decisions across workers, gateway policy, client-facing HTTP retries |
+| HiSparse | Decode-side sparse attention kernel behavior | Anything above the kernel boundary |
 
-## Why SMG is on `policy: round_robin` here
+## Parser And Tokenizer Boundary
 
-SMG's `cache_aware` policy maintains its own prefix tree from observed routing decisions. Dynamo Frontend's KV router maintains a prefix tree from *actual* SGLang KV-cache state via the ZMQ kv-events stream. With both turned on you get two trees that diverge — Dynamo sees evictions immediately; SMG sees them only when a request misses. The miss rate goes up, not down.
+SMG does not perform tokenization, detokenization, reasoning parsing, or tool-call parsing in this profile. Parser configuration stays on the Dynamo/SGLang path:
 
-The composition pattern is **gateway above, router below** — not "prefix-aware everywhere". SMG `cache_aware` is the right mode when SMG is the *only* prefix-aware layer (e.g. fronting a fleet of `vLLM` workers without llm-d). When the engine layer already owns KV awareness via its own router (Dynamo, llm-d), SMG should be `round_robin` over the engine's frontends.
-
-When the cluster grows to >1 Dynamo Frontend (multi-region, multi-fleet), upgrade SMG to `power_of_two` *across Dynamo Frontends* — each Frontend still owns prefix routing within its fleet.
-
-## Why HiSparse is decode-only and Dynamo is unchanged
-
-`--enable-hisparse` requires `--disable-radix-cache` (HiSparse pre-empts the radix tree's prefix slots). Dynamo's KV-aware router does not look at the radix tree — it consumes the ZMQ kv-events stream which is emitted regardless of HiSparse / radix state. So Dynamo's routing remains correct over a HiSparse-enabled decode fleet without any change. SMG sits one level above; it never sees HiSparse at all.
-
-This is why the user's stated invariant (*"Dynamo retains KV routing using SGLang HiSparse underneath"*) holds without further integration work: nothing about adding SMG in front changes the Dynamo↔SGLang contract.
-
-## What changed in `examples/deepseek-v32-reap-sglang.yaml`
-
-The 4-GPU prefill + 4-GPU decode disaggregation is unchanged. The only edit is the **removal** of two engine-side parser flags that have moved to the SMG router:
-
-```diff
--            - --tool-call-parser
--            - deepseekv32
--            - --reasoning-parser
--            - deepseek-v3
+```yaml
+- --dyn-tool-call-parser
+- deepseek_v3_2
+- --dyn-reasoning-parser
+- deepseek_r1
 ```
 
-Removed in *both* the prefill and decode worker arg lists. SMG now owns chat-template structured output (`router.toolCallParser: deepseek32`, `router.reasoningParser: deepseek_v31` in `addons/smg/values.yaml`), and SGLang returns raw model text. Two parsers attempting the same job would either double-parse or disagree, so the responsibility moves up the stack to the gateway — matching the "gateway above, router below" pattern that makes SMG composable in the first place.
+Those worker flags let Dynamo's frontend-side preprocessing path use the parser metadata while preserving KV routing. Do not document parser movement to SMG unless the SMG chart and deployment are changed to prove that behavior end to end.
 
-## What did *not* change
+## No Multimodal Or MCP Claim
 
-- 4-GPU prefill + 4-GPU decode shape: zero changes. SMG runs CPU-only (no `nvidia.com/gpu` requests); the disaggregated split is preserved as-is on the single B200 A4 node.
-- Dynamo Frontend args (`--router-mode kv --router-kv-events --router-reset-states`): unchanged.
-- HiSparse (`--enable-hisparse --hisparse-config '{"top_k":2048,...}'`), IndexCache (`--nsa-indexer-mode indexcache`), TurboQuant (`--enable-turboquant-dense-kv-cache`), SMC-SD (`--speculative-algorithm SMC`): unchanged.
-- Image (`ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4`): unchanged.
+This profile does not configure SMG multimodal handling or MCP tool execution. If multimodal support is needed, it must be configured and verified in Dynamo/SGLang. If MCP tool orchestration is needed, it must be added as a separate, tested application-layer integration instead of being implied by SMG.
 
-## Verifying the chain end-to-end
+## No Chat History Claim
 
-After ArgoCD has synced the SMG app and the Dynamo platform + DynamoGraphDeployment are healthy:
+This profile does not deploy an SMG Postgres database and does not configure SMG chat history or audit-log persistence. Durable conversation storage must be provided by a separate application service if needed.
+
+## Why SMG Uses `round_robin`
+
+SMG's `cache_aware` policy and Dynamo Frontend's KV router both maintain prefix state. Dynamo sees the actual SGLang KV-cache state through ZMQ KV events, so this profile keeps SMG as a simple gateway and leaves prefix routing to Dynamo.
+
+When the cluster grows to more than one Dynamo Frontend, SMG may use a non-cache-aware policy across Dynamo Frontends. Each Dynamo Frontend should still own prefix routing within its own fleet.
+
+## HiSparse Boundary
+
+`--enable-hisparse` requires `--disable-radix-cache`, but Dynamo's KV-aware router does not depend on SGLang's radix tree. It consumes KV events from SGLang, so Dynamo routing remains correct over the HiSparse-enabled decode fleet.
+
+SMG sits above that path and never sees HiSparse, IndexCache, TurboQuant, or SMC-SD state.
+
+## What Did Not Change
+
+- 4-GPU prefill plus 4-GPU decode shape.
+- Dynamo Frontend args: `--router-mode kv --router-kv-events --router-reset-states`.
+- HiSparse, IndexCache, TurboQuant, and SMC-SD worker settings.
+- The SGLang runtime image.
+- The single-node B200 A4 placement constraints.
+
+## Verifying The HTTP Chain
+
+After Argo CD has synced the SMG app and the Dynamo platform plus DynamoGraphDeployment are healthy:
 
 ```bash
 ./tests/smg-roundtrip.sh
 ```
 
-The script port-forwards SMG's ClusterIP service, sends an OpenAI-compatible chat request, and asserts a 200 with a `chat.completion` response. It also checks SMG's `/health` and the Dynamo Frontend's `/health` separately to attribute failures to the right layer.
+The script port-forwards SMG's ClusterIP service, sends an OpenAI-compatible chat request, and asserts a 200 with a `chat.completion` response. It also checks SMG's `/health` and the Dynamo Frontend's `/health` separately.
 
-## Memory / GPU footprint (B200 A4 single node)
+## Resource Footprint
 
 | Pod | CPU | RAM | GPUs | Storage |
 |---|---|---|---|---|
-| SMG router | 1–4 | 2–4 GiB | 0 | — |
-| SMG history Postgres | 0.25–2 | 0.5–4 GiB | 0 | 20 GiB PVC |
-| Dynamo Frontend | (operator default) | (operator default) | 0 | — |
-| SGLang prefill | (operator default) | 120 GiB shm | 4× B200 | — |
-| SGLang decode | (operator default) | 120 GiB shm | 4× B200 | — |
+| SMG router | 1-4 | 2-4 GiB | 0 | None |
+| Dynamo Frontend | Operator default | Operator default | 0 | None |
+| SGLang prefill | Operator default | 120 GiB shm | 4 B200 | None |
+| SGLang decode | Operator default | 120 GiB shm | 4 B200 | None |
 
-The 8 B200 GPUs remain split 4+4 prefill/decode. The CPU-only sidecars (SMG router + sibling Postgres) add at most a 6-CPU / 8-GiB footprint on the same node. No GPU contention with the SGLang workers.
+The 8 B200 GPUs remain split 4+4 prefill/decode. SMG is CPU-only and does not contend with the SGLang workers for GPUs.

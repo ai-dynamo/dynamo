@@ -15,8 +15,6 @@ resources:
   - apps/50-kai-scheduler.yaml
   - apps/51-grove.yaml
   - apps/60-dynamo-prometheus-rules.yaml
-  - apps/65-smg-postgres.yaml
-  - apps/66-smg-secrets.yaml
   - apps/70-smg.yaml
   - apps/90-dynamo-platform.yaml
 patches:

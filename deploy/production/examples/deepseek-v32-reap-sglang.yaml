@@ -79,6 +79,8 @@ spec:
             - kv
             - --router-kv-events
             - --router-reset-states
+            - --dyn-chat-processor
+            - dynamo
             - --http-port
             - "8000"
           env:
@@ -179,13 +181,10 @@ spec:
             - nixl
             - --disaggregation-bootstrap-port
             - "12345"
-            # Tool-call and reasoning parsing have moved to the SMG
-            # router (see addons/smg/values.yaml::router.toolCallParser
-            # and reasoningParser). Keeping them on the engine would
-            # double-parse: SGLang would attach structured tool_calls,
-            # then SMG would re-tokenize and find no boundary tags.
-            # The architecture choice is documented in
-            # docs/smg-integration.md ("gateway above, router below").
+            - --dyn-tool-call-parser
+            - deepseek_v3_2
+            - --dyn-reasoning-parser
+            - deepseek_r1
           env:
             - name: POD_UID
               valueFrom:
@@ -322,13 +321,10 @@ spec:
             - "0.5"
             - --smc-resample-method
             - systematic
-            # Tool-call and reasoning parsing have moved to the SMG
-            # router (see addons/smg/values.yaml::router.toolCallParser
-            # and reasoningParser). Keeping them on the engine would
-            # double-parse: SGLang would attach structured tool_calls,
-            # then SMG would re-tokenize and find no boundary tags.
-            # The architecture choice is documented in
-            # docs/smg-integration.md ("gateway above, router below").
+            - --dyn-tool-call-parser
+            - deepseek_v3_2
+            - --dyn-reasoning-parser
+            - deepseek_r1
           env:
             - name: POD_UID
               valueFrom:

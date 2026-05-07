@@ -5,8 +5,6 @@
 //     -- Renovate's native `argocd` manager bumps `targetRevision` on
 //     each Helm chart and git-sourced reference.
 //   * SMG-specific image tag in addons/smg/values.yaml (custom regex).
-//   * Sibling Postgres image tag in addons/smg-postgres/postgres.yaml
-//     (custom regex matching `image: postgres:X.Y-alpine`).
 //
 // Update policy:
 //   * patch + minor -> auto-merge after CI passes (preferred per
@@ -68,21 +66,6 @@
       automerge: false,
       labels: ["needs-human-review"],
     },
-    // Sibling Postgres for SMG history.
-    {
-      matchPackageNames: ["postgres"],
-      matchUpdateTypes: ["patch", "minor"],
-      groupName: "smg-postgres",
-      automerge: true,
-      automergeType: "pr",
-      platformAutomerge: true,
-    },
-    {
-      matchPackageNames: ["postgres"],
-      matchUpdateTypes: ["major"],
-      automerge: false,
-      labels: ["needs-human-review"],
-    },
   ],
 
   customManagers: [
@@ -96,18 +79,6 @@
       depNameTemplate: "lightseekorg/smg",
       datasourceTemplate: "docker",
       registryUrlTemplate: "https://ghcr.io",
-    },
-    // Sibling Postgres image (postgres:X.Y-alpine) inside the
-    // hand-rolled StatefulSet for SMG's history backend.
-    {
-      customType: "regex",
-      managerFilePatterns: ["deploy/production/addons/smg-postgres/postgres\\.yaml$"],
-      matchStrings: [
-        "image:\\s*postgres:(?<currentValue>[0-9]+\\.[0-9]+)-alpine",
-      ],
-      depNameTemplate: "postgres",
-      datasourceTemplate: "docker",
-      versioningTemplate: "docker",
     },
   ],
 }

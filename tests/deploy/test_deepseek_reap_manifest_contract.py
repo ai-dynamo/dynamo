@@ -32,6 +32,7 @@ def test_deepseek_reap_frontend_uses_event_backed_kv_routing():
     args = _args_for("Frontend")
 
     assert _arg_value(args, "--router-mode") == "kv"
+    assert _arg_value(args, "--dyn-chat-processor") == "dynamo"
     assert "--router-kv-events" in args
     assert "--no-kv-events" not in args
     assert "--no-router-kv-events" not in args
@@ -43,6 +44,8 @@ def test_deepseek_reap_workers_keep_combined_indexcache_turboquant_hisparse_pd_c
 
         assert _arg_value(args, "--disaggregation-mode") == mode
         assert _arg_value(args, "--disaggregation-transfer-backend") == "nixl"
+        assert _arg_value(args, "--dyn-tool-call-parser") == "deepseek_v3_2"
+        assert _arg_value(args, "--dyn-reasoning-parser") == "deepseek_r1"
         assert _arg_value(args, "--served-model-name") == TARGET_MODEL
         assert _arg_value(args, "--model-path") == f"/models/{TARGET_MODEL}"
         assert _arg_value(args, "--tp") == "4"
