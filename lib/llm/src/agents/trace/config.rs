@@ -7,6 +7,8 @@ use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm::agent_trace as env_agent_trace,
 };
 
+use crate::telemetry::parse_sink_names;
+
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
@@ -28,20 +30,6 @@ pub struct AgentTracePolicy {
 }
 
 static POLICY: OnceLock<AgentTracePolicy> = OnceLock::new();
-
-pub(crate) fn parse_sink_names(value: &str) -> Vec<String> {
-    let sinks: Vec<String> = value
-        .split(',')
-        .map(|value| value.trim().to_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect();
-
-    if sinks.is_empty() {
-        vec!["stderr".to_string()]
-    } else {
-        sinks
-    }
-}
 
 fn load_from_env() -> AgentTracePolicy {
     let sinks = std::env::var(env_agent_trace::DYN_AGENT_TRACE_SINKS)
@@ -113,24 +101,7 @@ pub fn is_enabled() -> bool {
 mod tests {
     use dynamo_runtime::config::environment_names::llm::agent_trace as env_agent_trace;
 
-    use super::{load_from_env, parse_sink_names};
-
-    #[test]
-    fn parse_sink_names_trims_and_normalizes() {
-        assert_eq!(
-            parse_sink_names(" jsonl, JSONL_GZ, STDERR "),
-            vec![
-                "jsonl".to_string(),
-                "jsonl_gz".to_string(),
-                "stderr".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_sink_names_defaults_empty_value_to_stderr() {
-        assert_eq!(parse_sink_names(" , "), vec!["stderr".to_string()]);
-    }
+    use super::load_from_env;
 
     #[test]
     #[serial_test::serial]

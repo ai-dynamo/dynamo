@@ -1,6 +1,6 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
-"""Generate the KV event density heatmap (Figure 1) for the Flash Indexer blog post.
+"""Generate the KV event density heatmap (Figure 1) for the Flash Indexer Digest post.
 
 Renders a diverging heatmap showing Store vs Remove event density across
 16 workers over time. Uses real Mooncake FAST'25 trace data when available,

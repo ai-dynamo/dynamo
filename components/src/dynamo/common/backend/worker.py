@@ -40,6 +40,10 @@ class WorkerConfig:
     event_plane: Optional[str] = None
     use_kv_events: bool = False
     custom_jinja_template: Optional[str] = None
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
+    exclude_tools_when_tool_choice_none: bool = True
+    enable_local_indexer: bool = True
     metrics_labels: list = field(default_factory=list)
 
     @classmethod
@@ -72,6 +76,12 @@ class WorkerConfig:
             "custom_jinja_template": getattr(
                 runtime_cfg, "custom_jinja_template", None
             ),
+            "tool_call_parser": getattr(runtime_cfg, "dyn_tool_call_parser", None),
+            "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
+            "exclude_tools_when_tool_choice_none": getattr(
+                runtime_cfg, "exclude_tools_when_tool_choice_none", True
+            ),
+            "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
         }
         if model_input is not None:
             kwargs["model_input"] = model_input
@@ -216,15 +226,7 @@ class Worker:
             raise EngineShutdown(f"Engine initialization failed: {exc}") from exc
 
         try:
-            runtime_config = ModelRuntimeConfig()
-            if engine_config.total_kv_blocks is not None:
-                runtime_config.total_kv_blocks = engine_config.total_kv_blocks
-            if engine_config.max_num_seqs is not None:
-                runtime_config.max_num_seqs = engine_config.max_num_seqs
-            if engine_config.max_num_batched_tokens is not None:
-                runtime_config.max_num_batched_tokens = (
-                    engine_config.max_num_batched_tokens
-                )
+            runtime_config = _model_runtime_config(engine_config, cfg)
 
             model_type = parse_endpoint_types(cfg.endpoint_types)
 
@@ -257,3 +259,22 @@ class Worker:
             )
         finally:
             await self._cleanup_once()
+
+
+def _model_runtime_config(
+    engine_config: EngineConfig, worker_config: WorkerConfig
+) -> ModelRuntimeConfig:
+    runtime_config = ModelRuntimeConfig()
+    if engine_config.total_kv_blocks is not None:
+        runtime_config.total_kv_blocks = engine_config.total_kv_blocks
+    if engine_config.max_num_seqs is not None:
+        runtime_config.max_num_seqs = engine_config.max_num_seqs
+    if engine_config.max_num_batched_tokens is not None:
+        runtime_config.max_num_batched_tokens = engine_config.max_num_batched_tokens
+    runtime_config.tool_call_parser = worker_config.tool_call_parser
+    runtime_config.reasoning_parser = worker_config.reasoning_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        worker_config.exclude_tools_when_tool_choice_none
+    )
+    runtime_config.enable_local_indexer = worker_config.enable_local_indexer
+    return runtime_config
