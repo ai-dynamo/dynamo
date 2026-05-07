@@ -447,11 +447,26 @@ func applyDynDeploymentConfig(ctx context.Context, dcd *v1beta1.DynamoComponentD
 	if err != nil {
 		return err
 	}
-	serviceConfig := config[componentName]
+	serviceConfig := getDynDeploymentServiceConfig(config, componentName, dcd.IsFrontendComponent())
 	if serviceConfig == nil || serviceConfig.ServiceArgs == nil || serviceConfig.ServiceArgs.Resources == nil {
 		return nil
 	}
 	return applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources)
+}
+
+func getDynDeploymentServiceConfig(config DynDeploymentConfig, componentName string, isFrontend bool) *DynDeploymentServiceConfig {
+	if serviceConfig := config[componentName]; serviceConfig != nil {
+		return serviceConfig
+	}
+	if !isFrontend {
+		return nil
+	}
+	for name, serviceConfig := range config {
+		if strings.EqualFold(name, commonconsts.ComponentTypeFrontend) {
+			return serviceConfig
+		}
+	}
+	return nil
 }
 
 func getDynamoDeploymentConfig(container *corev1.Container) []byte {
@@ -479,8 +494,13 @@ func updateDynDeploymentConfigBytes(rawConfig []byte, serviceName string, newPor
 	}
 	if frontend, ok := config[serviceName]; ok {
 		frontend["port"] = newPort
-	} else if frontend, ok := config[commonconsts.ComponentTypeFrontend]; ok {
-		frontend["port"] = newPort
+	} else {
+		for name, frontend := range config {
+			if strings.EqualFold(name, commonconsts.ComponentTypeFrontend) {
+				frontend["port"] = newPort
+				break
+			}
+		}
 	}
 	return json.Marshal(config)
 }
@@ -561,6 +581,13 @@ func GetDCDResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string
 		return baseName + "-" + workerSuffix
 	}
 	return baseName
+}
+
+// NormalizeKubeResourceName preserves the existing Dynamo resource naming
+// contract while making names acceptable for Kubernetes resources that reject
+// dots, such as Services.
+func NormalizeKubeResourceName(name string) string {
+	return strings.ReplaceAll(name, ".", "-")
 }
 
 type SecretsRetriever interface {
@@ -759,7 +786,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 		ObjectMeta: metav1.ObjectMeta{
 			// Service names must be DNS-1035 labels (no dots). Replace dots with
 			// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
-			Name:        strings.ReplaceAll(params.ServiceName, ".", "-"),
+			Name:        NormalizeKubeResourceName(params.ServiceName),
 			Namespace:   params.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -773,7 +800,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 }
 
 func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1.Ingress {
-	resourceName := componentName
+	resourceName := NormalizeKubeResourceName(componentName)
 	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName,
@@ -831,9 +858,10 @@ func getIngressHost(ingressSpec IngressSpec) string {
 }
 
 func GenerateComponentVirtualService(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1beta1.VirtualService {
+	resourceName := NormalizeKubeResourceName(componentName)
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      componentName,
+			Name:      resourceName,
 			Namespace: componentNamespace,
 		},
 	}
@@ -855,7 +883,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 					Route: []*istioNetworking.HTTPRouteDestination{
 						{
 							Destination: &istioNetworking.Destination{
-								Host: componentName,
+								Host: resourceName,
 								Port: &istioNetworking.PortSelector{
 									Number: commonconsts.DynamoServicePort,
 								},
@@ -875,7 +903,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
 	// Normalize the service name the same way GenerateComponentService does
 	// so the DestinationRule host matches the actual Service DNS name.
-	normalizedName := strings.ReplaceAll(serviceName, ".", "-")
+	normalizedName := NormalizeKubeResourceName(serviceName)
 
 	dr := &networkingv1beta1.DestinationRule{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1328,7 +1356,6 @@ func GenerateBasePodSpec(
 			}
 		}
 
-		podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, container.VolumeMounts)
 		podSpecOverride.Containers = nil
 		if err := mergo.Merge(&podSpec, podSpecOverride, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate spec: %w", err)
@@ -1369,6 +1396,7 @@ func GenerateBasePodSpec(
 	}
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 	if !shouldDisableImagePullSecret && secretsRetriever != nil {
@@ -1477,11 +1505,23 @@ func appendUniqueVolume(volumes []corev1.Volume, volume corev1.Volume) []corev1.
 }
 
 func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.VolumeMount) []corev1.Volume {
+	volumesByName := make(map[string]corev1.Volume, len(volumes))
+	for _, volume := range volumes {
+		volumesByName[volume.Name] = volume
+	}
+
+	ordered := make([]corev1.Volume, 0, len(volumes)+len(mounts))
+	seen := make(map[string]struct{}, len(volumes)+len(mounts))
 	for _, mount := range mounts {
-		if mount.Name == "" || volumeExists(volumes, mount.Name) {
+		if mount.Name == "" {
 			continue
 		}
-		volumes = append(volumes, corev1.Volume{
+		if volume, ok := volumesByName[mount.Name]; ok {
+			ordered = append(ordered, volume)
+			seen[mount.Name] = struct{}{}
+			continue
+		}
+		ordered = append(ordered, corev1.Volume{
 			Name: mount.Name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -1489,17 +1529,15 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 				},
 			},
 		})
+		seen[mount.Name] = struct{}{}
 	}
-	return volumes
-}
-
-func volumeExists(volumes []corev1.Volume, name string) bool {
 	for _, volume := range volumes {
-		if volume.Name == name {
-			return true
+		if _, ok := seen[volume.Name]; ok {
+			continue
 		}
+		ordered = append(ordered, volume)
 	}
-	return false
+	return ordered
 }
 
 func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration) error {
@@ -2008,7 +2046,9 @@ func generateLabels(
 		}
 	}
 	// Re-apply system labels after user merge to prevent override
+	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
 	}

@@ -5859,6 +5859,38 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 			},
 		},
 		{
+			name: "volumeMounts keep generated PVC when podTemplate has other volumes",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:       "test-pvc",
+						MountPoint: "/data",
+					},
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						Volumes: []corev1.Volume{
+							{
+								Name: "config",
+								VolumeSource: corev1.VolumeSource{
+									ConfigMap: &corev1.ConfigMapVolumeSource{
+										LocalObjectReference: corev1.LocalObjectReference{Name: "config"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError:  false,
+			expectedPVCs: []string{"test-pvc"},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
+				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+		},
+		{
 			name: "multiple volumeMounts",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
@@ -5963,6 +5995,50 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateBasePodSpec_TRTLLMSSHMountUsesSecretVolume(t *testing.T) {
+	sshSecretName := "mpi-run-ssh-secret"
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Resources: &v1alpha1.Resources{
+			Limits: &v1alpha1.ResourceItem{GPU: "1"},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.trtllm", "--model-path", "/model"},
+			},
+		},
+	})
+
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkTRTLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleLeader,
+		2,
+		&configv1alpha1.OperatorConfiguration{
+			MPI: configv1alpha1.MPIConfiguration{SSHSecretName: sshSecretName},
+		},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	var sshVolumes []corev1.Volume
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == sshSecretName {
+			sshVolumes = append(sshVolumes, volume)
+		}
+	}
+	require.Len(t, sshVolumes, 1)
+	assert.NotNil(t, sshVolumes[0].Secret)
+	assert.Nil(t, sshVolumes[0].PersistentVolumeClaim)
 }
 
 func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
@@ -7207,6 +7283,8 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:            "wrong-from-labels",
+				commonconsts.KubeLabelDynamoComponent:           "wrong-from-labels",
 				commonconsts.KubeLabelDynamoNamespace:           "wrong-from-labels",
 				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-labels",
@@ -7214,6 +7292,8 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoSelector:            "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoComponent:           "wrong-from-extra-metadata",
 					commonconsts.KubeLabelDynamoNamespace:           "wrong-from-extra-metadata",
 					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 					commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-extra-metadata",
@@ -7228,6 +7308,8 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 	)
 	require.NoError(t, err)
+	assert.Equal(t, "test-dgd-worker", labels[commonconsts.KubeLabelDynamoSelector])
+	assert.Equal(t, "Worker", labels[commonconsts.KubeLabelDynamoComponent])
 	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
 	assert.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
 	assert.Equal(t, "test-dgd", labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
@@ -7639,6 +7721,66 @@ func TestGetDCDResourceName(t *testing.T) {
 
 	// Empty hash — workers don't get suffix
 	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(beta, "prefill", ""))
+}
+
+func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testing.T) {
+	ingressSpec := IngressSpec{
+		Enabled:               true,
+		Host:                  "example",
+		UseVirtualService:     true,
+		VirtualServiceGateway: ptr.To("mesh/gateway"),
+	}
+
+	ingress := GenerateComponentIngress(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
+	require.Len(t, ingress.Spec.Rules, 1)
+	require.NotNil(t, ingress.Spec.Rules[0].HTTP)
+	require.Len(t, ingress.Spec.Rules[0].HTTP.Paths, 1)
+	require.NotNil(t, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service)
+	assert.Equal(t, "model-Qwen3-0-6B", ingress.Name)
+	assert.Equal(t, "model-Qwen3-0-6B", ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
+
+	virtualService := GenerateComponentVirtualService(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
+	require.Len(t, virtualService.Spec.Http, 1)
+	require.Len(t, virtualService.Spec.Http[0].Route, 1)
+	require.NotNil(t, virtualService.Spec.Http[0].Route[0].Destination)
+	assert.Equal(t, "model-Qwen3-0-6B", virtualService.Name)
+	assert.Equal(t, "model-Qwen3-0-6B", virtualService.Spec.Http[0].Route[0].Destination.Host)
+}
+
+func TestApplyDynDeploymentConfig_FallsBackToFrontendConfigKeyForRenamedFrontend(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "router", Namespace: "default"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "router",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: commonconsts.MainContainerName,
+								Env: []corev1.EnvVar{
+									{
+										Name:  commonconsts.DynamoDeploymentConfigEnvVar,
+										Value: `{"Frontend":{"ServiceArgs":{"Resources":{"CPU":"2","Memory":"2Gi","GPU":"1"}}}}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, applyDynDeploymentConfig(context.Background(), dcd, commonconsts.DynamoServicePort))
+
+	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	require.NotNil(t, main)
+	assert.Equal(t, resource.MustParse("2"), main.Resources.Requests[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("2Gi"), main.Resources.Requests[corev1.ResourceMemory])
+	assert.Equal(t, resource.MustParse("1"), main.Resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)])
 }
 
 func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {

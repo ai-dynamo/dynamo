@@ -140,7 +140,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeAvailable,
+				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
 				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", reconcileErr),
@@ -165,13 +165,13 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		r.Recorder.Event(dynamoComponentDeployment, corev1.EventTypeNormal, "Reconciling", "Starting to reconcile DynamoComponentDeployment")
 		dynamoComponentDeployment, err = r.setStatusConditions(ctx, req,
 			metav1.Condition{
-				Type:    nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeAvailable,
+				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile DynamoComponentDeployment",
 			},
 			metav1.Condition{
-				Type:    nvidiacomv1beta1.DynamoGraphDeploymentConditionTypeDynamoComponentReady,
+				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeDynamoComponentReady,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Reconciling",
 				Message: "Starting to reconcile DynamoComponentDeployment",
@@ -754,7 +754,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 	}
 	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      opt.dynamoComponentDeployment.Name,
+			Name:      dynamo.NormalizeKubeResourceName(opt.dynamoComponentDeployment.Name),
 			Namespace: opt.dynamoComponentDeployment.Namespace,
 		},
 	}
@@ -776,7 +776,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 	}
 	vs := &networkingv1beta1.VirtualService{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      opt.dynamoComponentDeployment.Name,
+			Name:      dynamo.NormalizeKubeResourceName(opt.dynamoComponentDeployment.Name),
 			Namespace: opt.dynamoComponentDeployment.Namespace,
 		},
 	}
@@ -1030,7 +1030,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 
 	deleteStub := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dcd.Name,
+			Name:      dynamo.NormalizeKubeResourceName(dcd.Name),
 			Namespace: dcd.Namespace,
 		},
 	}

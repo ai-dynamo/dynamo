@@ -400,7 +400,7 @@ const (
 
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
-// engine pod.
+// engine pod. An empty mode means the API/defaulting path selected intra-pod.
 func IsIntraPodFailoverEnabled(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	if component == nil || component.Experimental == nil || component.Experimental.Failover == nil {
 		return false
