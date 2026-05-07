@@ -89,7 +89,10 @@ sglang:
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
-  nixl_ref: 0.10.1
+  # Pin to v1.0.0 to match the nixl-cu13==1.0.0 wheel preinstalled in the
+  # upstream lmsysorg/sglang:v0.5.10.post1* runtime — keeps SDK and runtime
+  # ABIs aligned. Sglang-only; vllm/trtllm stay on 0.10.1.
+  nixl_ref: v1.0.0
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
