@@ -598,6 +598,7 @@ class BaseConfigModifier:
             cls._ensure_spec_pvc(cfg, pvc_name)
             for _svc_name, svc in cfg.spec.services.items():
                 cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                cls._ensure_service_hf_home_env(svc, pvc_mount_path)
             result = cls.update_model(
                 cfg.model_dump(),
                 model_name=model_name,
