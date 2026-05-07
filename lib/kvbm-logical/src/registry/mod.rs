@@ -37,7 +37,7 @@ pub(crate) mod tests;
 
 // Re-export public types
 pub use attachments::{AttachmentError, TypedAttachments};
-pub use handle::BlockRegistrationHandle;
+pub(crate) use handle::BlockRegistrationHandle;
 
 use crate::{events::EventsManager, tinylfu::FrequencyTracker};
 
@@ -228,7 +228,7 @@ impl BlockRegistry {
     // TODO(delegate): This is where `on_block_registered` is called. Future delegate
     // pattern should replace the direct EventsManager call here.
     #[inline]
-    pub fn register_sequence_hash(&self, seq_hash: SequenceHash) -> BlockRegistrationHandle {
+    pub(crate) fn register_sequence_hash(&self, seq_hash: SequenceHash) -> BlockRegistrationHandle {
         let map = self.prt.prefix(&seq_hash);
         let mut weak = map.entry(seq_hash).or_default();
 
@@ -277,7 +277,7 @@ impl BlockRegistry {
     /// Match a sequence hash and return a registration handle.
     /// This method triggers frequency tracking.
     #[inline]
-    pub fn match_sequence_hash(
+    pub(crate) fn match_sequence_hash(
         &self,
         seq_hash: SequenceHash,
         touch: bool,

@@ -119,7 +119,6 @@ fn test_immutable_block_downgrade_and_upgrade() {
 
     assert_eq!(immutable_block.sequence_hash(), seq_hash);
     let _block_id = immutable_block.block_id();
-    let _handle = immutable_block.registration_handle();
     assert!(immutable_block.use_count() >= 1);
 
     let weak_block = immutable_block.downgrade();

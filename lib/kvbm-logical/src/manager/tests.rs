@@ -2331,24 +2331,24 @@ mod race_regression_tests {
             .next()
             .unwrap();
 
-        let handle = primary.registration_handle();
-        assert!(handle.has_block::<TestBlockData>(), "before any drop");
+        let seq_hash = primary.sequence_hash();
+        let registry = manager.block_registry();
+        let present = |label: &str| {
+            let result = registry.check_presence::<TestBlockData>(&[seq_hash]);
+            assert_eq!(result, vec![(seq_hash, true)], "{label}");
+        };
+
+        present("before any drop");
 
         // Drop the duplicate: presence must remain true (primary still
         // alive).
         drop(dup);
-        assert!(
-            handle.has_block::<TestBlockData>(),
-            "after duplicate drop, primary still alive"
-        );
+        present("after duplicate drop, primary still alive");
 
         // Drop the primary: it transitions to Inactive — still
         // presence-bearing.
         drop(primary);
-        assert!(
-            handle.has_block::<TestBlockData>(),
-            "after primary drop, slot in Inactive still counts"
-        );
+        present("after primary drop, slot in Inactive still counts");
     }
 
     /// Allocation atomicity: with `free + inactive == N`, two concurrent

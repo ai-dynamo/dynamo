@@ -5,8 +5,8 @@
 //!
 //! [`ImmutableBlock`] is a cheap-to-clone strong handle backed by an
 //! `Arc<ImmutableBlockInner<T>>`. The inner carries the slot's identity
-//! ([`BlockId`], [`SequenceHash`], [`BlockRegistrationHandle`]) plus an
-//! `is_primary` flag that decides the slot's drop transition:
+//! ([`BlockId`], [`SequenceHash`]) plus an `is_primary` flag that decides
+//! the slot's drop transition:
 //!
 //! - **Primary** (`is_primary = true`): the canonical holder of a sequence
 //!   hash. Drop of the last clone moves the slot to `Inactive` so it can
@@ -24,8 +24,8 @@
 use std::sync::{Arc, Weak};
 
 use crate::ManagerId;
-use crate::blocks::{BlockId, BlockMetadata, BlockRegistrationHandle, SequenceHash};
 use crate::blocks::pin::{LifecyclePin, LifecyclePinRef};
+use crate::blocks::{BlockId, BlockMetadata, SequenceHash};
 use crate::pools::{BlockStore, store::upgrade_or_resurrect};
 
 /// Internal owner of a registered slot. Every clone of an
@@ -35,7 +35,6 @@ pub(crate) struct ImmutableBlockInner<T: BlockMetadata> {
     store: Arc<BlockStore<T>>,
     block_id: BlockId,
     seq_hash: SequenceHash,
-    handle: BlockRegistrationHandle,
     is_primary: bool,
     /// For duplicates, holds a strong reference to the primary's inner so
     /// the primary cannot transition to `Inactive` (and thus be evicted)
@@ -48,13 +47,11 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
         store: Arc<BlockStore<T>>,
         block_id: BlockId,
         seq_hash: SequenceHash,
-        handle: BlockRegistrationHandle,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             block_id,
             seq_hash,
-            handle,
             is_primary: true,
             _primary_keepalive: None,
         })
@@ -64,14 +61,12 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
         store: Arc<BlockStore<T>>,
         block_id: BlockId,
         seq_hash: SequenceHash,
-        handle: BlockRegistrationHandle,
         primary: Arc<ImmutableBlockInner<T>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             block_id,
             seq_hash,
-            handle,
             is_primary: false,
             _primary_keepalive: Some(primary),
         })
@@ -91,9 +86,6 @@ impl<T: BlockMetadata + Sync> LifecyclePin for ImmutableBlockInner<T> {
     }
     fn manager_id(&self) -> ManagerId {
         self.store.id()
-    }
-    fn registration_handle(&self) -> BlockRegistrationHandle {
-        self.handle.clone()
     }
 }
 
@@ -134,7 +126,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
         WeakBlock {
             sequence_hash: self.inner.seq_hash,
             inner: Arc::downgrade(&self.inner),
-            handle: self.inner.handle.clone(),
             store: self.inner.store.clone(),
         }
     }
@@ -147,11 +138,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
     /// Returns the [`SequenceHash`] that identifies this block's content.
     pub fn sequence_hash(&self) -> SequenceHash {
         self.inner.seq_hash
-    }
-
-    /// Returns a clone of the [`BlockRegistrationHandle`] for this block.
-    pub fn registration_handle(&self) -> BlockRegistrationHandle {
-        self.inner.handle.clone()
     }
 
     /// Returns the number of strong [`Arc`] references to the underlying
@@ -213,7 +199,6 @@ impl<T: BlockMetadata> std::fmt::Debug for ImmutableBlock<T> {
 pub struct WeakBlock<T: BlockMetadata> {
     sequence_hash: SequenceHash,
     inner: Weak<ImmutableBlockInner<T>>,
-    handle: BlockRegistrationHandle,
     store: Arc<BlockStore<T>>,
 }
 
@@ -223,7 +208,7 @@ impl<T: BlockMetadata + Sync> WeakBlock<T> {
         if let Some(strong) = self.inner.upgrade() {
             return Some(ImmutableBlock::from_inner(strong));
         }
-        let inner = upgrade_or_resurrect::<T>(&self.handle, &self.store, false)?;
+        let inner = upgrade_or_resurrect::<T>(self.sequence_hash, &self.store, false)?;
         Some(ImmutableBlock::from_inner(inner))
     }
 
@@ -239,7 +224,6 @@ impl<T: BlockMetadata> Clone for WeakBlock<T> {
         Self {
             sequence_hash: self.sequence_hash,
             inner: self.inner.clone(),
-            handle: self.handle.clone(),
             store: self.store.clone(),
         }
     }

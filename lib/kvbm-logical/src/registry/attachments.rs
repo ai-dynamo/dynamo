@@ -45,6 +45,7 @@ impl std::error::Error for AttachmentError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttachmentMode {
     Unique,
+    #[cfg(test)]
     Multiple,
 }
 
@@ -169,6 +170,7 @@ impl<'a, T: Any + Send + Sync> TypedAttachments<'a, T> {
                 let mut empty_vec: Vec<&mut T> = Vec::new();
                 f(unique, &mut empty_vec)
             }
+            #[cfg(test)]
             Some(AttachmentMode::Multiple) => {
                 let mut multiple_refs: Vec<&mut T> = attachments
                     .multiple_attachments

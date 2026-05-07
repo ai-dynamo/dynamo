@@ -3,12 +3,17 @@
 
 //! Block registration handle and its inner implementation.
 
-use super::attachments::{AttachmentError, AttachmentStore, TypedAttachments};
-use super::{BlockRegistry, PositionalRadixTree};
+#[cfg(test)]
+use super::BlockRegistry;
+use super::PositionalRadixTree;
+#[cfg(test)]
+use super::attachments::TypedAttachments;
+use super::attachments::{AttachmentError, AttachmentStore};
 
 use crate::blocks::{BlockMetadata, SequenceHash};
 
 use std::any::{Any, TypeId};
+#[cfg(test)]
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
@@ -24,7 +29,7 @@ use tracing_mutex::parkinglot::Mutex;
 /// Handle that represents a block registration in the global registry.
 /// This handle is cloneable and can be shared across pools.
 #[derive(Clone, Debug)]
-pub struct BlockRegistrationHandle {
+pub(crate) struct BlockRegistrationHandle {
     pub(crate) inner: Arc<BlockRegistrationHandleInner>,
 }
 
@@ -114,7 +119,8 @@ impl BlockRegistrationHandle {
         self.inner.seq_hash
     }
 
-    pub fn is_from_registry(&self, registry: &BlockRegistry) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_from_registry(&self, registry: &BlockRegistry) -> bool {
         self.inner
             .registry
             .upgrade()
@@ -188,12 +194,14 @@ impl BlockRegistrationHandle {
     }
 
     /// Register a callback to be invoked when this handle is touched.
-    pub fn on_touch(&self, callback: Arc<dyn Fn(SequenceHash) + Send + Sync>) {
+    #[cfg(test)]
+    pub(crate) fn on_touch(&self, callback: Arc<dyn Fn(SequenceHash) + Send + Sync>) {
         self.inner.touch_callbacks.lock().push(callback);
     }
 
     /// Fire all registered touch callbacks with this handle's sequence hash.
-    pub fn touch(&self) {
+    #[cfg(test)]
+    pub(crate) fn touch(&self) {
         let callbacks: Vec<_> = self.inner.touch_callbacks.lock().clone();
         let seq_hash = self.inner.seq_hash;
         for cb in &callbacks {
@@ -202,7 +210,8 @@ impl BlockRegistrationHandle {
     }
 
     /// Get a typed accessor for attachments of type T
-    pub fn get<T: Any + Send + Sync>(&self) -> TypedAttachments<'_, T> {
+    #[cfg(test)]
+    pub(crate) fn get<T: Any + Send + Sync>(&self) -> TypedAttachments<'_, T> {
         TypedAttachments {
             handle: self,
             _phantom: PhantomData,
@@ -216,6 +225,7 @@ impl BlockRegistrationHandle {
         let type_id = TypeId::of::<T>();
         let mut attachments = self.inner.attachments.lock();
 
+        #[cfg(test)]
         if let Some(super::attachments::AttachmentMode::Multiple) =
             attachments.type_registry.get(&type_id)
         {
@@ -235,7 +245,8 @@ impl BlockRegistrationHandle {
     /// Attach a value of type T to this handle.
     /// Multiple values per type are allowed - this will append to existing values.
     /// Returns an error if type T is already registered as unique attachment.
-    pub fn attach<T: Any + Send + Sync>(&self, value: T) -> Result<(), AttachmentError> {
+    #[cfg(test)]
+    pub(crate) fn attach<T: Any + Send + Sync>(&self, value: T) -> Result<(), AttachmentError> {
         let type_id = TypeId::of::<T>();
         let mut attachments = self.inner.attachments.lock();
 

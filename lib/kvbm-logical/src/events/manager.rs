@@ -166,7 +166,7 @@ impl EventsManager {
     ///
     /// # Returns
     /// Ok(()) if successful, or an error if attachment fails
-    pub fn on_block_registered(&self, handle: &BlockRegistrationHandle) -> Result<()> {
+    pub(crate) fn on_block_registered(&self, handle: &BlockRegistrationHandle) -> Result<()> {
         let seq_hash = handle.seq_hash();
 
         // Check policy - only emit events for filtered blocks

@@ -498,8 +498,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let block_id = inner.inactive.find_match(seq_hash, touch)?.1;
         self.metrics.dec_inactive_pool_size();
         let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
-        let inner_arc =
-            ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
+        let inner_arc = ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash);
         inner.slots[block_id].state = SlotState::Primary {
             seq_hash,
             handle,
@@ -555,7 +554,6 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                         self.clone(),
                         block_id,
                         seq_hash,
-                        handle.clone(),
                         existing_primary,
                     );
                     inner.slots[block_id].state = SlotState::Duplicate {
@@ -581,8 +579,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                 inner.slots[block_id].state,
                 SlotState::Staged { .. }
             ));
-            let inner_arc =
-                ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
+            let inner_arc = ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash);
             inner.slots[block_id].state = SlotState::Primary {
                 seq_hash,
                 handle: handle.clone(),
@@ -673,12 +670,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             .into_iter()
             .map(|(seq_hash, block_id)| {
                 let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
-                let inner_arc = ImmutableBlockInner::new_primary(
-                    self.clone(),
-                    block_id,
-                    seq_hash,
-                    handle.clone(),
-                );
+                let inner_arc = ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash);
                 inner.slots[block_id].state = SlotState::Primary {
                     seq_hash,
                     handle,
@@ -831,9 +823,9 @@ fn take_inactive_handle<T: BlockMetadata>(
 /// to the inactive resurrection path so frequency tracking observes
 /// the hit even when the active path absorbs it.
 pub(crate) fn upgrade_or_resurrect<T: BlockMetadata + Sync>(
-    handle: &BlockRegistrationHandle,
+    seq_hash: SequenceHash,
     store: &Arc<BlockStore<T>>,
     touch: bool,
 ) -> Option<Arc<ImmutableBlockInner<T>>> {
-    store.acquire_for_hash(handle.seq_hash(), touch)
+    store.acquire_for_hash(seq_hash, touch)
 }

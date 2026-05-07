@@ -45,6 +45,6 @@ impl BlockRegistrationHandle {
         store: &Arc<BlockStore<T>>,
         touch: bool,
     ) -> Option<Arc<ImmutableBlockInner<T>>> {
-        upgrade_or_resurrect::<T>(self, store, touch)
+        upgrade_or_resurrect::<T>(self.seq_hash(), store, touch)
     }
 }

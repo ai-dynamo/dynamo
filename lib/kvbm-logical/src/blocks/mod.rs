@@ -44,7 +44,6 @@ pub use pin::{LifecyclePin, LifecyclePinRef};
 
 pub(crate) use immutable::ImmutableBlockInner;
 
-pub use crate::registry::BlockRegistrationHandle;
 pub use crate::registry::BlockRegistry;
 
 pub use crate::{BlockId, SequenceHash};

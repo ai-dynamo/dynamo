@@ -38,7 +38,7 @@ pub use integrations::{
     ApplyError, DecodeOutcome, NoopDelegate, RequestSequence, SchedulableSequence,
     SchedulableSequenceBuilder, ScheduleError, SequenceDelegate, SequenceEvent, SequenceState,
 };
-pub use manager::BlockManager;
+pub use manager::{BlockManager, BlockManagerApi};
 pub use registry::BlockRegistry;
 pub use sequence::{
     BlockSequence, BlockSequenceError, ExternalBlockAssignments, LogicalBlockAssignmentError,
@@ -60,9 +60,7 @@ pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
 ///
 /// The reserved value [`ManagerId::NULL`] is never assigned to a real
 /// store — callers may use it as a null/test sentinel.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, Encode, Decode, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encode, Decode, Serialize, Deserialize)]
 pub struct ManagerId(pub u64);
 
 impl ManagerId {

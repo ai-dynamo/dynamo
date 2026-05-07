@@ -7,11 +7,13 @@
 //! All pool transitions go through the store's single mutex; the manager
 //! adds the registry coordination, allocation eviction policy, and metrics.
 
+mod api;
 mod builder;
 
 #[cfg(test)]
 mod tests;
 
+pub use api::BlockManagerApi;
 pub use builder::{
     BlockManagerBuilderError, BlockManagerConfigBuilder, BlockManagerResetError,
     FrequencyTrackingCapacity, InactiveBackendConfig,
