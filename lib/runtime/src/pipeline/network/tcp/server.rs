@@ -671,7 +671,15 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
-    use crate::pipeline::Context;
+    use crate::pipeline::{Context, network::StreamReceiver};
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+    use tokio::net::TcpStream;
+    use tokio_util::codec::{FramedRead, FramedWrite};
+
+    type TestFramedRead = FramedRead<ReadHalf<TcpStream>, TwoPartCodec>;
+    type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
+    type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
 
     // Mock resolver that always fails to simulate the fallback scenario
     struct FailingIpResolver;
@@ -684,6 +692,76 @@ mod tests {
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
             Err(Error::LocalIpAddressNotFound)
         }
+    }
+
+    async fn open_registered_response_stream() -> TestResponseStream {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let registered_stream = pending_connection.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(stream);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ResponseStreamPrologue { error: None })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        // SAFETY (test-only): each `.expect` below describes a condition that
+        // can only fail if the test harness itself is broken; an actual
+        // production `process_response_stream` always drives all three layers
+        // (timeout → stream_provider → response stream registration) to a
+        // non-error outcome on a connected localhost socket. A panic in the
+        // test thread is the desired failure mode here.
+        let receiver = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
+            .await
+            .expect("server should establish response stream within timeout")
+            .expect("stream provider should not be dropped")
+            .expect("response stream should be accepted");
+
+        (framed_reader, framed_writer, receiver)
+    }
+
+    async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
+        // SAFETY (test-only): a misbehaving server (closing early, sending
+        // garbage, or sending data alongside a control header) is exactly the
+        // kind of harness failure we want surfaced as a test panic.
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), framed_reader.next())
+            .await
+            .expect("server should send a control message within timeout")
+            .expect("server should not close before sending control")
+            .expect("control message should decode");
+        let (header, data) = message.optional_parts();
+        assert!(data.is_none(), "control message should not contain data");
+        serde_json::from_slice(header.expect("control header missing").as_ref()).unwrap()
     }
 
     #[tokio::test]
@@ -789,5 +867,39 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_unexpected_control_message() {
+        let (mut framed_reader, mut framed_writer, _receiver) =
+            open_registered_response_stream().await;
+
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ControlMessage::Stop).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "unexpected control message should kill only this stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_read_error() {
+        let (mut framed_reader, framed_writer, _receiver) = open_registered_response_stream().await;
+
+        let mut raw_writer = framed_writer.into_inner();
+        raw_writer.write_all(&[0u8; 8]).await.unwrap();
+        raw_writer.shutdown().await.unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "framing read error should kill only this stream"
+        );
     }
 }
