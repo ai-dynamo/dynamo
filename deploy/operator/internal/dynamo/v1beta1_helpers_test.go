@@ -38,6 +38,31 @@ func TestGetDCDComponentNamePrefersSpecOverLegacyMetadata(t *testing.T) {
 	}
 }
 
+func TestGetDCDComponentNameIgnoresStalePreservedServiceName(t *testing.T) {
+	const (
+		specComponentName  = "live-beta-component"
+		labelComponentName = "stable-label-component"
+	)
+	dcd := dcdFromAlpha(t, v1alpha1.DynamoComponentDeploymentSpec{
+		DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ServiceName: "stale-alpha-service-name",
+		},
+	})
+	dcd.Spec.ComponentName = specComponentName
+	dcd.Labels = map[string]string{
+		commonconsts.KubeLabelDynamoComponent: labelComponentName,
+	}
+
+	if got, want := GetDCDComponentName(dcd), specComponentName; got != want {
+		t.Fatalf("GetDCDComponentName() = %q, want %q", got, want)
+	}
+
+	dcd.Spec.ComponentName = ""
+	if got, want := GetDCDComponentName(dcd), labelComponentName; got != want {
+		t.Fatalf("GetDCDComponentName() without spec name = %q, want %q", got, want)
+	}
+}
+
 func TestGetDCDComponentNameLegacyFallbacks(t *testing.T) {
 	tests := []struct {
 		name string

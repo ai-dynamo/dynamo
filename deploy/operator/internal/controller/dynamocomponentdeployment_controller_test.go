@@ -379,6 +379,49 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 	}
 }
 
+func TestDynamoComponentDeploymentReconciler_dcdIngressSpecDefaultsFromParentDGD(t *testing.T) {
+	const (
+		dcdName               = "test-dgd-frontend"
+		parentDGDName         = "test-dgd"
+		frontendComponentName = "frontend"
+		controllerClassName   = "nginx"
+		hostSuffix            = "example.com"
+	)
+	r := &DynamoComponentDeploymentReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{
+			Ingress: configv1alpha1.IngressConfiguration{
+				ControllerClassName: controllerClassName,
+				HostSuffix:          hostSuffix,
+			},
+		},
+	}
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dcdName,
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: parentDGDName,
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: frontendComponentName,
+				ComponentType: v1beta1.ComponentTypeFrontend,
+			},
+		},
+	}
+
+	ingressSpec, ok, err := r.dcdIngressSpec(dcd)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, ingressSpec.Enabled)
+	require.NotNil(t, ingressSpec.IngressControllerClassName)
+	require.Equal(t, controllerClassName, *ingressSpec.IngressControllerClassName)
+	require.Equal(t, parentDGDName, ingressSpec.Host)
+	require.NotNil(t, ingressSpec.HostSuffix)
+	require.Equal(t, hostSuffix, *ingressSpec.HostSuffix)
+}
+
 func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T) {
 	type fields struct {
 	}
