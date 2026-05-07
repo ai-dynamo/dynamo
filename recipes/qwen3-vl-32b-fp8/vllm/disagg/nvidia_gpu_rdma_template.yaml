@@ -16,5 +16,3 @@ spec:
         exactly:
           deviceClassName: rdma-dranet
           count: 1
-
-

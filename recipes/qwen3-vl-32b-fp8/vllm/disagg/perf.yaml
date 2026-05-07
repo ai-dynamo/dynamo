@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-vl-32b-fp8-disagg-perf
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen3-vl-32b-fp8-disagg-perf
+    spec:
+      restartPolicy: Never
+      containers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+          pip install git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75
+          echo "aiperf installation completed"
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+
+          wait_for_model_ready() {
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every 5s)..."
+            while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+                echo "[$(date '+%H:%M:%S')] Model not ready yet, sleeping 5s before checking again http://$ENDPOINT/v1/models"
+                sleep 5
+            done
+            echo "Model '$TARGET_MODEL' is now available!"
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+
+          run_perf() {
+            local qps=$1
+            local isl=$2
+            local osl=$3
+            key=qps_${qps}_isl_${isl}
+            export ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/${key}"
+            mkdir -p "$ARTIFACT_DIR"
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+            aiperf profile --artifact-dir $ARTIFACT_DIR \
+                --model $TARGET_MODEL \
+                --tokenizer $TARGET_MODEL \
+                --tokenizer-trust-remote-code \
+                --endpoint-type chat \
+                --streaming \
+                --url http://$ENDPOINT \
+                --synthetic-input-tokens-mean $isl \
+                --synthetic-input-tokens-stddev 0 \
+                --image-width-mean 854 \
+                --image-width-stddev 0 \
+                --image-height-mean 480 \
+                --image-height-stddev 0 \
+                --image-batch-size 20 \
+                --output-tokens-mean $osl \
+                --request-rate $qps \
+                --concurrency $CONCURRENCY \
+                --request-count $REQUEST_COUNT \
+                --request-timeout-seconds 600 \
+                --random-seed 0 \
+                --no-server-metrics \
+                --no-gpu-telemetry \
+                --extra-inputs ignore_eos:true \
+                --extra-inputs min_tokens:$osl \
+                --extra-inputs max_tokens:$osl \
+                --ui simple
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+            ls -la $ARTIFACT_DIR
+          }
+
+          #### Actual execution ####
+          wait_for_model_ready
+          mkdir -p "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+
+          cat > "${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/input_config.json" <<CFGEOF
+          {
+            "model": "$TARGET_MODEL",
+            "endpoint": "$ENDPOINT",
+            "endpoint_type": "chat",
+            "isl": $ISL,
+            "osl": $OSL,
+            "images_per_request": 20,
+            "image_resolution": "854x480",
+            "qps_sweep": "$QPS_SWEEP",
+            "concurrency": $CONCURRENCY,
+            "request_count": $REQUEST_COUNT,
+            "mode": "disagg"
+          }
+          CFGEOF
+
+          for qps in $QPS_SWEEP; do
+            run_perf "$qps" $ISL $OSL
+          done
+
+          echo "All QPS sweep runs complete."
+          echo "Results in: ${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+        env:
+        - name: TARGET_MODEL
+          value: Qwen/Qwen3-VL-32B-Instruct-FP8
+        - name: ENDPOINT
+          value: qwen3-vl-32b-fp8-vllm-disagg-frontend:8000
+        - name: ISL
+          value: "128"
+        - name: OSL
+          value: "256"
+        - name: CONCURRENCY
+          value: "128"
+        - name: REQUEST_COUNT
+          value: "128"
+        - name: QPS_SWEEP
+          value: "0.1 0.25 0.5 1 2 4"
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /root/.cache/huggingface/perf
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: perf
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+        workingDir: /workspace
+      imagePullSecrets:
+      - name: nvcrimagepullsecret
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
