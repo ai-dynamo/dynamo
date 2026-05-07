@@ -333,7 +333,193 @@ class TestDecodeLoadScaling:
         assert effects.diagnostics.load_decision_reason == "scale_up"
 
 
-# ── Disagg load scaling ───────────────────────────────────────────────
+# ── Consolidation-aware scale-down ────────────────────────────────────
+
+
+def _decode_caps_with_max_kv(max_kv_tokens: int) -> WorkerCapabilities:
+    """Decode-only capabilities advertising a max_kv_tokens budget."""
+    return WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=max_kv_tokens,
+        ),
+    )
+
+
+class TestDecodeConsolidationAwareScaleDown:
+    """Decode scale-down uses ``util * N/(N-1) < sensitivity`` (input-side).
+
+    Tests use a deliberately permissive ITL SLA so the regression-driven
+    scale-up branch never fires; we're isolating the new scale-down logic.
+    """
+
+    def _setup(self, max_kv_tokens: int = 100_000):
+        core = _make_core(
+            mode="decode",
+            itl=10_000.0,  # huge SLA so no scale-up regardless of regression
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _decode_caps_with_max_kv(max_kv_tokens)
+        _train_decode_regression(core)
+        return core
+
+    def _tick(
+        self, *, num_workers: int, sched_kv_per_worker: int
+    ) -> TickInput:
+        decode = {}
+        for i in range(num_workers):
+            decode[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                sum_decode_kv_tokens=sched_kv_per_worker,
+                num_decode_requests=max(1, sched_kv_per_worker // 1000),
+                wall_time=0.005,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(decode=decode),
+            worker_counts=WorkerCounts(ready_num_decode=num_workers),
+        )
+
+    def test_low_n_blocks_oscillating_scale_down(self):
+        """N=2 at 50% util refuses scale-down.
+
+        Reproduces the production oscillation: per-worker util 0.5 looks
+        comfortable, but post-consolidation util on the survivor would be
+        1.0 -- well above the 0.8 sensitivity threshold. Flat 80% would
+        have allowed this scale-down; consolidation-aware rejects it.
+        """
+        core = self._setup()
+        tick = self._tick(num_workers=2, sched_kv_per_worker=50_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+
+    def test_low_n_allows_safe_scale_down(self):
+        """N=2 at 30% util permits scale-down: post-util 0.6 < 0.8."""
+        core = self._setup()
+        tick = self._tick(num_workers=2, sched_kv_per_worker=30_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
+
+    def test_high_n_permits_scale_down_at_high_util(self):
+        """N=10 at 70% util permits scale-down: post 0.7×10/9≈0.778 < 0.8."""
+        core = self._setup()
+        tick = self._tick(num_workers=10, sched_kv_per_worker=70_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 9
+
+    def test_high_n_blocks_when_post_util_overshoots(self):
+        """N=10 at 78% util refuses (post 0.78×10/9≈0.866 > 0.8)."""
+        core = self._setup()
+        tick = self._tick(num_workers=10, sched_kv_per_worker=78_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 10
+
+    def test_no_max_kv_disables_scale_down(self):
+        """Without max_kv_tokens, scale-down is refused even with low util.
+
+        The check is input-side; without a denominator we can't compute
+        utilization, so we conservatively keep the worker count.
+        """
+        core = self._setup()
+        # Erase max_kv to force the fallback branch.
+        core._capabilities = WorkerCapabilities(
+            decode=EngineCapabilities(num_gpu=1, max_num_batched_tokens=2048),
+        )
+        tick = self._tick(num_workers=2, sched_kv_per_worker=10_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        # Even at very low util we don't scale down.
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+
+
+def _train_slow_prefill_regression(core: PlannerStateMachine) -> None:
+    """Trains a regression with low slope so chunked TTFTs stay tractable."""
+    fpms = [
+        _make_fpm(
+            sum_prefill_tokens=t,
+            num_prefill_requests=1,
+            # wall_time_s = 1e-6 * t + 1e-3 -> chunk(2048) ≈ 3 ms,
+            # whole-trace TTFTs stay in the tens of ms.
+            wall_time=1e-6 * t + 1e-3,
+        )
+        for t in [500, 1000, 1500, 2000, 2500]
+    ]
+    core.load_benchmark_fpms(prefill_fpms=fpms)
+
+
+class TestPrefillConsolidationAwareScaleDown:
+    """Prefill scale-down re-runs ``estimate_next_ttft`` with scaled queue.
+
+    The regression's internal ``avg_isl`` (own-request compute) is unchanged
+    by consolidation -- only the queue input is scaled. This guards against
+    inflating the new request's prefill compute time.
+    """
+
+    def _setup(self, ttft: float = 100.0):
+        core = _make_core(
+            mode="prefill",
+            ttft=ttft,
+            load_scaling_down_sensitivity=80,
+        )
+        _train_slow_prefill_regression(core)
+        return core
+
+    def _tick(
+        self, *, num_workers: int, queued_per_worker: int
+    ) -> TickInput:
+        prefill = {}
+        for i in range(num_workers):
+            prefill[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                queued_prefill_tokens=queued_per_worker,
+                sum_prefill_tokens=500,
+                num_prefill_requests=1,
+                wall_time=0.005,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill=prefill),
+            worker_counts=WorkerCounts(ready_num_prefill=num_workers),
+        )
+
+    def test_n2_refuses_when_post_consolidation_breaks_sla(self):
+        """High queue at N=2: post-consolidation TTFT exceeds SLA × 0.8."""
+        core = self._setup(ttft=100.0)
+        # avg_isl=1500 from training; queue 30K per worker doubled to 60K
+        # post-consolidation -> ceil((60000+1500)/2048)=31 chunks ≈ 95+ ms.
+        tick = self._tick(num_workers=2, queued_per_worker=30_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_prefill is None
+            or effects.scale_to.num_prefill >= 2
+        )
+
+    def test_n2_permits_when_queue_empty(self):
+        """At N=2 with empty queues, post-consolidation TTFT stays within SLA."""
+        core = self._setup(ttft=100.0)
+        tick = self._tick(num_workers=2, queued_per_worker=0)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 1
+
+    def test_consolidation_only_inflates_queue_not_compute(self):
+        """At N=10 the queue-only scaling lets us scale down at queue sizes
+        that would refuse if we'd naively multiplied the whole TTFT by 10/9.
+
+        With queue=2000 per worker: avg_isl=1500 dominates the TTFT (≈3 ms)
+        and scaling N→N-1 only inflates the queue portion. Post-consolidation
+        queue ≈ 2222, total ≈ 3722 → still 2 chunks → predicted TTFT remains
+        well under 100ms × 0.8.
+        """
+        core = self._setup(ttft=100.0)
+        core._num_p_workers = 10  # ensure reconcile sees 10 workers
+        tick = self._tick(num_workers=10, queued_per_worker=2_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 9
 
 
 class TestDisaggLoadScaling:

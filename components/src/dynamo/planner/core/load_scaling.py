@@ -395,10 +395,22 @@ class LoadScalingMixin:
             return None
 
         kv_hit_rate = self._last_kv_hit_rate
+        sensitivity = self._config.load_scaling_down_sensitivity / 100.0
+        consolidation = (
+            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
+        )
+
         estimates: list[float] = []
+        # Consolidation-aware scale-down: re-predict TTFT with the queue
+        # scaled by N/(N-1). The regression's internal ``avg_isl`` (the new
+        # request's own compute) stays put, so only the *queue* part of TTFT
+        # is inflated -- per Shang-Pin's observation that the prefill
+        # forward-pass time itself does not shrink with more workers.
+        can_scale_down = num_workers > 1
         for (wid, dp), fpm in fpm_stats.items():
+            queued = fpm.queued_requests.sum_prefill_tokens
             est = self._prefill_regression.estimate_next_ttft(
-                queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
+                queued_prefill_tokens=queued,
                 max_num_batched_tokens=max_tokens,
                 kv_hit_rate=kv_hit_rate,
             )
@@ -407,16 +419,33 @@ class LoadScalingMixin:
                 estimates.append(est_ms)
                 logger.info(
                     f"Prefill engine {wid}:dp{dp}: estimated TTFT {est_ms:.2f}ms "
-                    f"(queued={fpm.queued_requests.sum_prefill_tokens}, "
+                    f"(queued={queued}, "
                     f"avg_isl={self._prefill_regression.avg_isl:.1f}, "
                     f"kv_hit_rate={kv_hit_rate if kv_hit_rate is not None else 'n/a'})"
                 )
+
+            if can_scale_down:
+                post_queued = int(queued * consolidation)
+                post_est = self._prefill_regression.estimate_next_ttft(
+                    queued_prefill_tokens=post_queued,
+                    max_num_batched_tokens=max_tokens,
+                    kv_hit_rate=kv_hit_rate,
+                )
+                if (
+                    post_est is None
+                    or post_est * 1000 >= self._config.ttft * sensitivity
+                ):
+                    can_scale_down = False
 
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)
 
         return self._scale_decision(
-            estimates, self._config.ttft, num_workers, "prefill TTFT"
+            estimates,
+            self._config.ttft,
+            num_workers,
+            "prefill TTFT",
+            can_scale_down=can_scale_down,
         )
 
     def _decode_load_decision(
@@ -433,26 +462,52 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
+        sensitivity = self._config.load_scaling_down_sensitivity / 100.0
+        consolidation = (
+            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
+        )
+        d_caps = self._capabilities.decode
+        max_kv = d_caps.max_kv_tokens if d_caps else None
+
         estimates: list[float] = []
+        # Consolidation-aware scale-down: per-worker KV utilisation
+        # (sched + queued) / max_kv, scaled by the consolidation factor.
+        # Survivors absorb the killed worker's in-flight KV, so post-survival
+        # util ≈ current × N/(N-1). Refuse scale-down if any survivor would
+        # exceed ``sensitivity`` (default 0.8) of full KV cache after merge.
+        can_scale_down = (
+            num_workers > 1 and max_kv is not None and max_kv > 0
+        )
         for (wid, dp), fpm in fpm_stats.items():
+            sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
+            queued_kv = fpm.queued_requests.sum_decode_kv_tokens
             est = self._decode_regression.estimate_next_itl(
-                scheduled_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
-                queued_decode_kv=fpm.queued_requests.sum_decode_kv_tokens,
+                scheduled_decode_kv=sched_kv,
+                queued_decode_kv=queued_kv,
             )
             if est is not None:
                 est_ms = est * 1000
                 estimates.append(est_ms)
                 logger.info(
                     f"Decode engine {wid}:dp{dp}: estimated ITL {est_ms:.2f}ms "
-                    f"(sched_kv={fpm.scheduled_requests.sum_decode_kv_tokens}, "
-                    f"queued_kv={fpm.queued_requests.sum_decode_kv_tokens})"
+                    f"(sched_kv={sched_kv}, queued_kv={queued_kv})"
                 )
+
+            if can_scale_down:
+                # max_kv is non-None here per the can_scale_down guard above.
+                util = (sched_kv + queued_kv) / max_kv  # type: ignore[operator]
+                if util * consolidation >= sensitivity:
+                    can_scale_down = False
 
         if estimates:
             self._diag_estimated_itl_ms = max(estimates)
 
         return self._scale_decision(
-            estimates, self._config.itl, num_workers, "decode ITL"
+            estimates,
+            self._config.itl,
+            num_workers,
+            "decode ITL",
+            can_scale_down=can_scale_down,
         )
 
     def _agg_prefill_scaling(
@@ -462,22 +517,53 @@ class LoadScalingMixin:
         max_tokens: int,
     ) -> Optional[int]:
         kv_hit_rate = self._last_kv_hit_rate
+        sensitivity = self._config.load_scaling_down_sensitivity / 100.0
+        consolidation = (
+            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
+        )
+
         estimates: list[float] = []
+        # Agg-prefill consolidation: both queued prefill and current decode KV
+        # are state that the surviving worker would absorb -- scale both by
+        # N/(N-1) when re-predicting TTFT. ``avg_isl`` (next-request compute)
+        # is unchanged inside the regression.
+        can_scale_down = num_workers > 1
         for fpm in fpm_stats.values():
+            queued = fpm.queued_requests.sum_prefill_tokens
+            sched_decode_kv = fpm.scheduled_requests.sum_decode_kv_tokens
             est = self._agg_regression.estimate_next_ttft(
-                queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
+                queued_prefill_tokens=queued,
                 max_num_batched_tokens=max_tokens,
-                current_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
+                current_decode_kv=sched_decode_kv,
                 kv_hit_rate=kv_hit_rate,
             )
             if est is not None:
                 estimates.append(est * 1000)
 
+            if can_scale_down:
+                post_queued = int(queued * consolidation)
+                post_decode_kv = int(sched_decode_kv * consolidation)
+                post_est = self._agg_regression.estimate_next_ttft(
+                    queued_prefill_tokens=post_queued,
+                    max_num_batched_tokens=max_tokens,
+                    current_decode_kv=post_decode_kv,
+                    kv_hit_rate=kv_hit_rate,
+                )
+                if (
+                    post_est is None
+                    or post_est * 1000 >= self._config.ttft * sensitivity
+                ):
+                    can_scale_down = False
+
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)
 
         return self._scale_decision(
-            estimates, self._config.ttft, num_workers, "agg TTFT"
+            estimates,
+            self._config.ttft,
+            num_workers,
+            "agg TTFT",
+            can_scale_down=can_scale_down,
         )
 
     def _agg_decode_scaling(
@@ -485,19 +571,46 @@ class LoadScalingMixin:
         fpm_stats: dict[tuple[str, int], ForwardPassMetrics],
         num_workers: int,
     ) -> Optional[int]:
+        sensitivity = self._config.load_scaling_down_sensitivity / 100.0
+        consolidation = (
+            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
+        )
+        d_caps = self._capabilities.decode
+        max_kv = d_caps.max_kv_tokens if d_caps else None
+
         estimates: list[float] = []
+        # Agg-decode consolidation: combined cache pressure (sched + queued
+        # decode KV + queued prefill) scaled by N/(N-1). Mirrors the easy-mode
+        # agg utilisation but with the consolidation-aware threshold.
+        can_scale_down = (
+            num_workers > 1 and max_kv is not None and max_kv > 0
+        )
         for fpm in fpm_stats.values():
+            sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
+            queued_kv = fpm.queued_requests.sum_decode_kv_tokens
+            queued_prefill = fpm.queued_requests.sum_prefill_tokens
             est = self._agg_regression.estimate_next_itl(
-                scheduled_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
-                queued_decode_kv=fpm.queued_requests.sum_decode_kv_tokens,
+                scheduled_decode_kv=sched_kv,
+                queued_decode_kv=queued_kv,
             )
             if est is not None:
                 estimates.append(est * 1000)
 
+            if can_scale_down:
+                util = (sched_kv + queued_kv + queued_prefill) / max_kv  # type: ignore[operator]
+                if util * consolidation >= sensitivity:
+                    can_scale_down = False
+
         if estimates:
             self._diag_estimated_itl_ms = max(estimates)
 
-        return self._scale_decision(estimates, self._config.itl, num_workers, "agg ITL")
+        return self._scale_decision(
+            estimates,
+            self._config.itl,
+            num_workers,
+            "agg ITL",
+            can_scale_down=can_scale_down,
+        )
 
     # ------------------------------------------------------------------
     # Easy-mode decision methods (optimization_target != "sla")
@@ -687,13 +800,35 @@ class LoadScalingMixin:
     # ------------------------------------------------------------------
 
     def _scale_decision(
-        self, estimates: list[float], sla: float, num_workers: int, label: str
+        self,
+        estimates: list[float],
+        sla: float,
+        num_workers: int,
+        label: str,
+        *,
+        can_scale_down: bool,
     ) -> Optional[int]:
+        """Combine scale-up (latency > SLA on every worker) with the
+        caller-precomputed ``can_scale_down`` signal.
+
+        Scale-down checks live in the per-component decision functions because
+        they are consolidation-aware:
+
+        - prefill / agg-prefill: re-predict TTFT with ``queued × N/(N-1)``
+          (and ``current_decode_kv × N/(N-1)`` for agg) so the new request's
+          own compute time is not double-counted.
+        - decode / agg-decode: per-worker KV utilisation × ``N/(N-1)`` against
+          ``sensitivity`` (i.e. fraction of full cache).
+
+        Both refuse the scale-down when the predicted post-survival metric
+        exceeds ``sensitivity``-fraction of capacity, fixing the 2→1
+        oscillation where flat-fraction thresholds let scale-down through but
+        the survivor immediately violates SLA.
+        """
         if not estimates:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        sensitivity = self._config.load_scaling_down_sensitivity / 100.0
         logger.info(
             f"Load-based {label}: workers={num_workers}, sla={sla:.1f}ms, "
             f"estimates={[f'{t:.1f}' for t in estimates]}"
@@ -705,14 +840,13 @@ class LoadScalingMixin:
             )
             return num_workers + 1
 
-        if num_workers > 1:
-            threshold = sla * sensitivity
-            if all(t < threshold for t in estimates):
-                desired = max(num_workers - 1, self._config.min_endpoint)
-                logger.info(
-                    f"Load-based {label}: ALL below threshold ({threshold:.1f}ms), -> {desired}"
-                )
-                return desired
+        if num_workers > 1 and can_scale_down:
+            desired = max(num_workers - 1, self._config.min_endpoint)
+            logger.info(
+                f"Load-based {label}: post-consolidation prediction within "
+                f"sensitivity, -> {desired}"
+            )
+            return desired
 
         self._diag_load_reason = "no_change"
         return None
