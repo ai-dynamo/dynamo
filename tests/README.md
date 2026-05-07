@@ -189,7 +189,7 @@ Markers differ by engine:
 
 **SGLang** uses token-based control:
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi at the recommended token count. Used for `--max-vram-gib` filtering and scheduler budget.
-- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. SGLang's default `--mem-fraction-static` is never overridden; the token cap is the sole allocation control. Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens N --mem-fraction-static 0.9`. The token cap controls actual KV allocation; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
 - **`requested_sglang_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion), where token-based control doesn't apply. Used for scheduler admission and display only.
 
 **TRT-LLM** uses token-based control (text models) or byte-based control (diffusion models):
@@ -636,7 +636,7 @@ The profiler automatically detects the engine type and uses the appropriate bina
 
 **Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_vllm_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
 
-**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N`).
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N --mem-fraction-static 0.9`).
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
 
