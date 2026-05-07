@@ -1467,7 +1467,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Fraction of the KV cache pool that is physically allocated (used + evictable). Unlike `sglang:token_usage`, which excludes evictable slots, this captures true pool occupancy — i.e. how much headroom remains for new requests after evicting all radix-cached entries. Available from sglang 0.5.11 (sgl-project/sglang#22726).",
+      "description": "Fraction of the KV cache pool that is not free, normalized against `sglang:max_total_num_tokens`. Equivalent to `1 - kv_available/max`. Captures true pool occupancy — including used, evictable (radix-cached), and any internally protected slots — vs. `sglang:token_usage`, which is the bottleneck across full/SWA/mamba pools and can miss evictable + protected slots. Gauge inputs available from sglang 0.5.11 (sgl-project/sglang#22726).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1542,7 +1542,7 @@
             "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "(1 - sglang:kv_available_tokens / (sglang:kv_available_tokens + sglang:kv_evictable_tokens + sglang:kv_used_tokens)) * 100",
+          "expr": "(1 - sglang:kv_available_tokens / sglang:max_total_num_tokens) * 100",
           "legendFormat": "Physical usage %",
           "range": true,
           "refId": "A"
