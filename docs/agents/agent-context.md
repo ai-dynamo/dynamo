@@ -38,8 +38,12 @@ Each harness LLM call should include `nvext.agent_context`:
 | `trajectory_id`        |   Yes    | One reasoning/tool trajectory within the agent run.                         |
 | `parent_trajectory_id` |    No    | Parent trajectory for subagents.                                            |
 
-These names intentionally align with [ATIF Alignment](atif-alignment.md). A
-single `session_id` can contain multiple parent and child trajectories.
+A single `session_id` can contain multiple parent and child trajectories. The
+field names align with the [Agent Trajectory Interchange Format][atif-rfc] so
+harness trajectory files and Dynamo serving traces join without renaming; see
+the collapsed section at the bottom of this page for details.
+
+[atif-rfc]: https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
 
 ## OpenAI Client Integration
 
@@ -86,3 +90,30 @@ Dynamo runtime APIs. Framework integrations should use this shape:
 
 For trace sink setup, tool event relay, and record schema details, see
 [Agent Tracing](agent-tracing.md).
+
+<details>
+<summary>ATIF alignment</summary>
+
+The [Agent Trajectory Interchange Format (ATIF)][atif-rfc] is the JSON format
+maintained as the [Harbor framework][harbor] data schema for complete agent
+trajectories (user inputs, agent steps, tool calls, observations, subagents,
+rewards). Dynamo does not emit ATIF; it emits `dynamo.agent.trace.v1`, a
+serving-oriented trace covering request timing, tokens, cache, queue depth, and
+worker placement. The two formats are complementary and join cleanly because
+identifier names match:
+
+| Dynamo field           | ATIF role                       | Meaning                                                         |
+| ---------------------- | ------------------------------- | --------------------------------------------------------------- |
+| `session_id`           | `session_id`                    | Agent run identity. Multiple trajectories share one session.    |
+| `trajectory_id`        | `trajectory_id`                 | One parent or child trajectory within the run.                  |
+| `parent_trajectory_id` | subagent relationship metadata  | Optional parent trajectory for subagents.                       |
+| `session_type_id`      | producer-specific metadata      | Reusable workload/profile class.                                |
+
+A harness ATIF file and Dynamo's trace stream can be joined offline on
+`session_id` + `trajectory_id` without schema changes. Full ATIF reconstruction
+still requires harness trajectory data; Dynamo trace records intentionally omit
+prompt and response content.
+
+[harbor]: https://github.com/harbor-framework/harbor
+
+</details>

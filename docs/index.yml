@@ -183,8 +183,6 @@ navigation:
             path: agents/agent-context.md
           - page: Agent Tracing
             path: agents/agent-tracing.md
-          - page: ATIF Alignment
-            path: agents/atif-alignment.md
           - page: Agent Hints
             path: agents/agent-hints.md
           - page: Chat Processors

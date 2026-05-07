@@ -16,7 +16,6 @@ telemetry, routing hints, and backend-specific cache behavior.
 |---------|---------|
 | [Agent Context](agent-context.md) | Passive `session_id` and `trajectory_id` metadata attached to OpenAI-compatible requests. |
 | [Agent Tracing](agent-tracing.md) | Dynamo-owned request timing, token, cache, worker-placement, and harness tool-event traces. |
-| [ATIF Alignment](atif-alignment.md) | How Dynamo identifiers line up with Agent Trajectory Interchange Format traces from harnesses and eval frameworks. |
 | [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
 | [Tool Calling](tool-calling.md) | Supported tool-call parsers and parser names. |
 | [Reasoning](reasoning.md) | Supported reasoning parsers for chain-of-thought models. |
