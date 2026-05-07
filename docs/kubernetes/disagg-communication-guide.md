@@ -242,13 +242,15 @@ No pod annotations are needed. InfiniBand devices are injected by the device plu
 
 **Security Context:**
 
-Add `IPC_LOCK` capability so NIXL/UCX can pin GPU memory for RDMA registration. Without this, transfers fail with `waiting_timeout`:
+Add `IPC_LOCK` and `SYS_RESOURCE` capabilities. `IPC_LOCK` allows RDMA memory pinning, `SYS_RESOURCE` allows memlock limit escalation:
 
 ```yaml
 securityContext:
+  runAsUser: 0
   capabilities:
     add:
       - IPC_LOCK
+      - SYS_RESOURCE
 ```
 
 **Environment Variables (worker containers):**
@@ -257,7 +259,15 @@ securityContext:
 env:
   # --- UCX (RDMA transport) ---
   - name: UCX_TLS
-    value: "cuda_ipc,cuda_copy,rc"
+    value: "rc_x,rc,cuda_copy,cuda_ipc"
+  - name: UCX_NET_DEVICES
+    value: "mlx5_0:1"
+  - name: UCX_IB_ADDR_TYPE
+    value: "eth"
+  - name: UCX_RNDV_SCHEME
+    value: "get_zcopy"
+  - name: UCX_RNDV_THRESH
+    value: "0"
   - name: UCX_RC_TIMEOUT
     value: "600s"
   - name: UCX_KEEPALIVE_INTERVAL
@@ -308,58 +318,6 @@ If `mlx5_bond_0` shows LID=0, use a non-bonded device:
 ```yaml
 - name: UCX_NET_DEVICES
   value: "mlx5_0:1"
-```
-
-### GKE RDMA Configuration (GCP GB200)
-
-For GCP GKE clusters with GB200 NVL hardware, NIXL KV transfer uses RDMA over GKE multi-network annotations. This is separate from ComputeDomain (which handles NCCL/NVLink for tensor parallelism).
-
-**GKE RDMA Network Annotations:**
-
-Both prefill and decode pods require RDMA NIC annotations. Without these, UCX `rc` transport has no IB devices and NIXL KV transfer fails:
-
-```yaml
-annotations:
-  networking.gke.io/default-interface: eth0
-  networking.gke.io/interfaces: |
-    [{"interfaceName":"eth0","network":"default"},
-     {"interfaceName":"rdma0","network":"rdma-0"},
-     {"interfaceName":"rdma1","network":"rdma-1"},
-     {"interfaceName":"rdma2","network":"rdma-2"},
-     {"interfaceName":"rdma3","network":"rdma-3"}]
-resources:
-  limits:
-    networking.gke.io.networks/rdma-0: "1"
-    networking.gke.io.networks/rdma-1: "1"
-    networking.gke.io.networks/rdma-2: "1"
-    networking.gke.io.networks/rdma-3: "1"
-```
-
-**Environment Variables:**
-
-```yaml
-env:
-  - name: UCX_TLS
-    value: "cuda_ipc,cuda_copy,rc"
-  - name: UCX_IB_GID_INDEX
-    value: "3"
-  - name: UCX_RC_TIMEOUT
-    value: "600s"
-  - name: UCX_KEEPALIVE_INTERVAL
-    value: "300s"
-```
-
-**ComputeDomain:**
-
-Multi-node tensor parallelism (e.g., TP8 across 2×4-GPU nodes) requires ComputeDomain for NCCL scheduling. Both prefill and decode need `compute-domain-channel` claims if they span multiple nodes.
-
-**NATS Isolation:**
-
-GCP clusters may have network isolation between `system-cpu` and `customer-gpu` node pools. If the system NATS is unreachable from GPU pods, deploy a namespace-local NATS on a `customer-cpu` node and override:
-
-```yaml
-- name: NATS_SERVER
-  value: "nats://nats-local.<namespace>.svc.cluster.local:4222"
 ```
 
 ### AWS EFA Configuration
