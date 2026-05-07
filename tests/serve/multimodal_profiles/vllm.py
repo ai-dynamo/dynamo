@@ -14,10 +14,34 @@ from tests.utils.multimodal import (
 )
 from tests.utils.payload_builder import chat_payload, chat_payload_default
 
+# LLaVA 1.5 color-identification reference set: the model legitimately
+# emits these colors (though the order/subset varies across CUDA backends
+# under vLLM 0.20). Reused by every LLaVA topology that runs the standard
+# color-identification payload.
+_LLAVA_EXPECTED_COLORS = [
+    "green",
+    "white",
+    "black",
+    "purple",
+    "red",
+    "pink",
+    "yellow",
+    "blue",
+    "orange",
+]
+
+# Multiple topology keys can map to the same shell script — the topology
+# key is what makes the EngineConfig name unique; the script is just the
+# launcher. ``agg_video`` and ``epd_video`` reuse ``agg_multimodal.sh`` /
+# ``disagg_multimodal_epd.sh`` so video-specific TopologyConfigs (longer
+# timeout, delayed_start, video-only VRAM bounds) can live alongside the
+# image variants on the same model profile.
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
+    "agg_video": "agg_multimodal.sh",
     "e_pd": "disagg_multimodal_e_pd.sh",
     "epd": "disagg_multimodal_epd.sh",
+    "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
 }
 
@@ -58,6 +82,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     ),
                 ],
             ),
+            "agg_video": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=600,
+                delayed_start=60,
+                profiled_vram_gib=8.2,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+            ),
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=340,
@@ -72,6 +104,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            "epd_video": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                delayed_start=60,
+                single_gpu=True,
+                profiled_vram_gib=19.7,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
+                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
             "p_d": TopologyConfig(
                 marks=[pytest.mark.post_merge],
@@ -106,29 +147,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         marks=[pytest.mark.post_merge],
                     ),
                 ],
-            ),
-        },
-    ),
-    MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
-        short_name="qwen3-vl-2b-video",
-        topologies={
-            "agg": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=600,
-                delayed_start=60,
-                profiled_vram_gib=8.2,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
-            ),
-            "epd": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=600,
-                delayed_start=60,
-                single_gpu=True,
-                profiled_vram_gib=19.7,
-                requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
         },
     ),
@@ -243,17 +261,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[
                     MmCase(
                         payload=make_image_payload(
-                            [
-                                "green",
-                                "white",
-                                "black",
-                                "purple",
-                                "red",
-                                "pink",
-                                "yellow",
-                                "blue",
-                                "orange",
-                            ],
+                            _LLAVA_EXPECTED_COLORS,
                             max_attempts=5,
                         )
                     )
@@ -284,17 +292,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[
                     MmCase(
                         payload=make_image_payload(
-                            [
-                                "green",
-                                "white",
-                                "black",
-                                "purple",
-                                "red",
-                                "pink",
-                                "yellow",
-                                "blue",
-                                "orange",
-                            ],
+                            _LLAVA_EXPECTED_COLORS,
                             max_attempts=5,
                         )
                     )
