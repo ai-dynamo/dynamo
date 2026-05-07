@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
 subtitle: "Schwinn Saereesitthipitak, Dan Feigin, Vikram Sharma Mailthody — May 2026"
-description: "Dynamo Snapshot uses CRIU, cuda-checkpoint, and a per-GPU memory service to bring inference worker startup down to 6 seconds or less."
-keywords: checkpoint restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
-last-updated: May 4, 2026
+description: "Dynamo Snapshot leverages CRIU, cuda-checkpoint, and a GPU Memory Service (GMS) to bring inference worker startup down to 6 seconds or less."
+keywords: checkpoint/restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
+last-updated: May 7, 2026
 ---
 
 ## The Cold-Start Problem
@@ -48,14 +48,13 @@ When restoring (same or different node):
 Since CRIU is run via an external process, **the restored workload process picks up at exactly the instruction it was at when it dumped.** This means there are no synchronization barriers between the workload and CRIU: if the workload needs to prevent being checkpointed until it is quiescent, or needs to be aware that it has been restored, those signals must be managed by an orchestrator that calls CRIU/cuda-checkpoint and/or the workload itself. We address this in the next two sections, which describe the orchestrator and the workload-side hooks respectively.
 
 ## Dynamo Snapshot: Kubernetes
-In Kubernetes, workloads run inside containers, inside of pods. CRIU checkpoints typically contain references to mounts and files in the container's writable filesystem layer (i.e. the upperdir overlay), so we checkpoint at the container level — the process tree state and the writable layer travel together.
+In Kubernetes, workloads run inside containers, inside of pods. CRIU checkpoints typically contain references to mounts and files in the container's writable filesystem layer (i.e. the upperdir overlay), so we checkpoint at the container level, which means the process tree state and the writable layer travel together.
 
 Our solution is a privileged DaemonSet called `snapshot-agent`, easily installable via a Helm chart. An agent pod runs on every node and handles pre-checkpoint and post-restore process/overlay wiring so that it can reliably checkpoint the process tree, namespaces, overlays, etc. for `runc`-managed containers (the OCI runtime we currently target). When an agent observes a *workload pod* — the pod running the inference worker — that has been marked as a checkpoint source, it reaches in from the host and performs the checkpoint without entering the container. On restore, the agent restores the workload into a sleeping *placeholder pod* whose only purpose is to provide the right namespaces.
 
 Each agent operates on the workload pods on its own node independently, so checkpoints and restores happen in parallel across the cluster with no central coordinator.
 
 ![At checkpoint time, the snapshot agent on the workload's node observes the pod from the host and writes the artifact to a shared PVC. At restore time, on any node, the agent there enters a placeholder pod's namespaces and restores the workload inside.](./figures/k8s_checkpoint_restore_lifecycle.svg)
-<!-- TODO(figure): k8s_checkpoint_restore_lifecycle.svg labels read "Checkpoint node" / "Restore node" / "Checkpoint Job pod" — relabel to "Source node" / "Target node" / "Workload pod" so the figure no longer hinges on the ambiguous "checkpoint X" naming. -->
 
 **Checkpoint:**
 
@@ -115,7 +114,6 @@ Unmap and release of the KV cache reduces the checkpoint size of Qwen3 0.6B for 
 So, what do the restore times look like? Surprisingly, really bad. For larger models, the restore time actually exceeds that of a cold start, defeating the entire purpose of checkpoint/restore.
 
 ![Baseline snapshot restore time across model sizes — for larger models the restore exceeds cold start.](./figures/regular_restore_criudev.svg)
-<!-- TODO(figure): update regular_restore_criudev.svg to overlay the cold-start times alongside baseline restore times so the reader can read both off the same chart instead of flipping back to the cold_start_bench figure. -->
 
 The main reason behind this is that CRIU and `cuda-checkpoint` do not copy memory at speed-of-light (SOL) speeds. In a Linux process, there are two types of memory: anonymous memory (the heap, stack, etc. of a process) and shared memory (shared between processes). For larger models, the restore bottleneck encompasses both types of memory, so we optimize both restore paths to bring the CRIU restore time down from minutes to seconds.
 
