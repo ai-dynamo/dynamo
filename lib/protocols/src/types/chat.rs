@@ -77,8 +77,61 @@ pub use async_openai::types::chat::{
     WebSearchUserLocationType,
 };
 
-// Upstream renamed Stop -> StopConfiguration; re-export under old name for compat
-pub use async_openai::types::chat::StopConfiguration as Stop;
+/// OpenAI stop configuration, with Dynamo's token-id stop extension.
+///
+/// The standard OpenAI shape accepts a string or string array. Dynamo also
+/// accepts an integer array, e.g. `"stop": [576]`, to express token-id stop
+/// conditions for tokenized in/out workflows. Strings like `"token_id:576"`
+/// remain ordinary string stops; the `token_id:<id>` format is only an output
+/// display format for logprobs.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum Stop {
+    String(String),
+    StringArray(Vec<String>),
+    TokenIdArray(Vec<u32>),
+}
+
+impl Stop {
+    pub fn strings(&self) -> Option<Vec<String>> {
+        match self {
+            Stop::String(s) => Some(vec![s.clone()]),
+            Stop::StringArray(arr) => Some(arr.clone()),
+            Stop::TokenIdArray(_) => None,
+        }
+    }
+
+    pub fn token_ids(&self) -> Option<Vec<u32>> {
+        match self {
+            Stop::TokenIdArray(arr) => Some(arr.clone()),
+            Stop::String(_) | Stop::StringArray(_) => None,
+        }
+    }
+}
+
+impl From<String> for Stop {
+    fn from(value: String) -> Self {
+        Stop::String(value)
+    }
+}
+
+impl From<&str> for Stop {
+    fn from(value: &str) -> Self {
+        Stop::String(value.to_string())
+    }
+}
+
+impl From<Vec<String>> for Stop {
+    fn from(value: Vec<String>) -> Self {
+        Stop::StringArray(value)
+    }
+}
+
+impl From<Vec<u32>> for Stop {
+    fn from(value: Vec<u32>) -> Self {
+        Stop::TokenIdArray(value)
+    }
+}
 
 // Upstream renamed FinishReason (streaming) -- re-export
 pub use async_openai::types::chat::FinishReason;

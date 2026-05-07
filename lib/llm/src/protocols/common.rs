@@ -240,6 +240,10 @@ pub struct StopConditions {
 
     /// List of tokens that stop the generation when they are
     /// generated. The returned output will NOT contain the stop tokens.
+    pub stop_token_ids: Option<Vec<TokenIdType>>,
+
+    /// List of hidden/system tokens that stop generation when they are
+    /// generated. The returned output will NOT contain the stop tokens.
     pub stop_token_ids_hidden: Option<Vec<TokenIdType>>,
 
     /// The minimum number of tokens to generate
@@ -260,6 +264,7 @@ impl StopConditions {
     pub fn apply_ignore_eos(&mut self) {
         if self.ignore_eos.unwrap_or(false) {
             self.stop = None;
+            self.stop_token_ids = None;
             self.stop_token_ids_hidden = None;
         }
     }

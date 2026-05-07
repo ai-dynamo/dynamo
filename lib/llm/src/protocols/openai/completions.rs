@@ -248,11 +248,11 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        use dynamo_protocols::types::Stop;
-        self.inner.stop.as_ref().map(|s| match s {
-            Stop::String(s) => vec![s.clone()],
-            Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
     }
 
     fn nvext(&self) -> Option<&NvExt> {
@@ -669,6 +669,7 @@ mod tests {
         let request: NvCreateCompletionRequest =
             serde_json::from_value(null_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let one_stop = json!({
             "model": "test-model",
@@ -678,6 +679,7 @@ mod tests {
         let request: NvCreateCompletionRequest =
             serde_json::from_value(one_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), Some(vec!["foo".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let many_stops = json!({
             "model": "test-model",
@@ -690,5 +692,34 @@ mod tests {
             request.get_stop(),
             Some(vec!["foo".to_string(), "bar".to_string()])
         );
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": [576]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), Some(vec![576]));
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop, None);
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![576]));
+        assert_eq!(stop_conditions.stop_token_ids_hidden, None);
+
+        let token_id_display_string_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": ["token_id:576"]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_display_string_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
     }
 }

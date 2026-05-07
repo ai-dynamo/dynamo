@@ -259,6 +259,30 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["model"] == "my-model"
         assert result["token_ids"] == [10, 20, 30]
 
+    def test_stop_token_id_array_maps_to_stop_token_ids(self):
+        """Integer stop arrays are token-id stops, not string stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": [576]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == []
+        assert result["stop_conditions"]["stop_token_ids"] == [576]
+
+    def test_token_id_display_string_remains_string_stop(self):
+        """token_id:N strings are output display strings, not token-id stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": ["token_id:576"]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["token_id:576"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
 
 # ---------------------------------------------------------------------------
 # _map_finish_reason

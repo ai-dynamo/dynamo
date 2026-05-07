@@ -203,12 +203,16 @@ def _build_dynamo_preproc(
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
+    stop_token_ids = request.get("stop_token_ids", [])
     if isinstance(stop, str):
         stop = [stop]
+    elif isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        stop_token_ids = [*stop_token_ids, *stop]
+        stop = []
     elif stop is None:
         stop = []
-
-    stop_token_ids = request.get("stop_token_ids", [])
 
     # Handle logprobs
     logprobs_val = None

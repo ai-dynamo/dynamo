@@ -187,4 +187,31 @@ mod tests {
         assert_eq!(value["finish_reason"], "stop");
         assert_eq!(value["text"], "hello");
     }
+
+    #[test]
+    fn stop_accepts_token_id_array() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": [576]}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.stop, Some(Stop::TokenIdArray(vec![576])));
+    }
+
+    #[test]
+    fn stop_token_id_display_string_remains_string_stop() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": ["token_id:576"]}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            request.stop,
+            Some(Stop::StringArray(vec!["token_id:576".to_string()]))
+        );
+    }
+
+    #[test]
+    fn stop_rejects_single_token_id() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": 576}"#;
+        let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
 }

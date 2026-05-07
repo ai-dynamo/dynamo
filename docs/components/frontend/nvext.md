@@ -48,6 +48,11 @@ Related root-level Dynamo output option:
 |-------|------|---------|-------------|-------------|
 | `return_tokens_as_token_ids` | `bool` | `false` | Response builder | Formats logprob token strings as `token_id:<id>` instead of decoded text. |
 
+`return_tokens_as_token_ids` only changes returned logprob token display. To stop on
+token IDs, pass integer IDs in the normal `stop` array, for example
+`"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
+sequences and are not parsed as token IDs.
+
 ### Header Overrides
 
 Routing fields can also be set via HTTP headers, which take priority over `nvext` values:

@@ -290,10 +290,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().map(|stop| match stop {
-            dynamo_protocols::types::Stop::String(s) => vec![s.clone()],
-            dynamo_protocols::types::Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.
