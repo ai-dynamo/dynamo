@@ -487,8 +487,10 @@ All commands shown in the "Local equivalent" columns above are also documented i
 
 Tests must be deterministic. A flaky test -- one that sometimes passes and sometimes fails without code changes -- wastes CI time and erodes developer trust in the test suite. If you encounter or introduce a flaky test:
 
-1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order. For LLM-output assertions, pass `temperature=0` and `seed=0` to the request so the model picks the same tokens each call.
-2. **If determinism truly isn't reachable** (model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
+1. **Fix it first.** Remove sources of non-determinism: set a fixed random seed, eliminate race conditions, mock network calls, avoid relying on execution order.
+
+   **Special case — LLM-output assertions.** Pass `temperature=0` and `seed=0` so sampling picks the same logits, but treat that as **necessary, not sufficient**: GPU-served LLM inference remains non-deterministic in practice from FP non-associativity in tensor-parallel reductions, batch-size-dependent kernel selection (cuBLAS / flash-attn), prefix-cache state across calls, and non-deterministic attention kernels. For any test asserting on served-model response content, configure retry (step 2b below) — treat it as required, not a fallback.
+2. **If determinism truly isn't reachable** (LLM-output content as above, model genuinely non-deterministic, an upstream library has races we don't own, etc.), retry. There are two mechanisms; pick based on what the test does.
 
    **2a. Whole-test retry — `@pytest.mark.flaky`** (use for unit tests, parser tests, tool-calling tests, anything that doesn't launch a server)
 
@@ -511,13 +513,16 @@ Tests must be deterministic. A flaky test -- one that sometimes passes and somet
    The server is launched once and stays up across attempts; only the request/response is re-issued. Set `max_attempts` on the payload:
    ```python
    # tests/serve/multimodal_profiles/vllm.py
-   request_payloads=[
-       make_image_payload(
-           ["green", "white", "black", "purple", "red", ...],
-           max_attempts=3,  # known-flaky model output; see comment above
+   tests=[
+       MmCase(
+           payload=make_image_payload(
+               ["green", "white", "black", "purple", "red", ...],
+               max_attempts=3,  # known-flaky model output; see comment above
+           )
        )
    ],
    ```
+   For background on the `MultimodalModelProfile → TopologyConfig → MmCase` shape, see [`tests/serve/multimodal_profiles/README.md`](serve/multimodal_profiles/README.md).
    - The factory functions (`make_image_payload`, `make_video_payload`, `chat_payload`, ...) accept a `max_attempts: int` kwarg that lands on `BasePayload.max_attempts`.
    - `tests/serve/common.py:run_serve_deployment` wraps the `send_request` + `check_response` pair in a small inline retry loop, catching `ResponseValidationError` with exponential backoff (1.0 → 1.5 → 2.25 → ... seconds, factor 1.5).
    - Cost: each attempt is ~one inference call (a few seconds), not a server restart. The 60-90s server startup is amortized across all attempts.

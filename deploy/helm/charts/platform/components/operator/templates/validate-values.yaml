@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{/*
+  Validate that removed/renamed dynamo-operator values are not present.
+  These values are set via 'dynamo-operator.<key>' in the parent chart.
+  Each check detects an old value path and fails with a migration message.
+*/}}
+
+{{/* ---- NATS toggle (moved to global.nats.install) ---- */}}
+
+{{- if and (hasKey .Values "nats") (hasKey .Values.nats "enabled") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.nats.enabled' has been removed.
+Use 'global.nats.install' instead.
+
+Before:
+  dynamo-operator:
+    nats:
+      enabled: false
+
+After:
+  global:
+    nats:
+      install: false
+` }}
+{{- end }}
+
+{{/* ---- Webhook enabled toggle (removed, webhooks are always enabled) ---- */}}
+
+{{- if and (hasKey .Values "webhook") (hasKey .Values.webhook "enabled") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.webhook.enabled' has been removed.
+Webhooks are now always enabled and cannot be disabled.
+Remove the 'dynamo-operator.webhook.enabled' field from your values.yaml.
+` }}
+{{- end }}
+
+{{/* ---- Webhook certificate generator (removed, replaced by built-in cert-controller) ---- */}}
+
+{{- if and (hasKey .Values "webhook") (hasKey .Values.webhook "certGenerator") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.webhook.certGenerator' has been removed.
+The operator now has a built-in cert-controller that generates and rotates
+webhook certificates automatically. Remove 'dynamo-operator.webhook.certGenerator'
+from your values.yaml.
+
+For external certificate management, use:
+  dynamo-operator:
+    webhook:
+      certificateSecret:
+        external: true
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "webhook") (hasKey .Values.webhook "certificateValidity") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.webhook.certificateValidity' has been removed.
+The operator's built-in cert-controller manages certificate lifecycle automatically.
+Remove 'dynamo-operator.webhook.certificateValidity' from your values.yaml.
+` }}
+{{- end }}
+
+{{/* ---- MPI SSH keygen toggle (removed, now handled by operator reconciliation) ---- */}}
+
+{{- if and (hasKey .Values "dynamo") (hasKey .Values.dynamo "mpiRun") (hasKey .Values.dynamo.mpiRun "sshKeygen") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.dynamo.mpiRun.sshKeygen' has been removed.
+SSH key generation is now handled automatically by the operator during reconciliation.
+Remove 'dynamo-operator.dynamo.mpiRun.sshKeygen' from your values.yaml.
+The 'dynamo-operator.dynamo.mpiRun.secretName' field is still supported.
+` }}
+{{- end }}
+
+{{/* ---- Checkpoint storage config (removed, moved to snapshot chart) ---- */}}
+
+{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "storage") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.checkpoint.storage' has been removed.
+Checkpoint storage is now configured via the snapshot Helm chart, not the operator.
+Remove 'dynamo-operator.checkpoint.storage' from your values.yaml.
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "readyForCheckpointFilePath") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.checkpoint.readyForCheckpointFilePath' has been removed.
+Checkpoint lifecycle is now managed via file-based sentinels in DYN_SNAPSHOT_CONTROL_DIR.
+Remove 'dynamo-operator.checkpoint.readyForCheckpointFilePath' from your values.yaml.
+` }}
+{{- end }}
+
+{{/* ---- Debug/internal images (removed) ---- */}}
+
+{{- if and (hasKey .Values "dynamo") (hasKey .Values.dynamo "internalImages") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.dynamo.internalImages' has been removed.
+Remove 'dynamo-operator.dynamo.internalImages' from your values.yaml.
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "dynamo") (hasKey .Values.dynamo "enableRestrictedSecurityContext") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.dynamo.enableRestrictedSecurityContext' has been removed.
+Remove 'dynamo-operator.dynamo.enableRestrictedSecurityContext' from your values.yaml.
+` }}
+{{- end }}

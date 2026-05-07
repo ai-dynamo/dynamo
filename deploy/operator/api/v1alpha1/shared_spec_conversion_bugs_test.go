@@ -22,11 +22,55 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
+
+func TestConvertToServiceCheckpointConfigSetsNilIdentity(t *testing.T) {
+	var got ServiceCheckpointConfig
+	ConvertToServiceCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
+		Mode:          v1beta1.CheckpointMode("auto"),
+		CheckpointRef: ptr.To("checkpoint"),
+	}, &got)
+	if got.Identity != nil {
+		t.Fatalf("ConvertToServiceCheckpointConfig().Identity = %#v, want nil", got.Identity)
+	}
+}
+
+func TestConvertFromSharedMemorySpec(t *testing.T) {
+	size := resource.MustParse("2Gi")
+	tests := []struct {
+		name string
+		src  *SharedMemorySpec
+		want string
+	}{
+		{name: "nil"},
+		{name: "zero size", src: &SharedMemorySpec{}},
+		{name: "disabled", src: &SharedMemorySpec{Disabled: true}, want: "0"},
+		{name: "size", src: &SharedMemorySpec{Size: size}, want: "2Gi"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got v1beta1.DynamoComponentDeploymentSharedSpec
+			if err := convertSharedMemoryTo(tt.src, &got); err != nil {
+				t.Fatalf("convertSharedMemoryTo() error = %v", err)
+			}
+			if tt.want == "" {
+				if got.SharedMemorySize != nil {
+					t.Fatalf("convertSharedMemoryTo().SharedMemorySize = %s, want nil", got.SharedMemorySize.String())
+				}
+				return
+			}
+			if got.SharedMemorySize == nil || got.SharedMemorySize.String() != tt.want {
+				t.Fatalf("convertSharedMemoryTo().SharedMemorySize = %v, want %s", got.SharedMemorySize, tt.want)
+			}
+		})
+	}
+}
 
 func addGeneratedFrontendSidecarHubOnlySecurityContext(t *testing.T, podTemplate *corev1.PodTemplateSpec) {
 	t.Helper()

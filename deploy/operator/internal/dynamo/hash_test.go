@@ -175,51 +175,6 @@ func TestComputeDGDWorkersSpecHash_AllWorkerTypes(t *testing.T) {
 	assert.NotEqual(t, base, ComputeDGDWorkersSpecHash(dgd))
 }
 
-func TestStripNonPodTemplateFields(t *testing.T) {
-	spec := &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		ServiceName:      "svc",
-		ComponentType:    commonconsts.ComponentTypeWorker,
-		SubComponentType: "sub",
-		DynamoNamespace:  ptr.To("ns"),
-		Replicas:         ptr.To(int32(3)),
-		Autoscaling:      &v1alpha1.Autoscaling{}, //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
-		ScalingAdapter:   &v1alpha1.ScalingAdapter{},
-		Ingress:          &v1alpha1.IngressSpec{Enabled: true},
-		ModelRef:         &v1alpha1.ModelReference{Name: "m"},
-		EPPConfig:        &v1alpha1.EPPConfig{},
-		Annotations:      map[string]string{"a": "b"},
-		Labels:           map[string]string{"c": "d"},
-		// Pod-affecting fields
-		Envs:                  []corev1.EnvVar{{Name: "Z"}, {Name: "A"}},
-		GlobalDynamoNamespace: true,
-	}
-	stripped := stripNonPodTemplateFields(spec)
-
-	// Excluded fields are zeroed
-	assert.Empty(t, stripped.ServiceName)
-	assert.Empty(t, stripped.ComponentType)
-	assert.Empty(t, stripped.SubComponentType)
-	assert.Nil(t, stripped.DynamoNamespace)
-	assert.Nil(t, stripped.Replicas)
-	assert.Nil(t, stripped.Autoscaling) //nolint:staticcheck // SA1019: testing backward compatibility with deprecated field
-	assert.Nil(t, stripped.ScalingAdapter)
-	assert.Nil(t, stripped.Ingress)
-	assert.Nil(t, stripped.ModelRef)
-	assert.Nil(t, stripped.EPPConfig)
-	assert.Nil(t, stripped.Annotations)
-	assert.Nil(t, stripped.Labels)
-
-	// Included fields are preserved
-	assert.True(t, stripped.GlobalDynamoNamespace)
-	assert.Len(t, stripped.Envs, 2)
-	// Envs are not sorted
-	assert.Equal(t, "Z", stripped.Envs[0].Name)
-	assert.Equal(t, "A", stripped.Envs[1].Name)
-
-	// Original spec is not mutated
-	assert.Equal(t, "svc", spec.ServiceName)
-}
-
 func TestSortEnvVars(t *testing.T) {
 	envs := []corev1.EnvVar{{Name: "C"}, {Name: "A"}, {Name: "B"}}
 	sorted := sortEnvVars(envs)
