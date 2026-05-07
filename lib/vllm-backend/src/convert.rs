@@ -192,16 +192,13 @@ pub(crate) fn map_output(
     prompt_tokens: u32,
     completion_tokens: u32,
 ) -> LLMEngineOutput {
-    let stop_reason = output
-        .finish_reason
-        .as_ref()
-        .and_then(VllmFinishReason::as_stop_reason)
-        .map(map_stop_reason);
-
     let mut mapped = match output.finish_reason {
         None => LLMEngineOutput::default(),
-        Some(VllmFinishReason::Stop(_)) => {
-            LLMEngineOutput::stop().with_usage(usage(prompt_tokens, completion_tokens))
+        Some(VllmFinishReason::Stop(reason)) => {
+            let mut mapped =
+                LLMEngineOutput::stop().with_usage(usage(prompt_tokens, completion_tokens));
+            mapped.stop_reason = reason.as_ref().map(map_stop_reason);
+            mapped
         }
         Some(VllmFinishReason::Length) => {
             LLMEngineOutput::length().with_usage(usage(prompt_tokens, completion_tokens))
@@ -218,11 +215,12 @@ pub(crate) fn map_output(
         }
     };
 
-    let (log_probs, top_logprobs) = map_logprobs(output.logprobs.as_ref());
     mapped.token_ids = output.token_ids;
-    mapped.log_probs = log_probs;
-    mapped.top_logprobs = top_logprobs;
-    mapped.stop_reason = stop_reason;
+    if let Some(logprobs) = output.logprobs.as_ref() {
+        let (log_probs, top_logprobs) = map_logprobs(logprobs);
+        mapped.log_probs = Some(log_probs);
+        mapped.top_logprobs = Some(top_logprobs);
+    }
     mapped.index = Some(0);
     mapped.disaggregated_params = output.kv_transfer_params;
     mapped
@@ -235,13 +233,7 @@ fn map_stop_reason(reason: &VllmStopReason) -> DynamoStopReason {
     }
 }
 
-fn map_logprobs(
-    logprobs: Option<&VllmLogprobs>,
-) -> (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>) {
-    let Some(logprobs) = logprobs else {
-        return (None, None);
-    };
-
+fn map_logprobs(logprobs: &VllmLogprobs) -> (Vec<f64>, Vec<Vec<TopLogprob>>) {
     let log_probs = logprobs
         .positions
         .iter()
@@ -266,7 +258,7 @@ fn map_logprobs(
         })
         .collect();
 
-    (Some(log_probs), Some(top_logprobs))
+    (log_probs, top_logprobs)
 }
 
 fn u32_to_i32(value: u32) -> Result<i32, DynamoError> {
@@ -474,8 +466,26 @@ mod tests {
 
     #[test]
     fn map_output_maps_terminal_finish_reasons() {
+        let eos_stop = map_output(finished(VllmFinishReason::Stop(None)), 3, 2);
+        assert_eq!(eos_stop.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(eos_stop.stop_reason, None);
+
+        let text_stop = map_output(
+            finished(VllmFinishReason::Stop(Some(VllmStopReason::Text(
+                "</stop>".to_string(),
+            )))),
+            3,
+            2,
+        );
+        assert_eq!(text_stop.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            text_stop.stop_reason,
+            Some(DynamoStopReason::String("</stop>".to_string()))
+        );
+
         let length = map_output(finished(VllmFinishReason::Length), 3, 2);
         assert_eq!(length.finish_reason, Some(FinishReason::Length));
+        assert_eq!(length.stop_reason, None);
 
         let abort = map_output(finished(VllmFinishReason::Abort), 3, 2);
         assert_eq!(abort.finish_reason, Some(FinishReason::Cancelled));
