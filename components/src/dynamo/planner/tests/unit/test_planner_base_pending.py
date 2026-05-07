@@ -73,11 +73,14 @@ def planner():
     inst = NativePlannerBase.__new__(NativePlannerBase)
     inst._pending_desired_prefill = None
     inst._pending_desired_decode = None
+    inst._pending_desired_prefill_ts = None
+    inst._pending_desired_decode_ts = None
     inst.require_prefill = True
     inst.require_decode = True
     inst.connector = AsyncMock()
     cfg = MagicMock()
     cfg.advisory = False
+    cfg.throughput_adjustment_interval = 180
     inst.config = cfg
     # Stub the raw worker-count source; individual tests set the return value.
     inst._get_worker_counts_raw = AsyncMock(return_value=(0, 0, True))
@@ -116,14 +119,21 @@ async def test_collect_worker_counts_no_pending_unstable(planner):
 @pytest.mark.asyncio
 async def test_collect_worker_counts_pending_matches_clears_pending(planner):
     """Pending target that matches discovery is cleared and expected == ready."""
+    import time as _t
+
+    now = _t.time()
     planner._pending_desired_prefill = 4
     planner._pending_desired_decode = 6
+    planner._pending_desired_prefill_ts = now
+    planner._pending_desired_decode_ts = now
     planner._get_worker_counts_raw.return_value = (4, 6, True)
 
     counts = await planner._collect_worker_counts()
 
     assert planner._pending_desired_prefill is None
     assert planner._pending_desired_decode is None
+    assert planner._pending_desired_prefill_ts is None
+    assert planner._pending_desired_decode_ts is None
     assert counts.expected_num_prefill == 4
     assert counts.expected_num_decode == 6
 
@@ -131,8 +141,13 @@ async def test_collect_worker_counts_pending_matches_clears_pending(planner):
 @pytest.mark.asyncio
 async def test_collect_worker_counts_pending_mismatch_reports_pending(planner):
     """Pending target that does not match discovery yet → expected == pending."""
+    import time as _t
+
+    now = _t.time()
     planner._pending_desired_prefill = 5
     planner._pending_desired_decode = 7
+    planner._pending_desired_prefill_ts = now
+    planner._pending_desired_decode_ts = now
     planner._get_worker_counts_raw.return_value = (2, 3, True)
 
     counts = await planner._collect_worker_counts()
@@ -151,8 +166,13 @@ async def test_collect_worker_counts_pending_mismatch_reports_pending(planner):
 @pytest.mark.asyncio
 async def test_collect_worker_counts_independent_axes(planner):
     """Prefill and decode pending tracking are independent."""
+    import time as _t
+
+    now = _t.time()
     planner._pending_desired_prefill = 5  # mismatch
     planner._pending_desired_decode = 3  # will match
+    planner._pending_desired_prefill_ts = now
+    planner._pending_desired_decode_ts = now
     planner._get_worker_counts_raw.return_value = (2, 3, True)
 
     counts = await planner._collect_worker_counts()
@@ -161,6 +181,45 @@ async def test_collect_worker_counts_independent_axes(planner):
     assert planner._pending_desired_decode is None  # cleared
     assert counts.expected_num_prefill == 5
     assert counts.expected_num_decode == 3
+
+
+@pytest.mark.asyncio
+async def test_collect_worker_counts_pending_expires_when_stale(planner):
+    """A pending target older than the expiry window is cleared with a warning.
+
+    Without expiry, a rejected/aborted GlobalPlanner request would permanently
+    silence local scaling because ``expected != actual`` would never resolve.
+    """
+    import time as _t
+
+    # _PENDING_EXPIRY_INTERVALS (5) * throughput_adjustment_interval (180) = 900s.
+    stale = _t.time() - 1000
+    planner._pending_desired_prefill = 5
+    planner._pending_desired_prefill_ts = stale
+    planner._get_worker_counts_raw.return_value = (2, 3, True)
+
+    counts = await planner._collect_worker_counts()
+
+    assert planner._pending_desired_prefill is None
+    assert planner._pending_desired_prefill_ts is None
+    # Falls back to the baseline (num_p when stable).
+    assert counts.expected_num_prefill == 2
+
+
+@pytest.mark.asyncio
+async def test_collect_worker_counts_pending_recent_does_not_expire(planner):
+    """A pending target inside the expiry window is retained."""
+    import time as _t
+
+    # Well within the 900s window.
+    planner._pending_desired_prefill = 5
+    planner._pending_desired_prefill_ts = _t.time() - 60
+    planner._get_worker_counts_raw.return_value = (2, 3, True)
+
+    counts = await planner._collect_worker_counts()
+
+    assert planner._pending_desired_prefill == 5
+    assert counts.expected_num_prefill == 5
 
 
 @pytest.mark.asyncio
@@ -185,8 +244,11 @@ async def test_collect_worker_counts_require_flags_gate_output(planner):
 
 @pytest.mark.asyncio
 async def test_apply_scaling_targets_records_pending_prefill(planner):
+    import time as _t
+
     from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 
+    before = _t.time()
     targets = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=4)
     ]
@@ -197,12 +259,18 @@ async def test_apply_scaling_targets_records_pending_prefill(planner):
     )
     assert planner._pending_desired_prefill == 4
     assert planner._pending_desired_decode is None
+    assert planner._pending_desired_prefill_ts is not None
+    assert planner._pending_desired_prefill_ts >= before
+    assert planner._pending_desired_decode_ts is None
 
 
 @pytest.mark.asyncio
 async def test_apply_scaling_targets_records_pending_decode(planner):
+    import time as _t
+
     from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 
+    before = _t.time()
     targets = [
         TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=6)
     ]
@@ -213,6 +281,9 @@ async def test_apply_scaling_targets_records_pending_decode(planner):
     )
     assert planner._pending_desired_prefill is None
     assert planner._pending_desired_decode == 6
+    assert planner._pending_desired_prefill_ts is None
+    assert planner._pending_desired_decode_ts is not None
+    assert planner._pending_desired_decode_ts >= before
 
 
 @pytest.mark.asyncio
@@ -227,6 +298,8 @@ async def test_apply_scaling_targets_records_both(planner):
 
     assert planner._pending_desired_prefill == 2
     assert planner._pending_desired_decode == 5
+    assert planner._pending_desired_prefill_ts is not None
+    assert planner._pending_desired_decode_ts is not None
 
 
 @pytest.mark.asyncio
@@ -243,6 +316,8 @@ async def test_apply_scaling_targets_advisory_does_not_track_or_send(planner):
     planner.connector.set_component_replicas.assert_not_awaited()
     assert planner._pending_desired_prefill is None
     assert planner._pending_desired_decode is None
+    assert planner._pending_desired_prefill_ts is None
+    assert planner._pending_desired_decode_ts is None
 
 
 @pytest.mark.asyncio
@@ -252,3 +327,5 @@ async def test_apply_scaling_targets_empty_is_noop(planner):
     planner.connector.set_component_replicas.assert_not_awaited()
     assert planner._pending_desired_prefill is None
     assert planner._pending_desired_decode is None
+    assert planner._pending_desired_prefill_ts is None
+    assert planner._pending_desired_decode_ts is None
