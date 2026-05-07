@@ -16,7 +16,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.utils import record_function_or_nullcontext
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -129,19 +128,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._saves_this_step: set[str] = set()
         self._evicts_this_step: set[str] = set()
 
-        # --- Scheduler-side cumulative counters (for periodic logging) ---
-        self._total_hits: int = 0
-        self._total_misses: int = 0
-        self._total_evictions: int = 0
-        self._total_loads: int = 0
-        self._total_saves: int = 0
-        self._log_step: int = 0
-
         # --- Worker-side: pinned arena, allocator, async-save state ---
-        self._log_every_n_steps: int = int(
-            extra_config.get("ec_log_every_n_steps", 100)
-        )
-
         self._cpu_store: dict[str, _CpuEntry] = {}
         # Arena is allocated lazily on the first save_caches call so the
         # SCHEDULER-role connector instance never pins host memory.
@@ -154,104 +141,58 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._pending_free: list[_PendingFree] = []
         self._save_stream: torch.cuda.Stream | None = None
         self._device: torch.device | None = None
-        self._step_counter: int = 0
-
-        logger.info(
-            "DynamoMultimodalEmbeddingCacheConnector initialized: "
-            "role=%s, capacity_gb=%.6f, capacity_bytes=%d, bytes_per_embed=%d",
-            role.name,
-            capacity_gb,
-            self._capacity_bytes,
-            self._bytes_per_embed,
-        )
 
     # ==============================
     # Scheduler-side methods
     # ==============================
 
     def has_cache_item(self, identifier: str) -> bool:
-        with record_function_or_nullcontext("ec_connector: scheduler_has_cache_item"):
-            if identifier in self._cache_order:
-                self._cache_order.move_to_end(identifier)
-                self._total_hits += 1
-                return True
-            self._total_misses += 1
-            return False
+        if identifier in self._cache_order:
+            self._cache_order.move_to_end(identifier)
+            return True
+        return False
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
-        with record_function_or_nullcontext(
-            "ec_connector: scheduler_update_state_after_alloc"
-        ):
-            mm_hash: str = request.mm_features[index].identifier
-            num_embeds: int = request.get_num_encoder_embeds(index)
-            size_bytes: int = num_embeds * self._bytes_per_embed
+        mm_hash: str = request.mm_features[index].identifier
+        num_embeds: int = request.get_num_encoder_embeds(index)
+        size_bytes: int = num_embeds * self._bytes_per_embed
 
-            if mm_hash in self._cache_order:
-                self._cache_order.move_to_end(mm_hash)
-                self._loads_this_step.add(mm_hash)
-                return
+        if mm_hash in self._cache_order:
+            self._cache_order.move_to_end(mm_hash)
+            self._loads_this_step.add(mm_hash)
+            return
 
-            if size_bytes > self._capacity_bytes:
-                return
+        if size_bytes > self._capacity_bytes:
+            return
 
-            self._saves_this_step.add(mm_hash)
+        self._saves_this_step.add(mm_hash)
 
-            if self._num_used_bytes + size_bytes > self._capacity_bytes:
-                with record_function_or_nullcontext("ec_connector: scheduler_evict"):
-                    while (
-                        self._num_used_bytes + size_bytes > self._capacity_bytes
-                        and self._cache_order
-                    ):
-                        evicted_hash, evicted_bytes = self._cache_order.popitem(
-                            last=False
-                        )
-                        self._num_used_bytes -= evicted_bytes
-                        self._evicts_this_step.add(evicted_hash)
-                        self._total_evictions += 1
+        if self._num_used_bytes + size_bytes > self._capacity_bytes:
+            while (
+                self._num_used_bytes + size_bytes > self._capacity_bytes
+                and self._cache_order
+            ):
+                evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
+                self._num_used_bytes -= evicted_bytes
+                self._evicts_this_step.add(evicted_hash)
 
-            self._cache_order[mm_hash] = size_bytes
-            self._num_used_bytes += size_bytes
+        self._cache_order[mm_hash] = size_bytes
+        self._num_used_bytes += size_bytes
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
-        with record_function_or_nullcontext("ec_connector: build_connector_meta"):
-            meta = MultimodalEmbeddingCacheConnectorMetadata(
-                loads=list(self._loads_this_step),
-                saves=list(self._saves_this_step),
-                evicts=list(self._evicts_this_step),
-            )
+        meta = MultimodalEmbeddingCacheConnectorMetadata(
+            loads=list(self._loads_this_step),
+            saves=list(self._saves_this_step),
+            evicts=list(self._evicts_this_step),
+        )
 
-            self._total_loads += len(self._loads_this_step)
-            self._total_saves += len(self._saves_this_step)
+        self._loads_this_step.clear()
+        self._saves_this_step.clear()
+        self._evicts_this_step.clear()
 
-            self._loads_this_step.clear()
-            self._saves_this_step.clear()
-            self._evicts_this_step.clear()
-
-            self._log_step += 1
-            if self._log_step % self._log_every_n_steps == 0:
-                total_lookups = self._total_hits + self._total_misses
-                hit_rate = (
-                    100.0 * self._total_hits / total_lookups if total_lookups else 0.0
-                )
-                used_gb = self._num_used_bytes / 1024**3
-                cap_gb = self._capacity_bytes / 1024**3
-                logger.info(
-                    "ec_connector stats: hits=%d misses=%d hit_rate=%.1f%% "
-                    "loads=%d saves=%d evicts=%d entries=%d used=%.2f/%.2f GB",
-                    self._total_hits,
-                    self._total_misses,
-                    hit_rate,
-                    self._total_loads,
-                    self._total_saves,
-                    self._total_evictions,
-                    len(self._cache_order),
-                    used_gb,
-                    cap_gb,
-                )
-
-            return meta
+        return meta
 
     # ==============================
     # Worker-side methods
@@ -278,9 +219,6 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             self._arena_bytes, dtype=torch.uint8, device="cpu", pin_memory=True
         )
         self._free_regions = [(0, self._arena_bytes)]
-        logger.info(
-            "EC arena allocated: %d bytes pinned host memory", self._arena_bytes
-        )
 
     def _validate_chunk(self, mm_hash: str, src: torch.Tensor, nbytes: int) -> None:
         """nbytes must be a _bytes_per_embed multiple. Raises with full
@@ -401,12 +339,6 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             self._free_regions = [(cursor, self._arena_bytes - cursor)]
         else:
             self._free_regions = []
-        logger.warning(
-            "EC arena compaction: repacked %d entries to %d/%d bytes",
-            len(self._cpu_store),
-            self._used_bytes,
-            self._arena_bytes,
-        )
 
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs
@@ -417,80 +349,50 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
         compute = torch.cuda.current_stream()
-        with record_function_or_nullcontext("ec_connector: load_ensure_streams"):
-            self._ensure_streams(compute.device)
+        self._ensure_streams(compute.device)
 
         for mm_hash in metadata.loads:
-            with record_function_or_nullcontext("ec_connector: load_item"):
-                if mm_hash in encoder_cache:
-                    continue
-                entry = self._cpu_store.get(mm_hash)
-                if entry is None:
-                    logger.warning(
-                        "start_load_caches: hash %s not in cpu_store, skipping",
-                        mm_hash,
-                    )
-                    continue
+            if mm_hash in encoder_cache:
+                continue
+            entry = self._cpu_store.get(mm_hash)
+            if entry is None:
+                continue
 
-                # Make compute wait for the prior DtoH on save_stream.
-                with record_function_or_nullcontext(
-                    "ec_connector: load_wait_save_done"
-                ):
-                    compute.wait_event(entry.save_done)
+            # Make compute wait for the prior DtoH on save_stream.
+            compute.wait_event(entry.save_done)
 
-                # HtoD on compute. The slice is pinned (it views the arena)
-                # so non_blocking is genuine.
-                with record_function_or_nullcontext("ec_connector: load_h2d"):
-                    gpu_tensor = entry.cpu_view.to(
-                        device=compute.device, non_blocking=True
-                    )
+            # HtoD on compute. The slice is pinned (it views the arena)
+            # so non_blocking is genuine.
+            gpu_tensor = entry.cpu_view.to(device=compute.device, non_blocking=True)
 
-                # Symmetric record_stream on the destination: tells the caching
-                # allocator the new tensor's storage is consumed by compute, so
-                # if vLLM pops encoder_cache[h] before compute is done, the GPU
-                # buffer is not reused early.
-                with record_function_or_nullcontext("ec_connector: load_record_stream"):
-                    gpu_tensor.record_stream(compute)
+            # Symmetric record_stream on the destination: tells the caching
+            # allocator the new tensor's storage is consumed by compute, so
+            # if vLLM pops encoder_cache[h] before compute is done, the GPU
+            # buffer is not reused early.
+            gpu_tensor.record_stream(compute)
 
-                with record_function_or_nullcontext("ec_connector: load_record_event"):
-                    load_done = torch.cuda.Event()
-                    load_done.record(compute)
-                    # Prune resolved events to bound list growth on hot entries.
-                    entry.pending_loads = [
-                        e for e in entry.pending_loads if not e.query()
-                    ]
-                    entry.pending_loads.append(load_done)
+            load_done = torch.cuda.Event()
+            load_done.record(compute)
+            # Prune resolved events to bound list growth on hot entries.
+            entry.pending_loads = [e for e in entry.pending_loads if not e.query()]
+            entry.pending_loads.append(load_done)
 
-                encoder_cache[mm_hash] = gpu_tensor
+            encoder_cache[mm_hash] = gpu_tensor
 
         if metadata.evicts:
-            with record_function_or_nullcontext("ec_connector: load_evict"):
-                for mm_hash in metadata.evicts:
-                    entry = self._cpu_store.pop(mm_hash, None)
-                    if entry is not None:
-                        self._pending_free.append(
-                            _PendingFree(
-                                offset=entry.offset,
-                                nbytes=entry.nbytes,
-                                save_done=entry.save_done,
-                                pending_loads=entry.pending_loads,
-                            )
+            for mm_hash in metadata.evicts:
+                entry = self._cpu_store.pop(mm_hash, None)
+                if entry is not None:
+                    self._pending_free.append(
+                        _PendingFree(
+                            offset=entry.offset,
+                            nbytes=entry.nbytes,
+                            save_done=entry.save_done,
+                            pending_loads=entry.pending_loads,
                         )
+                    )
 
-        with record_function_or_nullcontext("ec_connector: load_cleanup"):
-            self._reap_pending_free()
-
-        self._step_counter += 1
-        if self._step_counter % self._log_every_n_steps == 0:
-            logger.info(
-                "EC arena: used=%d / arena=%d entries=%d "
-                "free_regions=%d pending_free=%d",
-                self._used_bytes,
-                self._arena_bytes,
-                len(self._cpu_store),
-                len(self._free_regions),
-                len(self._pending_free),
-            )
+        self._reap_pending_free()
 
     def save_caches(
         self, encoder_cache: dict[str, torch.Tensor], mm_hash: str, **kwargs
@@ -508,83 +410,61 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         fail, raises RuntimeError — a save under the scheduler cap that
         cannot be placed is a programming bug, not a normal cache miss.
         """
-        with record_function_or_nullcontext("ec_connector: save_caches"):
-            metadata = self._get_connector_metadata()
-            assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
-            if mm_hash not in metadata.saves:
-                return
-            if mm_hash in self._cpu_store:
-                # Per ECConnector contract, a hash is saved at most once
-                # per cache lifetime; treat repeats as no-op.
-                return
-            if mm_hash not in encoder_cache:
-                logger.warning(
-                    "save_caches: hash %s in metadata.saves but not in encoder_cache",
-                    mm_hash,
-                )
-                return
+        if mm_hash not in metadata.saves:
+            return
+        if mm_hash in self._cpu_store:
+            # Per ECConnector contract, a hash is saved at most once
+            # per cache lifetime; treat repeats as no-op.
+            return
+        if mm_hash not in encoder_cache:
+            return
 
-            src = encoder_cache[mm_hash]
-            if not src.is_contiguous():
-                logger.debug(
-                    "save_caches: non-contiguous source for hash %s, materializing",
-                    mm_hash,
-                )
-                with record_function_or_nullcontext("ec_connector: save_contiguous"):
-                    src = src.contiguous()
+        src = encoder_cache[mm_hash]
+        if not src.is_contiguous():
+            src = src.contiguous()
 
-            with record_function_or_nullcontext("ec_connector: save_ensure_streams"):
-                self._ensure_streams(src.device)
-            with record_function_or_nullcontext("ec_connector: save_ensure_arena"):
-                self._ensure_arena()
+        self._ensure_streams(src.device)
+        self._ensure_arena()
 
-            nbytes = src.numel() * src.element_size()
-            self._validate_chunk(mm_hash, src, nbytes)
+        nbytes = src.numel() * src.element_size()
+        self._validate_chunk(mm_hash, src, nbytes)
 
-            self._reap_pending_free()
-            offset = self._alloc(nbytes)
-            if offset is None:
-                with record_function_or_nullcontext(
-                    "ec_connector: save_alloc_fallback"
-                ):
-                    offset = self._alloc_with_fallback(nbytes)
-            if offset is None:
-                raise RuntimeError(
-                    f"EC arena exhausted for hash={mm_hash}: "
-                    f"nbytes={nbytes} used={self._used_bytes} "
-                    f"arena={self._arena_bytes} "
-                    f"free_regions={len(self._free_regions)} "
-                    f"pending_free={len(self._pending_free)}"
-                )
-
-            assert self._pinned_arena is not None
-            cpu_view = (
-                self._pinned_arena.narrow(0, offset, nbytes)
-                .view(src.dtype)
-                .view(src.shape)
+        self._reap_pending_free()
+        offset = self._alloc(nbytes)
+        if offset is None:
+            offset = self._alloc_with_fallback(nbytes)
+        if offset is None:
+            raise RuntimeError(
+                f"EC arena exhausted for hash={mm_hash}: "
+                f"nbytes={nbytes} used={self._used_bytes} "
+                f"arena={self._arena_bytes} "
+                f"free_regions={len(self._free_regions)} "
+                f"pending_free={len(self._pending_free)}"
             )
 
-            compute = torch.cuda.current_stream(src.device)
-            assert self._save_stream is not None
-            with record_function_or_nullcontext("ec_connector: save_wait_compute"):
-                self._save_stream.wait_stream(compute)
-            with torch.cuda.stream(self._save_stream):
-                with record_function_or_nullcontext(
-                    "ec_connector: save_d2h_async_enqueue"
-                ):
-                    cpu_view.copy_(src, non_blocking=True)
-                    # Symmetric record_stream on the source: protects the GPU
-                    # source memory in case vLLM pops encoder_cache[h] before
-                    # the async DtoH finishes.
-                    src.record_stream(self._save_stream)
-            with record_function_or_nullcontext("ec_connector: save_record_event"):
-                save_done = torch.cuda.Event()
-                save_done.record(self._save_stream)
+        assert self._pinned_arena is not None
+        cpu_view = (
+            self._pinned_arena.narrow(0, offset, nbytes).view(src.dtype).view(src.shape)
+        )
 
-            self._cpu_store[mm_hash] = _CpuEntry(
-                cpu_view=cpu_view,
-                offset=offset,
-                nbytes=nbytes,
-                save_done=save_done,
-            )
+        compute = torch.cuda.current_stream(src.device)
+        assert self._save_stream is not None
+        self._save_stream.wait_stream(compute)
+        with torch.cuda.stream(self._save_stream):
+            cpu_view.copy_(src, non_blocking=True)
+            # Symmetric record_stream on the source: protects the GPU
+            # source memory in case vLLM pops encoder_cache[h] before
+            # the async DtoH finishes.
+            src.record_stream(self._save_stream)
+        save_done = torch.cuda.Event()
+        save_done.record(self._save_stream)
+
+        self._cpu_store[mm_hash] = _CpuEntry(
+            cpu_view=cpu_view,
+            offset=offset,
+            nbytes=nbytes,
+            save_done=save_done,
+        )
