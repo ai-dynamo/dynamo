@@ -19,6 +19,7 @@ The active topology runs on one `a4-us-001-rl9` node with eight allocatable B200
 - no LayerSplit flags in this 4+4 DP=4 profile because the prefill worker does not have effective attention CP size greater than 1
 - Dynamo event-backed KV-aware routing via frontend `--router-mode kv --router-kv-events` and worker `--kv-events-config`
 - Dynamo-native chat preprocessing via frontend `--dyn-chat-processor dynamo` and worker parser flags `--dyn-tool-call-parser deepseek_v3_2 --dyn-reasoning-parser deepseek_r1`
+- Dynamo Frontend tokenization via `--tokenizer fastokens`, with HuggingFace decoding and fallback behavior handled inside Dynamo
 - prefill: `--disaggregation-mode prefill`, `--dp 4`, `--tp 4`, DP attention enabled
 - decode: `--disaggregation-mode decode`, `--dp 4`, `--tp 4`, DP attention enabled, radix cache disabled as required by HiSparse
 - SMC-SD draft on decode only: `BlaiseAI/GLM-4-9B-0414-FP8-DeepSeekV32-OMP`, FP8 draft KV, CUTLASS draft FP8 GEMM
@@ -142,6 +143,7 @@ python3 -m dynamo.frontend \
   --router-kv-events \
   --router-reset-states \
   --dyn-chat-processor dynamo \
+  --tokenizer fastokens \
   --http-port 8000
 ```
 

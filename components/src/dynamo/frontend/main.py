@@ -170,10 +170,7 @@ async def async_main():
     dump_config(config.dump_config_to, config)
     if config.event_plane:
         os.environ["DYN_EVENT_PLANE"] = config.event_plane
-    if config.tokenizer_backend == "fastokens":
-        os.environ["DYN_TOKENIZER"] = "fastokens"
-    else:
-        os.environ.pop("DYN_TOKENIZER", None)
+    os.environ["DYN_TOKENIZER"] = config.tokenizer_backend
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
         if config.migration_max_seq_len is not None

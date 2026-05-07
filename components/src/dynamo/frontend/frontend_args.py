@@ -472,11 +472,12 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--tokenizer",
             env_var="DYN_TOKENIZER",
-            default="default",
+            default="fastokens",
             dest="tokenizer_backend",
             help=(
-                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
-                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
+                "Tokenizer backend for BPE models: 'fastokens' "
+                "(high-performance Rust BPE encoding) or 'default' "
+                "(HuggingFace tokenizers library). "
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
             choices=["default", "fastokens"],

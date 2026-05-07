@@ -81,6 +81,8 @@ spec:
             - --router-reset-states
             - --dyn-chat-processor
             - dynamo
+            - --tokenizer
+            - fastokens
             - --http-port
             - "8000"
           env:

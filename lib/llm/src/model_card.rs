@@ -425,7 +425,7 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// When the `DYN_TOKENIZER=fastokens` env var is set, uses `fastokens` for encoding
+    /// Uses `fastokens` for BPE encoding unless `DYN_TOKENIZER=default` is set.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -433,11 +433,11 @@ impl ModelDeploymentCard {
             Ok(v) => {
                 tracing::warn!(
                     value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; using fastokens"
                 );
-                false
+                true
             }
-            Err(_) => false,
+            Err(_) => true,
         };
 
         match &self.tokenizer {

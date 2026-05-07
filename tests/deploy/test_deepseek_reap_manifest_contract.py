@@ -12,6 +12,23 @@ MANIFEST = (
     / "examples"
     / "deepseek-v32-reap-sglang.yaml"
 )
+FRONTEND_ARGS = (
+    Path(__file__).resolve().parents[2]
+    / "components"
+    / "src"
+    / "dynamo"
+    / "frontend"
+    / "frontend_args.py"
+)
+FRONTEND_MAIN = (
+    Path(__file__).resolve().parents[2]
+    / "components"
+    / "src"
+    / "dynamo"
+    / "frontend"
+    / "main.py"
+)
+MODEL_CARD = Path(__file__).resolve().parents[2] / "lib" / "llm" / "src" / "model_card.rs"
 TARGET_MODEL = (
     "BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-"
     "IndexerK8-FP8-GatedNorm-G1"
@@ -28,11 +45,30 @@ def _arg_value(args: list[str], flag: str) -> str:
     return args[args.index(flag) + 1]
 
 
+def test_fastokens_is_dynamo_frontend_default_tokenizer():
+    frontend_args = FRONTEND_ARGS.read_text()
+    tokenizer_arg_start = frontend_args.index('flag_name="--tokenizer"')
+    tokenizer_arg_end = frontend_args.index('flag_name="--trust-remote-code"')
+    tokenizer_arg = frontend_args[tokenizer_arg_start:tokenizer_arg_end]
+    frontend_main = FRONTEND_MAIN.read_text()
+    model_card = MODEL_CARD.read_text()
+    tokenizer_fn = model_card[model_card.index("pub fn tokenizer(&self)") :]
+    tokenizer_env_end = tokenizer_fn.index("match &self.tokenizer")
+    tokenizer_env = tokenizer_fn[:tokenizer_env_end]
+
+    assert 'env_var="DYN_TOKENIZER"' in tokenizer_arg
+    assert 'default="fastokens"' in tokenizer_arg
+    assert 'os.environ["DYN_TOKENIZER"] = config.tokenizer_backend' in frontend_main
+    assert 'Ok(v) if v == "default" || v.is_empty() => false' in tokenizer_env
+    assert "Err(_) => true" in tokenizer_env
+
+
 def test_deepseek_reap_frontend_uses_event_backed_kv_routing():
     args = _args_for("Frontend")
 
     assert _arg_value(args, "--router-mode") == "kv"
     assert _arg_value(args, "--dyn-chat-processor") == "dynamo"
+    assert _arg_value(args, "--tokenizer") == "fastokens"
     assert "--router-kv-events" in args
     assert "--no-kv-events" not in args
     assert "--no-router-kv-events" not in args
