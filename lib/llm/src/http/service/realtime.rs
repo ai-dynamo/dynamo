@@ -12,13 +12,16 @@
 //!
 //! On connect the handler synthesizes a `session.created` server event before any
 //! engine event flows — the spec requires it to be the first server event on the
-//! wire. The engine is then responsible for everything subsequent (including
-//! `session.updated` echoes, audio-buffer state, and response generation).
+//! wire. The handler then waits for the first client frame; if it's a
+//! `session.update`, the carried `session.model` field is the routing input for
+//! engine selection. The selected engine handles everything subsequent
+//! (including `session.updated` echoes, audio-buffer state, and response
+//! generation).
 //!
 //! For now the engine is a process-scoped mock ([`EchoBidirectionalEngine`]) held
-//! in a `OnceLock` so tests can install one without going through the
-//! `ModelManager`, which has no bidirectional accessor yet. A future revision
-//! will replace the static with a `ModelManager` lookup keyed on `model_name`.
+//! in a `OnceLock` and `select_engine` ignores the model field — there's only
+//! one engine to return. The architectural shape (model in, engine out) is in
+//! place for #9174 to swap the static for a `ModelManager`-keyed lookup.
 
 use std::sync::{Arc, OnceLock};
 
@@ -99,22 +102,11 @@ async fn realtime_ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
-    let Some(engine) = BIDIRECTIONAL_ENGINE.get() else {
-        tracing::error!("/v1/realtime connection rejected: bidirectional engine not installed");
-        let _ = socket
-            .send(close_message(
-                close_code::ERROR,
-                "bidirectional engine not installed",
-            ))
-            .await;
-        return;
-    };
-
     // OpenAI Realtime spec requires `session.created` to be the first server
     // frame on the wire, before any client event arrives. The handler synthesizes
     // it here so the connection handshake works regardless of which engine is
-    // installed; per-session config negotiation is deferred to `session.update`
-    // exchanges (which the engine handles).
+    // installed; engine selection happens once we observe the client's first
+    // frame (typically `session.update` carrying the desired model).
     let session_created = RealtimeServerEvent::SessionCreated(RealtimeServerEventSessionCreated {
         event_id: format!("event_{}", Uuid::new_v4()),
         session: Session::RealtimeSession(Box::default()),
@@ -141,7 +133,44 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
     }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // Wait for the first client frame to drive engine selection. If it's a
+    // `session.update`, its model field is the routing input; otherwise the
+    // model is unspecified and selection falls back to default.
+    let first_event = match wait_for_first_client_event(&mut ws_rx).await {
+        FirstEvent::Event(event) => *event,
+        FirstEvent::ClosedByClient => return,
+        FirstEvent::ProtocolError { code, reason } => {
+            let _ = ws_tx.send(close_message(code, &reason)).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ws_tx.close()).await;
+            return;
+        }
+    };
+    let model = session_update_model(&first_event);
+    let Some(engine) = select_engine(model.as_deref()) else {
+        tracing::error!(
+            ?model,
+            "/v1/realtime connection rejected: no engine available"
+        );
+        let _ = ws_tx
+            .send(close_message(
+                close_code::ERROR,
+                "no realtime engine available",
+            ))
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ws_tx.close()).await;
+        return;
+    };
+
     let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
+
+    // Forward the first event into the engine so it sees the same traffic a
+    // post-engine-acquisition frame would; e.g. a session.update is echoed back
+    // as session.updated.
+    if req_tx.send(first_event).await.is_err() {
+        tracing::debug!("/v1/realtime engine receiver dropped before first event delivered");
+        return;
+    }
 
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
     let input = RequestStream::new(request_stream, Context::new(()).context());
@@ -276,4 +305,88 @@ fn close_message(code: u16, reason: &str) -> Message {
         code,
         reason: Utf8Bytes::from(reason.to_string()),
     }))
+}
+
+/// Outcome of waiting for the first client frame on a freshly-upgraded
+/// connection — either a parsed event ready to drive engine selection, a
+/// clean client-initiated close, or a protocol-level reason to close the
+/// connection ourselves.
+///
+/// `Event` is boxed so the enum size doesn't track the largest variant of
+/// `RealtimeClientEvent` (~400 bytes due to the upstream `Session` payload),
+/// which is the rest-of-handler-irrelevant detail clippy flags as a
+/// large-variant difference.
+enum FirstEvent {
+    Event(Box<RealtimeClientEvent>),
+    ClosedByClient,
+    ProtocolError { code: u16, reason: String },
+}
+
+/// Drain the inbound socket until the first `RealtimeClientEvent` arrives.
+/// Skips ping/pong frames (axum handles ping replies on its own); rejects
+/// binary and malformed-JSON frames per the rest of the handler's posture.
+async fn wait_for_first_client_event<S>(ws_rx: &mut S) -> FirstEvent
+where
+    S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
+    while let Some(msg) = ws_rx.next().await {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::debug!(%err, "/v1/realtime inbound frame error before first event");
+                return FirstEvent::ClosedByClient;
+            }
+        };
+        match msg {
+            Message::Text(text) => match serde_json::from_str::<RealtimeClientEvent>(text.as_str())
+            {
+                Ok(event) => return FirstEvent::Event(Box::new(event)),
+                Err(err) => {
+                    tracing::warn!(%err, "/v1/realtime malformed JSON before first event");
+                    return FirstEvent::ProtocolError {
+                        code: close_code::INVALID,
+                        reason: "malformed JSON frame".to_string(),
+                    };
+                }
+            },
+            Message::Binary(_) => {
+                tracing::warn!("/v1/realtime binary frame before first event; rejecting");
+                return FirstEvent::ProtocolError {
+                    code: close_code::UNSUPPORTED,
+                    reason: "binary frames not supported".to_string(),
+                };
+            }
+            Message::Close(_) => return FirstEvent::ClosedByClient,
+            Message::Ping(_) | Message::Pong(_) => {}
+        }
+    }
+    FirstEvent::ClosedByClient
+}
+
+/// Extract the `model` routing key from a client event. Today only
+/// `session.update` carries one (`session.session.model`); other events
+/// return `None`, which signals "use default" to [`select_engine`].
+fn session_update_model(event: &RealtimeClientEvent) -> Option<String> {
+    let RealtimeClientEvent::SessionUpdate(req) = event else {
+        return None;
+    };
+    match &req.session {
+        Session::RealtimeSession(s) => s.model.clone(),
+        Session::RealtimeTranscriptionSession(_) => None,
+    }
+}
+
+/// Pick the realtime engine for this connection.
+///
+/// `model` comes from a client `session.update` (or `None` if the first
+/// client frame didn't specify one). Today the slot is a single
+/// `OnceLock<EchoBidirectionalEngine>` and the model is logged but not used
+/// for routing — there's only one engine to return. #9174 will replace this
+/// with a `ModelManager`-keyed lookup; the function signature is the
+/// architectural seam.
+fn select_engine(model: Option<&str>) -> Option<&'static EchoBidirectionalEngine> {
+    if let Some(m) = model {
+        tracing::debug!(model = m, "/v1/realtime engine selection by model");
+    }
+    BIDIRECTIONAL_ENGINE.get()
 }
