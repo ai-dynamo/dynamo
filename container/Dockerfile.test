@@ -33,7 +33,7 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 FROM debian:bookworm-slim AS github_runner_tools
 
 RUN set -eux; \
-    tools="bash tail tar cat grep env tr head mkdir chmod mv sleep"; \
+    tools="bash tail tar gzip cat grep env tr head mkdir chmod mv sleep"; \
     mkdir -p /github-runner-tools/usr/local/bin /github-runner-tools/opt/dynamo/lib; \
     for tool in ${tools}; do \
         tool_path="$(command -v "${tool}")"; \
