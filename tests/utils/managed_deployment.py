@@ -368,6 +368,30 @@ class ServiceSpec:
     _WRAPPER_DIR = "/dyn-wrapper"
     _WRAPPER_PATH = "/dyn-wrapper/dyn_tee.sh"
 
+    def enable_model_cache(
+        self, pvc_name: str, mount_path: str = "/model-cache"
+    ) -> None:
+        """Mount an existing RWX PVC as the HuggingFace model cache.
+
+        Sets HF_HOME (and the legacy TRANSFORMERS_CACHE / HF_HUB_CACHE
+        vars) on the service so vLLM / dynamo's downloader uses the
+        shared cache for model weight downloads. Skips re-downloading
+        large model weights between test runs.
+
+        Caller (DeploymentSpec.enable_model_cache) is responsible for
+        ensuring the PVC exists and is RWX. The mount is added at the
+        service level (operator-managed, mirrors how the log PVC is
+        mounted) so the operator handles volume creation.
+        """
+        self._add_volume_mount(pvc_name, mount_path)
+        self._add_env_var("HF_HOME", value=mount_path)
+        self._add_env_var("HF_HUB_CACHE", value=mount_path)
+        self._add_env_var("TRANSFORMERS_CACHE", value=mount_path)
+        # hf_transfer accelerates large-file downloads (Qwen3-30B + LLM
+        # tokenizer indexes are big enough to benefit). Costs nothing
+        # when the cache is warm.
+        self._add_env_var("HF_HUB_ENABLE_HF_TRANSFER", value="1")
+
     # ----- ported from _2 (full surface area) -----
     def set_readiness_probe(
         self,
@@ -720,6 +744,38 @@ class DeploymentSpec:
         for service in target_services:
             service.enable_log_collection(container_log_dir, pvc_name)
 
+    def enable_model_cache(
+        self,
+        pvc_name: str,
+        mount_path: str = "/model-cache",
+        worker_services_only: bool = True,
+    ) -> None:
+        """Mount an existing RWX PVC as the HF model cache on workers.
+
+        Caller-supplied PVC must already exist in the test namespace
+        and be RWX. Avoids re-downloading large model weights across
+        test runs. Many shared clusters auto-provision a per-namespace
+        ``shared-model-cache`` PVC; pass that name here to use it.
+
+        Adds an entry to ``spec.pvcs`` with ``create: False`` so the
+        operator does not try to provision it.
+        """
+        if "pvcs" not in self._deployment_spec["spec"]:
+            self._deployment_spec["spec"]["pvcs"] = []
+        if not any(
+            p.get("name") == pvc_name for p in self._deployment_spec["spec"]["pvcs"]
+        ):
+            self._deployment_spec["spec"]["pvcs"].append(
+                {"name": pvc_name, "create": False}
+            )
+        targets = (
+            [s for s in self.services if s.component_type != "frontend"]
+            if worker_services_only
+            else self.services
+        )
+        for service in targets:
+            service.enable_model_cache(pvc_name, mount_path)
+
     # ----- ported from _2 (full surface area) -----
 
 
@@ -801,6 +857,11 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
+    # When True, the log-collection PVC is assumed to already exist;
+    # _create_log_collection_pvc skips create + verify (just installs
+    # the wrapper ConfigMap), and _cleanup_log_collection_pvc skips
+    # delete. Set when the user passes --log-pvc.
+    reuse_log_pvc: bool = False
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1415,12 +1476,21 @@ class ManagedDeployment:
             self._logger.debug(f"scrub: list CRs failed: {e}")
 
         # 2. Delete log-collection PVCs (labelled by enable_log_collection).
+        # Skip the user-supplied PVC when --log-pvc is set: it's not ours
+        # to delete.
+        reused_pvc = (
+            getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+            if self.reuse_log_pvc
+            else None
+        )
         try:
             pvcs = await self._core_api.list_namespaced_persistent_volume_claim(
                 namespace=self.namespace,
                 label_selector="purpose=log-collection",
             )
             for pvc in pvcs.items:
+                if reused_pvc and pvc.metadata.name == reused_pvc:
+                    continue
                 try:
                     await self._core_api.delete_namespaced_persistent_volume_claim(
                         name=pvc.metadata.name, namespace=self.namespace
@@ -1816,7 +1886,9 @@ class ManagedDeployment:
 
         No-op when the spec did not enable log collection. Recreates the PVC
         on every run so log content from a previous run does not leak into
-        this one.
+        this one — UNLESS ``reuse_log_pvc`` is set, in which case the PVC
+        is assumed to already exist (skip create + verify, just install the
+        wrapper ConfigMap).
 
         Returns the PVC name on success, or ``None`` when log collection is
         not configured.
@@ -1830,6 +1902,34 @@ class ManagedDeployment:
         )
 
         assert self._core_api is not None, "Kubernetes API not initialized"
+
+        if self.reuse_log_pvc:
+            self._logger.info(
+                f"Reusing existing log-collection PVC {pvc_name} "
+                f"(skip create + verify; --log-pvc was set)"
+            )
+            try:
+                pvc = await self._core_api.read_namespaced_persistent_volume_claim(
+                    name=pvc_name, namespace=self.namespace
+                )
+            except exceptions.ApiException as e:
+                if e.status == 404:
+                    raise RuntimeError(
+                        f"--log-pvc {pvc_name!r} does not exist in namespace "
+                        f"{self.namespace!r}; either create it first or omit "
+                        f"the flag to let the framework provision a fresh one."
+                    ) from None
+                raise
+            if pvc.status.phase != "Bound":
+                raise RuntimeError(
+                    f"--log-pvc {pvc_name!r} is in phase {pvc.status.phase}, "
+                    f"expected Bound. Resolve the binding before re-running."
+                )
+            await self._install_log_wrapper_configmap()
+            self._log_collection_pvc_created = True
+            self._log_collection_pvc_verified = True
+            return pvc_name
+
         self._logger.info(
             f"Creating log-collection PVC {pvc_name} ({pvc_size}, "
             f"sc={storage_class or 'cluster-default'}, RWX)"
@@ -2220,8 +2320,17 @@ class ManagedDeployment:
     async def _cleanup_log_collection_pvc(self):
         """
         Clean up the log collection PVC if we created it.
+
+        Skipped when ``reuse_log_pvc`` is set — the PVC was provided by
+        the user; we don't own its lifecycle.
         """
         if not self._log_collection_pvc_created:
+            return
+        if self.reuse_log_pvc:
+            self._logger.info(
+                "Skipping log-collection PVC delete (--log-pvc set; "
+                "reusing user-managed PVC)"
+            )
             return
 
         pvc_name = getattr(

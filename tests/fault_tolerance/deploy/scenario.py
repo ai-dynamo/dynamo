@@ -72,6 +72,8 @@ async def run_scenario(
     test_name: str | None = None,
     skip_service_restart: bool = True,
     storage_class: str | None = None,
+    log_pvc: str | None = None,
+    model_pvc: str | None = None,
     reports: list[Report] | None = None,
     resource_config: Optional["ResourceMonitorConfig"] = None,
 ) -> ScenarioContext:
@@ -137,14 +139,24 @@ async def run_scenario(
     # Enable logging
     deployment_spec.set_logging(True, "info")
 
-    # Enable PVC-based log collection
+    # Enable PVC-based log collection. If --log-pvc was passed, use
+    # that name (the framework will skip create + delete, just install
+    # the wrapper ConfigMap and verify the PVC is bound).
     log_collection_kwargs = {
         "pvc_size": "500Mi",
         "container_log_dir": "/tmp/service_logs",
     }
     if storage_class:
         log_collection_kwargs["storage_class"] = storage_class
+    if log_pvc:
+        log_collection_kwargs["pvc_name"] = log_pvc
     deployment_spec.enable_log_collection(**log_collection_kwargs)
+
+    # If --model-pvc was passed, mount that PVC as the HF model cache
+    # on every worker. Avoids re-downloading large model weights
+    # between test runs.
+    if model_pvc:
+        deployment_spec.enable_model_cache(model_pvc)
 
     # Create context (will be populated during deployment)
     ctx = ScenarioContext(
@@ -164,6 +176,7 @@ async def run_scenario(
         log_dir=log_dir,
         deployment_spec=deployment_spec,
         skip_service_restart=skip_service_restart,
+        reuse_log_pvc=bool(log_pvc),
     ) as deployment:
         ctx.deployment = deployment
 

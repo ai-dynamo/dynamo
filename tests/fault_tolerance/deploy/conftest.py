@@ -69,6 +69,28 @@ def pytest_addoption(parser):
         "If not specified, uses cluster default.",
     )
     parser.addoption(
+        "--log-pvc",
+        type=str,
+        default=None,
+        help="Reuse an existing RWX PVC for log collection instead of "
+        "creating a fresh one. Skips both creation and cleanup. Useful "
+        "on clusters where PVC provisioning is slow (e.g. AWS FSx "
+        "takes ~7 min). The PVC must already exist in the test "
+        "namespace and be RWX. Logs accumulate across runs — clean "
+        "manually if needed.",
+    )
+    parser.addoption(
+        "--model-pvc",
+        type=str,
+        default=None,
+        help="Reuse an existing RWX PVC as the HuggingFace model cache "
+        "(mounted at /model-cache, exported as HF_HOME on workers). "
+        "Skips re-downloading large model weights between runs. The "
+        "PVC must already exist in the test namespace and be RWX. "
+        "Many shared clusters auto-provision a 'shared-model-cache' "
+        "PVC per namespace.",
+    )
+    parser.addoption(
         "--restart-services",
         action="store_true",
         default=False,
@@ -173,3 +195,15 @@ def skip_service_restart(request):
 def storage_class(request):
     """Storage class for PVC log collection (must support RWX)."""
     return request.config.getoption("--storage-class")
+
+
+@pytest.fixture
+def log_pvc(request):
+    """Existing RWX PVC name to reuse for log collection (skips create/delete)."""
+    return request.config.getoption("--log-pvc")
+
+
+@pytest.fixture
+def model_pvc(request):
+    """Existing RWX PVC name to reuse as the HF model cache (mounted on workers)."""
+    return request.config.getoption("--model-pvc")

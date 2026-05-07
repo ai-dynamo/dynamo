@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# vllm disagg DGD: 1 Frontend + 1 prefill (TP=2) + 2 decode (TP=2 each)
+# = 6 GPUs total; fits one 8xH100-80GB node. Model: Qwen3-30B-A3B
+# (30B-param MoE). NixlConnector with kv_role=kv_both for the
+# prefill→decode KV transfer.
+#
+# Image: dynamo v1.0.1 vllm-runtime (released).
+#
+# Sanity-config defaults below; specific repro tests override
+# --max-num-seqs / cudagraph_capture_sizes per scenario to exercise
+# documented vLLM disagg failure modes (running-batch >512 cudagraph
+# fall-off, KV-cleanup retention under transfer churn, rank-process
+# wedge propagation through shm_broadcast).
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-qwen3-30b-1p2d
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-30B-A3B
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --tensor-parallel-size
+            - "2"
+            - --max-model-len
+            - "8192"
+            # KV events disabled — matches "plain disagg" without the
+            # KV-router indexer subscriber; reduces variance when
+            # repro'ing transfer-path failure modes.
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 2
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-30B-A3B
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --tensor-parallel-size
+            - "2"
+            - --max-model-len
+            - "8192"
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'
