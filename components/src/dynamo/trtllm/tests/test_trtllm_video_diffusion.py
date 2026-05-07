@@ -543,12 +543,14 @@ class TestDiffusionEngineGenerate:
 
         # DiffusionRequest is imported inside generate() via
         #   from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
-        # so we inject a fake module into sys.modules.
+        #   from tensorrt_llm.visual_gen.params import VisualGenParams
         fake_executor = MagicMock(DiffusionRequest=FakeDiffusionRequest)
+        fake_params_module = MagicMock(VisualGenParams=MagicMock)
         with patch.dict(
             "sys.modules",
             {
                 "tensorrt_llm._torch.visual_gen.executor": fake_executor,
+                "tensorrt_llm.visual_gen.params": fake_params_module,
             },
         ):
             engine.generate(
