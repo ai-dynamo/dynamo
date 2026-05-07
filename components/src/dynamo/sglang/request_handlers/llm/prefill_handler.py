@@ -73,7 +73,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        trace_id = context.trace_id
 
         if "request" in request:
             # DisaggPreprocessedRequest format
@@ -154,7 +153,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
-            rid=trace_id,
             data_parallel_rank=dp_rank,
             **self._session_kwargs(inner_request),
             lora_path=lora_path,

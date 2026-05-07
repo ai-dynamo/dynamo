@@ -109,7 +109,6 @@ class SglangLLMEngine(LLMEngine):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
-            rid=context.trace_id,
         )
 
         async for res in stream:

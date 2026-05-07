@@ -301,7 +301,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
@@ -342,7 +341,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 external_trace_header=trace_header,
-                rid=trace_id,
                 data_parallel_rank=dp_rank,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
@@ -377,7 +375,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 stream=True,
                 **self._routed_experts_kwargs,
                 external_trace_header=trace_header,
-                rid=trace_id,
                 data_parallel_rank=dp_rank,
                 **self._session_kwargs(request),
                 lora_path=lora_path,

@@ -57,12 +57,10 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             raise TypeError(f"Invalid input type: {type(embedding_request.input)}")
 
         trace_header = build_trace_headers(context) if self.enable_trace else None
-        trace_id = context.trace_id
 
         result = await self.engine.async_encode(
             prompt=prompt,
             external_trace_header=trace_header,
-            rid=trace_id,
         )
 
         # Transform the response to OpenAI format
