@@ -238,9 +238,9 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
-    /// Number of event processing threads for the KV indexer.
-    /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
-    /// single-threaded RadixTree. Default: 4.
+    /// Number of KV indexer worker threads.
+    /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
+    /// and approximate routing writes. Default: 4.
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
