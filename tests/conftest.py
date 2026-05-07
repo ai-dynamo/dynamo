@@ -263,6 +263,20 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
+    # Forward --basetemp and -o cache_dir= so workers don't fall back to
+    # <cwd>/.pytest_cache. In CI cwd=/workspace is read-only for the runner
+    # uid, and pyproject's filterwarnings=["error"] escalates the resulting
+    # PytestCacheWarning into a test failure.
+    basetemp = config.getoption("basetemp", default=None)
+    if basetemp:
+        extra_args.extend(["--basetemp", str(basetemp)])
+    # Only forward cache_dir when absolute. pytest's default ini value is the
+    # relative ".pytest_cache"; forwarding it would needlessly pin every worker
+    # to an explicit override outside our CI scenario.
+    cache_dir = config.getini("cache_dir")
+    if cache_dir and os.path.isabs(str(cache_dir)):
+        extra_args.extend(["-o", f"cache_dir={cache_dir}"])
+
     old_downloads_ready = os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV)
     old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
     downloads_ready = False
