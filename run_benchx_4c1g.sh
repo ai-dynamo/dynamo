@@ -64,6 +64,7 @@ DYN_SYS_PORT_GEN=8085
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
+cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
 {
     echo "exp_name: $EXP_NAME"
@@ -468,13 +469,15 @@ echo "Snapshotting frontend metrics (pre-bench)..."
 curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
   > "$RESULTS_DIR/frontend_metrics_pre.prom" || echo "  WARN: pre snapshot failed"
 
-echo "Starting periodic frontend metrics scraper (interval=10s)..."
+mkdir -p "$RESULTS_DIR/frontend_metrics"
+echo "Starting periodic frontend metrics scraper (interval=10s) -> timeseries + per-snapshot files..."
 (
   while true; do
     TS=$(date +%s)
     if RESP=$(curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" 2>/dev/null); then
       echo "$RESP" | awk -v ts="$TS" '/^[a-zA-Z]/ {print ts" "$0}' \
         >> "$RESULTS_DIR/frontend_metrics_timeseries.prom"
+      printf '%s' "$RESP" > "$RESULTS_DIR/frontend_metrics/snapshot_${TS}.prom"
     fi
     sleep 10
   done

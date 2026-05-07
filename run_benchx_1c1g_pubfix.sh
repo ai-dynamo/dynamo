@@ -59,6 +59,7 @@ DYN_SYS_PORT_GEN=8082
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/${EXP_NAME}_${TIMESTAMP}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
+cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
 {
     echo "exp_name: $EXP_NAME"
