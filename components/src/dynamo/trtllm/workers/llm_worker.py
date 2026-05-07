@@ -322,8 +322,7 @@ async def init_llm_worker(
             existing = current_kv_config.get("event_buffer_max_size")
             if existing:
                 logging.info(
-                    "Using existing event_buffer_max_size=%d from kv_cache_config",
-                    existing,
+                    f"Using existing event_buffer_max_size={existing} from kv_cache_config"
                 )
             else:
                 current_kv_config[
