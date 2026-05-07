@@ -322,7 +322,9 @@ func generateSingleDCD(
 	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
 	deployment.Namespace = parentDGD.Namespace
 
-	copyDGDComponentPreservedAnnotationsToDCD(parentDGD, componentName, deployment)
+	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
+		return nil, err
+	}
 
 	labels := make(map[string]string)
 	maps.Copy(labels, GetPodTemplateLabels(component))
@@ -374,30 +376,34 @@ func generateSingleDCD(
 	return deployment, nil
 }
 
-var dgdComponentAnnotationToDCDAnnotation = map[string]string{
-	"annotations":        PreservedDCDAnnotationsAnnotation,
-	"labels":             PreservedDCDLabelsAnnotation,
-	"ingress":            PreservedDCDIngressAnnotation,
-	"service-name":       preservedDCDServiceNameAnnotation,
-	"dynamo-namespace":   preservedDCDDynamoNamespaceAnnotation,
-	"sub-component-type": preservedDCDSubComponentTypeAnnotation,
-}
-
-func copyDGDComponentPreservedAnnotationsToDCD(parentDGD *v1beta1.DynamoGraphDeployment, componentName string, dcd *v1beta1.DynamoComponentDeployment) {
-	if parentDGD == nil || dcd == nil || len(parentDGD.Annotations) == 0 {
-		return
+func applyDGDComponentAlphaCompatibilityToDCD(parentDGD *v1beta1.DynamoGraphDeployment, componentName string, dcd *v1beta1.DynamoComponentDeployment) error {
+	component := getDGDAlphaComponent(parentDGD, componentName)
+	if dcd == nil || component == nil {
+		return nil
 	}
-	for suffix, dcdKey := range dgdComponentAnnotationToDCDAnnotation {
-		if value := getDGDComponentPreservedAnnotation(parentDGD, componentName, suffix); value != "" {
-			if dcd.Annotations == nil {
-				dcd.Annotations = map[string]string{}
-			}
-			dcd.Annotations[dcdKey] = value
-		}
+	alphaDCD := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dcd.Name,
+			Namespace: dcd.Namespace,
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework:                    dcd.Spec.BackendFramework,
+			DynamoComponentDeploymentSharedSpec: *component.DeepCopy(),
+		},
 	}
+	carrier := &v1beta1.DynamoComponentDeployment{}
+	if err := alphaDCD.ConvertTo(carrier); err != nil {
+		return err
+	}
+	if len(carrier.Annotations) == 0 {
+		return nil
+	}
+	if dcd.Annotations == nil {
+		dcd.Annotations = map[string]string{}
+	}
+	maps.Copy(dcd.Annotations, carrier.Annotations)
+	return nil
 }
-
-const preservedDGDAlphaSpecAnnotation = "nvidia.com/dgd-spec"
 
 // GetDGDComponentResourceLabels returns labels that should be applied to resources
 // created directly for a DGD component.
@@ -405,7 +411,7 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	labels := map[string]string{}
 	if dgd != nil {
 		maps.Copy(labels, dgd.Spec.Labels)
-		maps.Copy(labels, getDGDComponentPreservedStringMap(dgd, componentName, "labels"))
+		maps.Copy(labels, getDGDComponentAlphaLabels(dgd, componentName))
 	}
 	maps.Copy(labels, GetPodTemplateLabels(component))
 	return labels
@@ -414,12 +420,16 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 // GetDGDComponentPreservedIngressSpec returns an alpha component ingress spec that
 // was preserved during conversion to v1beta1.
 func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, componentName string) (IngressSpec, bool) {
-	raw := getDGDComponentPreservedAnnotation(dgd, componentName, "ingress")
-	if raw == "" {
+	component := getDGDAlphaComponent(dgd, componentName)
+	if component == nil || component.Ingress == nil {
+		return IngressSpec{}, false
+	}
+	raw, err := json.Marshal(component.Ingress)
+	if err != nil {
 		return IngressSpec{}, false
 	}
 	var ingressSpec IngressSpec
-	if err := json.Unmarshal([]byte(raw), &ingressSpec); err != nil {
+	if err := json.Unmarshal(raw, &ingressSpec); err != nil {
 		return IngressSpec{}, false
 	}
 	return ingressSpec, true
@@ -2025,7 +2035,7 @@ func generateLabels(
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
 	}
-	if subComponentType := getDGDComponentPreservedAnnotation(dynamoDeployment, componentName, "sub-component-type"); subComponentType != "" {
+	if subComponentType := getDGDComponentAlphaSubComponentType(dynamoDeployment, componentName); subComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
 	}
 	labels[commonconsts.KubeLabelDynamoNamespace] = GetDynamoNamespace(dynamoDeployment, component)
@@ -2038,7 +2048,7 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge labels: %w", err)
 		}
 	}
-	if componentLabels := getDGDComponentPreservedStringMap(dynamoDeployment, componentName, "labels"); componentLabels != nil {
+	if componentLabels := getDGDComponentAlphaLabels(dynamoDeployment, componentName); componentLabels != nil {
 		if err := mergo.Merge(&labels, componentLabels, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge preserved component labels: %w", err)
 		}
@@ -2055,7 +2065,7 @@ func generateLabels(
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
 	}
-	if subComponentType := getDGDComponentPreservedAnnotation(dynamoDeployment, componentName, "sub-component-type"); subComponentType != "" {
+	if subComponentType := getDGDComponentAlphaSubComponentType(dynamoDeployment, componentName); subComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
 	}
 	labels[commonconsts.KubeLabelDynamoNamespace] = GetDynamoNamespace(dynamoDeployment, component)
@@ -2078,110 +2088,62 @@ func generateLabels(
 	return labels, nil
 }
 
-func getDGDComponentPreservedAnnotation(dgd *v1beta1.DynamoGraphDeployment, componentName, suffix string) string {
-	if dgd == nil || dgd.Annotations == nil || componentName == "" || suffix == "" {
-		return ""
-	}
-	if value := dgd.Annotations["nvidia.com/dgd-comp-"+componentName+"-"+suffix]; value != "" {
-		return value
-	}
-	component := getDGDComponentPreservedAlphaSpec(dgd, componentName)
+func getDGDComponentAlphaSubComponentType(dgd *v1beta1.DynamoGraphDeployment, componentName string) string {
+	component := getDGDAlphaComponent(dgd, componentName)
 	if component == nil {
 		return ""
 	}
-	switch suffix {
-	case "annotations":
-		return marshalPreservedDGDValue(component.Annotations)
-	case "labels":
-		return marshalPreservedDGDValue(component.Labels)
-	case "ingress":
-		return marshalPreservedDGDValue(component.Ingress)
-	case "service-name":
-		return component.ServiceName
-	case "dynamo-namespace":
-		if component.DynamoNamespace != nil {
-			return *component.DynamoNamespace
-		}
-	case "sub-component-type":
-		return component.SubComponentType
-	}
-	return ""
+	return component.SubComponentType
 }
 
-func getDGDComponentPreservedAlphaSpec(dgd *v1beta1.DynamoGraphDeployment, componentName string) *v1alpha1.DynamoComponentDeploymentSharedSpec {
-	spec := getDGDPreservedAlphaSpec(dgd)
-	if spec == nil || spec.Services == nil {
+func getDGDComponentAlphaLabels(dgd *v1beta1.DynamoGraphDeployment, componentName string) map[string]string {
+	component := getDGDAlphaComponent(dgd, componentName)
+	if component == nil {
 		return nil
 	}
-	return spec.Services[componentName]
+	return component.Labels
 }
 
-func getDGDPreservedAlphaSpec(dgd *v1beta1.DynamoGraphDeployment) *v1alpha1.DynamoGraphDeploymentSpec {
-	if dgd == nil || dgd.Annotations == nil {
+func getDGDComponentAlphaAnnotations(dgd *v1beta1.DynamoGraphDeployment, componentName string) map[string]string {
+	component := getDGDAlphaComponent(dgd, componentName)
+	if component == nil {
 		return nil
 	}
+	return component.Annotations
+}
 
-	raw := dgd.Annotations[preservedDGDAlphaSpecAnnotation]
-	if raw == "" {
+func getDGDAlphaComponent(dgd *v1beta1.DynamoGraphDeployment, componentName string) *v1alpha1.DynamoComponentDeploymentSharedSpec {
+	alpha := getDGDAlpha(dgd)
+	if alpha == nil || alpha.Spec.Services == nil {
 		return nil
 	}
+	return alpha.Spec.Services[componentName]
+}
 
-	var rawObject map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &rawObject); err == nil {
-		if _, ok := rawObject["spec"]; ok {
-			var envelope struct {
-				Spec v1alpha1.DynamoGraphDeploymentSpec `json:"spec"`
-			}
-			if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-				return nil
-			}
-			return &envelope.Spec
-		}
-	}
-
-	var spec v1alpha1.DynamoGraphDeploymentSpec
-	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+func getDGDAlpha(dgd *v1beta1.DynamoGraphDeployment) *v1alpha1.DynamoGraphDeployment {
+	if dgd == nil {
 		return nil
 	}
-	return &spec
+	alpha := &v1alpha1.DynamoGraphDeployment{}
+	if err := alpha.ConvertFrom(dgd.DeepCopy()); err != nil {
+		return nil
+	}
+	return alpha
 }
 
 // GetDGDPreservedAlphaPVCs returns legacy v1alpha1 top-level PVC declarations
 // preserved on a converted v1beta1 DynamoGraphDeployment.
 func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC {
-	spec := getDGDPreservedAlphaSpec(dgd)
-	if spec == nil || len(spec.PVCs) == 0 {
+	alpha := getDGDAlpha(dgd)
+	if alpha == nil || len(alpha.Spec.PVCs) == 0 {
 		return nil
 	}
-	return append([]v1alpha1.PVC(nil), spec.PVCs...)
-}
-
-func marshalPreservedDGDValue(value any) string {
-	if value == nil {
-		return ""
-	}
-	data, err := json.Marshal(value)
-	if err != nil || string(data) == "null" || string(data) == "{}" {
-		return ""
-	}
-	return string(data)
-}
-
-func getDGDComponentPreservedStringMap(dgd *v1beta1.DynamoGraphDeployment, componentName, suffix string) map[string]string {
-	raw := getDGDComponentPreservedAnnotation(dgd, componentName, suffix)
-	if raw == "" {
-		return nil
-	}
-	values := map[string]string{}
-	if err := json.Unmarshal([]byte(raw), &values); err != nil {
-		return nil
-	}
-	return values
+	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
 func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1beta1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	annotations := make(map[string]string)
-	if componentAnnotations := getDGDComponentPreservedStringMap(dynamoDeployment, componentName, "annotations"); componentAnnotations != nil {
+	if componentAnnotations := getDGDComponentAlphaAnnotations(dynamoDeployment, componentName); componentAnnotations != nil {
 		if err := mergo.Merge(&annotations, componentAnnotations, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge preserved component annotations: %w", err)
 		}

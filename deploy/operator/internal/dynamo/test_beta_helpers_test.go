@@ -74,7 +74,7 @@ func normalizeGeneratedDCD(src *v1beta1.DynamoComponentDeployment) *v1beta1.Dyna
 	}
 	out := src.DeepCopy()
 	maps.DeleteFunc(out.Annotations, func(key, _ string) bool {
-		return IsPreservedDCDAnnotation(key)
+		return v1alpha1.IsDynamoComponentDeploymentConversionAnnotation(key)
 	})
 	if len(out.Annotations) == 0 {
 		out.Annotations = nil

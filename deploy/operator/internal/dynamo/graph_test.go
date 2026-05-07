@@ -821,12 +821,15 @@ func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnno
 	dcd := got["frontend"]
 	require.NotNil(t, dcd)
 
-	assert.JSONEq(t, `{"legacy-annotation":"kept"}`, dcd.Annotations[PreservedDCDAnnotationsAnnotation])
-	assert.JSONEq(t, `{"legacy-label":"kept"}`, dcd.Annotations[PreservedDCDLabelsAnnotation])
-	assert.JSONEq(t, `{"enabled":true,"host":"legacy.example","ingressControllerClassName":"nginx"}`, dcd.Annotations[PreservedDCDIngressAnnotation])
-	assert.Equal(t, "legacy-sub", dcd.Annotations[preservedDCDSubComponentTypeAnnotation])
-	assert.Empty(t, dcd.Annotations[preservedDCDServiceNameAnnotation])
-	assert.Equal(t, "custom-ns", dcd.Annotations[preservedDCDDynamoNamespaceAnnotation])
+	assert.Equal(t, "custom-ns", GetDCDDynamoNamespace(dcd))
+	assert.Equal(t, "legacy-sub", GetDCDSubComponentType(dcd))
+	assert.Equal(t, map[string]string{"legacy-annotation": "kept"}, GetDCDPreservedAlphaAnnotations(dcd))
+	assert.Equal(t, map[string]string{"legacy-label": "kept"}, GetDCDPreservedAlphaLabels(dcd))
+	ingressSpec, ok, err := GetDCDPreservedAlphaIngressSpec(dcd)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "legacy.example", ingressSpec.Host)
+	assert.Equal(t, "nginx", ptr.Deref(ingressSpec.IngressControllerClassName, ""))
 }
 
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
