@@ -171,6 +171,17 @@ async fn realtime_websocket_audio_append_streams_response_envelope() {
 
     expect_text_event(&mut ws, "session.created").await;
 
+    // Initialize the session before sending audio — handler requires
+    // session.update first to pick the engine.
+    let session_update = serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "realtime", "model": "gpt-realtime" }
+    });
+    ws.send(Message::Text(session_update.to_string().into()))
+        .await
+        .expect("send session.update");
+    expect_text_event(&mut ws, "session.updated").await;
+
     let audio = "A".repeat(200);
     let body = serde_json::json!({
         "type": "input_audio_buffer.append",
