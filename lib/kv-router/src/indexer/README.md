@@ -377,10 +377,10 @@ There are five production indexer variants. This section maps deployment scenari
 - Does not shard; a single hot branch can become a write bottleneck at extreme scale.
 
 **`BranchShardedIndexer<CRTC>` (BSI)**
-- Routes each conversation to one shard via a fixed-depth FNV prefix hash. Read path normally scans one shard, using the deepest registered prefix alias when a query diverges before `prefix_depth`.
+- Routes each conversation to one shard via a fixed-depth FNV prefix hash. Read path scans one shard for the routed prefix key.
 - Enables *approximate pruning*: a shard can evict its least-recently-used entries independently without coordinating with others.
-- Use when: worker count > ~1 000, you need per-shard approximate pruning, and you can tolerate the residual shard-crossing risk from out-of-order events (rare in practice).
-- **Shard-crossing**: short chains (root shorter than `prefix_depth` blocks) use *sticky routing* in `branch_sharded.rs`: continuations inherit the root `shard_idx` from `block_to_fnv_state`, and root batches register prefix aliases up to `prefix_depth`, so short-root continuations do not cross shards. The remaining caveat is out-of-order delivery where a continuation arrives before its parent is known.
+- Use when: worker count > ~1 000, you need per-shard approximate pruning, and you can tolerate the flat-map router's shallow-chain and out-of-order limitations.
+- **Shard-crossing**: `branch_sharded.rs` stores `block_to_fnv_state` for shallow roots and registers prefix aliases for short queries, but the flat map does not provide the stronger anchor/replay model needed to guarantee every shallow continuation stays with its parent shard. Out-of-order delivery remains a caveat when a continuation arrives before its parent is known.
 - Not the right choice if you need a guarantee that every conversation stays on one shard even under out-of-order events (use anchor-aware BSI for that).
 
 **`AnchorAwareBranchShardedIndexer<CRTC>` (anchor-aware BSI)**
@@ -403,7 +403,7 @@ Start
   └─ ≥ ~1 000 workers (or want per-shard pruning)?
          │
          ├─ Need approximate pruning / full BSI feature set?
-         │      └─ BranchShardedIndexer<CRTC>  (sticky routing)
+         │      └─ BranchShardedIndexer<CRTC>  (flat-map routing)
          │
          └─ Need routing-correctness guarantee, no pruning needed?
                 └─ AnchorAwareBranchShardedIndexer<CRTC>

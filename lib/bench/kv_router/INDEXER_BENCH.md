@@ -216,10 +216,9 @@ For a larger branch-sharded worker pool, use `--num-event-workers-per-shard 8` (
 
 | Field | Meaning |
 |-------|---------|
-| Exact dispatch | Queries routed by the deepest requested prefix key |
-| Shallow-fallback % | Queries whose exact requested prefix key missed but a shorter registered prefix routed to a shard that can return the shallow overlap score |
+| Dispatched | Queries routed to one shard for lookup |
 | Early-exit % | Queries with no registered prefix alias, resolved without shard dispatch |
-| Avg routing | Prefix-key routing-table lookup time (deepest registered prefix → shard index) |
+| Avg routing | Prefix-key routing-table lookup time |
 | Avg shard | CRTC traversal time on the dispatched shard |
 
 ---
@@ -271,13 +270,13 @@ Trace: `mooncake_trace.jsonl` (Mooncake FAST25 arxiv trace). Config: 2 shards ×
 | Indexer | Achieved ops/s | p99 | Routing outcome | Avg routing | Avg shard |
 |---------|---------------|-----|-----------------|-------------|-----------|
 | CRTC baseline (8w) | 17,201 | 1,093 µs | — | — | — |
-| Branch-sharded depth=2 (2×4w) | 17,182 | **933 µs** | 60.5% exact / 39.5% shallow-fallback / 0.0% miss | 762 ns | 238 µs |
-| Branch-sharded depth=4 (2×4w) | 17,221 | **841 µs** | 59.9% exact / 40.1% shallow-fallback / 0.0% miss | 717 ns | 237 µs |
+| Branch-sharded depth=2 (2×4w) | 17,182 | **933 µs** | 0.0% miss | 762 ns | 238 µs |
+| Branch-sharded depth=4 (2×4w) | 17,221 | **841 µs** | 0.0% miss | 717 ns | 237 µs |
 | Anchor-aware BSI depth=2 (2×4w) | 17,064 | 1,510 µs | 91.3% dispatched / 8.7% shallow | 388 µs | 161 µs |
 
 All indexers keep up with the offered trace rate. On this arxiv trace, branch-sharded depth=2 is about **15% lower p99** than CRTC, and depth=4 is about **23% lower p99**. This is a modest latency win, not the large win seen on the smaller `conversation_trace.jsonl` workload; do not compare those results directly.
 
-The true-miss rate remains effectively zero. Shallow fallback accounts for about **40%** of branch-sharded lookups, which means those lookups did not find the exact requested prefix alias but did find a shorter registered prefix and could still return the shallow overlap score from one shard. That is the accuracy-preserving behavior this benchmark is meant to track.
+The true-miss rate remains effectively zero in these runs.
 
 Anchor-aware BSI is slower than both CRTC and branch-sharded in this steady-state run. Its routing TRIE provides a stronger structural routing model, but on this hot-prefix trace the routing work is materially higher and the shard load collapses almost entirely onto one shard.
 
@@ -357,14 +356,14 @@ Tests how p99 and shard balance change as trace volume grows. Config: 2 shards �
 
 Note: `--trace-duplication-factor` duplicates request/hash spaces while keeping the worker identity count fixed at 7,000. It increases branch diversity and event volume; it does not multiply the number of worker identities.
 
-| Trace duplication | Branches | Offered ops/s | Achieved ops/s | Shallow fallback | Avg routing | Avg shard | p99 | Block split |
-|------------------:|---------:|--------------:|---------------:|-----------------|-------------|-----------|-----|-------------|
-| 1× | 822 | 17,268 | 16,942 | 39.5% | 4.3 µs | 419 µs | 9,069 µs | 87.1% / 12.9% |
-| 2× | 1,640 | 34,536 | 33,623 | 39.7% | 4.3 µs | 531 µs | 9,989 µs | 45.5% / 54.5% |
-| 4× ⚠ | 3,306 | 69,073 | 56,049 | 39.3% | 5.2 µs | 488 µs | 8,403 µs | 54.2% / 45.8% |
-| 8× ⚠ | 6,587 | 138,147 | 61,306 | 39.4% | 4.8 µs | 439 µs | 6,563 µs | 29.4% / 70.6% |
-| 16× ⚠ | 13,162 | 276,295 | 106,127 | 39.3% | 2.0 µs | 262 µs | 2,859 µs | 44.3% / 55.7% |
-| 32× ⚠ | 26,328 | 552,590 | 99,795 | 39.2% | 4.9 µs | 263 µs | 2,549 µs | 55.4% / 44.6% |
+| Trace duplication | Branches | Offered ops/s | Achieved ops/s | Avg routing | Avg shard | p99 | Block split |
+|------------------:|---------:|--------------:|---------------:|-------------|-----------|-----|-------------|
+| 1× | 822 | 17,268 | 16,942 | 4.3 µs | 419 µs | 9,069 µs | 87.1% / 12.9% |
+| 2× | 1,640 | 34,536 | 33,623 | 4.3 µs | 531 µs | 9,989 µs | 45.5% / 54.5% |
+| 4× ⚠ | 3,306 | 69,073 | 56,049 | 5.2 µs | 488 µs | 8,403 µs | 54.2% / 45.8% |
+| 8× ⚠ | 6,587 | 138,147 | 61,306 | 4.8 µs | 439 µs | 6,563 µs | 29.4% / 70.6% |
+| 16× ⚠ | 13,162 | 276,295 | 106,127 | 2.0 µs | 262 µs | 2,859 µs | 44.3% / 55.7% |
+| 32× ⚠ | 26,328 | 552,590 | 99,795 | 4.9 µs | 263 µs | 2,549 µs | 55.4% / 44.6% |
 
 **1× and 2× keep up but p99 is noisy in this long stress sequence.** Use the standalone steady-state runs for normal trace-rate latency comparisons.
 
@@ -425,4 +424,4 @@ Note: `anchor-aware-branch-sharded-crtc` avoids FNV routing-key collisions (diff
 
 `AnchorAwareBranchShardedIndexer` uses static divergent-shard assignment: the first conversation under a new parent node stays on the parent's shard; only subsequent divergent siblings are hashed to a different shard. On workloads with a dominant shared prefix, nearly all traffic can end up as the "first child" of the same TRIE node and route to one shard. Observed on `mooncake_trace.jsonl`: effectively 100% of stored blocks on shard 1 in the steady-state run.
 
-The code has an open TODO for adaptive hot-branch splitting. Until that is resolved, `branch-sharded-crtc` (with sticky routing) is the safer choice for traces with narrow prefix diversity.
+The code has an open TODO for adaptive hot-branch splitting. Until that is resolved, compare both branch-sharded variants on traces with narrow prefix diversity before choosing one for production.
