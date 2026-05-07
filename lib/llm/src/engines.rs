@@ -183,7 +183,7 @@ impl
                         break;
                     }
                     tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                    let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
+                    let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                     yield Annotated {
                         id: Some(id.to_string()),
                         data: Some(response),
@@ -199,7 +199,6 @@ impl
                         0,
                         None,
                         Some(dynamo_protocols::types::FinishReason::Stop),
-                        None,
                         None,
                     );
                     yield Annotated {
