@@ -185,6 +185,16 @@ func TestFuzzRoundTripMutability(t *testing.T) {
 			func() *v1beta1.DynamoComponentDeployment { return &v1beta1.DynamoComponentDeployment{} },
 		)
 	})
+	t.Run("DGDR/hub-to-mutated-spoke", func(t *testing.T) {
+		fuzzMutatedSpokeCarrier[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
+			func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+		)
+	})
+	t.Run("DGDR/spoke-to-mutated-hub", func(t *testing.T) {
+		fuzzMutatedHubCarrier[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
+			func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+		)
+	})
 	t.Run("DGDSA/hub-to-mutated-spoke", func(t *testing.T) {
 		fuzzMutatedSpokeCarrier[*v1beta1.DynamoGraphDeploymentScalingAdapter, v1alpha1.DynamoGraphDeploymentScalingAdapter](t, "DGDSA",
 			func() *v1beta1.DynamoGraphDeploymentScalingAdapter {

@@ -97,6 +97,11 @@ on:
         required: false
         type: string
         default: ''
+      source_ref:
+        description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -126,26 +131,28 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
         env:
           ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
         run: |
-
+          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          IMAGE_TAG=${SOURCE_SHA}-${TARGET_TAG_PLAIN}
           if [[ "${{ matrix.version_selector }}" == "cpu" ]] || [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
-            CPU_IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
-            echo "cpu_runtime_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
-            echo "cpu_test_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
-            echo "runtime_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
-            echo "test_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
+            echo "cpu_runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "cpu_test_image=${ECR_REPOSITORY}:${IMAGE_TAG}-test" >> $GITHUB_OUTPUT
+            echo "runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "test_image=${ECR_REPOSITORY}:${IMAGE_TAG}-test" >> $GITHUB_OUTPUT
             exit 0
           elif [[ "${{ matrix.version_selector }}" == "xpu" ]]; then
             XPU_IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-xpu
-            echo "xpu_runtime_image=${ECR_REPOSITORY}:${XPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
-            echo "xpu_test_image=${ECR_REPOSITORY}:${XPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
-            echo "runtime_image=${ECR_REPOSITORY}:${XPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
-            echo "test_image=${ECR_REPOSITORY}:${XPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
+            echo "xpu_runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}-xpu" >> $GITHUB_OUTPUT
+            echo "xpu_test_image=${ECR_REPOSITORY}:${IMAGE_TAG}-xpu-test" >> $GITHUB_OUTPUT
+            echo "runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}-xpu" >> $GITHUB_OUTPUT
+            echo "test_image=${ECR_REPOSITORY}:${IMAGE_TAG}-xpu-test" >> $GITHUB_OUTPUT
             exit 0
           else
             CUDA_VERSION="${{ matrix.version_selector }}"
