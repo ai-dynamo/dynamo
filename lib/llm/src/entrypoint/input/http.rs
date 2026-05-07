@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
@@ -83,6 +84,12 @@ pub async fn run(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            // `--model-path` on the frontend supplies a local copy of
+            // metadata for workers whose `cf.path()` (or `file://` URL)
+            // is unreachable from the frontend host. None means no
+            // override.
+            let local_model_path =
+                (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -94,6 +101,7 @@ pub async fn run(
                 http_service.state().metrics_clone(),
                 chat_engine_factory.clone(),
                 prefill_load_estimator.clone(),
+                local_model_path,
             )
             .await?;
             http_service
@@ -173,6 +181,7 @@ async fn run_watcher(
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_model_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
@@ -184,6 +193,7 @@ async fn run_watcher(
         prefill_load_estimator,
         metrics.clone(),
     );
+    watch_obj.set_local_model_path(local_model_path);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
