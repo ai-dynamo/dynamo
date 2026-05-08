@@ -432,11 +432,15 @@ def _bootstrap_kwargs_for_request(
     if mode == DisaggregationMode.AGGREGATED:
         return {}
 
-    state = request.get("disaggregated_state") or {}
+    # Read the canonical disaggregated_state field first; fall back to the
+    # legacy SGLang wire key bootstrap_info that Dynamo's Rust PrefillRouter
+    # writes today. Lets this PR work end-to-end before the parallel
+    # Rust-side normalization to disaggregated_state lands.
+    state = request.get("disaggregated_state") or request.get("bootstrap_info") or {}  # type: ignore[typeddict-item]
     if not state:
         raise InvalidArgument(
             f"TokenSpeed worker in disaggregation_mode={mode.value} requires "
-            "disaggregated_state on the request "
+            "disaggregated_state (or legacy bootstrap_info) on the request "
             "(bootstrap_host/bootstrap_port/bootstrap_room)"
         )
 
