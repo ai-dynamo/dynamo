@@ -18,179 +18,75 @@
 package checkpoint
 
 import (
+	"context"
 	"fmt"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func ApplyCheckpointSourcePodMetadata(
-	labels map[string]string,
-	annotations map[string]string,
-	hash string,
-	location string,
-	storageType nvidiacomv1alpha1.DynamoCheckpointStorageType,
-) {
-	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
-	delete(labels, commonconsts.KubeLabelCheckpointHash)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointLocation)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointStorageType)
-
-	labels[commonconsts.KubeLabelIsCheckpointSource] = commonconsts.KubeLabelValueTrue
-	if hash != "" {
-		labels[commonconsts.KubeLabelCheckpointHash] = hash
-	}
-	if location != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointLocation] = location
-	}
-	if storageType != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointStorageType] = string(storageType)
-	}
-}
-
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
-	delete(labels, commonconsts.KubeLabelIsRestoreTarget)
-	delete(labels, commonconsts.KubeLabelCheckpointHash)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointLocation)
-	delete(annotations, commonconsts.KubeAnnotationCheckpointStorageType)
-
-	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
+	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
+	hash := ""
+	artifactVersion := ""
+	if enabled {
+		hash = checkpointInfo.Hash
+		artifactVersion = checkpointInfo.ArtifactVersion
+	}
+	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	if !enabled {
+		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		return
 	}
-
-	labels[commonconsts.KubeLabelIsRestoreTarget] = commonconsts.KubeLabelValueTrue
-	if checkpointInfo.Hash != "" {
-		labels[commonconsts.KubeLabelCheckpointHash] = checkpointInfo.Hash
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
 	}
-	if checkpointInfo.Location != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointLocation] = checkpointInfo.Location
-	}
-	if checkpointInfo.StorageType != "" {
-		annotations[commonconsts.KubeAnnotationCheckpointStorageType] = string(checkpointInfo.StorageType)
-	}
+	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 }
 
-func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == commonconsts.CheckpointVolumeName {
-			return
+func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
+	if podSpec == nil {
+		return nil, fmt.Errorf("pod spec is nil")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i], nil
 		}
 	}
-
-	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-		Name: commonconsts.CheckpointVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: pvcName,
-				ReadOnly:  false,
-			},
-		},
-	})
+	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
 }
 
-func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == commonconsts.CheckpointVolumeName {
-			return
-		}
-	}
-
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      commonconsts.CheckpointVolumeName,
-		MountPath: basePath,
-		ReadOnly:  false,
-	})
-}
-
-func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == commonconsts.PodInfoVolumeName {
-			return
-		}
-	}
-
-	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-		Name: commonconsts.PodInfoVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: []corev1.DownwardAPIVolumeFile{
-					{
-						Path: "pod_name",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodName,
-						},
-					},
-					{
-						Path: "pod_uid",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodUID,
-						},
-					},
-					{
-						Path: "pod_namespace",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodNamespace,
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynNamespace,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoNamespace + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynNamespaceWorkerSuffix,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoWorkerHash + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynComponent,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoComponentType + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynParentDGDName,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoGraphDeploymentName + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynParentDGDNamespace,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodNamespace,
-						},
-					},
-				},
-			},
-		},
-	})
-}
-
-func InjectPodInfoVolumeMount(container *corev1.Container) {
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == commonconsts.PodInfoVolumeName {
-			return
-		}
-	}
-
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      commonconsts.PodInfoVolumeName,
-		MountPath: commonconsts.PodInfoMountPath,
-		ReadOnly:  true,
-	})
-}
-
+// InjectCheckpointIntoPodSpec mutates a worker pod spec for restore-from-checkpoint
+// once the referenced DynamoCheckpoint is Ready. It adds the snapshot-control
+// volume + mount, sets DYN_SNAPSHOT_CONTROL_DIR, attaches the checkpoint PVC,
+// applies the localhost seccomp profile (when seccompProfile is non-empty), and
+// — for GMS-enabled workloads — wires the GMS restore sidecars. No-ops when
+// checkpointInfo is nil, disabled, or not Ready (cold-start path).
+//
+// seccompProfile is the path passed to the localhost seccomp profile injection;
+// pass an empty string to skip seccomp injection (e.g. on OpenShift, or when
+// running a CRIU build with io_uring support). Callers typically obtain this
+// from operatorConfig.Checkpoint.EffectiveSeccompProfile().
 func InjectCheckpointIntoPodSpec(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	namespace string,
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
-	checkpointConfig *configv1alpha1.CheckpointConfiguration,
+	seccompProfile string,
 ) error {
-	if checkpointInfo == nil || !checkpointInfo.Enabled {
+	// Only mutate the worker pod spec once the checkpoint is Ready. Before
+	// the checkpoint exists, the worker must cold-start normally without
+	// the snapshot-control volume, DYN_SNAPSHOT_CONTROL_DIR, checkpoint PVC
+	// mount, or localhost seccomp profile — otherwise the Python worker
+	// enters checkpoint mode on env-var presence and sits quiesced waiting
+	// for a sentinel that only the checkpoint Job and restore-target path
+	// produce. The checkpoint Job itself is built separately through
+	// buildCheckpointJob + NewCheckpointJob and does get these.
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil
 	}
 
@@ -207,90 +103,64 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	var mainContainer *corev1.Container
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			mainContainer = &podSpec.Containers[i]
-			break
+	if reader == nil {
+		return fmt.Errorf("checkpoint client is required")
+	}
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	podInfoContainers := make([]*corev1.Container, 0, len(targets))
+	for _, name := range targets {
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				podInfoContainers = append(podInfoContainers, &podSpec.Containers[i])
+				break
+			}
 		}
 	}
-	if mainContainer == nil && len(podSpec.Containers) > 0 {
-		mainContainer = &podSpec.Containers[0]
+	if len(podInfoContainers) != len(targets) {
+		return fmt.Errorf("checkpoint restore targets %v do not all exist in pod spec", targets)
 	}
-	if mainContainer == nil {
-		return fmt.Errorf("no container found to inject checkpoint config")
+	syntheticAnnotations := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
 	}
-
-	if info.Ready {
-		mainContainer.Command = []string{"sleep", "infinity"}
-		mainContainer.Args = nil
-	}
-
-	if podSpec.SecurityContext == nil {
-		podSpec.SecurityContext = &corev1.PodSecurityContext{}
-	}
-	podSpec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
-		Type:             corev1.SeccompProfileTypeLocalhost,
-		LocalhostProfile: ptr.To(commonconsts.SeccompProfilePath),
-	}
-
-	storageType := configv1alpha1.CheckpointStorageTypePVC
-	var storageConfig *configv1alpha1.CheckpointStorageConfiguration
-	if checkpointConfig != nil {
-		storageConfig = &checkpointConfig.Storage
-		if storageConfig.Type != "" {
-			storageType = storageConfig.Type
-		}
-	}
-	if err := injectCheckpointStorage(podSpec, mainContainer, info, storageType, storageConfig); err != nil {
+	if err := snapshotprotocol.PrepareRestorePodSpecForCheckpoint(
+		ctx,
+		reader,
+		namespace,
+		podSpec,
+		syntheticAnnotations,
+		info.Hash,
+		info.ArtifactVersion,
+		seccompProfile,
+		info.Ready,
+	); err != nil {
 		return err
 	}
 
-	InjectPodInfoVolume(podSpec)
-	InjectPodInfoVolumeMount(mainContainer)
+	EnsurePodInfoVolume(podSpec)
+	for _, c := range podInfoContainers {
+		EnsurePodInfoMount(c)
+	}
+	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+		// GMS restore is still single-main-container only.
+		mainContainer, err := RequireMainContainer(podSpec)
+		if err != nil {
+			return fmt.Errorf("gpuMemoryService enabled: %w", err)
+		}
+		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
+			ctx,
+			reader,
+			namespace,
+			info.Hash,
+			info.ArtifactVersion,
+		)
+		if err != nil {
+			return err
+		}
+		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
+	}
+
 	return nil
-}
-
-func injectCheckpointStorage(
-	podSpec *corev1.PodSpec,
-	mainContainer *corev1.Container,
-	info *CheckpointInfo,
-	storageType string,
-	storageConfig *configv1alpha1.CheckpointStorageConfiguration,
-) error {
-	if info.StorageType == "" {
-		info.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
-	}
-
-	switch storageType {
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if storageConfig == nil || storageConfig.S3.URI == "" {
-			return fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
-		}
-		if info.Location == "" {
-			info.Location = fmt.Sprintf("%s/%s.tar", storageConfig.S3.URI, info.Hash)
-		}
-		return nil
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if storageConfig == nil || storageConfig.OCI.URI == "" {
-			return fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
-		}
-		if info.Location == "" {
-			info.Location = fmt.Sprintf("%s:%s", storageConfig.OCI.URI, info.Hash)
-		}
-		return nil
-	default:
-		if storageConfig == nil || storageConfig.PVC.PVCName == "" {
-			return fmt.Errorf("PVC storage type selected but no PVC name configured (set checkpoint.storage.pvc.pvcName)")
-		}
-		if storageConfig.PVC.BasePath == "" {
-			return fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
-		}
-		if info.Location == "" {
-			info.Location = fmt.Sprintf("%s/%s", storageConfig.PVC.BasePath, info.Hash)
-		}
-		InjectCheckpointVolume(podSpec, storageConfig.PVC.PVCName)
-		InjectCheckpointVolumeMount(mainContainer, storageConfig.PVC.BasePath)
-		return nil
-	}
 }

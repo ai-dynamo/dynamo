@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -25,18 +25,22 @@ crate-type = ["cdylib", "rlib"]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
-kv-indexer-runtime = ["kv-indexer", "dynamo-kv-router/indexer-runtime"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
+dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
+async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
+dashmap = { version = "6.1" }
 futures = { version = "0.3" }
+rmp = { version = "0.8" }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }

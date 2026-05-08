@@ -60,8 +60,9 @@ pub async fn tensor_response_stream(
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
+    let model_name = request.model.clone();
     let cancellation_labels = CancellationLabels {
-        model: request.model.clone(),
+        model: model_name.clone(),
         endpoint: Endpoint::Tensor.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -85,14 +86,21 @@ pub async fn tensor_response_stream(
     let engine = state
         .manager()
         .get_tensor_engine(model)
-        .map_err(|_| Status::not_found("model not found"))?;
+        .map_err(|e| match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                Status::unavailable("model temporarily unavailable")
+            }
+            _ => Status::not_found("model not found"),
+        })?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Tensor, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Tensor,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -101,6 +109,12 @@ pub async fn tensor_response_stream(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
+            return Status::resource_exhausted(e.to_string());
+        }
         Status::internal(format!("Failed to generate tensor response stream: {}", e))
     })?;
 

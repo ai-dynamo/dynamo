@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::core::ReplayWorkerCore;
-use super::normalize_trace_requests;
+use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{Trace, WorkloadDriver};
-use crate::replay::{TraceCollector, TraceSimulationReport};
+use crate::loadgen::WorkloadDriver;
+use crate::replay::TraceCollector;
 use anyhow::bail;
 use std::collections::VecDeque;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
-enum SingleReplayMode {
+pub(super) enum SingleReplayMode {
     Trace,
     Concurrency { max_in_flight: usize },
 }
@@ -21,20 +21,29 @@ enum AdmissionSource {
     Workload(WorkloadDriver),
 }
 
-struct SingleRuntime {
+pub(super) struct SingleRuntime {
     current_time_ms: f64,
     admission: AdmissionSource,
     worker: ReplayWorkerCore,
     collector: TraceCollector,
     mode: SingleReplayMode,
+    progress: ReplayProgress,
 }
 
 impl SingleRuntime {
-    fn new(args: MockEngineArgs, pending: VecDeque<DirectRequest>, mode: SingleReplayMode) -> Self {
+    pub(super) fn new(
+        args: MockEngineArgs,
+        pending: VecDeque<DirectRequest>,
+        mode: SingleReplayMode,
+    ) -> Self {
         Self::new_with_source(args, AdmissionSource::Requests(pending), mode)
     }
 
-    fn new_workload(args: MockEngineArgs, driver: WorkloadDriver, mode: SingleReplayMode) -> Self {
+    pub(super) fn new_workload(
+        args: MockEngineArgs,
+        driver: WorkloadDriver,
+        mode: SingleReplayMode,
+    ) -> Self {
         Self::new_with_source(args, AdmissionSource::Workload(driver), mode)
     }
 
@@ -43,12 +52,17 @@ impl SingleRuntime {
         admission: AdmissionSource,
         mode: SingleReplayMode,
     ) -> Self {
+        let total_requests = match &admission {
+            AdmissionSource::Requests(pending) => pending.len(),
+            AdmissionSource::Workload(driver) => driver.total_turns(),
+        };
         Self {
             current_time_ms: 0.0,
             admission,
             worker: ReplayWorkerCore::new(args),
             collector: TraceCollector::default(),
             mode,
+            progress: ReplayProgress::new(total_requests, "offline replay"),
         }
     }
 
@@ -161,12 +175,20 @@ impl SingleRuntime {
                     .expect("completed workload request must belong to a session");
             }
         }
+        let completed_requests = pass
+            .output_signals
+            .iter()
+            .filter(|signal| signal.completed)
+            .count();
+        for _ in 0..completed_requests {
+            self.progress.inc_completed();
+        }
         if admit_arrivals_between_steps {
             self.enqueue_trace_arrivals();
         }
     }
 
-    fn run(mut self) -> anyhow::Result<TraceCollector> {
+    pub(super) fn run(mut self) -> anyhow::Result<TraceCollector> {
         while !self.is_done() {
             match self.mode {
                 SingleReplayMode::Trace => {
@@ -192,123 +214,19 @@ impl SingleRuntime {
             }
         }
 
+        self.progress.finish();
         Ok(self.collector)
     }
 }
 
-pub(crate) fn simulate_trace_single(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    arrival_speedup_ratio: f64,
-) -> anyhow::Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace).run()?;
-    Ok(collector.finish())
-}
-
-pub(crate) fn simulate_concurrency_single(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-) -> anyhow::Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let pending = VecDeque::from(requests);
-    let collector = SingleRuntime::new(
-        args,
-        pending,
-        SingleReplayMode::Concurrency { max_in_flight },
-    )
-    .run()?;
-    Ok(collector.finish())
-}
-
-pub(crate) fn simulate_trace_workload_single(
-    args: MockEngineArgs,
-    trace: Trace,
-) -> anyhow::Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let collector =
-        SingleRuntime::new_workload(args, trace.into_trace_driver()?, SingleReplayMode::Trace)
-            .run()?;
-    Ok(collector.finish())
-}
-
-pub(crate) fn simulate_concurrency_workload_single(
-    args: MockEngineArgs,
-    trace: Trace,
-    max_in_flight: usize,
-) -> anyhow::Result<TraceSimulationReport> {
-    let args = args.normalized()?;
-    let collector = SingleRuntime::new_workload(
-        args,
-        trace.into_concurrency_driver()?,
-        SingleReplayMode::Concurrency { max_in_flight },
-    )
-    .run()?;
-    Ok(collector.finish())
-}
-
-#[cfg(test)]
-pub(super) fn run_trace_single_collect(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    arrival_speedup_ratio: f64,
-) -> TraceCollector {
-    let pending = normalize_trace_requests(requests, arrival_speedup_ratio).unwrap();
-    SingleRuntime::new(args, pending, SingleReplayMode::Trace)
-        .run()
-        .unwrap()
-}
-
-#[cfg(test)]
-pub(super) fn run_concurrency_single_collect(
-    args: MockEngineArgs,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-) -> TraceCollector {
-    SingleRuntime::new(
-        args,
-        VecDeque::from(requests),
-        SingleReplayMode::Concurrency { max_in_flight },
-    )
-    .run()
-    .unwrap()
-}
-
-#[cfg(test)]
-pub(super) fn run_trace_workload_single_collect(
-    args: MockEngineArgs,
-    trace: Trace,
-) -> TraceCollector {
-    SingleRuntime::new_workload(
-        args,
-        trace.into_trace_driver().unwrap(),
-        SingleReplayMode::Trace,
-    )
-    .run()
-    .unwrap()
-}
-
-#[cfg(test)]
-pub(super) fn run_concurrency_workload_single_collect(
-    args: MockEngineArgs,
-    trace: Trace,
-    max_in_flight: usize,
-) -> TraceCollector {
-    SingleRuntime::new_workload(
-        args,
-        trace.into_concurrency_driver().unwrap(),
-        SingleReplayMode::Concurrency { max_in_flight },
-    )
-    .run()
-    .unwrap()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::entrypoints::{
+        run_concurrency_workload_single_collect, run_trace_workload_single_collect,
+        simulate_concurrency_single, simulate_trace_single,
+    };
     use super::*;
-    use crate::loadgen::{SessionTrace, TurnTrace};
+    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::{TraceRequestStatsSnapshot, TraceSimulationReport};
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};

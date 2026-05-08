@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
+use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
@@ -104,14 +105,25 @@ impl TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
-    HfChatTemplate { is_custom: bool, file: CheckedFile },
+    #[serde(rename = "hf_chat_template", alias = "hf_chat_template_jinja")]
+    HfChatTemplateJinja {
+        is_custom: bool,
+        file: CheckedFile,
+    },
+    HfChatTemplateJson {
+        is_custom: bool,
+        file: CheckedFile,
+    },
 }
 
 impl PromptFormatterArtifact {
     pub fn checksum(&self) -> String {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.checksum().to_string(),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => {
+                c.checksum().to_string()
+            }
         }
     }
 
@@ -119,21 +131,24 @@ impl PromptFormatterArtifact {
     pub fn is_local(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.is_local(),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.is_local(),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.is_local(),
         }
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.update_dir(dir),
-            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.update_dir(dir),
+            PromptFormatterArtifact::HfChatTemplateJinja { file: c, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { file: c, .. } => c.update_dir(dir),
         }
     }
 
     pub fn is_custom(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(_) => false,
-            PromptFormatterArtifact::HfChatTemplate { is_custom, .. } => *is_custom,
+            PromptFormatterArtifact::HfChatTemplateJinja { is_custom, .. }
+            | PromptFormatterArtifact::HfChatTemplateJson { is_custom, .. } => *is_custom,
         }
     }
 }
@@ -179,6 +194,22 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
+fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
+    }
+}
+
+fn pf_checked_file_mut(p: &mut PromptFormatterArtifact) -> &mut CheckedFile {
+    match p {
+        PromptFormatterArtifact::HfTokenizerConfigJson(cf)
+        | PromptFormatterArtifact::HfChatTemplateJinja { file: cf, .. }
+        | PromptFormatterArtifact::HfChatTemplateJson { file: cf, .. } => cf,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -219,8 +250,8 @@ pub struct ModelDeploymentCard {
     /// Max context (in number of tokens) this model can handle
     pub context_length: u32,
 
-    /// Size of a KV cache block - vllm only currently
-    /// Passed to the engine and the KV router.
+    /// Size of a KV cache block.
+    /// Passed to the engine, KV router, and trace replay hash path.
     pub kv_cache_block_size: u32,
 
     /// How many times a request can be migrated to another worker if the HTTP server lost
@@ -253,6 +284,12 @@ pub struct ModelDeploymentCard {
     /// Media fetching configuration
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
+
+    /// Per-worker-set router configuration override.
+    /// When set, the frontend watcher uses this instead of the global frontend router config.
+    /// Falls back to the frontend-level config when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_config: Option<RouterConfig>,
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
@@ -363,7 +400,16 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
-                // TODO: Do we want any of user_data or runtime_config?
+                if let Some(router_config) = self.router_config.as_ref()
+                    && let Ok(bytes) = serde_json::to_vec(router_config)
+                {
+                    // Hash router_config separately so we extend bytes_to_hash with a
+                    // fixed-size digest (32 bytes) rather than the full JSON payload.
+                    // [gluo TODO] take checksum() approach that is the same as above,
+                    // along with this effort, we should reorganize where RouterConfig
+                    // should be defined.
+                    bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
+                }
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -452,7 +498,12 @@ impl ModelDeploymentCard {
             }
             None => {
                 anyhow::bail!(
-                    "Blank ModelDeploymentCard does not have a tokenizer. Is this a mistral model? If so, the `--use-<framework>-tokenizer` flag in the engine command is required."
+                    "ModelDeploymentCard for '{}' does not have a tokenizer. \
+                     Provide a supported tokenizer file (tokenizer.json, tiktoken.model, \
+                     or *.tiktoken), use --use-<framework>-tokenizer to delegate \
+                     tokenization to the backend, or use a non-Rust chat processor \
+                     (e.g. --dyn-chat-processor vllm).",
+                    self.display_name
                 );
             }
         }
@@ -485,6 +536,66 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    /// Walk populated metadata `CheckedFile` slots in deterministic
+    /// order: model_info, tokenizer, prompt_formatter,
+    /// chat_template_file, gen_config.
+    pub fn iter_metadata_files(&self) -> Vec<&CheckedFile> {
+        let mut out: Vec<&CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_ref() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_ref() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_ref() {
+            out.push(pf_checked_file(p));
+        }
+        if let Some(c) = self.chat_template_file.as_ref() {
+            out.push(pf_checked_file(c));
+        }
+        if let Some(g) = self.gen_config.as_ref() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
+    }
+
+    /// Mutable variant of [`Self::iter_metadata_files`].
+    pub fn iter_metadata_files_mut(&mut self) -> Vec<&mut CheckedFile> {
+        let mut out: Vec<&mut CheckedFile> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_mut() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push(cf),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_mut() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push(cf)
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_mut() {
+            out.push(pf_checked_file_mut(p));
+        }
+        if let Some(c) = self.chat_template_file.as_mut() {
+            out.push(pf_checked_file_mut(c));
+        }
+        if let Some(g) = self.gen_config.as_mut() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
+            }
+        }
+        out
     }
 
     /// Download the files this card needs to work: config.json, tokenizer.json, etc.
@@ -548,10 +659,16 @@ impl ModelDeploymentCard {
 
         // We only "move" the chat template if it came form the repo. If we have a custom template
         // file we cannot download that from HF.
-        if let Some(PromptFormatterArtifact::HfChatTemplate {
-            file: src_file,
-            is_custom,
-        }) = self.chat_template_file.as_mut()
+        if let Some(
+            PromptFormatterArtifact::HfChatTemplateJinja {
+                file: src_file,
+                is_custom,
+            }
+            | PromptFormatterArtifact::HfChatTemplateJson {
+                file: src_file,
+                is_custom,
+            },
+        ) = self.chat_template_file.as_mut()
         {
             if *is_custom {
                 tracing::info!(
@@ -676,7 +793,7 @@ impl ModelDeploymentCard {
         let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
             (
                 Some(ModelInfoType::from_disk(local_path)?),
-                Some(TokenizerKind::from_disk(local_path)?),
+                TokenizerKind::from_disk(local_path)?,
                 GenerationConfig::from_disk(local_path).ok(),
                 PromptFormatterArtifact::from_disk(local_path)?,
             )
@@ -703,7 +820,7 @@ impl ModelDeploymentCard {
                 )
             })?;
 
-            Some(PromptFormatterArtifact::HfChatTemplate {
+            Some(PromptFormatterArtifact::HfChatTemplateJinja {
                 is_custom: custom_template_path.is_some(),
                 file: CheckedFile::from_disk(template_path)?,
             })
@@ -734,6 +851,7 @@ impl ModelDeploymentCard {
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,
             media_fetcher: None,
+            router_config: None,
             checksum: OnceLock::new(),
         })
     }
@@ -870,7 +988,7 @@ impl HFConfig {
         // 1. generation_config.json;
         // 2. config.json, or text_config field in config.json.
         // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
-        let final_eos_token_ids: Vec<TokenIdType> = {
+        let mut final_eos_token_ids: Vec<TokenIdType> = {
                 // Firstly check the generation_config.json
                 crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
@@ -927,10 +1045,78 @@ impl HFConfig {
                     "missing eos_token_id in config.json and generation_config.json, cannot load"
                 )
             })?;
+        // Also check tokenizer_config.json for the tokenizer's eos_token.
+        // Some models (e.g. Qwen3.5) have text_config.eos_token_id = <|endoftext|>
+        // but the tokenizer's eos_token is <|im_end|> — the token the model actually
+        // emits to end generation. Merge the tokenizer's EOS into the set so both
+        // are recognized as stop tokens.
+        let tokenizer_cfg_path = file_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("tokenizer_config.json");
+        if let Ok(tokenizer_eos_id) =
+            resolve_eos_token_id_from_tokenizer_config(&tokenizer_cfg_path)
+            && !final_eos_token_ids.contains(&tokenizer_eos_id)
+        {
+            final_eos_token_ids.push(tokenizer_eos_id);
+        }
+
         text_config.final_eos_token_ids = final_eos_token_ids;
 
         Ok(Arc::new(config))
     }
+}
+
+/// Resolve the tokenizer's `eos_token` to a token ID by reading `tokenizer_config.json`.
+///
+/// Reads the `eos_token` field (string) and looks it up in `added_tokens_decoder`
+/// to find the corresponding token ID. This handles models where the tokenizer's
+/// EOS token differs from `config.json`'s `eos_token_id`.
+fn resolve_eos_token_id_from_tokenizer_config(path: &Path) -> anyhow::Result<TokenIdType> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read tokenizer_config.json: {:?}", path))?;
+    let config: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse tokenizer_config.json: {:?}", path))?;
+
+    // Get eos_token — can be a plain string or a dict with a "content" field (older HF format)
+    let eos_token_str = match config.get("eos_token") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Object(obj)) => obj
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("eos_token is an object without 'content' field"))?,
+        _ => anyhow::bail!("eos_token not found or not a string in tokenizer_config.json"),
+    };
+
+    // Look up the token string in added_tokens_decoder to get its ID
+    let added_tokens = config
+        .get("added_tokens_decoder")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!("added_tokens_decoder not found in tokenizer_config.json")
+        })?;
+
+    for (id_str, token_info) in added_tokens {
+        let content = token_info
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if content == eos_token_str {
+            let token_id: TokenIdType = id_str.parse().with_context(|| {
+                format!(
+                    "Failed to parse token ID '{}' from added_tokens_decoder",
+                    id_str
+                )
+            })?;
+            return Ok(token_id);
+        }
+    }
+
+    anyhow::bail!(
+        "eos_token '{}' not found in added_tokens_decoder",
+        eos_token_str
+    )
 }
 
 impl ModelInfo for HFConfig {
@@ -996,40 +1182,72 @@ impl PromptFormatterArtifact {
     }
 
     pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
-        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
-            Ok(f) => Ok(Some(Self::HfChatTemplate {
+        // Try chat_template.jinja first (raw Jinja template)
+        let jinja_path = directory.join("chat_template.jinja");
+        if jinja_path.exists() {
+            let f = CheckedFile::from_disk(&jinja_path)
+                .with_context(|| format!("Failed to load {}", jinja_path.display()))?;
+            return Ok(Some(Self::HfChatTemplateJinja {
                 file: f,
                 is_custom: false,
-            })),
-            Err(_) => Ok(None),
+            }));
         }
+
+        // Try chat_template.json (JSON with "chat_template" key, e.g. Qwen3-Omni)
+        let json_path = directory.join("chat_template.json");
+        if json_path.exists() {
+            let f = CheckedFile::from_disk(&json_path)
+                .with_context(|| format!("Failed to load {}", json_path.display()))?;
+            return Ok(Some(Self::HfChatTemplateJson {
+                file: f,
+                is_custom: false,
+            }));
+        }
+
+        Ok(None)
     }
 }
 
 impl TokenizerKind {
-    pub fn from_disk(directory: &Path) -> Result<Self> {
+    /// Try to discover a tokenizer in the given directory.
+    ///
+    /// Returns `Ok(Some(..))` when a supported tokenizer is found,
+    /// `Ok(None)` when no tokenizer files are present (e.g. models that
+    /// ship only `vocab.json` + `merges.txt`), and `Err` for ambiguous
+    /// layouts or filesystem failures that should be treated as hard errors.
+    pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
+        // Helper: probe a single well-known file.  Returns Ok(None) when the
+        // file simply does not exist, Ok(Some(..)) on success, and Err for
+        // anything else (unreadable file, checksum failure, etc.).
+        fn probe(path: std::path::PathBuf) -> Result<Option<CheckedFile>> {
+            if !path.exists() {
+                return Ok(None);
+            }
+            Ok(Some(CheckedFile::from_disk(path)?))
+        }
+
         // 1. Try tokenizer.json (HuggingFace)
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tokenizer.json")) {
-            return Ok(Self::HfTokenizerJson(f));
+        if let Some(f) = probe(directory.join("tokenizer.json"))? {
+            return Ok(Some(Self::HfTokenizerJson(f)));
         }
 
         // 2. Try tiktoken.model
-        if let Ok(f) = CheckedFile::from_disk(directory.join("tiktoken.model")) {
-            return Ok(Self::TikTokenModel(f));
+        if let Some(f) = probe(directory.join("tiktoken.model"))? {
+            return Ok(Some(Self::TikTokenModel(f)));
         }
 
         // 3. Search for any *.tiktoken file
         let tiktoken_files: Vec<_> = std::fs::read_dir(directory)
+            .with_context(|| format!("Failed to read directory {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("Failed to iterate directory {}", directory.display()))?
             .into_iter()
-            .flatten()
-            .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "tiktoken"))
             .collect();
 
         if tiktoken_files.len() == 1 {
-            if let Ok(f) = CheckedFile::from_disk(tiktoken_files[0].path()) {
-                return Ok(Self::TikTokenModel(f));
-            }
+            let f = CheckedFile::from_disk(tiktoken_files[0].path())?;
+            return Ok(Some(Self::TikTokenModel(f)));
         } else if tiktoken_files.len() > 1 {
             let names: Vec<_> = tiktoken_files
                 .iter()
@@ -1042,10 +1260,13 @@ impl TokenizerKind {
             );
         }
 
-        anyhow::bail!(
-            "No tokenizer.json or tiktoken model file found in {}",
+        tracing::warn!(
+            "No supported tokenizer found in {} \
+             (expected tokenizer.json or a tiktoken file). \
+             Features that depend on the Rust tokenizer will not be available.",
             directory.display()
-        )
+        );
+        Ok(None)
     }
 }
 
@@ -1109,5 +1330,27 @@ mod tests {
         dynamo_runtime::logging::init();
         let path = "tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
         let _ = HFConfig::from_json_file(path).unwrap();
+    }
+
+    /// Qwen3.5 models have text_config.eos_token_id = 248044 (<|endoftext|>) but the
+    /// tokenizer's eos_token is <|im_end|> (248046). The model actually emits <|im_end|>
+    /// to end generation. Verify that both are included in the resolved EOS set.
+    #[test]
+    fn test_config_json_qwen35_eos_from_tokenizer() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-qwen3.5-0.8B/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        // Must include both: 248044 (<|endoftext|>) from text_config and
+        // 248046 (<|im_end|>) from tokenizer_config.json
+        assert!(
+            eos_token_id_set.contains(&248044),
+            "Should contain text_config eos_token_id (248044 <|endoftext|>)"
+        );
+        assert!(
+            eos_token_id_set.contains(&248046),
+            "Should contain tokenizer eos_token (248046 <|im_end|>)"
+        );
+        Ok(())
     }
 }

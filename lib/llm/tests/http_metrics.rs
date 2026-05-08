@@ -6,6 +6,7 @@ use async_stream::stream;
 use dynamo_llm::{
     http::service::{metrics::Endpoint, service_v2::HttpService},
     model_card::ModelDeploymentCard,
+    preprocessor::LLMMetricAnnotation,
     protocols::{
         Annotated,
         openai::chat_completions::{
@@ -50,10 +51,32 @@ impl
             // Simulate some processing time
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-            // Generate 5 response chunks
+            // Generate 5 response chunks with LLMMetricAnnotation so that
+            // output_sequence_tokens is properly recorded (the histogram only
+            // records when osl > 0, which requires the annotation to be present).
             for i in 0..5 {
                 let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
-                yield Annotated::from_data(output);
+                let mut annotated = Annotated::from_data(output);
+                let metrics = LLMMetricAnnotation {
+                    input_tokens: 5,
+                    output_tokens: (i + 1) as usize,
+                    chunk_tokens: 1,
+                    cached_tokens: None,
+                    prefill_worker_id: None,
+                    prefill_dp_rank: None,
+                    prefill_worker_type: None,
+                    decode_worker_id: None,
+                    decode_dp_rank: None,
+                    decode_worker_type: None,
+                    tokenize_latency: None,
+                    detokenize_total_latency: None,
+                    detokenize_count: None,
+                };
+                if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    annotated.event = ann.event;
+                    annotated.comment = ann.comment;
+                }
+                yield annotated;
             }
         };
 
@@ -78,6 +101,7 @@ async fn test_metrics_prefix_default() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 false,
+                "",
             );
         }
 
@@ -117,6 +141,7 @@ async fn test_metrics_prefix_custom() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -151,6 +176,7 @@ async fn test_metrics_prefix_sanitized() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -218,16 +244,16 @@ async fn test_metrics_with_mock_model() {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, mock model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model("mockmodel")
             .messages(vec![message])
             .max_tokens(50u32)
@@ -339,7 +365,9 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
-            0, // migration_limit
+            0,    // migration_limit
+            None, // migration_max_seq_len
+            None,
             None,
             service.state().metrics_clone(),
         );
@@ -355,7 +383,7 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher
+            Arc::new(model_watcher)
                 .watch(discovery_stream, NamespaceFilter::Global)
                 .await;
         });
@@ -419,16 +447,16 @@ mod integration_tests {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, MDC model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model(model.service_name())
             .messages(vec![message])
             .max_tokens(50u32)

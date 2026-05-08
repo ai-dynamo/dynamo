@@ -6,6 +6,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
@@ -26,7 +27,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM-Omni Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+print_launch_banner --no-curl "Launching vLLM-Omni Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_curl_footer <<CURL
+curl -s http://localhost:${HTTP_PORT}/v1/videos \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "model": "${MODEL}",
+    "prompt": "Dog running on a beach",
+    "size": "832x480",
+    "response_format": "url",
+    "nvext": {
+      "num_inference_steps": 20,
+      "num_frames": 30
+    }
+  }' | jq
+CURL
 
 
 python -m dynamo.frontend &
@@ -40,6 +56,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --model "$MODEL" \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
+    $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

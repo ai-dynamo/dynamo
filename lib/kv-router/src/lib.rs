@@ -6,8 +6,12 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+mod active_set;
+pub(crate) mod cleanup;
+
 pub mod indexer;
 pub mod protocols;
+pub mod recovery;
 pub mod scheduling;
 pub mod sequences;
 pub mod zmq_wire;
@@ -28,6 +32,9 @@ pub use sequences::single as sequence;
 #[cfg(feature = "standalone-indexer")]
 pub mod standalone_indexer;
 
+#[cfg(feature = "standalone-indexer")]
+pub mod standalone_shared_cache;
+
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
 
@@ -37,18 +44,27 @@ pub use self::multi_worker_sequence::{
     SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
+pub use self::sequences::PrefillTokenDeltas;
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
-pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
+pub use config::{
+    KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
+    SharedCacheType,
+};
+pub use indexer::{
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
+    ThreadPoolIndexer,
+};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
     KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, RouterEventSink,
-    WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
+    SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
+pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
 pub use selector::{DefaultWorkerSelector, WorkerSelector};

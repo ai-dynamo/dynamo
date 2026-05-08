@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use crate::common::protocols::OutputSignal;
+use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::SglangKvManager;
 
 use super::config::{SglangConfig, floor_to_block};
@@ -56,9 +57,12 @@ pub(super) fn cache_materialized_prefix(
         return;
     }
 
-    let Some(last_node) = req.last_node else {
-        return;
-    };
+    let last_node = req.last_node.unwrap_or_else(|| {
+        panic!(
+            "cache_materialized_prefix: request {} has aligned_tokens={aligned_tokens} but last_node is None",
+            req.uuid
+        )
+    });
 
     let sequence = req.sequence_prefix(aligned_tokens);
     let new_last =
@@ -139,10 +143,13 @@ pub(super) fn simulate_decode_step(
         .map(SglangRequest::current_sequence_len)
         .sum();
     let avg_context = total_context / running.len();
-    let decode_time =
-        config
-            .perf_model
-            .predict_decode_time(running.len(), total_context, avg_context);
+    let active_kv_tokens = total_context.min(config.total_kv_tokens);
+    let decode_time = config.perf_model.predict_decode_time(
+        running.len(),
+        active_kv_tokens,
+        avg_context,
+        config.total_kv_tokens,
+    );
     let unscaled_time = Duration::from_secs_f64(decode_time / 1000.0);
     let effective_ratio = config.speedup_ratio * config.decode_speedup_ratio;
     let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
@@ -179,6 +186,13 @@ pub(super) fn simulate_decode_step(
         output_signals.push(OutputSignal {
             uuid: req.uuid,
             completed: is_complete,
+            handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                config.worker_type,
+                is_complete,
+                req.prompt_len(),
+                config.kv_transfer_bandwidth,
+                config.kv_bytes_per_token,
+            ),
         });
 
         if is_complete {

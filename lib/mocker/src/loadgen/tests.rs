@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -83,6 +85,87 @@ fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
 }
 
 #[test]
+fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
+    let file = write_trace(&[serde_json::json!({
+        "num_turns": 2,
+        "input_prompt_length": 100,
+        "assistant_response_length": [10, 20],
+        "tool_call_output_length": [30, 40],
+        "tool_call_latency": [0.5, 1.25],
+        "final_assistant_response_length": 50,
+    })]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 64, 0.0, 0).unwrap();
+    assert_eq!(trace.sessions.len(), 1);
+    let session = &trace.sessions[0];
+    assert_eq!(session.first_arrival_timestamp_ms, None);
+    assert_eq!(session.turns.len(), 3);
+    assert_eq!(session.turns[0].input_length, 100);
+    assert_eq!(session.turns[0].max_output_tokens, 10);
+    assert_eq!(session.turns[0].delay_after_previous_ms, 0.0);
+    assert_eq!(session.turns[1].input_length, 140);
+    assert_eq!(session.turns[1].max_output_tokens, 20);
+    assert_eq!(session.turns[1].delay_after_previous_ms, 500.0);
+    assert_eq!(session.turns[2].input_length, 200);
+    assert_eq!(session.turns[2].max_output_tokens, 50);
+    assert_eq!(session.turns[2].delay_after_previous_ms, 1250.0);
+}
+
+#[test]
+fn test_from_applied_compute_agentic_prefix_extends_hashes_across_turns() {
+    let file = write_trace(&[serde_json::json!({
+        "num_turns": 2,
+        "input_prompt_length": 600,
+        "assistant_response_length": [40, 50],
+        "tool_call_output_length": [40, 50],
+        "tool_call_latency": [0.1, 0.2],
+        "final_assistant_response_length": 60,
+    })]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.0, 0).unwrap();
+    let turns = &trace.sessions[0].turns;
+    assert_eq!(turns[0].hash_ids, vec![1, 2, 3]);
+    assert_eq!(turns[1].hash_ids, vec![1, 2, 3]);
+    assert_eq!(turns[2].hash_ids, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_from_applied_compute_agentic_can_share_initial_prefix_blocks_across_sessions() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "num_turns": 1,
+            "input_prompt_length": 600,
+            "assistant_response_length": [10],
+            "tool_call_output_length": [10],
+            "tool_call_latency": [0.1],
+            "final_assistant_response_length": 10,
+        }),
+        serde_json::json!({
+            "num_turns": 1,
+            "input_prompt_length": 600,
+            "assistant_response_length": [20],
+            "tool_call_output_length": [20],
+            "tool_call_latency": [0.2],
+            "final_assistant_response_length": 20,
+        }),
+    ]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.5, 1).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].hash_ids[0],
+        trace.sessions[1].turns[0].hash_ids[0]
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].hash_ids[1],
+        trace.sessions[1].turns[0].hash_ids[1]
+    );
+    assert_ne!(
+        trace.sessions[0].turns[0].hash_ids[2],
+        trace.sessions[1].turns[0].hash_ids[2]
+    );
+}
+
+#[test]
 fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
     let turn = TurnTrace {
         input_length: 6,
@@ -110,8 +193,9 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
     let request = turn
         .to_direct_request(4, Uuid::from_u128(1), Some(5.0))
         .unwrap();
-    let replay_hashes = turn.to_replay_hashes(4).unwrap();
-    let expected_local = compute_block_hash_for_seq(&request.tokens, 4, None, None);
+    let replay_hashes = turn.to_replay_hashes(4, 4).unwrap();
+    let expected_local =
+        compute_block_hash_for_seq(&request.tokens, 4, BlockHashOptions::default());
 
     assert_eq!(replay_hashes.local_block_hashes, expected_local);
     assert_eq!(
@@ -119,6 +203,30 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
         compute_seq_hash_for_block(&expected_local)
     );
     assert_eq!(replay_hashes.local_block_hashes.len(), 1);
+}
+
+#[test]
+fn test_turn_replay_hashes_support_distinct_trace_and_engine_block_sizes() {
+    let turn = TurnTrace {
+        input_length: 6,
+        max_output_tokens: 3,
+        hash_ids: vec![1, 2],
+        delay_after_previous_ms: 0.0,
+    };
+
+    let request = turn
+        .to_direct_request(4, Uuid::from_u128(2), Some(5.0))
+        .unwrap();
+    let replay_hashes = turn.to_replay_hashes(4, 2).unwrap();
+    let expected_local =
+        compute_block_hash_for_seq(&request.tokens, 2, BlockHashOptions::default());
+
+    assert_eq!(replay_hashes.local_block_hashes, expected_local);
+    assert_eq!(
+        replay_hashes.sequence_hashes,
+        compute_seq_hash_for_block(&expected_local)
+    );
+    assert_eq!(replay_hashes.local_block_hashes.len(), 3);
 }
 
 #[test]
@@ -403,7 +511,7 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
         first.replay_hashes.as_ref(),
         Some(
             &expected.sessions[0].turns[0]
-                .to_replay_hashes(expected.block_size)
+                .to_replay_hashes(expected.block_size, expected.block_size)
                 .unwrap()
         )
     );
@@ -440,7 +548,7 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
         second.replay_hashes.as_ref(),
         Some(
             &expected.sessions[1].turns[0]
-                .to_replay_hashes(expected.block_size)
+                .to_replay_hashes(expected.block_size, expected.block_size)
                 .unwrap()
         )
     );
@@ -467,7 +575,7 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
         third.replay_hashes.as_ref(),
         Some(
             &expected.sessions[0].turns[1]
-                .to_replay_hashes(expected.block_size)
+                .to_replay_hashes(expected.block_size, expected.block_size)
                 .unwrap()
         )
     );
@@ -483,5 +591,41 @@ fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
     assert_eq!(
         third.request.arrival_timestamp_ms,
         expected_third_request.arrival_timestamp_ms
+    );
+}
+
+#[test]
+fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "session-a".to_string(),
+            first_arrival_timestamp_ms: Some(10.0),
+            turns: vec![TurnTrace {
+                input_length: 6,
+                max_output_tokens: 2,
+                hash_ids: vec![1, 2],
+                delay_after_previous_ms: 0.0,
+            }],
+        }],
+    };
+    let mut driver = trace.into_trace_driver_with_block_size(2).unwrap();
+
+    let ready = driver.pop_ready(10.0, usize::MAX);
+    assert_eq!(ready.len(), 1);
+    let ready = &ready[0];
+    assert_eq!(ready.request.tokens, vec![1, 1, 1, 1, 2, 2]);
+    assert_eq!(
+        ready.replay_hashes.as_ref(),
+        Some(
+            &TurnTrace {
+                input_length: 6,
+                max_output_tokens: 2,
+                hash_ids: vec![1, 2],
+                delay_after_previous_ms: 0.0,
+            }
+            .to_replay_hashes(4, 2)
+            .unwrap()
+        )
     );
 }

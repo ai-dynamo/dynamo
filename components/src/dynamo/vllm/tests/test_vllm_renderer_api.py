@@ -23,7 +23,7 @@ _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
 _engine_protocol = importlib.import_module("vllm.entrypoints.openai.engine.protocol")
-_inputs_data = importlib.import_module("vllm.inputs.data")
+_inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
 _tool_parsers = importlib.import_module("vllm.tool_parsers")
@@ -376,6 +376,7 @@ class TestVllmRendererApi:
             "resumable",
             "external_req_id",
             "reasoning_ended",
+            "reasoning_parser_kwargs",
         )
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
@@ -400,8 +401,7 @@ class TestVllmRendererApi:
             "events",
             "kv_transfer_params",
             "trace_headers",
-            "num_cached_tokens",
-            "num_external_computed_tokens",
+            "prefill_stats",
             "routed_experts",
             "num_nans_in_logits",
         )

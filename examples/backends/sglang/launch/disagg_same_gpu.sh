@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is estimated from model parameters below. Override individual
-# knobs (CONTEXT_LENGTH, MAX_RUNNING_REQUESTS) via env vars, or set
-# _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE to bypass the calculation entirely.
+# Per-worker VRAM is controlled via build_sglang_gpu_mem_args (see gpu_utils.sh).
+# Override individual knobs (CONTEXT_LENGTH, MAX_RUNNING_REQUESTS) via env vars.
 #
 # Measured reference (Qwen/Qwen3-0.6B, --context-length 4096, RTX 6000 Ada 48 GiB):
 #   estimate (from gpu_utils.sh) : ~5.7 GiB per worker (w=1.1 + kv=0.9 + oh=3.7)
@@ -25,20 +24,31 @@ MODEL="Qwen/Qwen3-0.6B"
 # ---- Tunable (override via env vars) ----
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
+MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-25000}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" --max-model-len "$CONTEXT_LENGTH" --max-num-seqs "$MAX_RUNNING_REQUESTS" --workers-per-gpu 2)
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+if [[ -z "$GPU_MEM_ARGS" ]]; then
+    GPU_MEM_ARGS="--max-total-tokens $MAX_TOTAL_TOKENS"
+fi
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated (same GPU)" "$MODEL" "$HTTP_PORT" \
     "Workers:     2 (prefill + decode, fraction is per worker)"
 
-# run ingress with KV router mode for disaggregated setup
+# run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend --router-mode kv &
+python3 -m dynamo.frontend &
 
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # run prefill worker with metrics on port 8081
+CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
@@ -47,10 +57,10 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
-  --mem-fraction-static "${GPU_MEM_FRACTION}" \
+  $GPU_MEM_ARGS \
   --context-length "$CONTEXT_LENGTH" \
   --chunked-prefill-size "$CONTEXT_LENGTH" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \
@@ -59,16 +69,15 @@ python3 -m dynamo.sglang \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics &
 
-# Wait for prefill worker to initialize before starting decode worker
-# This prevents both workers from competing for GPU memory simultaneously, which can cause OOM.
-# The prefill worker needs time to:
-# 1. Load model weights and allocate its memory fraction
-# 2. Initialize KV cache with --delete-ckpt-after-loading to free checkpoint memory
-# 3. Register with NATS service discovery so decode worker can find it
-echo "Waiting for prefill worker to initialize..."
-sleep 5
+# Wait for prefill worker to initialize before starting decode worker.
+# Both workers share one GPU with --delete-ckpt-after-loading; without this
+# wait they compete for GPU memory during model loading and the scheduler OOMs.
+# || true: don't let set -e kill the script on timeout (wait_for_ready returns 1).
+PREFILL_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
+wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 
 # run decode worker with metrics on port 8082
+CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
@@ -77,10 +86,10 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
-  --mem-fraction-static "${GPU_MEM_FRACTION}" \
+  $GPU_MEM_ARGS \
   --context-length "$CONTEXT_LENGTH" \
   --chunked-prefill-size "$CONTEXT_LENGTH" \
   --max-prefill-tokens "$CONTEXT_LENGTH" \

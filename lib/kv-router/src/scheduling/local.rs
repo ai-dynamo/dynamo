@@ -5,20 +5,24 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use rustc_hash::{FxHashMap, FxHashSet};
+use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::policy::{RouterSchedulingPolicy, SchedulingPolicy};
+use super::prefill_load::PrefillLoadEstimator;
 use super::queue::SchedulerQueue;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
-use crate::protocols::{OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use super::types::{
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
+    ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
+    SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
-
-const RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct LocalScheduler<P, C, S = RouterSchedulingPolicy, Sel = DefaultWorkerSelector>
 where
@@ -27,9 +31,10 @@ where
     S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
 {
-    request_tx: mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, S, Sel>>,
+    queue_updates: watch::Sender<()>,
+    track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
 
@@ -40,6 +45,18 @@ where
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + Sync + 'static,
 {
+    fn worker_dp_range(workers: &HashMap<WorkerId, C>) -> HashMap<WorkerId, (u32, u32)> {
+        workers
+            .iter()
+            .map(|(&id, cfg)| {
+                (
+                    id,
+                    (cfg.data_parallel_start_rank(), cfg.data_parallel_size()),
+                )
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
@@ -48,6 +65,9 @@ where
         block_size: u32,
         selector: Sel,
         policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
@@ -79,15 +99,7 @@ where
                         continue;
                     }
 
-                    let dp_range: HashMap<WorkerId, (u32, u32)> = current_workers
-                        .iter()
-                        .map(|(&id, cfg)| {
-                            (
-                                id,
-                                (cfg.data_parallel_start_rank(), cfg.data_parallel_size()),
-                            )
-                        })
-                        .collect();
+                    let dp_range = Self::worker_dp_range(&current_workers);
                     slots_monitor.update_workers(&dp_range);
                     last_workers = current_workers;
                 }
@@ -101,40 +113,58 @@ where
             block_size,
             selector,
             policy,
+            prefill_load_estimator,
         ));
-        let (request_tx, request_rx) = mpsc::channel::<SchedulingRequest>(1024);
-        let queue_clone = Arc::clone(&queue);
+        let (queue_updates, _) = watch::channel(());
+        let queue_remote_updates = Arc::clone(&queue);
+        let queue_periodic_updates = Arc::clone(&queue);
+        let mut remote_state_updates = slots.subscribe_remote_state_changes();
+        let remote_update_cancel_token = cancellation_token.clone();
+        let queue_updates_remote = queue_updates.clone();
 
         tokio::spawn(async move {
-            let mut request_rx = request_rx;
-            let mut recheck_interval = tokio::time::interval(RECHECK_INTERVAL);
-            tracing::trace!("LocalScheduler background task started");
+            tracing::trace!("LocalScheduler remote state listener started");
+
+            loop {
+                tokio::select! {
+                    _ = remote_update_cancel_token.cancelled() => {
+                        tracing::trace!("LocalScheduler remote state listener shutting down");
+                        break;
+                    }
+                    result = remote_state_updates.changed() => {
+                        if result.is_err() {
+                            tracing::trace!("LocalScheduler remote state listener shutting down");
+                            break;
+                        }
+                        queue_remote_updates.update().await;
+                        let _ = queue_updates_remote.send(());
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            let mut recheck_interval = tokio::time::interval(recheck_interval);
+            tracing::trace!("LocalScheduler periodic queue update task started");
 
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
-                        tracing::trace!("LocalScheduler background task shutting down");
+                        tracing::trace!("LocalScheduler periodic queue update task shutting down");
                         break;
                     }
-                    request = request_rx.recv() => {
-                        let Some(request) = request else {
-                            tracing::warn!("LocalScheduler request channel closed");
-                            break;
-                        };
-                        tracing::trace!("received request to be scheduled");
-                        queue_clone.enqueue(request).await;
-                    }
                     _ = recheck_interval.tick() => {
-                        queue_clone.update().await;
+                        queue_periodic_updates.update().await;
                     }
                 }
             }
         });
 
         Self {
-            request_tx,
             slots,
             queue,
+            queue_updates,
+            track_prefill_tokens_default,
             worker_type,
         }
     }
@@ -145,35 +175,44 @@ where
         maybe_request_id: Option<String>,
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
-        overlaps: OverlapScores,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let track_prefill_tokens = router_config_override
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.track_prefill_tokens_default);
         let request = SchedulingRequest {
             maybe_request_id,
             token_seq,
             isl_tokens,
-            overlaps,
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            tier_overlap_blocks,
+            effective_overlap_blocks,
+            effective_cached_tokens,
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens,
             router_config_override: router_config_override.cloned(),
             update_states,
             lora_name,
             priority_jump,
             expected_output_tokens,
+            pinned_worker,
             allowed_worker_ids,
+            shared_cache_hits,
             resp_tx: Some(resp_tx),
         };
 
-        self.request_tx
-            .send(request)
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        self.queue.enqueue(request).await;
 
         resp_rx
             .await
@@ -185,19 +224,18 @@ where
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
-        self.slots.add_request(req).await
+        self.slots.add_request(req, Instant::now())
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots
-            .mark_prefill_completed(&request_id.to_string())
-            .await?;
+            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
         self.queue.update().await;
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string()).await?;
+        self.slots.free(&request_id.to_string(), Instant::now())?;
         self.queue.update().await;
         Ok(())
     }
@@ -206,8 +244,16 @@ where
         self.queue.pending_count()
     }
 
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.queue.pending_isl_tokens()
+    }
+
     pub fn worker_type(&self) -> &'static str {
         self.worker_type
+    }
+
+    pub fn subscribe_queue_updates(&self) -> watch::Receiver<()> {
+        self.queue_updates.subscribe()
     }
 
     pub fn add_output_block(
@@ -223,13 +269,34 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        overlaps: OverlapScores,
+        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
-        let (decode_blocks, prefill_tokens) =
-            self.slots
-                .potential_blocks_and_tokens(token_seq.as_deref(), isl_tokens, overlaps);
+        let decay_now = Instant::now();
+        let prefill_token_deltas = if track_prefill_tokens {
+            let by_worker = effective_cached_tokens
+                .iter()
+                .map(|(worker, cached_tokens)| {
+                    let delta = isl_tokens.checked_sub(*cached_tokens).unwrap_or_else(|| {
+                        tracing::error!(
+                            "prefill_tokens < 0 with ISL {isl_tokens} < cached_tokens {cached_tokens}, returning 0"
+                        );
+                        0
+                    });
+                    (*worker, delta)
+                })
+                .collect();
+            PrefillTokenDeltas::new(isl_tokens, by_worker)
+        } else {
+            PrefillTokenDeltas::none()
+        };
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            token_seq.as_deref(),
+            &prefill_token_deltas,
+            decay_now,
+        );
 
-        let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
+        let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         workers.extend(decode_blocks.keys().copied());
         workers.extend(prefill_tokens.keys().copied());
 
@@ -260,19 +327,47 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
 
     use super::*;
-    use crate::protocols::OverlapScores;
+    use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use crate::scheduling::PrefillLoadEstimator;
     use crate::scheduling::policy::FcfsPolicy;
     use crate::scheduling::selector::DefaultWorkerSelector;
+    use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+
+    struct TestSequenceSubscriber {
+        rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
+    }
+
+    impl SequenceSubscriber for TestSequenceSubscriber {
+        async fn next_event(&mut self) -> Option<anyhow::Result<ActiveSequenceEvent>> {
+            self.rx.recv().await.map(Ok)
+        }
+    }
+
+    struct FixedPrefillLoadEstimator {
+        duration: Duration,
+    }
+
+    impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
+        fn predict_prefill_duration(
+            &self,
+            _batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<Duration> {
+            Ok(self.duration)
+        }
+    }
 
     #[allow(clippy::type_complexity)]
     fn make_scheduler(
         workers: HashMap<WorkerId, SimpleWorkerConfig>,
         threshold_frac: Option<f64>,
         monitor_worker_configs: bool,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
@@ -300,11 +395,39 @@ mod tests {
             64,
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,
+            prefill_load_estimator,
+            Duration::from_secs(60),
+            true,
             cancel_token.clone(),
             "test",
             monitor_worker_configs,
         ));
         (scheduler, slots, cfg_tx, cancel_token)
+    }
+
+    fn start_replica_sync(
+        slots: &Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        cancel_token: &CancellationToken,
+    ) -> mpsc::UnboundedSender<ActiveSequenceEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        slots.start_replica_sync(TestSequenceSubscriber { rx }, cancel_token.clone());
+        tx
+    }
+
+    async fn wait_for_pending_count(
+        scheduler: &Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy>>,
+        expected: usize,
+    ) {
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if scheduler.pending_count() == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -317,18 +440,22 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
         let response = scheduler
             .schedule(
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                None,
+                None,
                 None,
                 None,
             )
@@ -345,6 +472,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_schedule_override_can_disable_prefill_tracking() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+
+        scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                Some(&crate::config::RouterConfigOverride {
+                    track_prefill_tokens: Some(false),
+                    ..Default::default()
+                }),
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            slots
+                .active_tokens(Instant::now())
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(0)
+        );
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_schedule_uses_weighted_cached_tokens_for_active_tracking() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        let response = scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks::default(),
+                HashMap::from([(worker, 0.75)]),
+                HashMap::from([(worker, 48)]),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.best_worker, worker);
+        assert_eq!(response.cached_tokens, 48);
+        assert_eq!(response.effective_overlap_blocks, 0.75);
+        assert_eq!(
+            slots.active_tokens(Instant::now()).get(&worker).copied(),
+            Some(16),
+            "weighted cached tokens should reduce tracked prefill load",
+        );
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn test_mark_prefill_completed_drains_pending_queue() {
         let mut workers = HashMap::new();
         workers.insert(
@@ -354,18 +572,23 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, Some(0.5), true);
+        let (scheduler, _slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.5), true, None);
 
         scheduler
             .schedule(
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
                 0.0,
+                None,
+                None,
                 None,
                 None,
             )
@@ -380,11 +603,15 @@ mod tests {
                         Some("req-2".to_string()),
                         64,
                         Some(vec![5, 6, 7, 8]),
-                        OverlapScores::default(),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
                         None,
                         true,
                         None,
                         0.0,
+                        None,
+                        None,
                         None,
                         None,
                     )
@@ -392,11 +619,251 @@ mod tests {
             })
         };
 
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(scheduler.pending_count(), 1);
+        wait_for_pending_count(&scheduler, 1).await;
 
         scheduler.mark_prefill_completed("req-1").await.unwrap();
         queued.await.unwrap().unwrap();
+        assert_eq!(scheduler.pending_count(), 0);
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_remote_mark_prefill_completed_drains_pending_queue() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.5), true, None);
+        let event_tx = start_replica_sync(&slots, &cancel_token);
+
+        scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let queued = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .schedule(
+                        Some("req-2".to_string()),
+                        64,
+                        Some(vec![5, 6, 7, 8]),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
+                        None,
+                        true,
+                        None,
+                        0.0,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+
+        wait_for_pending_count(&scheduler, 1).await;
+
+        event_tx
+            .send(ActiveSequenceEvent {
+                request_id: "req-1".to_string(),
+                worker: WorkerWithDpRank::new(0, 0),
+                data: ActiveSequenceEventData::MarkPrefillCompleted,
+                router_id: 1,
+                lora_name: None,
+            })
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(250), async {
+            queued.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(scheduler.pending_count(), 0);
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_remote_queue_update_notification_fires_after_drain() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.5), true, None);
+        let event_tx = start_replica_sync(&slots, &cancel_token);
+        let mut queue_updates = scheduler.subscribe_queue_updates();
+
+        scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let queued = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .schedule(
+                        Some("req-2".to_string()),
+                        64,
+                        Some(vec![5, 6, 7, 8]),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
+                        None,
+                        true,
+                        None,
+                        0.0,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+
+        wait_for_pending_count(&scheduler, 1).await;
+
+        event_tx
+            .send(ActiveSequenceEvent {
+                request_id: "req-1".to_string(),
+                worker: WorkerWithDpRank::new(0, 0),
+                data: ActiveSequenceEventData::Free,
+                router_id: 1,
+                lora_name: None,
+            })
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(250), queue_updates.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(scheduler.pending_count(), 0);
+        queued.await.unwrap().unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_remote_free_drains_pending_queue() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.5), true, None);
+        let event_tx = start_replica_sync(&slots, &cancel_token);
+
+        scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let queued = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .schedule(
+                        Some("req-2".to_string()),
+                        64,
+                        Some(vec![5, 6, 7, 8]),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
+                        None,
+                        true,
+                        None,
+                        0.0,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+
+        wait_for_pending_count(&scheduler, 1).await;
+
+        event_tx
+            .send(ActiveSequenceEvent {
+                request_id: "req-1".to_string(),
+                worker: WorkerWithDpRank::new(0, 0),
+                data: ActiveSequenceEventData::Free,
+                router_id: 1,
+                lora_name: None,
+            })
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(250), async {
+            queued.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(scheduler.pending_count(), 0);
 
         cancel_token.cancel();
@@ -412,18 +879,22 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
         scheduler
             .schedule(
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                None,
+                None,
                 None,
                 None,
             )
@@ -457,12 +928,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true);
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let token_seq = vec![11, 22, 33, 44];
-        let overlaps = OverlapScores::default();
 
+        let prefill_token_deltas = PrefillTokenDeltas::uniform(128);
         let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), 128, overlaps.clone());
+            slots.potential_blocks_and_tokens(Some(&token_seq), &prefill_token_deltas);
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
@@ -474,7 +945,7 @@ mod tests {
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
-        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, overlaps);
+        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, HashMap::new(), true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -494,13 +965,58 @@ mod tests {
         cancel_token.cancel();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_get_potential_loads_uses_decayed_prefill_tokens() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(256),
+                ..Default::default()
+            },
+        );
+        let estimator: Arc<dyn PrefillLoadEstimator> = Arc::new(FixedPrefillLoadEstimator {
+            duration: Duration::from_secs(10),
+        });
+        let (scheduler, _slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, None, true, Some(estimator));
+
+        scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                100,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+
+        let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), true);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].potential_prefill_tokens, 40);
+
+        cancel_token.cancel();
+    }
+
     #[tokio::test]
     async fn test_register_workers_uses_default_dp_fallback() {
         let (scheduler, _slots, _cfg_tx, cancel_token) =
-            make_scheduler(HashMap::new(), None, false);
+            make_scheduler(HashMap::new(), None, false, None);
 
         scheduler.register_workers(&HashSet::from([42]));
-        let loads = scheduler.get_potential_loads(None, 64, OverlapScores::default());
+        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
 
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].worker_id, 42);
@@ -513,11 +1029,11 @@ mod tests {
     async fn test_worker_watch_updates_slot_ranges() {
         let mut workers = HashMap::new();
         workers.insert(0, SimpleWorkerConfig::default());
-        let (scheduler, _slots, cfg_tx, cancel_token) = make_scheduler(workers, None, true);
+        let (scheduler, _slots, cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, OverlapScores::default())
+                .get_potential_loads(None, 64, HashMap::new(), true,)
                 .len(),
             1
         );
@@ -536,7 +1052,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, OverlapScores::default())
+                    .get_potential_loads(None, 64, HashMap::new(), true)
                     .len()
                     == 3
                 {
@@ -547,6 +1063,45 @@ mod tests {
         })
         .await
         .unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_get_potential_loads_can_ignore_prefill_tokens() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(256),
+                ..Default::default()
+            },
+        );
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+
+        scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                64,
+                Some(vec![11, 22]),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), false);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].potential_prefill_tokens, 64);
 
         cancel_token.cancel();
     }

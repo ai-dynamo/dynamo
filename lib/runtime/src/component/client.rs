@@ -1,33 +1,132 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-use std::{collections::HashMap, time::Duration};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use futures::StreamExt;
-use tokio::net::unix::pipe::Receiver;
 
+use crate::component::{Endpoint, Instance};
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
-use crate::{
-    component::{Endpoint, Instance},
-    pipeline::async_trait,
-    pipeline::{
-        AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
-        SingleIn,
-    },
-    traits::DistributedRuntimeProvider,
-    transports::etcd::Client as EtcdClient,
-};
+use crate::traits::DistributedRuntimeProvider;
+
+/// Shared occupancy state for routing modes that track per-worker in-flight requests.
+#[derive(Debug, Default)]
+pub(crate) struct RoutingOccupancyState {
+    counts: DashMap<u64, AtomicU64>,
+    exact_selection_lock: tokio::sync::Mutex<()>,
+}
+
+impl RoutingOccupancyState {
+    pub(crate) fn increment(&self, instance_id: u64) {
+        self.counts
+            .entry(instance_id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
+        let _guard = self.exact_selection_lock.lock().await;
+        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+        self.increment(id);
+        Some(id)
+    }
+
+    pub(crate) fn decrement(&self, instance_id: u64) {
+        if let Some(count) = self.counts.get(&instance_id) {
+            let _ = count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1))
+            });
+        }
+    }
+
+    pub(crate) fn load(&self, instance_id: u64) -> u64 {
+        self.counts
+            .get(&instance_id)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn retain(&self, instance_ids: &[u64]) {
+        let live: HashSet<u64> = instance_ids.iter().copied().collect();
+        self.counts.retain(|id, _| live.contains(id));
+    }
+}
+
+/// Get or create the shared routing occupancy state for an endpoint.
+pub(crate) async fn get_or_create_routing_occupancy_state(
+    endpoint: &Endpoint,
+) -> Arc<RoutingOccupancyState> {
+    let drt = endpoint.drt();
+    let registry = drt.routing_occupancy_states();
+    let mut registry = registry.lock().await;
+
+    if let Some(weak) = registry.get(endpoint) {
+        if let Some(state) = weak.upgrade() {
+            return state;
+        } else {
+            registry.remove(endpoint);
+        }
+    }
+
+    let state = Arc::new(RoutingOccupancyState::default());
+    registry.insert(endpoint.clone(), Arc::downgrade(&state));
+    state
+}
 
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Shared endpoint discovery state for a single endpoint query.
+///
+/// This wraps both the coalesced instance snapshot used for routing decisions
+/// and a raw, lossless per-subscriber event feed used by the response-stream
+/// cancellation watcher. Both outputs are driven by a single underlying
+/// discovery `list_and_watch` task so clients do not multiply control-plane
+/// watches.
+#[derive(Debug)]
+pub(crate) struct EndpointDiscoverySource {
+    instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
+    event_subscribers: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>>>,
+}
+
+impl EndpointDiscoverySource {
+    fn new(instance_source: tokio::sync::watch::Receiver<Vec<Instance>>) -> Self {
+        Self {
+            instance_source,
+            event_subscribers: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn instance_receiver(&self) -> tokio::sync::watch::Receiver<Vec<Instance>> {
+        self.instance_source.clone()
+    }
+
+    fn subscribe_events(&self) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.event_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    fn broadcast_event(&self, event: &DiscoveryEvent) {
+        let subscribers = &mut *self.event_subscribers.lock().unwrap();
+        subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
+    // Shared endpoint discovery source backing both snapshots and raw events.
+    endpoint_discovery_source: Arc<EndpointDiscoverySource>,
     // These are the remotes I know about from watching key-value store
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
@@ -60,7 +159,9 @@ impl Client {
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
             endpoint.id()
         );
-        let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
+        let endpoint_discovery_source =
+            Self::get_or_create_dynamic_discovery_source(&endpoint).await?;
+        let instance_source = Arc::new(endpoint_discovery_source.instance_receiver());
 
         // Seed instance_avail from the current instance_source snapshot so that
         // callers who proceed immediately after wait_for_instances (which reads
@@ -74,6 +175,7 @@ impl Client {
         let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
+            endpoint_discovery_source,
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
@@ -105,6 +207,16 @@ impl Client {
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
+    }
+
+    /// Subscribe to raw discovery events for this endpoint.
+    ///
+    /// Unlike `instance_source`, this feed does not coalesce remove→add pairs,
+    /// so consumers can react to every removal event exactly once.
+    pub(crate) fn subscribe_discovery_events(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
+        self.endpoint_discovery_source.subscribe_events()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -181,6 +293,15 @@ impl Client {
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
 
+                // Clean up stale occupancy counters for instances that no longer exist.
+                let registry = client.endpoint.drt().routing_occupancy_states();
+                if let Ok(registry) = registry.try_lock()
+                    && let Some(weak) = registry.get(&client.endpoint)
+                    && let Some(state) = weak.upgrade()
+                {
+                    state.retain(&instance_ids);
+                }
+
                 // Send update to watch channel subscribers
                 let _ = client.instance_avail_tx.send(instance_ids);
 
@@ -203,18 +324,25 @@ impl Client {
         });
     }
 
-    async fn get_or_create_dynamic_instance_source(
-        endpoint: &Endpoint,
-    ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
-        let drt = endpoint.drt();
-        let instance_sources = drt.instance_sources();
-        let mut instance_sources = instance_sources.lock().await;
+    /// Override `instance_avail` for testing. This allows creating an inconsistency
+    /// between `instance_ids_avail()` and `instances()` to simulate race conditions.
+    #[cfg(test)]
+    pub(crate) fn override_instance_avail(&self, ids: Vec<u64>) {
+        self.instance_avail.store(Arc::new(ids));
+    }
 
-        if let Some(instance_source) = instance_sources.get(endpoint) {
-            if let Some(instance_source) = instance_source.upgrade() {
-                return Ok(instance_source);
+    async fn get_or_create_dynamic_discovery_source(
+        endpoint: &Endpoint,
+    ) -> Result<Arc<EndpointDiscoverySource>> {
+        let drt = endpoint.drt();
+        let sources = drt.endpoint_discovery_sources();
+        let mut sources = sources.lock().await;
+
+        if let Some(source) = sources.get(endpoint) {
+            if let Some(source) = source.upgrade() {
+                return Ok(source);
             } else {
-                instance_sources.remove(endpoint);
+                sources.remove(endpoint);
             }
         }
 
@@ -229,8 +357,10 @@ impl Client {
             .list_and_watch(discovery_query.clone(), None)
             .await?;
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
+        let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
 
         let secondary = endpoint.component.drt.runtime().secondary().clone();
+        let discovery_source_task = discovery_source.clone();
 
         secondary.spawn(async move {
             tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
@@ -257,15 +387,17 @@ impl Client {
                     }
                 };
 
-                match discovery_event {
-                    DiscoveryEvent::Added(discovery_instance) => {
-                        if let DiscoveryInstance::Endpoint(instance) = discovery_instance {
+                discovery_source_task.broadcast_event(&discovery_event);
 
-                                map.insert(instance.instance_id, instance);
-                        }
+                match discovery_event {
+                    DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
+                        map.insert(instance.instance_id, instance);
                     }
+                    DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::Removed(id) => {
-                        map.remove(&id.instance_id());
+                        if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
+                            map.remove(&endpoint_id.instance_id);
+                        }
                     }
                 }
 
@@ -277,9 +409,8 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        let instance_source = Arc::new(watch_rx);
-        instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
-        Ok(instance_source)
+        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
+        Ok(discovery_source)
     }
 }
 
@@ -393,6 +524,125 @@ mod tests {
         // Note: We need to check if changed() was signaled
         let current = watcher.borrow().clone();
         assert_eq!(current, vec![1, 3]);
+
+        rt.shutdown();
+    }
+
+    /// Test that concurrent select_and_increment distributes load correctly.
+    #[tokio::test]
+    async fn test_concurrent_select_and_increment() {
+        let state = Arc::new(RoutingOccupancyState::default());
+        let instance_ids: Vec<u64> = vec![100, 200, 300];
+        let num_requests = 90;
+
+        let mut handles = Vec::new();
+        for _ in 0..num_requests {
+            let state = state.clone();
+            let ids = instance_ids.clone();
+            handles.push(tokio::spawn(async move {
+                state.select_exact_min_and_increment(&ids).await
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(state.load(100), 30);
+        assert_eq!(state.load(200), 30);
+        assert_eq!(state.load(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_connection_counts() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_ll_counts".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let state1 = get_or_create_routing_occupancy_state(&endpoint).await;
+        let state2 = get_or_create_routing_occupancy_state(&endpoint).await;
+
+        let picked1 = state1
+            .select_exact_min_and_increment(&[10, 20, 30])
+            .await
+            .unwrap();
+        assert_eq!(state1.load(picked1), 1);
+
+        let picked2 = state1
+            .select_exact_min_and_increment(&[10, 20, 30])
+            .await
+            .unwrap();
+        assert_ne!(picked1, picked2);
+
+        // state2 should see the same counts (same underlying Arc)
+        assert_eq!(state2.load(10), state1.load(10));
+        assert_eq!(state2.load(20), state1.load(20));
+        assert_eq!(state2.load(30), state1.load(30));
+
+        state2.decrement(picked1);
+        assert_eq!(state1.load(picked1), if picked1 == picked2 { 1 } else { 0 });
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_state_retain() {
+        let state = RoutingOccupancyState::default();
+
+        // Add some connections
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        // Each instance should have 1 connection
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 1);
+        assert_eq!(state.load(3), 1);
+
+        // Retain only instances 1 and 3 (instance 2 was removed)
+        state.retain(&[1, 3]);
+
+        assert_eq!(state.load(1), 1);
+        assert_eq!(state.load(2), 0);
+        assert_eq!(state.load(3), 1);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_instance_source_cleans_up_removed_worker_counts() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_occupancy_cleanup".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let worker_id = client.instance_ids_avail()[0];
+        let state = get_or_create_routing_occupancy_state(&endpoint).await;
+        state.increment(worker_id);
+        assert_eq!(state.load(worker_id), 1);
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+
+        for _ in 0..10 {
+            if state.load(worker_id) == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(state.load(worker_id), 0);
 
         rt.shutdown();
     }

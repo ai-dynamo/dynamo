@@ -17,7 +17,12 @@ from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
-from tests.utils.engine_process import EngineConfig, EngineProcess
+from tests.utils.engine_process import (
+    EngineConfig,
+    EngineProcess,
+    ResponseValidationError,
+)
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
 
@@ -51,6 +56,41 @@ def run_serve_deployment(
     merged_env: dict[str, str] = {}
     if extra_env:
         merged_env.update(extra_env)
+
+    # In serial mode (no parallel scheduler), pass the marker's KV cache budget
+    # so the launch script's small default doesn't starve larger models.
+    # The parallel scheduler already sets this env var per-test.
+    if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in os.environ:
+        kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+        if kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(int(kv_mark.args[0]))
+            )
+
+    if "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS" not in os.environ:
+        sglang_kv_mark = request.node.get_closest_marker("requested_sglang_kv_tokens")
+        if sglang_kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS",
+                str(int(sglang_kv_mark.args[0])),
+            )
+
+    if "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS" not in os.environ:
+        trtllm_kv_mark = request.node.get_closest_marker("requested_trtllm_kv_tokens")
+        if trtllm_kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
+                str(int(trtllm_kv_mark.args[0])),
+            )
+
+    if "_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES" not in os.environ:
+        trtllm_vram_mark = request.node.get_closest_marker("requested_trtllm_vram_gib")
+        if trtllm_vram_mark:
+            gib_to_bytes = int(trtllm_vram_mark.args[0] * 1024**3)
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES",
+                str(gib_to_bytes),
+            )
 
     # Stagger engine startup under xdist to avoid vLLM profiling race
     # (vLLM bug #10643: concurrent profilers miscount each other's memory).
@@ -93,6 +133,7 @@ def run_serve_deployment(
 
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
+
     else:
         # Backward compat: infer from config/extra_env if no explicit ports are passed.
         dynamic_frontend_port = int(config.frontend_port)
@@ -108,76 +149,111 @@ def run_serve_deployment(
             int(merged_env.get("DYN_SYSTEM_PORT2") or DefaultPort.SYSTEM2.value),
         ]
 
-    with EngineProcess.from_script(
-        config, request, extra_env=merged_env
-    ) as server_process:
-        for _payload in config.request_payloads:
-            logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
+    # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
+    disagg_bootstrap_port: int | None = None
+    if config.script_name and "disagg" in config.script_name:
+        disagg_bootstrap_port = allocate_port(12000)
+        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
-            # Make a per-iteration copy so tests can safely override ports/fields
-            # without mutating shared config instances across parametrized cases.
-            payload = deepcopy(_payload)
-            # inject model
-            if hasattr(payload, "with_model"):
-                payload = payload.with_model(config.model)
+    try:
+        with EngineProcess.from_script(
+            config, request, extra_env=merged_env
+        ) as server_process:
+            for _payload in config.request_payloads:
+                logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
 
-            # Default behavior: requests go to the frontend port, except metrics which target
-            # worker system ports (mapped from DefaultPort -> per-test ports).
-            if getattr(payload, "endpoint", "") == "/metrics":
-                if payload.port == DefaultPort.SYSTEM1.value:
-                    if len(dynamic_system_ports) < 1:
-                        raise RuntimeError(
-                            "Payload targets SYSTEM_PORT1 but no system ports were provided "
-                            f"(payload={payload.__class__.__name__})"
-                        )
-                    payload.port = dynamic_system_ports[0]
-                elif payload.port == DefaultPort.SYSTEM2.value:
-                    if len(dynamic_system_ports) < 2:
-                        raise RuntimeError(
-                            "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
-                            f"(payload={payload.__class__.__name__})"
-                        )
-                    payload.port = dynamic_system_ports[1]
-            else:
-                payload.port = dynamic_frontend_port
+                # Make a per-iteration copy so tests can safely override ports/fields
+                # without mutating shared config instances across parametrized cases.
+                payload = deepcopy(_payload)
+                # inject model
+                if hasattr(payload, "with_model"):
+                    payload = payload.with_model(config.model)
 
-            # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
-            # BasePayload always defines `system_ports` (usually empty); map defaults
-            # (SYSTEM_PORT1/2) to per-test system ports when present.
-            if payload.system_ports:
-                mapped_system_ports: list[int] = []
-                for p in payload.system_ports:
-                    if p == DefaultPort.SYSTEM1.value:
+                # Default behavior: requests go to the frontend port, except metrics which target
+                # worker system ports (mapped from DefaultPort -> per-test ports).
+                if getattr(payload, "endpoint", "") == "/metrics":
+                    if payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
-                                "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                "Payload targets SYSTEM_PORT1 but no system ports were provided "
                                 f"(payload={payload.__class__.__name__})"
                             )
-                        mapped_system_ports.append(dynamic_system_ports[0])
-                    elif p == DefaultPort.SYSTEM2.value:
+                        payload.port = dynamic_system_ports[0]
+                    elif payload.port == DefaultPort.SYSTEM2.value:
                         if len(dynamic_system_ports) < 2:
                             raise RuntimeError(
-                                "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
                                 f"(payload={payload.__class__.__name__})"
                             )
-                        mapped_system_ports.append(dynamic_system_ports[1])
-                    else:
-                        mapped_system_ports.append(p)
-                payload.system_ports = mapped_system_ports
+                        payload.port = dynamic_system_ports[1]
+                else:
+                    payload.port = dynamic_frontend_port
 
-            for _ in range(payload.repeat_count):
-                response = send_request(
-                    url=payload.url(),
-                    payload=payload.body,
-                    timeout=payload.timeout,
-                    method=payload.method,
-                    stream=payload.http_stream,
-                )
-                server_process.check_response(payload, response)
+                # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
+                # BasePayload always defines `system_ports` (usually empty); map defaults
+                # (SYSTEM_PORT1/2) to per-test system ports when present.
+                if payload.system_ports:
+                    mapped_system_ports: list[int] = []
+                    for p in payload.system_ports:
+                        if p == DefaultPort.SYSTEM1.value:
+                            if len(dynamic_system_ports) < 1:
+                                raise RuntimeError(
+                                    "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                    f"(payload={payload.__class__.__name__})"
+                                )
+                            mapped_system_ports.append(dynamic_system_ports[0])
+                        elif p == DefaultPort.SYSTEM2.value:
+                            if len(dynamic_system_ports) < 2:
+                                raise RuntimeError(
+                                    "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                    f"(payload={payload.__class__.__name__})"
+                                )
+                            mapped_system_ports.append(dynamic_system_ports[1])
+                        else:
+                            mapped_system_ports.append(p)
+                    payload.system_ports = mapped_system_ports
 
-            # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
-            if hasattr(payload, "final_validation"):
-                payload.final_validation()
+                for _ in range(payload.repeat_count):
+                    # Re-issue the request (server stays up) on validation
+                    # failure when payload.max_attempts > 1. See tests/README.md
+                    # "Flaky Tests" for when this is appropriate. Backoff
+                    # factor 1.5 keeps the worst-case sleep budget bounded
+                    # for max_attempts up to ~6.
+                    last_err: Optional[ResponseValidationError] = None
+                    for attempt in range(payload.max_attempts):
+                        try:
+                            response = send_request(
+                                url=payload.url(),
+                                payload=payload.body,
+                                timeout=payload.timeout,
+                                method=payload.method,
+                                stream=payload.http_stream,
+                            )
+                            server_process.check_response(payload, response)
+                            last_err = None
+                            break
+                        except ResponseValidationError as e:
+                            last_err = e
+                            if attempt < payload.max_attempts - 1:
+                                wait = 1.0 * (1.5**attempt)
+                                logger.warning(
+                                    "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
+                                    type(payload).__name__,
+                                    attempt + 1,
+                                    payload.max_attempts,
+                                    e,
+                                    wait,
+                                )
+                                time.sleep(wait)
+                    if last_err is not None:
+                        raise last_err
+
+                # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
+                if hasattr(payload, "final_validation"):
+                    payload.final_validation()
+    finally:
+        if disagg_bootstrap_port is not None:
+            deallocate_port(disagg_bootstrap_port)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

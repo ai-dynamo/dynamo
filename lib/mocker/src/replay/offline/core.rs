@@ -4,6 +4,7 @@
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
 use crate::scheduler::{EngineCore, EnginePassResult, SglangCore, VllmCore};
+use dynamo_kv_router::protocols::WorkerId;
 
 pub(crate) struct ReplayWorkerCore {
     core: EngineCore,
@@ -12,13 +13,41 @@ pub(crate) struct ReplayWorkerCore {
 impl ReplayWorkerCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
         let core = match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => EngineCore::Vllm(VllmCore::new(args)),
+            crate::common::protocols::EngineType::Vllm => {
+                let mut core = VllmCore::new(args);
+                Self::init_offload_vllm(&mut core);
+                EngineCore::Vllm(core)
+            }
             crate::common::protocols::EngineType::Sglang => {
                 EngineCore::Sglang(SglangCore::new(args))
             }
         };
         Self { core }
     }
+
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        let core = match args.engine_type {
+            crate::common::protocols::EngineType::Vllm => {
+                let mut core = VllmCore::new_with_kv_capture(args, worker_id);
+                Self::init_offload_vllm(&mut core);
+                EngineCore::Vllm(core)
+            }
+            crate::common::protocols::EngineType::Sglang => {
+                EngineCore::Sglang(SglangCore::new_with_kv_capture(args, worker_id))
+            }
+        };
+        Self { core }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn init_offload_vllm(core: &mut VllmCore) {
+        if let Err(e) = core.init_offload_offline() {
+            tracing::error!("kvbm-offload single-worker offline init failed: {e}");
+        }
+    }
+
+    #[cfg(not(feature = "kvbm-offload"))]
+    fn init_offload_vllm(_core: &mut VllmCore) {}
 
     pub(crate) fn is_empty(&self) -> bool {
         self.core.is_empty()

@@ -60,6 +60,9 @@ async def main():
         kv_router_config=kv_router_config
     )
 
+    # Optional startup gate shared with the frontend and standalone indexer:
+    # os.environ["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "2"
+
     # Your input tokens
     token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
@@ -102,7 +105,7 @@ For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployme
 - [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/agg_router.yaml)
 - [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml)
 - [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+- [Kubernetes deployment guide](../../kubernetes/README.md)
 
 **For A/B Testing and Advanced K8s Setup:**
 See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
@@ -117,7 +120,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: my-namespace
       componentType: frontend
       replicas: 1
       envs:
@@ -131,7 +133,7 @@ spec:
           value: "16"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
 ```
 
 ### Alternative: Using Command Args in K8s
@@ -141,7 +143,7 @@ You can also pass CLI arguments directly in the container command:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
     command:
       - /bin/sh
       - -c
@@ -290,5 +292,5 @@ For deployments with multiple worker pools, the **Global Router** enables hierar
 ## See Also
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
-- **[Router Guide](router-guide.md)**: Configuration, tuning, and production setup
+- **[Configuration and Tuning](router-configuration.md)**: Router flags and production setup
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes

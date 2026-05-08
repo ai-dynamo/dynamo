@@ -90,13 +90,13 @@ python -m dynamo.mocker \
 | `--num-workers` | 1 | Workers per process |
 | `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
-| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
+| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy: `fifo`/`fcfs` (default) or `lpm` (longest prefix match) |
 | `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens. Also becomes the effective block size when `--engine-type sglang` and `--block-size` is omitted |
 | `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
-| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Requires `aiconfigurator` SDK installed (install with `pip install ai-dynamo[mocker]`) |
+| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and replay paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
@@ -126,10 +126,12 @@ python -m dynamo.mocker \
 
 The mocker supports replaying Mooncake-style traces through the dedicated replay CLI, which exposes
 `offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
-admission, and synthetic workload generation directly:
+admission, synthetic workload generation, and offline disaggregated prefill/decode replay directly:
 
-The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Engine settings
-such as `block_size`, `engine_type`, and compute speedups still belong in `--extra-engine-args`.
+The replay CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Aggregated
+replay uses `--extra-engine-args`. Offline disagg replay instead uses
+`--prefill-engine-args` plus `--decode-engine-args`, together with
+`--num-prefill-workers` and `--num-decode-workers`.
 
 ```bash
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
@@ -137,7 +139,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs"}' \
     --report-json /tmp/replay-report.json
 ```
@@ -182,6 +185,11 @@ first turn uses `timestamp`/`created_time`; later turns can use `delay` or `dela
 {"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 ```
 
+For trace-file replay, `--trace-block-size` controls how many tokens each `hash_id` represents in
+the dataset, while engine `block_size` still controls the replay engine and router hashing. Public
+Mooncake/toolagent traces use `--trace-block-size 512`; engine `block_size` can still stay at `64`
+to match the live runtime configuration.
+
 The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
 report JSON to disk.
 
@@ -196,6 +204,31 @@ For full usage, constraints, and benchmarking guidance, see [Mocker Trace Replay
 Replay supports aggregated `vllm` and `sglang` engine configs. Internally replay uses canonical
 `block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
 as it matches `block_size` when both are provided.
+
+Offline replay also supports disaggregated `kv_router` mode. In that mode:
+
+- `--prefill-engine-args` must describe a prefill worker
+- `--decode-engine-args` must describe a decode worker
+- `--router-mode` must be `kv_router`
+- only offline replay is supported
+
+Example:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 4096 \
+    --output-tokens 256 \
+    --request-count 100 \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --replay-concurrency 32 \
+    --num-prefill-workers 2 \
+    --num-decode-workers 6 \
+    --prefill-engine-args '{"worker_type":"prefill","block_size":512}' \
+    --decode-engine-args '{"worker_type":"decode","block_size":512}' \
+    --router-config '{"router_queue_policy":"wspt"}' \
+    --report-json /tmp/replay-report.json
+```
 
 ## Performance Modeling Setup
 
@@ -214,7 +247,7 @@ It also accepts older raw-data directories containing:
 ```bash
 python -m dynamo.mocker \
     --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
-    --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
+    --planner-profile-data components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D \
     --speedup-ratio 1.0
 ```
 
@@ -223,7 +256,7 @@ python -m dynamo.mocker \
 To use the AIC SDK for latency prediction:
 
 ```bash
-pip install ai-dynamo[mocker]
+uv pip install '.[mocker]'
 
 python -m dynamo.mocker \
     --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
@@ -234,14 +267,60 @@ python -m dynamo.mocker \
 
 The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
 
-When using `python -m dynamo.replay`, there are no dedicated AIC flags. Pass the equivalent fields directly via `--extra-engine-args`:
+Important notes:
+
+- AIC is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC.
+- `python -m dynamo.replay` has two separate AIC surfaces:
+  - engine timing AIC through `--extra-engine-args` / staged engine JSON
+  - router-side prefill-load AIC through top-level `--aic-*` flags plus `router_prefill_load_model="aic"` in `--router-config`
+- The Python AIC session bridge is now shared with the live KV router path via the internal `dynamo._internal.aic` module. Mocker CLI behavior is unchanged; this just removes duplicate AIC session code.
+- `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
+- In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
+
+This mocker AIC path is separate from the router-side prefill-load estimator. Live router,
+frontend, and replay all use `router_prefill_load_model="aic"` plus top-level `--aic-*` flags for
+oldest-prefill prompt-load decay. Replay still uses engine-args AIC separately when you want the
+mocked worker timing model itself to come from AIC.
+
+For aggregated replay, engine timing AIC still comes from `--extra-engine-args`:
 
 ```bash
 python -m dynamo.replay /path/to/trace.jsonl \
     --extra-engine-args '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
 ```
 
+For offline disagg replay, pass the staged engine configs instead:
+
+```bash
+python -m dynamo.replay /path/to/trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --prefill-engine-args '{"worker_type":"prefill","aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"block_size":512}' \
+    --decode-engine-args '{"worker_type":"decode","aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"block_size":512}' \
+    --num-prefill-workers 2 \
+    --num-decode-workers 6
+```
+
 The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
+
+Replay router-side AIC prompt-load modeling is configured separately with top-level flags:
+
+```bash
+python -m dynamo.replay /path/to/trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
+    --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --aic-tp-size 1
+```
+
+For offline disagg replay, the same top-level `--aic-*` flags drive the prefill-stage router only;
+the decode-stage router keeps prompt tracking disabled.
 
 Example `--reasoning` configuration:
 
@@ -287,7 +366,7 @@ kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines.
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the replay harness on top of multiple engine cores; see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md) for the component-level diagram and for offline replay internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
 
 ### Scheduler
 
@@ -309,43 +388,46 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ### KV Block Manager
 
-The block manager tracks KV cache blocks using reference counting and an LRU eviction policy. Blocks exist in one of two pools:
+The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](../../lib/kvbm-logical/), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](../../lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
 
-- **Active Pool** - Blocks currently in use by one or more sequences, tracked with reference counts
-- **Inactive Pool** - Blocks no longer actively referenced but kept for potential reuse (prefix caching)
+Blocks still conceptually live in one of two pools:
 
-When a sequence needs blocks, the manager first checks if they already exist (cache hit). If not, it allocates new blocks, potentially evicting the least-recently-used inactive blocks to make room. When a sequence completes or is preempted, its blocks are either moved to the inactive pool (for potential reuse) or freed entirely.
+- **Active** — blocks currently held by at least one sequence. Partial (still-filling) blocks are held as `MutableBlock<G1>`; full blocks are held as `ImmutableBlock<G1>` clones (the clone vec length is the mocker's refcount, one per `Use`).
+- **Inactive** — blocks no longer referenced by any sequence but kept for prefix-cache reuse. Handled entirely by kvbm-logical's inactive pool; the mocker never tracks them manually.
 
-The following diagram illustrates the block lifecycle, based on vLLM's block manager design:
+The lifecycle is RAII: dropping the last `ImmutableBlock` clone transitions the block from active to inactive (kvbm-logical's `reset` pool), with no explicit `deref`/`evict` bookkeeping on the mocker side. When a sequence completes or is preempted, the mocker simply drops its handles; kvbm-logical recovers the capacity.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active : alloc
-    Active --> Inactive : deref
-    Inactive --> Active : cache hit (reuse)
-    Inactive --> Freed : evict
-    Active --> Freed : destroy (preemption)
+    [*] --> Active : allocate + stage + register
+    Active --> Inactive : last handle dropped (RAII)
+    Inactive --> Active : match_blocks(PLH) reuse
+    Inactive --> Freed : evicted by backend
+    Active --> Freed : explicit Removed (Destroy)
     Freed --> [*]
 
     state Active {
-        [*] --> Tracked : ref_count tracked
-    }
-    state Inactive {
-        [*] --> Ordered : LRU order
+        [*] --> Partial : MutableBlock<G1>
+        Partial --> Full : promote (PLH / SequenceHash)
+        [*] --> Full : ImmutableBlock<G1> clones
     }
 ```
 
-### Evictor
+Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcount on an already-pinned block), `InactiveHit` (reactivate via `match_blocks(plh)`), and `NewStore` (fresh allocation). Only `NewStore` emits a `Stored` KV event — the router radix tree already knows about the other two and only forgets on explicit `Removed`.
 
-The LRU evictor maintains blocks ordered by a monotonic counter, enabling O(log n) eviction of the lowest-priority block. Each `insert` assigns the next counter value, so blocks inserted later have higher counters and survive longer.
+### Eviction Backends
 
-This produces a **depth-aware eviction policy**: when a sequence completes, `free_signal` releases its blocks in reverse order (tail first). Deeper suffix blocks therefore receive lower counters and are evicted before shallower prefix blocks. This keeps shared prefixes cached longer, improving cache hit rates across requests with common prefixes.
+The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](../../lib/mocker/src/common/protocols.rs):
 
-The evictor also supports front-insertion (negative counters) for marking blocks for immediate eviction, though this is not currently used in the scheduler.
+- **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the old hand-rolled `LRUEvictor::push_front` used to provide.
+- **`Lru`** — plain recency-based LRU.
+- **`MultiLru`** — 4-tier frequency-aware LRU built on a TinyLFU tracker.
+
+All three give the same "suffix blocks evicted before shared prefixes" outcome that the old evictor was designed to produce; `Lineage` does it structurally (via the block parent chain) rather than via monotonic counters.
 
 ### Sequence Tracking
 
-Each active request is tracked as a sequence, managing its token blocks and generation state. As tokens are generated, the sequence tracks which blocks are partial (still being filled) versus full (complete and hashable for prefix caching). When a partial block fills up, it gets "promoted" to a full block with a content-based hash, enabling future cache hits from requests with matching prefixes.
+Each active request is tracked as a sequence, managing its token blocks and generation state. As tokens are generated, the sequence tracks which blocks are partial (`MutableBlock<G1>`, still being filled) versus full (`ImmutableBlock<G1>`, complete and hashable for prefix caching). When a partial block fills up, it gets "promoted" to a full block with a content-based `SequenceHash` (or collapses onto an existing registered handle if the PLH is already present), enabling future cache hits from requests with matching prefixes.
 
 ### Performance Model
 
@@ -355,7 +437,7 @@ The mocker supports three timing prediction modes:
 
 **Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
 
-**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode requires the `aiconfigurator` SDK, installable via `pip install ai-dynamo[mocker]`.
+**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode is opt-in and requires both the `aiconfigurator` SDK and loadable systems/perf data for the requested tuple.
 
 ### Bootstrap Rendezvous (Disaggregated Serving)
 
@@ -416,6 +498,8 @@ The mocker is particularly useful for:
 | [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
 
 ## Feature Gaps (WIP)
+
+> For the broader mocker enhancement roadmap, see [#6383](https://github.com/ai-dynamo/dynamo/issues/6383).
 
 The following features are not yet supported by the mocker:
 

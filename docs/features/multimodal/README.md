@@ -44,18 +44,36 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 |-------|-------|-------|-------|
 | **[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md)** | ✅ | 🧪  | 🧪 |
 | **[TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md)** | ✅ | ❌ | ❌ |
-| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)** | ✅ | ❌ | ❌ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)** | ✅ | 🧪 | ❌ |
 
 **Status:** ✅ Supported | 🧪 Experimental | ❌ Not supported
+
+## Security: URL Validation
+
+All multimodal loaders route remote fetches through a shared URL policy
+(`dynamo.common.multimodal.url_validator`). Only
+`https://` and `data:` URLs are allowed by default, private / internal IPs are blocked,
+and local file access is disabled. Every HTTP redirect hop is re-validated
+against the policy.
+
+Two environment variables loosen the defaults for non-public deployments:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DYN_MM_ALLOW_INTERNAL` | `0` | Set to `1` to allow `http://`, private / internal IPs, and explicit ports. Intended for on-prem or local-dev setups where media lives on an internal network. |
+| `DYN_MM_LOCAL_PATH` | *(empty)* | Absolute directory prefix. When set, `file://` URIs and bare paths are allowed if they resolve inside this prefix. |
+
+<Warning>
+**Never set `DYN_MM_ALLOW_INTERNAL=1` on public-facing deployments.** It opens SSRF paths to cloud metadata endpoints (AWS IMDS, GCE, Azure) and other internal services.
+</Warning>
 
 ## Example Workflows
 
 Reference implementations for deploying multimodal models:
 
-- [vLLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch)
+- [vLLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch) (image, video)
 - [TRT-LLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/launch)
 - [SGLang multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch)
-- [Experimental multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/launch) (video, audio)
 
 ## Backend Documentation
 

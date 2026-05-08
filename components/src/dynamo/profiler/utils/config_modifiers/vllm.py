@@ -3,10 +3,11 @@
 
 import logging
 from typing import Tuple
+from uuid import uuid4
 
 import yaml
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     append_argument,
@@ -76,7 +77,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         # MoE flags (--enable-expert-parallel) are set in set_config_tep_size/set_config_dep_size
 
         # set metadata name
-        cfg.metadata.name = "agg"
+        cfg.metadata.name = f"vllm-agg-{uuid4().hex[:8]}"
 
         # disable planner
         if "Planner" in cfg.spec.services:

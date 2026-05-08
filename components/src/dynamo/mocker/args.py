@@ -55,14 +55,14 @@ def resolve_planner_profile_data(
     Raises:
         FileNotFoundError: If path doesn't contain valid profile data in any supported format.
     """
+    if planner_profile_data is None:
+        return ProfileDataResult(npz_path=None, tmpdir=None)
+
     from .utils.planner_profiler_perf_data_converter import (
         convert_profile_results_to_npz,
         is_mocker_format_npz,
         is_profile_results_dir,
     )
-
-    if planner_profile_data is None:
-        return ProfileDataResult(npz_path=None, tmpdir=None)
 
     # Case 1: Already a mocker-format NPZ file
     if is_mocker_format_npz(planner_profile_data):
@@ -286,6 +286,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="AIC system name (e.g., 'h200_sxm'). Used with --aic-perf-model.",
     )
     parser.add_argument(
+        "--aic-backend",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang", "trtllm"],
+        help="AIC backend name used for perf database lookups. When unset, "
+        "falls back to --engine-type. Set this to decouple the AIC perf model "
+        "from the simulated engine type (e.g. simulate with vllm while using "
+        "trtllm AIC data).",
+    )
+    parser.add_argument(
         "--aic-backend-version",
         type=str,
         default=None,
@@ -298,6 +308,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Tensor parallel size for AIC latency prediction (default: 1). "
         "Only affects AIC performance model lookups, not mocker scheduling.",
+    )
+    parser.add_argument(
+        "--aic-moe-tp-size",
+        type=int,
+        default=None,
+        help="MoE tensor-parallel size for AIC latency prediction. "
+        "Required for MoE models. Constraint: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.",
+    )
+    parser.add_argument(
+        "--aic-moe-ep-size",
+        type=int,
+        default=None,
+        help="MoE expert-parallel size for AIC latency prediction. "
+        "Required for MoE models. Constraint: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.",
+    )
+    parser.add_argument(
+        "--aic-attention-dp-size",
+        type=int,
+        default=None,
+        help="Attention data-parallel size for AIC latency prediction (default: 1). "
+        "Corresponds to the 'dp' dimension in AIC CLI output.",
     )
     parser.add_argument(
         "--num-workers",
@@ -492,8 +523,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
-        help="Determines how events are published [nats|zmq]",
+        default=os.environ.get("DYN_EVENT_PLANE"),
+        help="Determines how events are published [nats|zmq]. If unset, "
+        "auto-detected from --discovery-backend (zmq for file/mem, nats "
+        "for etcd/kubernetes).",
     )
 
     args = parser.parse_args(argv)

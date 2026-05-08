@@ -55,7 +55,7 @@ pub enum FinishReason {
     #[serde(rename = "error")]
     Error(String),
 
-    #[serde(rename = "cancelled")]
+    #[serde(rename = "cancelled", alias = "abort")]
     Cancelled,
 
     #[serde(rename = "content_filter")]
@@ -83,34 +83,34 @@ impl std::str::FromStr for FinishReason {
             "eos" => Ok(FinishReason::EoS),
             "length" => Ok(FinishReason::Length),
             "stop" => Ok(FinishReason::Stop),
-            "cancelled" => Ok(FinishReason::Cancelled),
+            "cancelled" | "abort" => Ok(FinishReason::Cancelled),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
     }
 }
 
-impl From<FinishReason> for dynamo_async_openai::types::CompletionFinishReason {
+impl From<FinishReason> for dynamo_protocols::types::CompletionFinishReason {
     fn from(reason: FinishReason) -> Self {
         match reason {
             FinishReason::EoS | FinishReason::Stop | FinishReason::Cancelled => {
-                dynamo_async_openai::types::CompletionFinishReason::Stop
+                dynamo_protocols::types::CompletionFinishReason::Stop
             }
             FinishReason::ContentFilter => {
-                dynamo_async_openai::types::CompletionFinishReason::ContentFilter
+                dynamo_protocols::types::CompletionFinishReason::ContentFilter
             }
-            FinishReason::Length => dynamo_async_openai::types::CompletionFinishReason::Length,
-            FinishReason::Error(_) => dynamo_async_openai::types::CompletionFinishReason::Stop,
+            FinishReason::Length => dynamo_protocols::types::CompletionFinishReason::Length,
+            FinishReason::Error(_) => dynamo_protocols::types::CompletionFinishReason::Stop,
         }
     }
 }
 
-impl From<dynamo_async_openai::types::CompletionFinishReason> for FinishReason {
-    fn from(reason: dynamo_async_openai::types::CompletionFinishReason) -> Self {
+impl From<dynamo_protocols::types::CompletionFinishReason> for FinishReason {
+    fn from(reason: dynamo_protocols::types::CompletionFinishReason) -> Self {
         match reason {
-            dynamo_async_openai::types::CompletionFinishReason::Stop => FinishReason::Stop,
-            dynamo_async_openai::types::CompletionFinishReason::Length => FinishReason::Length,
-            dynamo_async_openai::types::CompletionFinishReason::ContentFilter => {
+            dynamo_protocols::types::CompletionFinishReason::Stop => FinishReason::Stop,
+            dynamo_protocols::types::CompletionFinishReason::Length => FinishReason::Length,
+            dynamo_protocols::types::CompletionFinishReason::ContentFilter => {
                 FinishReason::ContentFilter
             }
         }

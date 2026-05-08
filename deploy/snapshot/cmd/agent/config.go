@@ -8,7 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/types"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 // ConfigMapPath is the default path where the ConfigMap is mounted.

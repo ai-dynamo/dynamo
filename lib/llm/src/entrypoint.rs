@@ -12,8 +12,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
@@ -32,7 +33,7 @@ pub type ChatEngineFactoryCallback = Arc<
         + Sync,
 >;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
@@ -68,6 +69,7 @@ pub enum EngineConfig {
     Dynamic {
         model: Box<LocalModel>,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.

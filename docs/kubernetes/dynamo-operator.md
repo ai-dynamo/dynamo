@@ -28,7 +28,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 The Dynamo operator supports three deployment modes to accommodate different cluster environments and use cases:
 
-### 1. Cluster-Wide Mode (Default)
+### 1. Cluster-Wide Mode (Default, Recommended)
 
 The operator monitors and manages DynamoGraph resources across **all namespaces** in the cluster.
 
@@ -39,7 +39,9 @@ The operator monitors and manages DynamoGraph resources across **all namespaces*
 
 ---
 
-### 2. Namespace-Scoped Mode
+### 2. Namespace-Scoped Mode (DEPRECATED)
+
+> **DEPRECATED:** Namespace-scoped mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode instead. Do not use this for new deployments.
 
 The operator monitors and manages DynamoGraph resources **only in a specific namespace**. A lease marker is created to signal the operator's presence to any cluster-wide operators.
 
@@ -59,7 +61,9 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
 
 ---
 
-### 3. Hybrid Mode
+### 3. Hybrid Mode (DEPRECATED)
+
+> **DEPRECATED:** Hybrid mode relies on namespace-scoped operators, which are deprecated and will be removed in a future release. Use a single cluster-wide operator instead.
 
 A **cluster-wide operator** manages most namespaces, while **one or more namespace-scoped operators** run in specific namespaces (e.g., for testing new versions). The cluster-wide operator automatically detects and excludes namespaces with namespace-scoped operators using lease markers.
 
@@ -128,7 +132,6 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 - ✅ Shared certificate infrastructure across all webhook types
 - ✅ Automatic certificate generation and rotation (default, all environments)
 - ✅ cert-manager integration (optional, for custom PKI)
-- ✅ Multi-operator support with lease-based coordination
 - ✅ Immutability enforcement for critical fields
 
 For complete documentation on webhooks, certificate management, and troubleshooting, see:
@@ -175,7 +178,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-> **Note:** For shared/multi-tenant clusters or testing scenarios, see [Deployment Modes](#deployment-modes) above for namespace-scoped and hybrid configurations.
+> **Note:** Namespace-scoped and hybrid deployment modes are deprecated. Use cluster-wide mode for all new deployments. See [Deployment Modes](#deployment-modes) above if you need backward-compatible configurations.
 
 ### Building from Source
 
@@ -187,7 +190,10 @@ export IMAGE_TAG=latest
 
 # Build operator image
 cd deploy/operator
-docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG .
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG \
+  --build-context snapshot=../snapshot \
+  --build-arg DOCKER_PROXY="" \
+  .
 docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 cd -
 

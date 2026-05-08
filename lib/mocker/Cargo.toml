@@ -8,18 +8,34 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# Enables G1↔G2 offload simulation via kvbm-engine.
+kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo", "dep:futures"]
 
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+kvbm-logical = { workspace = true }
+
+# kvbm-offload feature dependencies (G1↔G2 transport simulation)
+kvbm-engine = { workspace = true, optional = true }
+kvbm-physical = { workspace = true, optional = true }
+kvbm-common = { workspace = true, optional = true }
+velo = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
+indicatif = "0.18"
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -34,6 +50,7 @@ ndarray = "0.16"
 slotmap = "1"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
+rustc-hash = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"

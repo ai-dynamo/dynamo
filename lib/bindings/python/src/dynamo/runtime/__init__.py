@@ -3,8 +3,9 @@
 
 import asyncio
 import os
+import warnings
 from functools import wraps
-from typing import Any, AsyncGenerator, Callable, Type, Union
+from typing import Any, AsyncGenerator, Callable, Optional, Type, Union
 
 from pydantic import BaseModel, ValidationError
 
@@ -16,15 +17,23 @@ from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 
 
-def dynamo_worker(enable_nats: bool = True):
+def dynamo_worker(enable_nats: Optional[bool] = None):
     """
     Decorator that creates a DistributedRuntime and passes it to the worker function.
 
     Args:
-        enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                    If request_plane is "nats", NATS is always enabled.
-                    Pass False (via --no-kv-events flag) to disable NATS initialization.
+        enable_nats: Deprecated. NATS enablement is now determined automatically
+            from the event-plane configuration. This parameter is accepted for
+            backwards compatibility but will be removed in a future release.
     """
+    if enable_nats is not None:
+        warnings.warn(
+            "The 'enable_nats' parameter is deprecated and will be removed in a "
+            "future release. NATS enablement is now determined automatically from "
+            "the event-plane configuration.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def decorator(func):
         @wraps(func)
@@ -32,26 +41,9 @@ def dynamo_worker(enable_nats: bool = True):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
-            runtime = DistributedRuntime(
-                loop, discovery_backend, request_plane, enable_nats
-            )
+            runtime = DistributedRuntime(loop, discovery_backend, request_plane)
 
             await func(runtime, *args, **kwargs)
-
-            # # wait for one of
-            # # 1. the task to complete
-            # # 2. the task to be cancelled
-
-            # done, pending = await asyncio.wait({task, cancelled}, return_when=asyncio.FIRST_COMPLETED)
-
-            # # i want to catch a SIGINT or SIGTERM or a cancellation event here
-
-            # try:
-            #     # Call the actual function
-            #     return await func(runtime, *args, **kwargs)
-            # finally:
-            #     print("Decorator: Cleaning up runtime resources")
-            #     # Perform cleanup actions here
 
         return wrapper
 

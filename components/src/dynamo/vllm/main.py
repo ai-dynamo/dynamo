@@ -7,7 +7,10 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -34,11 +37,11 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
@@ -91,12 +94,10 @@ def run_dynamo_headless(config: Config) -> None:
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             configure_gms_lock_mode(config.engine_args)
-            validate_cudagraph_mode(config.engine_args)
 
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
@@ -144,7 +145,10 @@ async def worker() -> None:
         (
             config.namespace,
             config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            config.namespace,
+            config.discovery_backend,
+        )
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -157,7 +161,6 @@ async def worker() -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=config.use_kv_events,
     )
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
@@ -184,7 +187,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config | OmniConfig, generate_endpoint: Endpoint, logger: logging.Logger
+    config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
@@ -331,6 +334,7 @@ def setup_kv_event_publisher(
     # all served workers should cover all ranks.
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
+    kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -351,7 +355,7 @@ def setup_kv_event_publisher(
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
-            kv_block_size=vllm_config.cache_config.block_size,
+            kv_block_size=kv_event_block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
@@ -468,17 +472,15 @@ def setup_vllm_engine(
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             logger.info(
-                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
             )
             # ENGINE_ID=0 writes weights, all others import (RO).
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
-            validate_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
@@ -554,6 +556,15 @@ def setup_vllm_engine(
     if fpm_worker_id is not None:
         vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
+    # Pass benchmark config to InstrumentedScheduler via additional_config.
+    if hasattr(config, "_benchmark_additional_config"):
+        bench = config._benchmark_additional_config
+        if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
+            short_id = fpm_worker_id[-8:]
+            bench["output_path"] = f"/tmp/benchmark_results_{short_id}.json"
+        vllm_config.additional_config["benchmark"] = bench
+        logger.info("Benchmark config injected into additional_config")
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)
@@ -573,6 +584,10 @@ def setup_vllm_engine(
     component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
+    # update block_size in vllm_config based on final engine cache info for later use
+    runtime_values = get_engine_cache_info(engine_client)
+    vllm_config.cache_config.block_size = runtime_values["block_size"]
 
     return (
         engine_client,
@@ -635,6 +650,16 @@ async def register_vllm_model(
     if model_type != ModelType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
+
+    # Propagate stream_interval so the frontend can respect --stream-interval.
+    # set_engine_specific requires a JSON-encoded string (the Rust binding
+    # parses it with serde_json::from_str); str(int) happens to be valid JSON.
+    stream_interval = getattr(config.engine_args, "stream_interval", None)
+    if stream_interval is not None:
+        runtime_config.set_engine_specific("stream_interval", str(stream_interval))
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
@@ -658,7 +683,9 @@ async def register_vllm_model(
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)
-        media_fetcher.allow_direct_port(True)
+        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        media_fetcher.allow_direct_ip(allow_internal)
+        media_fetcher.allow_direct_port(allow_internal)
 
     await register_model(
         model_input,
@@ -667,7 +694,7 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         context_length=vllm_config.model_config.max_model_len,
-        kv_cache_block_size=runtime_values["block_size"],
+        kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -676,13 +703,15 @@ async def register_vllm_model(
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
-    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+    """Return vLLM cache and scheduler limits used for model registration."""
 
     try:
         # Get values directly from vllm_config instead of collective_rpc
+        kv_event_block_size = get_configured_kv_event_block_size(engine.vllm_config)
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
             "block_size": engine.vllm_config.cache_config.block_size,
+            "kv_event_block_size": kv_event_block_size,
         }
 
         scheduler_values = {
@@ -690,11 +719,12 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
         }
 
-        logging.info(f"Cache config values: {cache_values}")
-        logging.info(f"Scheduler config values: {scheduler_values}")
+        logging.debug(f"Cache config values: {cache_values}")
+        logging.debug(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "block_size": cache_values["block_size"],
+            "kv_event_block_size": cache_values["kv_event_block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }

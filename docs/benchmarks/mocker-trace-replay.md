@@ -19,6 +19,52 @@ Use this when you want to:
 - compare timing and cache behavior across mocker configurations
 - validate replay logic in CI without bringing up a distributed stack
 
+## Harness Overview
+
+The replay harness wires a load driver (trace file or synthetic workload generator) into one or more mocker engine simulations and tees request/token timing into a trace collector.
+
+```mermaid
+flowchart LR
+    LD[Load Driver] --> H[Replay Harness]
+
+    H --> SES[Single Engine Simulation]
+    H --> MES[Multi Engine Simulation]
+
+    SES --> H
+    MES --> H
+
+    H --> TC[Trace Collector]
+```
+
+The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with the vLLM engine; multi-engine simulation (`MES`) covers aggregated multi-worker replay, disaggregated prefill/decode replay, and KV-router replay. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
+
+Each simulation composes a different set of components. SES drives the engine core directly (scheduler + forward-pass modeling). MES composes multiple engine cores with KV transfer/offloading, KV routing, and planner simulation layered on top:
+
+```mermaid
+flowchart TD
+    subgraph SEC[Single Engine Core]
+        subgraph SCH[Scheduler Modeling]
+            F[Fwd Pass Modeling]
+        end
+    end
+
+    KV[KV Transfer + Offloading Simulation]
+    KR[KV Router Simulation]
+    P[Planner Simulation]
+
+    SES[Single Engine Simulation]
+    MES[Multi Engine Simulation]
+
+    SES --> SEC
+
+    MES --> SEC
+    MES --> KV
+    MES --> KR
+    MES --> P
+```
+
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
+
 ## Quick Start
 
 Run offline replay through the dedicated replay CLI:
@@ -28,7 +74,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode round_robin \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --report-json /tmp/replay-report.json
 ```
 
@@ -81,31 +128,40 @@ Example:
 
 ```json
 {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
+{"timestamp": 0, "input_length": 4096, "output_length": 128, "hash_ids": [9, 10, 11, 12]}
 ```
 
-Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session. The
-first turn uses `timestamp` or `created_time`; later turns may use either:
+Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
+request traces, including agent-converted traces where parallel LLM calls should remain parallel.
 
-- `delay` or `delay_ms` directly
-- or an absolute later `timestamp`, in which case replay infers the inter-turn delay from the
-  previous turn timestamp
+Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session.
+Multi-turn sessions are closed-loop: turn `n+1` waits until turn `n` completes plus either the
+explicit `delay` / `delay_ms` or the timestamp delta inferred from consecutive rows in the same
+session.
 
 Example:
 
 ```json
 {"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
-{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+{"session_id":"session-a","delay_ms":50,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 {"session_id":"session-b","timestamp":1010,"input_length":1024,"output_length":64,"hash_ids":[9,10]}
-{"session_id":"session-b","delay_ms":50,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
+{"session_id":"session-b","timestamp":1060,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
 ```
 
-The mocker synthesizes token blocks from `hash_ids` using the configured mocker `block_size`, so the
-replay block size must match the block size used when the trace was generated. Public Mooncake
-traces are commonly block-level hashes at `512` tokens per hash ID, so replaying them with the
-default mocker `block_size=64` will fail once `input_length > len(hash_ids) * 64`. Set that
-through `--extra-engine-args '{"block_size":512}'`. For `engine_type=sglang`, replay still uses
-canonical `block_size` internally; `sglang.page_size` is accepted as a compatibility alias and is
-normalized into `block_size` before replay starts.
+The second `session-a` row waits for the first turn to complete plus 50 ms. The second `session-b`
+row also waits for the first turn to complete plus the inferred 50 ms timestamp delta.
+
+Replay uses two different block-size concepts for trace files:
+
+- `--trace-block-size`: how many tokens each `hash_id` in the dataset represents
+- engine `block_size`: the block size used by the replay engine and router when they re-chunk the
+  synthesized tokens into sequence hashes
+
+Public Mooncake/toolagent traces use `512` tokens per `hash_id`, so replaying them should normally
+use `--trace-block-size 512`. The engine `block_size` can still be smaller, for example the live
+vLLM benchmark setup uses `block_size=64`. For `engine_type=sglang`, replay still uses canonical
+`block_size` internally; `sglang.page_size` is accepted as a compatibility alias and is normalized
+into `block_size` before replay starts.
 
 ## Replay Surfaces
 
@@ -117,15 +173,25 @@ The dedicated replay CLI exposes:
 - `--replay-mode offline|online`
 - `--router-mode round_robin|kv_router`
 - `--num-workers`
+- `--num-prefill-workers`
+- `--num-decode-workers`
 - `--replay-concurrency`
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
+- `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`
 - `--num-prefix-groups`
 - `--inter-turn-delay-ms`
 - `--extra-engine-args` (JSON string)
+- `--prefill-engine-args` (JSON string)
+- `--decode-engine-args` (JSON string)
 - `--router-config` (JSON string)
+- `--aic-backend`
+- `--aic-system`
+- `--aic-backend-version`
+- `--aic-tp-size`
+- `--aic-model-path`
 - `--report-json`
 
 Defaults:
@@ -141,7 +207,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs","router_temperature":0.0}' \
     --report-json /tmp/replay-report.json
 ```
@@ -161,8 +228,29 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 
 Both `--extra-engine-args` and `--router-config` accept partial JSON objects. Engine settings such
 as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_ratio` belong in
-`--extra-engine-args`, not as top-level replay CLI flags. Unspecified fields fall back to the same
-defaults used by `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+`--extra-engine-args`, not as top-level replay CLI flags. `--trace-block-size` is separate and is
+used only for trace-file replay. Unspecified fields fall back to the same defaults used by
+`MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+Replay has two independent AIC surfaces:
+
+- engine timing AIC via `--extra-engine-args` / staged engine JSON
+- router-side prompt-load AIC via top-level `--aic-*` flags together with
+  `router_prefill_load_model: "aic"` in `--router-config`
+
+Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
+
+- `--prefill-engine-args` for the prefill worker config
+- `--decode-engine-args` for the decode worker config
+- `--num-prefill-workers` and `--num-decode-workers` for pool sizes
+
+For offline disagg replay, the staged JSON must set `worker_type` explicitly:
+
+- `--prefill-engine-args` must use `worker_type: "prefill"`
+- `--decode-engine-args` must use `worker_type: "decode"`
+
+The staged configs must also use the same engine `block_size`. `--trace-block-size` remains a
+separate trace-file input knob.
 
 ### Synthetic Replay
 
@@ -206,10 +294,14 @@ those timestamps:
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}'
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}'
 ```
 
-This is the right mode when you want deterministic replay of the original arrival pattern.
+This is the right mode when you want deterministic replay of the original request-arrival pattern.
+For wall-clock request traces, omit `session_id` so each row is scheduled independently by timestamp.
+Rows that share a `session_id` are replayed as a closed-loop session, where each later turn waits for
+the previous turn to complete.
 
 ### Closed-Loop Concurrency Replay
 
@@ -244,7 +336,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args '{"block_size":512}'
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}'
 ```
 
 ### Arrival Speedup
@@ -257,7 +350,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --num-workers 4 \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512}'
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}'
 ```
 
 ### Router Modes
@@ -275,6 +369,8 @@ provided through `--router-config`, not a dedicated top-level replay flag. In of
 - KV visibility is delayed slightly relative to request lifecycle events
 - queue admission is driven by router lifecycle edges (`add_request`, `mark_prefill_completed`, and `free`)
 - transient in-pass prefill occupancy is still approximated at the router level rather than modeled exactly
+- when `router_prefill_load_model` is `"aic"`, replay predicts one expected prefill duration per
+  admitted request and decays only the oldest active prefill request on each worker
 
 To compare queue policies manually, keep the same trace and engine args fixed and swap only
 `router_queue_policy` inside `--router-config`:
@@ -284,19 +380,40 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs"}'
 
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"lcfs"}'
 ```
 
 `lcfs` is intentionally a worse comparison policy under saturation; use it for experiments, not as
 an expected production default.
+
+To enable router-side AIC prefill-load modeling during replay:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
+    --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --aic-tp-size 1
+```
+
+For offline disagg replay, the same top-level `--aic-*` flags are supported, but the estimator is
+applied only to the prefill-stage router.
 
 ## Output
 
@@ -320,9 +437,12 @@ If `--report-json` is not provided, `python -m dynamo.replay` writes a timestamp
 
 Shared replay constraints:
 
-- aggregated mode
 - `extra_engine_args.engine_type` must be `vllm` or `sglang`
-- `extra_engine_args.dp_size` must be `1`
+- aggregated replay requires the existing aggregated args path
+- disagg replay requires both `prefill_engine_args` and `decode_engine_args`
+- disagg replay requires `router_mode=kv_router`
+- replay `dp_size` must be `1`
+- disagg replay requires matching `block_size` in `prefill_engine_args` and `decode_engine_args`
 
 Additional offline constraints:
 
@@ -330,6 +450,7 @@ Additional offline constraints:
 - single-worker offline replay is still a dedicated fast path for `vllm`, but it now supports both
   flat request replay and workload-driven multi-turn replay
 - `sglang` still goes through the shared multi-worker replay runtime even when `num_workers=1`
+- offline disagg replay is a separate two-stage runtime with prefill and decode worker pools
 
 Additional online constraints:
 
@@ -343,15 +464,20 @@ If you violate those constraints, replay fails immediately with a validation err
   either a trace file, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
 - `--replay-concurrency` works with both trace replay and synthetic replay
 - mocker compute-speed knobs such as `speedup_ratio` still affect simulated timing when passed via
-  `--extra-engine-args`
+  the engine-args JSON for the chosen replay mode
 - `--arrival-speedup-ratio` affects trace timestamps, not worker compute speed
+- `--trace-block-size` affects only how trace `hash_ids` expand into tokens
 - `--arrival-interval-ms` only applies to synthetic replay
 - `--turns-per-session`, `--shared-prefix-ratio`, `--num-prefix-groups`, and
   `--inter-turn-delay-ms` only apply to synthetic replay
-- `--extra-engine-args` and `--router-config` are JSON strings on the standalone replay CLI
+- `--extra-engine-args`, `--prefill-engine-args`, `--decode-engine-args`, and `--router-config`
+  are JSON strings on the standalone replay CLI
+- top-level `--aic-*` flags are used only for router-side prompt-load modeling; engine timing AIC
+  still belongs in the engine-args JSON
 - offline replay does not need planner runtime setup, router registration, or external event transport
-- the replay block size should match the trace block size, because token synthesis expands `hash_ids`
-  using the configured block size
+- trace-file replay can use different values for `--trace-block-size` and engine `block_size`
+- Mooncake/toolagent traces typically use `--trace-block-size 512`, while engine `block_size`
+  often stays `64`
 
 ## When To Use This vs AIPerf
 

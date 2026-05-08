@@ -27,7 +27,8 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateCompletionRequest,
+    #[schema(value_type = Object)]
+    pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
     pub common: CommonExt,
@@ -47,25 +48,28 @@ pub struct NvCreateCompletionRequest {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateCompletionResponse,
+    #[schema(value_type = Object)]
+    pub inner: dynamo_protocols::types::CreateCompletionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
-impl ContentProvider for dynamo_async_openai::types::Choice {
+impl ContentProvider for dynamo_protocols::types::Choice {
     fn content(&self) -> String {
         self.text.clone()
     }
 }
 
-pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
+pub fn prompt_to_string(prompt: &dynamo_protocols::types::Prompt) -> String {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => s.clone(),
-        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.join(" "), // Join strings with spaces
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => arr
+        dynamo_protocols::types::Prompt::String(s) => s.clone(),
+        dynamo_protocols::types::Prompt::StringArray(arr) => arr.join(" "), // Join strings with spaces
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => arr
             .iter()
             .map(|&num| num.to_string())
             .collect::<Vec<_>>()
             .join(" "),
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => arr
             .iter()
             .map(|inner| {
                 inner
@@ -80,12 +84,12 @@ pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
 }
 
 /// Get the batch size from a prompt (1 for single prompts, array length for batch prompts)
-pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usize {
+pub fn get_prompt_batch_size(prompt: &dynamo_protocols::types::Prompt) -> usize {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(_) => 1,
-        dynamo_async_openai::types::Prompt::IntegerArray(_) => 1,
-        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.len(),
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
+        dynamo_protocols::types::Prompt::String(_) => 1,
+        dynamo_protocols::types::Prompt::IntegerArray(_) => 1,
+        dynamo_protocols::types::Prompt::StringArray(arr) => arr.len(),
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
     }
 }
 
@@ -93,21 +97,21 @@ pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usi
 /// For single prompts, returns a clone regardless of index.
 /// For batch prompts, returns the prompt at the specified index.
 pub fn extract_single_prompt(
-    prompt: &dynamo_async_openai::types::Prompt,
+    prompt: &dynamo_protocols::types::Prompt,
     index: usize,
-) -> dynamo_async_openai::types::Prompt {
+) -> dynamo_protocols::types::Prompt {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => {
-            dynamo_async_openai::types::Prompt::String(s.clone())
+        dynamo_protocols::types::Prompt::String(s) => {
+            dynamo_protocols::types::Prompt::String(s.clone())
         }
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
-            dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => {
+            dynamo_protocols::types::Prompt::IntegerArray(arr.clone())
         }
-        dynamo_async_openai::types::Prompt::StringArray(arr) => {
-            dynamo_async_openai::types::Prompt::String(arr[index].clone())
+        dynamo_protocols::types::Prompt::StringArray(arr) => {
+            dynamo_protocols::types::Prompt::String(arr[index].clone())
         }
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
-            dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => {
+            dynamo_protocols::types::Prompt::IntegerArray(arr[index].clone())
         }
     }
 }
@@ -239,7 +243,7 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        use dynamo_async_openai::types::Stop;
+        use dynamo_protocols::types::Stop;
         self.inner.stop.as_ref().map(|s| match s {
             Stop::String(s) => vec![s.clone()],
             Stop::StringArray(arr) => arr.clone(),
@@ -285,10 +289,10 @@ impl ResponseFactory {
 
     pub fn make_response(
         &self,
-        choice: dynamo_async_openai::types::Choice,
-        usage: Option<dynamo_async_openai::types::CompletionUsage>,
+        choice: dynamo_protocols::types::Choice,
+        usage: Option<dynamo_protocols::types::CompletionUsage>,
     ) -> NvCreateCompletionResponse {
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -296,9 +300,8 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
-            nvext: None, // Will be populated by router layer if needed
         };
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 }
 
@@ -360,7 +363,7 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
     }
 }
 
-impl TryFrom<common::StreamingCompletionResponse> for dynamo_async_openai::types::Choice {
+impl TryFrom<common::StreamingCompletionResponse> for dynamo_protocols::types::Choice {
     type Error = anyhow::Error;
 
     fn try_from(response: common::StreamingCompletionResponse) -> Result<Self, Self::Error> {
@@ -381,10 +384,10 @@ impl TryFrom<common::StreamingCompletionResponse> for dynamo_async_openai::types
         // TODO handle aggregating logprobs
         let logprobs = None;
 
-        let finish_reason: Option<dynamo_async_openai::types::CompletionFinishReason> =
+        let finish_reason: Option<dynamo_protocols::types::CompletionFinishReason> =
             response.delta.finish_reason.map(Into::into);
 
-        let choice = dynamo_async_openai::types::Choice {
+        let choice = dynamo_protocols::types::Choice {
             text,
             index,
             logprobs,

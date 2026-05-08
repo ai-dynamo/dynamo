@@ -87,9 +87,10 @@ impl SglangRequest {
         self.materialized_tokens += 1;
     }
 
-    pub(super) fn debug_assert_invariants(&self, block_size: usize) {
+    pub(super) fn debug_assert_invariants(&self, _block_size: usize) {
         #[cfg(debug_assertions)]
         {
+            let block_size = _block_size;
             let sequence_len = self.current_sequence_len();
             debug_assert!(
                 self.cached_tokens <= self.materialized_tokens,

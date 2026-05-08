@@ -10,12 +10,18 @@ title: Inference Gateway (GAIE)
 
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
-EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+## Features
 
-Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
-If you want to use LoRA deploy Dynamo without the Inference Gateway.
+- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml), following the checked-in GAIE/EPP configuration layout used by this repository.
 
 These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
+- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
+
+- GAIE integration supports Data Parallelism.
+
+- If you want to use LoRA deploy Dynamo without the Inference Gateway.
+
+- Currently, these setups are only tested with the kGateway Inference Gateway.
 
 ## Prerequisites
 
@@ -164,7 +170,7 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 ```yaml
 frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
   args:
     - --router-mode
     - direct
@@ -237,7 +243,6 @@ KV-aware routing uses live KV cache block events from workers so the EPP can rou
    - **vLLM:** Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`.
    - **SGLang:** Pass `--kv-events-config` with the appropriate endpoint.
    - **TRT-LLM:** Pass `--publish-events-and-metrics`.
-   - **Disaggregated vLLM (prefill/decode separation):** Do **not** pass `--disaggregation-mode decode` on decode workers — this flag hardcodes KV event publishing to off. Instead, omit the flag (defaults to aggregated mode) so decode workers also publish their cache state.
 2. **EPP — leave `DYN_USE_KV_EVENTS` at its default (`true`).** The EPP subscribes to worker KV events via event plane (NATS/ZMQ) and uses them for prefix-overlap scoring.
 3. **Block size — must be consistent.** The `--block-size` on all workers must match `DYN_KV_CACHE_BLOCK_SIZE` on the EPP (default: 128). Mismatched block sizes cause incorrect block hash computation.
 
@@ -250,7 +255,9 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_ENFORCE_DISAGG=true` to strictly enforce disaggregated mode. When enabled, requests fail if prefill workers have not registered yet. Without this, requests arriving before prefill workers are discovered fall through to decode-only routing. Prefill errors always fail requests regardless of this setting.
+- Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
+  - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
+  - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
@@ -261,6 +268,58 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
+
+**Service Mesh Integration (Istio)**
+
+When running under a service mesh such as Istio, the mesh sidecar proxy may conflict with the EPP's own TLS serving, causing connection failures (double-TLS). To avoid this, the mesh must be told how to connect to the EPP service via an Istio `DestinationRule`.
+
+The Dynamo operator can generate this DestinationRule automatically. Enable it by setting the `dynamo.serviceMesh` parameters when installing or upgrading the Dynamo platform Helm chart:
+
+```bash
+helm install dynamo deploy/helm/charts/platform \
+  --set dynamo.serviceMesh.enabled=true
+```
+
+Or equivalently in a custom values file:
+
+```yaml
+dynamo:
+  serviceMesh:
+    enabled: true
+    provider: "istio"
+    istio:
+      tlsMode: "SIMPLE"
+      insecureSkipVerify: true
+```
+
+**Helm Parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `dynamo.serviceMesh.enabled` | bool | `false` | Enable automatic DestinationRule generation for EPP services. |
+| `dynamo.serviceMesh.provider` | string | `"istio"` | Service mesh provider. Only `"istio"` is supported. |
+| `dynamo.serviceMesh.istio.tlsMode` | string | `"SIMPLE"` | TLS mode for the DestinationRule. Supported values: `DISABLE`, `SIMPLE`, `MUTUAL`, `ISTIO_MUTUAL`. |
+| `dynamo.serviceMesh.istio.insecureSkipVerify` | bool | `true` | Skip TLS certificate verification. Set to `true` when EPP uses self-signed certificates (the default). |
+
+> [!NOTE]
+> The Istio CRDs (`networking.istio.io`) must be installed on the cluster before enabling this feature. The operator detects Istio availability at startup — if the CRDs are not present, DestinationRule reconciliation is skipped even when `serviceMesh.enabled` is `true`.
+
+When enabled, the operator produces a `DestinationRule` for each EPP service equivalent to:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: <epp-service-name>
+spec:
+  host: <epp-service-name>.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+```
+
+If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
 
 ### 6. Verify Installation ###
 
@@ -446,7 +505,7 @@ helm uninstall agentgateway-crds -n agentgateway-system
 kubectl delete namespace agentgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs
-IGW_LATEST_RELEASE=v1.2.1
+IGW_LATEST_RELEASE=v1.5.0-rc.2
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
 # 5. Delete the Gateway API CRDs
@@ -456,7 +515,7 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 
 ## Gateway API Inference Extension Integration
 
-This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.5.0-rc.2**.
 
 ### Router bookkeeping operations
 
@@ -465,8 +524,9 @@ EPP performs Dynamo router book keeping operations so the FrontEnd's Router does
 
 ### Header Routing Hints
 
-Since v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
-The plugins set HTTP headers that are forwarded to the backend workers.
+Since v1.5.0-rc.1, the EPP uses **headers and body mutations** for communicating routing decisions.
+The plugins set HTTP headers for worker targeting and inject pre-computed token IDs
+into the request body (`nvext.token_data`) so the frontend sidecar can skip redundant tokenization.
 
 #### Headers Set by Dynamo Plugins
 

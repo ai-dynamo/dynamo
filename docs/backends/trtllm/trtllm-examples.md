@@ -32,7 +32,7 @@ docker compose -f deploy/docker-compose.yml up -d
 Each launch script runs the frontend and worker(s) in a single terminal. You can run each command separately in different terminals for testing. Each shell script simply runs `python3 -m dynamo.frontend <args>` to start up the ingress and `python3 -m dynamo.trtllm <args>` to start up the workers.
 </Tip>
 
-For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router-guide.md).
+For detailed information about KV-aware routing behavior, see [Routing Concepts](../../components/router/router-concepts.md). For deployment modes, see the [Router Guide](../../components/router/router-guide.md).
 
 ## Single Node Examples
 
@@ -103,10 +103,6 @@ For comprehensive instructions on multinode serving, see the [Multinode Examples
 ### Kubernetes Deployment
 
 For complete Kubernetes deployment instructions, configurations, and troubleshooting, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
-
-### Performance Sweep
-
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance_sweeps/README.md).
 
 ## Client
 

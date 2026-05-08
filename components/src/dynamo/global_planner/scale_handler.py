@@ -7,8 +7,8 @@ import asyncio
 import logging
 
 from dynamo.planner import KubernetesConnector
-from dynamo.planner.kube import KubernetesAPI
-from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse, ScaleStatus
+from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -266,7 +266,7 @@ class ScaleRequestHandler:
                             f"would use {total_gpus} GPUs, exceeding max of {self.max_total_gpus}"
                         )
                         yield {
-                            "status": ScaleStatus.ERROR.value,
+                            "status": ScaleStatus.REJECTED.value,
                             "message": (
                                 f"GPU budget exceeded: request would use {total_gpus} total GPUs, "
                                 f"max allowed is {self.max_total_gpus}"

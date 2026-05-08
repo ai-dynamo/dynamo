@@ -2,18 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
-import socket
 from typing import Any, List, Optional
 
 import sglang as sgl
+from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_local_ip_auto
+from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
+
+SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
 
 async def _register_model_with_runtime_config(
@@ -39,9 +43,9 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
 
-    if not server_args.skip_tokenizer_init:
+    if dynamo_args.use_sglang_tokenizer:
         logging.warning(
-            "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
+            "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
         # Only override output_type for chat models, not for embeddings
@@ -88,61 +92,160 @@ def _get_bootstrap_info_for_config(
             return None, None
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-                addr_family = infos[0][0]
-                logging.info(
-                    f"Resolved bootstrap host '{host_core}' -> '{resolved}' "
-                    f"({'IPv6' if addr_family == socket.AF_INET6 else 'IPv4'})"
-                )
-            except socket.gaierror as e:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
-                logging.warning(
-                    f"Failed to resolve bootstrap host '{host_core}': {e}, using as-is"
-                )
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            resolved = dist_init.resolved()
+            bootstrap_host = (
+                NetworkAddress(resolved.host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
+            logging.info(
+                f"Resolved bootstrap host '{dist_init.host}' -> '{resolved.host}' "
+                f"({'IPv6' if resolved.is_ipv6 else 'IPv4'})"
+            )
         else:
             # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
             # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
-            bootstrap_host = get_local_ip_auto()
-            is_ipv6 = ":" in bootstrap_host
+            local_ip = get_local_ip_auto()
+            local_addr = NetworkAddress(local_ip, bootstrap_port)
+            bootstrap_host = local_addr.to_host_port_str().rsplit(":", 1)[0]
             logging.info(
-                f"Using auto-detected local IP: {bootstrap_host} "
-                f"({'IPv6' if is_ipv6 else 'IPv4'})"
+                f"Using auto-detected local IP: {local_ip} "
+                f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
             )
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
-            logging.info(f"Wrapped IPv6 address with brackets: {bootstrap_host}")
-
         return bootstrap_host, bootstrap_port
     except Exception as e:
         logging.warning(f"Failed to get bootstrap info: {e}")
         return None, None
+
+
+def _parse_hicache_storage_extra_config(
+    raw_extra_config: Optional[Any],
+) -> dict[str, Any]:
+    if raw_extra_config is None:
+        return {}
+
+    if isinstance(raw_extra_config, dict):
+        return dict(raw_extra_config)
+
+    if isinstance(raw_extra_config, str):
+        raw_extra_config = raw_extra_config.strip()
+        if not raw_extra_config:
+            return {}
+        try:
+            parsed = json.loads(raw_extra_config)
+        except json.JSONDecodeError as e:
+            logging.warning(
+                f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
+            )
+            return {}
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        logging.warning(
+            "hicache_storage_backend_extra_config JSON was not an object; ignoring it."
+        )
+        return {}
+
+    logging.warning(
+        "Unsupported hicache_storage_backend_extra_config type %s; ignoring it.",
+        type(raw_extra_config).__name__,
+    )
+    return {}
+
+
+def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
+    if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
+        return None
+
+    extra_config = _parse_hicache_storage_extra_config(
+        getattr(server_args, "hicache_storage_backend_extra_config", None)
+    )
+
+    try:
+        from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
+            MooncakeStoreConfig,
+        )
+    except ImportError as e:
+        logging.warning(f"MooncakeStoreConfig import unavailable: {e}")
+        return None
+
+    # Graceful degradation: Mooncake runtime metadata is optional. If config
+    # resolution fails for any reason (file not found, malformed env vars,
+    # upstream API change), skip publishing the metadata rather than crashing
+    # the worker -- the worker still serves requests, just without HiCache
+    # router hints. Broad catch is intentional per python-guidelines.md.
+    try:
+        if extra_config and (
+            extra_config.get("master_server_address") is not None
+            or extra_config.get("client_server_address") is not None
+        ):
+            mooncake_config = MooncakeStoreConfig.load_from_extra_config(extra_config)
+        elif envs.SGLANG_HICACHE_MOONCAKE_CONFIG_PATH.is_set():
+            mooncake_config = MooncakeStoreConfig.from_file()
+        else:
+            mooncake_config = MooncakeStoreConfig.load_from_env()
+    except Exception as e:
+        logging.warning(f"Failed to resolve Mooncake config for runtime metadata: {e}")
+        return None
+
+    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+    pp_size = int(getattr(server_args, "pp_size", 1) or 1)
+
+    try:
+        is_mla_model = bool(server_args.use_mla_backend())
+    except Exception as e:
+        logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
+        is_mla_model = False
+
+    try:
+        spec_algorithm = SpeculativeAlgorithm.from_string(
+            getattr(server_args, "speculative_algorithm", None)
+        )
+        is_eagle = bool(spec_algorithm.is_eagle())
+    except Exception as e:
+        logging.warning(f"Failed to determine speculative algorithm: {e}")
+        is_eagle = False
+
+    tp_lcm_size = extra_config.get("tp_lcm_size")
+    try:
+        tp_lcm_size = int(tp_lcm_size) if tp_lcm_size is not None else None
+    except (TypeError, ValueError):
+        logging.warning("Ignoring non-integer Mooncake tp_lcm_size=%r", tp_lcm_size)
+        tp_lcm_size = None
+
+    should_split_heads = (
+        not is_mla_model
+        and getattr(server_args, "hicache_mem_layout", None) == "page_head"
+        and tp_lcm_size is not None
+        and tp_lcm_size > tp_size
+        and tp_lcm_size % tp_size == 0
+    )
+
+    extra_backend_tag = extra_config.get("extra_backend_tag")
+    if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
+        extra_backend_tag = None
+
+    master_server_address = getattr(mooncake_config, "master_server_address", None)
+    if not isinstance(master_server_address, str) or not master_server_address:
+        master_server_address = None
+
+    return {
+        "backend": "mooncake",
+        "page_size": int(getattr(server_args, "page_size", 1) or 1),
+        "tp_size": tp_size,
+        "pp_size": pp_size,
+        "is_mla_model": is_mla_model,
+        "is_eagle": is_eagle,
+        "tp_lcm_size": tp_lcm_size,
+        "should_split_heads": should_split_heads,
+        "extra_backend_tag": extra_backend_tag,
+        "master_server_address": master_server_address,
+        "master_metrics_port": int(
+            getattr(mooncake_config, "master_metrics_port", 9003)
+        ),
+    }
 
 
 async def _get_runtime_config(
@@ -162,6 +265,9 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        dynamo_args.exclude_tools_when_tool_choice_none
+    )
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -194,38 +300,55 @@ async def _get_runtime_config(
     if max_prefill_tokens:
         runtime_config.max_num_batched_tokens = max_prefill_tokens
 
+    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+        runtime_config.enable_eagle = True
+
+    mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
+    if mooncake_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY,
+                json.dumps(mooncake_runtime_data),
+            )
+            logging.info("Published Mooncake HiCache runtime metadata for router use.")
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
+            )
+
     try:
-        # Try to check if the engine has a scheduler attribute with the computed values
-        if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
-            # Get max_total_num_tokens from scheduler_info
-            if "max_total_num_tokens" in engine.scheduler_info:
-                max_total_tokens = engine.scheduler_info["max_total_num_tokens"]
-                if max_total_tokens and hasattr(
-                    engine.tokenizer_manager, "server_args"
-                ):
-                    page_size = engine.tokenizer_manager.server_args.page_size
-                    if page_size:
-                        runtime_config.total_kv_blocks = (
-                            max_total_tokens + page_size - 1
-                        ) // page_size
-                        logging.info(
-                            f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
-                            f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
-                        )
+        scheduler_info = get_scheduler_info(engine)
+        max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
-            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info.
-            # SGLang separates configuration (server_args) from runtime stats (scheduler_info).
-            # In contrast, vLLM exposes both config and runtime values through engine config.
-            # These are config parameters, so they must be retrieved from server_args only.
+        if max_total_tokens:
+            page_size = server_args.page_size
+            if page_size:
+                runtime_config.total_kv_blocks = (
+                    max_total_tokens + page_size - 1
+                ) // page_size
+                logging.info(
+                    f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
+                    f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                )
 
-            return runtime_config
+            # When max_prefill_tokens is not explicitly set by the user, fall back
+            # to max_total_num_tokens from the scheduler. This ensures the planner
+            # always has a prefill load signal for aggregated scaling decisions.
+            if not max_prefill_tokens:
+                runtime_config.max_num_batched_tokens = max_total_tokens
+                logging.info(
+                    f"max_prefill_tokens not set, using max_total_num_tokens "
+                    f"from scheduler as max_num_batched_tokens: {max_total_tokens}"
+                )
+        else:
+            unpublished = "total_kv_blocks"
+            if not max_prefill_tokens:
+                unpublished += " and max_num_batched_tokens"
+            logging.warning(
+                f"Could not access scheduler info from SGLang engine. "
+                f"{unpublished} will not be published; SGLang will use its internal defaults."
+            )
 
-        # If scheduler approach doesn't work, log and return None to indicate we'll skip runtime config
-        logging.warning(
-            "Could not access runtime config from SGLang engine. "
-            "The engine may compute these values internally after initialization. "
-            "Proceeding without runtime config - SGLang will use its internal defaults."
-        )
         return runtime_config
 
     except Exception as e:
@@ -298,8 +421,9 @@ async def register_image_diffusion_model(
         by default. When output_modalities is provided, the ModelType is derived
         from the given modality names instead.
     """
-    # Use model_path as the model name (diffusion workers don't have served_model_name)
-    model_name = server_args.model_path
+    model_name = (
+        getattr(server_args, "served_model_name", None) or server_args.model_path
+    )
 
     model_type = ModelType.Images
     if output_modalities:
@@ -321,7 +445,7 @@ async def register_image_diffusion_model(
             ModelInput.Text,
             model_type,
             endpoint,
-            model_name,
+            server_args.model_path,
             model_name,
         )
         logging.info(f"Successfully registered diffusion model: {model_name}")
@@ -353,15 +477,16 @@ async def register_video_generation_model(
     Note:
         Video generation models use ModelInput.Text (text prompts) and ModelType.Videos.
     """
-    # Use model_path as the model name (video workers don't have served_model_name)
-    model_name = server_args.model_path
+    model_name = (
+        getattr(server_args, "served_model_name", None) or server_args.model_path
+    )
 
     try:
         await register_model(
             ModelInput.Text,
             ModelType.Videos,
             endpoint,
-            model_name,
+            server_args.model_path,
             model_name,
         )
         logging.info(f"Successfully registered video generation model: {model_name}")

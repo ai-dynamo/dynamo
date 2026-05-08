@@ -14,6 +14,23 @@
 # limitations under the License.
 
 {{- $operatorValues := index .Values "dynamo-operator" }}
+{{- if $operatorValues.namespaceRestriction.enabled }}
+
+================================================================================
+  DEPRECATION WARNING
+================================================================================
+  Namespace-restricted mode (namespaceRestriction.enabled=true) is DEPRECATED
+  and will be removed in a future release.
+
+  The operator is configured for namespace: {{ default .Release.Namespace $operatorValues.namespaceRestriction.targetNamespace }}
+
+  Please migrate to cluster-wide mode by removing the namespaceRestriction
+  configuration from your values.
+
+  See: https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md
+================================================================================
+
+{{- end }}
 {{- if and $operatorValues.namespaceRestriction.enabled $operatorValues.gpuDiscovery.enabled }}
 GPU Discovery: ENABLED — the operator will automatically detect GPU hardware from cluster nodes.
 {{- else if $operatorValues.namespaceRestriction.enabled }}

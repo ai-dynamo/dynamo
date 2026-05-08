@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_deci
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.2:
+    description: Multiple tool calls
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone":
+      "EST"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: Hello, how can I help you today?
+  PARSER.batch.4:
+    description: Malformed (truncated JSON inside TOOLCALL)
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: null
+  PARSER.batch.5:
+    description: Missing </TOOLCALL> end marker
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: null
+  PARSER.batch.6:
+    description: Empty args (no-arg call)
+    model_text: '<TOOLCALL>[{"name": "get_time", "arguments": {}}]</TOOLCALL>'
+    tools:
+    - name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.7:
+    description: Complex args (nested object + array)
+    model_text: '<TOOLCALL>[{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}]</TOOLCALL>'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          items:
+          - 1
+          - 2
+          - 3
+          config:
+            nested: true
+      normal_text: ''
+  PARSER.batch.8:
+    description: Interleaved normal text
+    model_text: 'Hey How are you? <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: Hey How are you?
+  PARSER.batch.9:
+    description: Empty input
+    model_text: ''
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

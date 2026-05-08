@@ -10,7 +10,7 @@ use crate::{
         common::{self, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            nvext::{NvExtProvider, NvExtResponse, TimingInfo},
+            nvext::{NvExtProvider, NvExtResponseFieldSelection},
             token_to_utf8_bytes,
         },
     },
@@ -32,7 +32,7 @@ impl NvCreateChatCompletionRequest {
             // For non-streaming requests (stream=false), enable usage by default
             if self.inner.stream_options.is_none() {
                 self.inner.stream_options =
-                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                    Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                         include_usage: true,
                         continuous_usage_stats: false,
                     });
@@ -51,20 +51,7 @@ impl NvCreateChatCompletionRequest {
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        // Enable tracking if:
-        // 1. Client requested timing in extra_fields, OR
-        // 2. query_instance_id annotation is present (needs worker_id tracking for response)
-        let enable_tracking = self
-            .nvext()
-            .map(|nv| {
-                nv.extra_fields
-                    .as_ref()
-                    .is_some_and(|fields| fields.iter().any(|f| f == "timing"))
-                    || nv.annotations.as_ref().is_some_and(|annots| {
-                        annots.iter().any(|a| a.starts_with("query_instance_id"))
-                    })
-            })
-            .unwrap_or(false);
+        let response_fields = NvExtResponseFieldSelection::from_nvext(self.nvext());
 
         let options = DeltaGeneratorOptions {
             enable_usage: self
@@ -81,7 +68,7 @@ impl NvCreateChatCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
-            enable_tracking,
+            response_fields,
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -98,8 +85,8 @@ pub struct DeltaGeneratorOptions {
     pub continuous_usage_stats: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
-    /// Determines whether request tracking (timing, KV hit rate) should be enabled.
-    pub enable_tracking: bool,
+    /// Determines which nvext response fields may be emitted for this request.
+    pub response_fields: NvExtResponseFieldSelection,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -116,9 +103,9 @@ pub struct DeltaGenerator {
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
     /// Optional service tier information for the response.
-    service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
-    usage: dynamo_async_openai::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
     /// Counter tracking the number of messages issued.
     msg_counter: u64,
     /// Configuration options for response generation.
@@ -147,7 +134,7 @@ impl DeltaGenerator {
         // but this will not be an issue until 2106.
         let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
 
-        let usage = dynamo_async_openai::types::CompletionUsage {
+        let usage = dynamo_protocols::types::CompletionUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
@@ -158,7 +145,8 @@ impl DeltaGenerator {
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
-        // The enable_tracking option only controls whether timing info is included in the response.
+        // `response_fields` only controls which nvext fields are returned to the client;
+        // the tracker still records timing/ITL internally for metrics.
         let tracker = Some(Arc::new(RequestTracker::new()));
 
         Self {
@@ -194,7 +182,7 @@ impl DeltaGenerator {
         token_ids: &[TokenIdType],
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
+    ) -> Option<dynamo_protocols::types::ChatChoiceLogprobs> {
         if !self.options.enable_logprobs || logprobs.is_none() {
             return None;
         }
@@ -216,7 +204,7 @@ impl DeltaGenerator {
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
                     let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
-                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                    dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: t.clone(),
                         logprob: lp,
                         bytes: token_to_utf8_bytes(t),
@@ -226,7 +214,7 @@ impl DeltaGenerator {
                 .collect()
         });
 
-        Some(dynamo_async_openai::types::ChatChoiceLogprobs {
+        Some(dynamo_protocols::types::ChatChoiceLogprobs {
             content,
             refusal: None,
         })
@@ -242,22 +230,22 @@ impl DeltaGenerator {
     /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
-    /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
+    /// * An [`dynamo_protocols::types::CreateChatCompletionStreamResponse`] instance representing the choice.
     #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
         text: Option<String>,
-        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-        logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
-        stop_reason: Option<dynamo_async_openai::types::StopReason>,
+        finish_reason: Option<dynamo_protocols::types::FinishReason>,
+        logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
+        stop_reason: Option<dynamo_protocols::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
-        let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text.map(dynamo_async_openai::types::ChatCompletionMessageContent::Text),
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
-                Some(dynamo_async_openai::types::Role::Assistant)
+                Some(dynamo_protocols::types::Role::Assistant)
             } else {
                 None
             },
@@ -265,7 +253,7 @@ impl DeltaGenerator {
             reasoning_content: None,
         };
 
-        let choice = dynamo_async_openai::types::ChatChoiceStream {
+        let choice = dynamo_protocols::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
@@ -278,19 +266,21 @@ impl DeltaGenerator {
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices,
-            usage: if self.options.enable_usage && self.options.continuous_usage_stats {
-                Some(self.get_usage())
-            } else {
-                None
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices,
+                usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+                    Some(self.get_usage())
+                } else {
+                    None
+                },
+                service_tier: self.service_tier.clone(),
             },
-            service_tier: self.service_tier.clone(),
             nvext: None, // Will be populated by router layer if needed
         }
     }
@@ -303,15 +293,17 @@ impl DeltaGenerator {
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![], // Empty choices for usage-only chunk
-            usage: Some(usage),
-            service_tier: self.service_tier.clone(),
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices: vec![], // Empty choices for usage-only chunk
+                usage: Some(usage),
+                service_tier: self.service_tier.clone(),
+            },
             nvext: None,
         }
     }
@@ -326,7 +318,7 @@ impl DeltaGenerator {
         self.options.continuous_usage_stats
     }
 
-    pub fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+    pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         let mut usage = self.usage.clone();
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         usage
@@ -383,18 +375,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Map backend finish reasons to OpenAI's finish reasons.
         let finish_reason = match delta.finish_reason {
-            Some(common::FinishReason::EoS) => Some(dynamo_async_openai::types::FinishReason::Stop),
-            Some(common::FinishReason::Stop) => {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
-            }
+            Some(common::FinishReason::EoS) => Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(common::FinishReason::Stop) => Some(dynamo_protocols::types::FinishReason::Stop),
             Some(common::FinishReason::Length) => {
-                Some(dynamo_async_openai::types::FinishReason::Length)
+                Some(dynamo_protocols::types::FinishReason::Length)
             }
             Some(common::FinishReason::Cancelled) => {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
+                Some(dynamo_protocols::types::FinishReason::Stop)
             }
             Some(common::FinishReason::ContentFilter) => {
-                Some(dynamo_async_openai::types::FinishReason::ContentFilter)
+                Some(dynamo_protocols::types::FinishReason::ContentFilter)
             }
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));
@@ -403,7 +393,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         };
 
         // Create the streaming response.
-        let index = 0;
+        let index = delta.index.unwrap_or(0);
         let mut stream_response = self.create_choice(
             index,
             delta.text,
@@ -412,58 +402,38 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             delta.stop_reason,
         );
 
-        // Get worker_id info from tracker (set by KvPushRouter based on phase)
-        let worker_id_info = self.tracker.as_ref().and_then(|t| t.get_worker_info());
-
-        let token_ids = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("token_ids"))
-            .and_then(|v| serde_json::from_value::<Vec<u32>>(v.clone()).ok());
-        let routed_experts = delta
-            .disaggregated_params
-            .as_ref()
-            .and_then(|params| params.get("routed_experts"))
-            .cloned();
-
-        // Get timing info if this is the final response (has finish_reason)
-        let timing_info: Option<TimingInfo> = if finish_reason.is_some() {
-            self.tracker.as_ref().map(|tracker| {
-                tracker.record_finish();
-                tracker.get_timing_info()
-            })
-        } else {
-            None
-        };
-
-        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
-        if worker_id_info.is_some()
-            || token_ids.is_some()
-            || timing_info.is_some()
-            || routed_experts.is_some()
+        // Record finish for timing/ITL accounting even when timing is not returned to the client.
+        // Kept at call site because it's a side effect on the tracker — not a gating decision.
+        if finish_reason.is_some()
+            && let Some(ref tracker) = self.tracker
         {
-            let nvext_response = NvExtResponse {
-                worker_id: worker_id_info.clone(),
-                timing: timing_info,
-                token_ids: token_ids.clone(),
-                routed_experts,
-            };
+            tracker.record_finish();
+        }
 
-            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                stream_response.nvext = Some(nvext_json);
-                if let Some(ref info) = worker_id_info {
-                    tracing::debug!(
-                        "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                        info.prefill_worker_id,
-                        info.decode_worker_id
-                    );
-                }
-                if let Some(ref tokens) = token_ids {
-                    tracing::debug!(
-                        "Injected token_ids into chat completion nvext: {} tokens",
-                        tokens.len()
-                    );
-                }
+        // Build the nvext response payload via the shared gating helper on
+        // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
+        // completions delta generators go through the same helper so the gating
+        // rules stay in one place.
+        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
+            self.tracker.as_ref(),
+            delta.disaggregated_params.as_ref(),
+            finish_reason.is_some(),
+            delta.engine_data,
+        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
+        {
+            stream_response.nvext = Some(nvext_json);
+            if let Some(ref info) = nvext_response.worker_id {
+                tracing::debug!(
+                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                    info.prefill_worker_id,
+                    info.decode_worker_id
+                );
+            }
+            if let Some(ref tokens) = nvext_response.token_ids {
+                tracing::debug!(
+                    "Injected token_ids into chat completion nvext: {} tokens",
+                    tokens.len()
+                );
             }
         }
 
@@ -486,7 +456,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         DeltaGenerator::is_continuous_usage_enabled(self)
     }
 
-    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         DeltaGenerator::get_usage(self)
     }
 
@@ -498,7 +468,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use crate::protocols::common::{self, llm_backend::BackendOutput, timing::WORKER_TYPE_PREFILL};
+    use crate::protocols::openai::DeltaGeneratorExt;
+    use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };
@@ -561,5 +533,280 @@ mod tests {
             request.inner.stream_options.is_none(),
             "Streaming request should not have stream_options modified"
         );
+    }
+
+    fn make_request_with_nvext(
+        nvext: crate::protocols::openai::nvext::NvExt,
+    ) -> NvCreateChatCompletionRequest {
+        let mut request = create_test_request();
+        request.nvext = Some(nvext);
+        request
+    }
+
+    fn final_backend_output() -> BackendOutput {
+        BackendOutput {
+            token_ids: vec![1],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: Some(serde_json::json!({
+                "token_ids": [11, 22, 33],
+                "routed_experts": {"layer_0": [1, 3]}
+            })),
+            engine_data: None,
+        }
+    }
+
+    fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("test".to_string()),
+                name: None,
+            },
+        )];
+
+        NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages,
+                stream: Some(true),
+                stream_options: None,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: Some(
+                crate::protocols::openai::nvext::NvExt::builder()
+                    .extra_fields(fields)
+                    .build()
+                    .unwrap(),
+            ),
+            chat_template_args: None,
+            media_io_kwargs: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    fn make_backend_output_with_engine_data() -> crate::protocols::common::llm_backend::BackendOutput
+    {
+        crate::protocols::common::llm_backend::BackendOutput {
+            token_ids: vec![42],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            engine_data: Some(serde_json::json!({
+                "kv_transfer_time_ms": 12.3,
+                "disaggregated_kv_transfer_time_ms": 8.1,
+                "prefill_compute_time_ms": 45.6
+            })),
+        }
+    }
+
+    #[test]
+    fn test_plain_request_without_extra_fields_omits_nvext() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-no-nvext".to_string());
+        let tracker = generator.tracker().expect("tracker");
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_backend_choice_index_is_preserved() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-choice-index".to_string());
+        let mut output = final_backend_output();
+        output.index = Some(2);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        assert_eq!(response.inner.choices[0].index, 2);
+    }
+
+    #[test]
+    fn test_timing_extra_field_emits_timing_on_final_chunk() {
+        use crate::protocols::openai::nvext::NvExt;
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["timing".to_string()])
+            .build()
+            .unwrap();
+        let mut generator =
+            make_request_with_nvext(nvext).response_generator("req-timing".to_string());
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        let nvext_json = response.nvext.expect("nvext present for timing request");
+        assert!(
+            nvext_json.get("timing").is_some(),
+            "timing should be emitted when extra_fields=[\"timing\"]"
+        );
+        assert!(nvext_json.get("worker_id").is_none());
+        assert!(nvext_json.get("token_ids").is_none());
+        assert!(nvext_json.get("routed_experts").is_none());
+    }
+
+    #[test]
+    fn test_query_instance_id_emits_worker_id_and_token_ids() {
+        use crate::protocols::openai::nvext::NvExt;
+        let nvext = NvExt::builder()
+            .annotations(vec!["query_instance_id:abc".to_string()])
+            .build()
+            .unwrap();
+        let mut generator =
+            make_request_with_nvext(nvext).response_generator("req-qid".to_string());
+        let tracker = generator.tracker().expect("tracker");
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        let nvext_json = response
+            .nvext
+            .expect("nvext present for query_instance_id flow");
+        assert!(nvext_json.get("worker_id").is_some());
+        assert_eq!(
+            nvext_json.get("token_ids"),
+            Some(&serde_json::json!([11, 22, 33]))
+        );
+        // timing is NOT auto-enabled for query_instance_id — it is gated by `extra_fields: ["timing"]`.
+        assert!(nvext_json.get("timing").is_none());
+        assert!(nvext_json.get("routed_experts").is_none());
+    }
+
+    #[test]
+    fn test_routed_experts_extra_field_emits_routed_experts() {
+        use crate::protocols::openai::nvext::NvExt;
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["routed_experts".to_string()])
+            .build()
+            .unwrap();
+        let mut generator =
+            make_request_with_nvext(nvext).response_generator("req-experts".to_string());
+
+        let response = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("choice generation");
+
+        let nvext_json = response
+            .nvext
+            .expect("nvext present for routed_experts request");
+        assert_eq!(
+            nvext_json.get("routed_experts"),
+            Some(&serde_json::json!({"layer_0": [1, 3]}))
+        );
+        assert!(nvext_json.get("worker_id").is_none());
+        assert!(nvext_json.get("timing").is_none());
+        assert!(nvext_json.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn test_engine_data_included_when_requested_via_extra_fields() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-1".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        let nvext = response.nvext.expect("nvext should be present");
+        let engine_data = nvext
+            .get("engine_data")
+            .expect("engine_data should be present");
+        assert_eq!(engine_data["kv_transfer_time_ms"], 12.3);
+        assert_eq!(engine_data["prefill_compute_time_ms"], 45.6);
+    }
+
+    #[test]
+    fn test_engine_data_excluded_when_not_requested() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-engine-2".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        // nvext may or may not be present (tracker may inject worker_id),
+        // but engine_data specifically must be absent
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not be present when not requested"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_data_excluded_when_other_extra_fields_requested() {
+        let request = create_test_request_with_extra_fields(vec!["timing".to_string()]);
+        let mut generator = request.response_generator("req-engine-3".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not be present when only timing is requested"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_data_none_from_backend_no_nvext_noise() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-4".to_string());
+
+        let backend_output = crate::protocols::common::llm_backend::BackendOutput {
+            token_ids: vec![42],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            engine_data: None, // engine didn't provide any data
+        };
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        // engine_data is None from backend, so nvext.engine_data should be absent
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not appear when backend provides None"
+            );
+        }
     }
 }

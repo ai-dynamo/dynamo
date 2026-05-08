@@ -18,17 +18,18 @@ from __future__ import annotations
 import copy
 import logging
 from typing import Any, Protocol, Tuple
+from uuid import uuid4
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     Container,
     PodSpec,
-    ServiceResources,
     break_arguments,
     get_service_name_by_type,
     sanitize_cli_args,
     set_argument_value,
+    setup_worker_service_resources,
     update_image,
 )
 from dynamo.profiler.utils.defaults import EngineType
@@ -121,6 +122,29 @@ class ConfigModifierProtocol(Protocol):
         pvc_name: str,
         pvc_mount_path: str,
         pvc_path: str,
+    ) -> dict:
+        ...
+
+    @classmethod
+    def build_dgd_config(
+        cls,
+        mode: str,
+        model_name: str,
+        image: str,
+        prefill_cli_args: list[str] | None = None,
+        prefill_replicas: int = 1,
+        prefill_gpus: int = 1,
+        decode_cli_args: list[str] | None = None,
+        decode_replicas: int = 1,
+        decode_gpus: int = 1,
+        agg_cli_args: list[str] | None = None,
+        agg_replicas: int = 1,
+        agg_gpus: int = 1,
+        namespace: str | None = None,
+        model_path: str | None = None,
+        pvc_name: str | None = None,
+        pvc_mount_path: str | None = None,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         ...
 
@@ -445,6 +469,7 @@ class BaseConfigModifier:
         model_path: str | None = None,
         pvc_name: str | None = None,
         pvc_mount_path: str | None = None,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         """
         Build a complete DynamoGraphDeployment config by loading a base YAML
@@ -471,6 +496,9 @@ class BaseConfigModifier:
             model_path: Model path if different from model_name (e.g. PVC path)
             pvc_name: PVC claim name for model cache (optional)
             pvc_mount_path: PVC mount path (optional)
+            num_gpus_per_node: GPUs per physical node. When provided, worker
+                GPU limits are capped per node and multinode.nodeCount is set
+                for workers that span multiple nodes.
 
         Returns:
             Complete DGD config dict ready for YAML serialization
@@ -485,7 +513,7 @@ class BaseConfigModifier:
         cfg = Config.model_validate(config)
 
         # Set metadata
-        cfg.metadata.name = f"{cls.BACKEND}-{mode}"
+        cfg.metadata.name = f"{cls.BACKEND}-{mode}-{uuid4().hex[:8]}"
         if namespace and hasattr(cfg.metadata, "namespace"):
             cfg.metadata.namespace = namespace
 
@@ -502,6 +530,7 @@ class BaseConfigModifier:
                 decode_cli_args=decode_cli_args or [],
                 decode_replicas=decode_replicas,
                 decode_gpus=decode_gpus,
+                num_gpus_per_node=num_gpus_per_node,
             )
         else:
             cls._apply_agg_worker(
@@ -509,12 +538,15 @@ class BaseConfigModifier:
                 agg_cli_args=agg_cli_args or [],
                 agg_replicas=agg_replicas,
                 agg_gpus=agg_gpus,
+                num_gpus_per_node=num_gpus_per_node,
             )
 
         # Update model (handles worker args + frontend patching)
         effective_model_path = model_path or model_name
-        if pvc_name and pvc_mount_path:
-            # Derive pvc_path from effective_model_path by stripping the mount prefix
+        if pvc_name and pvc_mount_path and model_path:
+            # pvcModelPath was explicitly provided — model weights live at a
+            # known path inside the PVC.  Let update_model_from_pvc handle
+            # volume mount + CLI patching.
             pvc_path = ""
             if effective_model_path and effective_model_path.startswith(pvc_mount_path):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
@@ -524,6 +556,17 @@ class BaseConfigModifier:
                 pvc_name=pvc_name,
                 pvc_mount_path=pvc_mount_path,
                 pvc_path=pvc_path,
+            )
+        elif pvc_name and pvc_mount_path:
+            # PVC configured as an HF cache directory (no explicit model path
+            # within it).  Mount the PVC so workers can find cached weights,
+            # but keep the HF model ID as the worker model argument.
+            cls._ensure_spec_pvc(cfg, pvc_name)
+            for _svc_name, svc in cfg.spec.services.items():
+                cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+            result = cls.update_model(
+                cfg.model_dump(),
+                model_name=model_name,
             )
         else:
             result = cls.update_model(
@@ -558,18 +601,15 @@ class BaseConfigModifier:
         cli_args: list[str],
         replicas: int,
         gpus: int,
+        num_gpus_per_node: int | None = None,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to a single worker service."""
         service.replicas = replicas
-
-        if service.resources is None:
-            service.resources = ServiceResources()
-        if service.resources.limits is None:
-            service.resources.limits = {}
-        service.resources.limits["gpu"] = str(gpus)
-
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
             service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
+
+        # Apply resources after args so multinode sizing can inspect final TP/PP flags.
+        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
     @classmethod
     def _apply_disagg_workers(
@@ -581,6 +621,7 @@ class BaseConfigModifier:
         decode_cli_args: list[str],
         decode_replicas: int,
         decode_gpus: int,
+        num_gpus_per_node: int | None = None,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to disagg worker services."""
         for sct, cli_args, replicas, gpus in [
@@ -601,7 +642,11 @@ class BaseConfigModifier:
                 )
                 continue
             cls._apply_worker_config(
-                cfg.spec.services[svc_name], cli_args, replicas, gpus
+                cfg.spec.services[svc_name],
+                cli_args,
+                replicas,
+                gpus,
+                num_gpus_per_node=num_gpus_per_node,
             )
 
     @classmethod
@@ -611,6 +656,7 @@ class BaseConfigModifier:
         agg_cli_args: list[str],
         agg_replicas: int,
         agg_gpus: int,
+        num_gpus_per_node: int | None = None,
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to the agg worker service.
 
@@ -630,7 +676,11 @@ class BaseConfigModifier:
             logger.warning("Could not find worker service for agg mode")
             return
         cls._apply_worker_config(
-            cfg.spec.services[svc_name], agg_cli_args, agg_replicas, agg_gpus
+            cfg.spec.services[svc_name],
+            agg_cli_args,
+            agg_replicas,
+            agg_gpus,
+            num_gpus_per_node=num_gpus_per_node,
         )
 
 

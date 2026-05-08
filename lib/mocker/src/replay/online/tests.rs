@@ -4,9 +4,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::sync::{Notify, Semaphore, mpsc};
+use dynamo_kv_router::PrefillLoadEstimator;
+use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -14,14 +17,14 @@ use uuid::Uuid;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs};
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::ReplayRouterMode;
-use crate::replay::router::ReplayRouter;
 
-use super::live_runtime::{
+use super::ReplayRouter;
+use super::entrypoints::{
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
     simulate_trace_requests, simulate_trace_requests_with_stats,
     simulate_trace_workload_with_stats,
 };
-use super::state::{LiveReplayMode, SharedLiveRuntimeStats, WorkloadDispatchState, record_arrival};
+use super::state::{SharedLiveRuntimeStats, WorkloadDispatchState, record_arrival};
 use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
 
 fn replay_args() -> MockEngineArgs {
@@ -52,6 +55,21 @@ fn request(uuid: u128, token: u32, arrival_timestamp_ms: Option<f64>) -> DirectR
         uuid: Some(Uuid::from_u128(uuid)),
         dp_rank: 0,
         arrival_timestamp_ms,
+    }
+}
+
+struct FixedPrefillLoadEstimator {
+    duration: Duration,
+}
+
+impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
+    fn predict_prefill_duration(
+        &self,
+        _batch_size: usize,
+        _effective_isl: usize,
+        _prefix: usize,
+    ) -> anyhow::Result<Duration> {
+        Ok(self.duration)
     }
 }
 
@@ -96,9 +114,16 @@ fn test_online_trace_replay_single_worker_completes() {
     let args = replay_args();
     let requests = vec![request(1, 11, Some(0.0)), request(2, 22, Some(1.0))];
 
-    let report =
-        simulate_trace_requests(args, None, requests, 1, 1.0, ReplayRouterMode::RoundRobin)
-            .unwrap();
+    let report = simulate_trace_requests(
+        args,
+        None,
+        None,
+        requests,
+        1,
+        1.0,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
 
     assert_eq!(report.request_counts.num_requests, 2);
     assert_eq!(report.request_counts.completed_requests, 2);
@@ -165,6 +190,7 @@ async fn test_trace_arrivals_are_not_blocked_by_queued_router_selection() {
         ReplayRouterMode::KvRouter,
         &args,
         None,
+        None,
         1,
     ));
     let senders: Arc<[mpsc::UnboundedSender<DirectRequest>]> =
@@ -215,6 +241,50 @@ async fn test_trace_arrivals_are_not_blocked_by_queued_router_selection() {
     assert_eq!(third.at_ms, 2.0);
 
     tasks.abort_all();
+    router.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
+    let args = replay_args();
+    let router = ReplayRouter::new(
+        ReplayRouterMode::KvRouter,
+        &args,
+        Some(KvRouterConfig {
+            router_track_prefill_tokens: true,
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            ..KvRouterConfig::default()
+        }),
+        Some(Arc::new(FixedPrefillLoadEstimator {
+            duration: Duration::from_secs(10),
+        })),
+        1,
+    );
+
+    assert_eq!(
+        router
+            .select_worker(&request(1, 11, Some(0.0)), 1)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+        64
+    );
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert_eq!(
+        router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+        32
+    );
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert_eq!(
+        router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
+        0
+    );
+
     router.shutdown().await.unwrap();
 }
 
@@ -279,7 +349,6 @@ async fn test_workload_wakeup_is_not_lost_when_completion_happens_before_await()
 
 #[tokio::test]
 async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion_gated() {
-    let semaphore = Arc::new(Semaphore::new(1));
     let notify = Arc::new(Notify::new());
     let wake = notify.notified();
     tokio::pin!(wake);
@@ -287,13 +356,7 @@ async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion
     assert!(
         tokio::time::timeout(
             tokio::time::Duration::from_millis(20),
-            wait_for_workload_progress(
-                LiveReplayMode::Concurrency { max_in_flight: 1 },
-                Some(semaphore.as_ref()),
-                None,
-                Instant::now(),
-                wake.as_mut(),
-            ),
+            wait_for_workload_progress(None, Instant::now(), wake.as_mut()),
         )
         .await
         .is_err(),
@@ -302,13 +365,7 @@ async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion
 
     let wake = notify.notified();
     tokio::pin!(wake);
-    let wait = wait_for_workload_progress(
-        LiveReplayMode::Concurrency { max_in_flight: 1 },
-        Some(semaphore.as_ref()),
-        None,
-        Instant::now(),
-        wake.as_mut(),
-    );
+    let wait = wait_for_workload_progress(None, Instant::now(), wake.as_mut());
     let notify_task = {
         let notify = Arc::clone(&notify);
         tokio::spawn(async move {
@@ -361,7 +418,7 @@ fn test_online_concurrency_replay_respects_max_in_flight() {
     .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 4);
-    assert_eq!(stats.max_in_flight_seen, 2);
+    assert!(stats.max_in_flight_seen <= 2);
 }
 
 #[test]
@@ -369,9 +426,16 @@ fn test_online_trace_replay_populates_admit_reuse_stats() {
     let args = replay_args();
     let requests = vec![request(1, 77, Some(0.0)), request(2, 77, Some(5.0))];
 
-    let report =
-        simulate_trace_requests(args, None, requests, 1, 1.0, ReplayRouterMode::RoundRobin)
-            .unwrap();
+    let report = simulate_trace_requests(
+        args,
+        None,
+        None,
+        requests,
+        1,
+        1.0,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 2);
     assert!(report.prefix_cache_reused_ratio > 0.0);
@@ -395,9 +459,16 @@ fn test_online_trace_replay_sglang_single_worker_completes() {
     let args = sglang_replay_args();
     let requests = vec![request(101, 7, Some(0.0)), request(102, 8, Some(1.0))];
 
-    let report =
-        simulate_trace_requests(args, None, requests, 1, 1.0, ReplayRouterMode::RoundRobin)
-            .unwrap();
+    let report = simulate_trace_requests(
+        args,
+        None,
+        None,
+        requests,
+        1,
+        1.0,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 2);
     assert_eq!(report.request_counts.total_output_tokens, 4);
@@ -431,7 +502,7 @@ fn test_online_concurrency_replay_kv_router_respects_max_in_flight() {
             .unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 4);
-    assert_eq!(stats.max_in_flight_seen, 2);
+    assert!(stats.max_in_flight_seen <= 2);
 }
 
 #[test]

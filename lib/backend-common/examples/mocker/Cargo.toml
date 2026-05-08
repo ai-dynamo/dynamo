@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-mocker-backend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo Rust backend example wrapping the dynamo-mocker scheduler — a full-fidelity mocked LLM engine exposed through the LLMEngine trait."
+
+[[bin]]
+name = "dynamo-mocker-backend"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+dynamo-mocker = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+dashmap = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-runtime = { workspace = true }

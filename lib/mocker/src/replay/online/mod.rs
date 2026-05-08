@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod demux;
+mod entrypoints;
 mod live_runtime;
+mod router;
 mod state;
 mod task;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use live_runtime::{
+pub(crate) use entrypoints::{
     simulate_concurrency_requests, simulate_concurrency_workload, simulate_trace_requests,
     simulate_trace_workload,
 };
+pub(crate) use router::ReplayRouter;

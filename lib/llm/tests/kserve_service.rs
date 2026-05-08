@@ -62,7 +62,7 @@ pub mod kserve_test {
     use tonic::{Request, Response, transport::Channel};
 
     use crate::ports::get_random_port;
-    use dynamo_async_openai::types::Prompt;
+    use dynamo_protocols::types::Prompt;
     use prost::Message;
 
     struct SplitEngine {}

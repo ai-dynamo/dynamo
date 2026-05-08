@@ -52,7 +52,7 @@ huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "m
 
 Set the container image:
 ```bash
-export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
 ```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -529,7 +529,6 @@ flowchart TD
 
 ## Next Steps
 
-- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
 - **Performance Benchmarking**: Use AIPerf to measure and optimize your deployment performance

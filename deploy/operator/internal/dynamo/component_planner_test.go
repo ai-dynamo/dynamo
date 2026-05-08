@@ -12,6 +12,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
@@ -45,8 +46,43 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 				},
 				Ports: []corev1.ContainerPort{
 					{Name: commonconsts.DynamoMetricsPortName, ContainerPort: commonconsts.DynamoPlannerMetricsPort, Protocol: corev1.ProtocolTCP},
+					{Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort), Protocol: corev1.ProtocolTCP},
+				},
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/live",
+							Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+						},
+					},
+					PeriodSeconds:    5,
+					TimeoutSeconds:   4,
+					FailureThreshold: 1,
+				},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/health",
+							Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+						},
+					},
+					PeriodSeconds:    10,
+					TimeoutSeconds:   4,
+					FailureThreshold: 3,
+				},
+				StartupProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/live",
+							Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+						},
+					},
+					PeriodSeconds:    10,
+					TimeoutSeconds:   5,
+					FailureThreshold: 720,
 				},
 				Env: []corev1.EnvVar{
+					{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 					{Name: commonconsts.DynamoNamespaceEnvVar, Value: "dynamo-namespace"},
 					{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypePlanner},
 					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},
@@ -71,6 +107,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					}},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 					{Name: "PLANNER_PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
+					{Name: "DYN_SYSTEM_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort)},
 				},
 			},
 		},
