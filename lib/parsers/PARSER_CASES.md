@@ -222,8 +222,10 @@ shape is being exercised so divergences land on a precise row.
   text → call → text → call → text. Tests that inter-call text is
   preserved (not just leading/trailing).
 
-Each sub-case carries the same `tool_calls` shape as a single happy-path
-call; the assertion is on the `normal_text` field's contents.
+All four sub-cases share the same parser contract — `tool_calls` extracted,
+`normal_text` preserved by position. `.a`/`.b`/`.c` are single-call shapes
+that vary only in where the narration sits; `.d` is the multi-call
+interleaving shape. The assertion across all four is on `normal_text`.
 
 ## `PARSER.batch.9` — Empty content / empty `tool_calls` array / null response
 
