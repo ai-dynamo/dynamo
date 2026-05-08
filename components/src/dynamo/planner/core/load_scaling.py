@@ -580,6 +580,10 @@ class LoadScalingMixin:
         for fpm in fpm_stats.values():
             queued = fpm.queued_requests.sum_prefill_tokens
             sched_decode_kv = fpm.scheduled_requests.sum_decode_kv_tokens
+            queued_decode_kv = fpm.queued_requests.sum_decode_kv_tokens
+            # Pre-consolidation prediction uses scheduled-only because the
+            # regression's training feature is sum_decode_kv_tokens (in the
+            # scheduled batch). Queued decode is not part of training space.
             est = self._agg_regression.estimate_next_ttft(
                 queued_prefill_tokens=queued,
                 max_num_batched_tokens=max_tokens,
@@ -591,7 +595,14 @@ class LoadScalingMixin:
 
             if can_scale_down:
                 post_queued = int(queued * consolidation)
-                post_decode_kv = int(sched_decode_kv * consolidation)
+                # Post-consolidation: survivors inherit both the killed
+                # worker's scheduled AND its queued decode KV (queued
+                # migrates and eventually schedules). Use the combined
+                # backlog for the steady-state prediction so we don't
+                # under-estimate the survivor's prefill TTFT.
+                post_decode_kv = int(
+                    (sched_decode_kv + queued_decode_kv) * consolidation
+                )
                 t_own_post = self._agg_regression.estimate_next_ttft(
                     queued_prefill_tokens=0,
                     max_num_batched_tokens=max_tokens,

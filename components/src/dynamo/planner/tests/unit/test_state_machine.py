@@ -1045,7 +1045,13 @@ class TestAggConsolidationAwareScaleDown:
         ]
         core.load_benchmark_fpms(agg_fpms=fpms)
 
-    def _tick(self, *, num_workers: int, sched_decode_kv_per_worker: int) -> TickInput:
+    def _tick(
+        self,
+        *,
+        num_workers: int,
+        sched_decode_kv_per_worker: int,
+        queued_decode_kv_per_worker: int = 0,
+    ) -> TickInput:
         decode = {}
         for i in range(num_workers):
             decode[(f"w{i}", 0)] = _make_fpm(
@@ -1055,6 +1061,7 @@ class TestAggConsolidationAwareScaleDown:
                 sum_decode_kv_tokens=sched_decode_kv_per_worker,
                 num_decode_requests=10,
                 queued_prefill_tokens=0,
+                queued_decode_kv_tokens=queued_decode_kv_per_worker,
                 # Match the regression so per-tick refit stays monotone.
                 wall_time=1e-4 * 200 + 1e-5 * sched_decode_kv_per_worker + 1e-3,
             )
@@ -1095,6 +1102,49 @@ class TestAggConsolidationAwareScaleDown:
         )
         # Operator-facing reason should distinguish the safety veto from
         # generic "no_change".
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_queued_decode_kv_included_in_consolidation(self):
+        """Queued decode KV must be added to the post-consolidation input.
+
+        Scenario: low scheduled decode kv per worker but a sizable queued
+        decode backlog. Without summing the queue, the post-consolidation
+        ``current_decode_kv`` underestimates the survivor's decode pressure
+        and the prefill TTFT prediction lets scale-down through.
+
+        Setup at N=2, ttft=500ms, regression slope 1e-5 on decode_kv:
+          - sched_decode_kv = 5K per worker, queued_decode_kv = 25K per worker
+          - Combined = 30K; post-consolidation combined = 60K.
+          - Sched-only (buggy) ``T_own_post`` at decode_kv=10K is ~121ms,
+            queue_budget = (500-121)*0.8 = 303ms -> would ALLOW.
+          - Combined (fixed) ``T_own_post`` at decode_kv=60K is ~621ms >
+            500ms -> queue_budget <= 0 -> REFUSES.
+        """
+        core = _make_agg_core(
+            ttft=500.0,
+            itl=1000.0,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _agg_caps_with_max_kv(100_000)
+        self._train_agg_high_decode_kv_cost(core)
+
+        tick = self._tick(
+            num_workers=2,
+            sched_decode_kv_per_worker=5_000,
+            queued_decode_kv_per_worker=25_000,
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+
+        # Without the fix, agg-prefill would see post_decode_kv=10K and
+        # let scale-down through. With the fix, post_decode_kv=60K refuses.
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_decode is None
+            or effects.scale_to.num_decode >= 2
+        )
         assert (
             effects.diagnostics.load_decision_reason
             == "scale_down_refused_consolidation"
