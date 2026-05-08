@@ -93,6 +93,11 @@ async def init_decode(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
+    if getattr(server_args, "enable_trace", False):
+        from sglang.srt.observability.trace import set_global_trace_level
+
+        set_global_trace_level(int(os.environ.get("SGLANG_TRACE_LEVEL", "2")))
+
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -234,6 +239,11 @@ async def init_prefill(
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
+
+    if getattr(server_args, "enable_trace", False):
+        from sglang.srt.observability.trace import set_global_trace_level
+
+        set_global_trace_level(int(os.environ.get("SGLANG_TRACE_LEVEL", "2")))
 
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
