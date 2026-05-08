@@ -549,6 +549,19 @@ fn uri_basename(uri: &str) -> anyhow::Result<String> {
         .with_context(|| format!("no basename in uri: {uri}"))
 }
 
+fn is_custom_chat_template(p: &PromptFormatterArtifact) -> bool {
+    matches!(
+        p,
+        PromptFormatterArtifact::HfChatTemplateJinja {
+            is_custom: true,
+            ..
+        } | PromptFormatterArtifact::HfChatTemplateJson {
+            is_custom: true,
+            ..
+        }
+    )
+}
+
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
     match p {
         PromptFormatterArtifact::HfTokenizerConfigJson(cf)
@@ -920,7 +933,12 @@ impl ModelDeploymentCard {
         if let Some(p) = self.prompt_formatter.as_ref() {
             out.push(pf_checked_file(p));
         }
-        if let Some(c) = self.chat_template_file.as_ref() {
+        // Custom chat templates aren't published on HF and aren't
+        // routed through the cache pipeline; reachability is validated
+        // separately in `download_config`.
+        if let Some(c) = self.chat_template_file.as_ref()
+            && !is_custom_chat_template(c)
+        {
             out.push(pf_checked_file(c));
         }
         if let Some(g) = self.gen_config.as_ref() {
@@ -949,7 +967,9 @@ impl ModelDeploymentCard {
         if let Some(p) = self.prompt_formatter.as_mut() {
             out.push(pf_checked_file_mut(p));
         }
-        if let Some(c) = self.chat_template_file.as_mut() {
+        if let Some(c) = self.chat_template_file.as_mut()
+            && !is_custom_chat_template(c)
+        {
             out.push(pf_checked_file_mut(c));
         }
         if let Some(g) = self.gen_config.as_mut() {
@@ -958,6 +978,48 @@ impl ModelDeploymentCard {
             }
         }
         out
+    }
+
+    /// Validate a custom chat template's local path is reachable on
+    /// this host (worker's published path, or `local_model_path`
+    /// overlay). Custom templates aren't published on HF, so the
+    /// resolve pipeline's hf:// fallback would always 404 — fail fast
+    /// with a clear error instead. If `local_model_path` provides the
+    /// basename, rewrite `cf.path()` so downstream code reads the
+    /// local copy.
+    fn validate_custom_chat_template(
+        &mut self,
+        local_model_path: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        let Some(c) = self.chat_template_file.as_mut() else {
+            return Ok(());
+        };
+        if !is_custom_chat_template(c) {
+            return Ok(());
+        }
+        let cf = pf_checked_file_mut(c);
+        let path = cf
+            .path()
+            .context("custom chat template needs a local path")?
+            .to_path_buf();
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(prefix) = local_model_path
+            && let Some(filename) = path.file_name()
+        {
+            let local = prefix.join(filename);
+            if local.exists() {
+                cf.move_to_disk(local);
+                return Ok(());
+            }
+        }
+        anyhow::bail!(
+            "custom chat template {} not reachable on this host; \
+             ensure the file exists at the same path on every host \
+             (shared mount) or pass --model-path with the same basename",
+            path.display()
+        );
     }
 
     async fn resolve_metadata_files(
@@ -1020,6 +1082,7 @@ impl ModelDeploymentCard {
             );
             return Ok(());
         }
+        self.validate_custom_chat_template(local_model_path)?;
         // Single resolve pipeline: every CheckedFile (URL or local
         // path, existing or missing) flows through resolve_uri,
         // blake3-verifies, lands in the MDC cache. No new/legacy split.
@@ -1862,5 +1925,41 @@ mod tests {
         let cf = cf_for("/nonexistent/worker/path/config.json");
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None).unwrap();
         assert_eq!(got, "hf://Qwen/Qwen3-0.6B/config.json");
+    }
+
+    fn mdc_with_custom_chat_template(path: &Path) -> super::ModelDeploymentCard {
+        let mut mdc = super::ModelDeploymentCard::with_name_only("test");
+        mdc.chat_template_file = Some(super::PromptFormatterArtifact::HfChatTemplateJinja {
+            file: cf_for(path.to_str().unwrap()),
+            is_custom: true,
+        });
+        mdc
+    }
+
+    #[test]
+    fn validate_custom_chat_template_fails_when_unreachable() {
+        let mut mdc = mdc_with_custom_chat_template(Path::new("/nonexistent/template.jinja"));
+        let err = mdc
+            .validate_custom_chat_template(None)
+            .expect_err("expected error for unreachable custom template");
+        assert!(
+            err.to_string().contains("custom chat template"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_custom_chat_template_uses_local_model_path_overlay() {
+        let local = tempfile::tempdir().unwrap();
+        let local_tpl = local.path().join("template.jinja");
+        std::fs::write(&local_tpl, b"").unwrap();
+        let mut mdc = mdc_with_custom_chat_template(Path::new("/nonexistent/template.jinja"));
+        mdc.validate_custom_chat_template(Some(local.path()))
+            .unwrap();
+        let cf = match mdc.chat_template_file.as_ref().unwrap() {
+            super::PromptFormatterArtifact::HfChatTemplateJinja { file, .. } => file,
+            _ => panic!("wrong variant"),
+        };
+        assert_eq!(cf.path(), Some(local_tpl.as_path()));
     }
 }
