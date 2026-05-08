@@ -31,7 +31,7 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.10.post1` | `1.3.0rc13` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
+| **main (ToT)** | `0.5.10.post1` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.0` | `0.10.1` |
 | **v1.1.0** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.1.0-dev.3** *(experimental, partial)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
@@ -168,9 +168,6 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
 Wheels are built using a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but not officially verified.
-
-> [!Caution]
-> KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
 
 ## Cloud Service Provider Compatibility
 
