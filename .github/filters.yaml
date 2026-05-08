@@ -58,7 +58,6 @@ ignore:
   - '.github/dco.yml'
   - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
-  - 'container/check_nixl_alignment.py'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
