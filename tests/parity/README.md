@@ -242,15 +242,30 @@ cases:
 ```
 
 The `ref` field is required on per-sub-case files
-(`PARSER.<mode>.<n>.yaml`). For fixtures sourced from an upstream test,
-it's a URL — the URL itself names the impl (`vllm-project/vllm` → vLLM,
-`sgl-project/sglang` → SGLang) and pins the SHA, file path, and line.
-For sub-cases authored fresh in this repo (e.g., sub-case taxonomy
-fillers with no direct upstream peer), the literal string `dynamo`
-records that we made it up. Every sub-case is one or the other; there's
-no "no provenance" state for sub-cases. The legacy flat
-`PARSER.<mode>.yaml` (cases without sub-cases) does NOT carry `ref` —
-those entries predate the convention.
+(`PARSER.<mode>.<n>.yaml`) and takes one of three forms, distinguishing
+how strongly the fixture is tied to upstream:
+
+- **`ref: inspired-by <url>`** — there's an upstream test exercising
+  this same shape on this same family, but the fixture's `model_text`
+  is freshly authored (templated narration, consistent function/args
+  across families) rather than copied verbatim. The URL points back at
+  the upstream test for traceability. Most cases that have an upstream
+  analogue land here.
+- **`ref: ported-from <url>`** — the fixture's `model_text` is a
+  verbatim (or minimally-adapted) copy of the upstream test's input.
+  Rare; reserve for when the wire format is intricate enough that
+  byte-equivalence matters and we want the upstream link to be a
+  literal source-of-truth.
+- **`ref: dynamo`** — authored fresh in this repo, no upstream peer.
+  Most sub-case taxonomy fillers (`.b` post-only, `.d` between-calls)
+  land here because vLLM/SGLang don't test those shapes.
+
+The URL form (`inspired-by` / `ported-from`) names the impl in the URL
+itself: `vllm-project/vllm` → vLLM, `sgl-project/sglang` → SGLang.
+
+Every sub-case carries one of these three states; there's no "no
+provenance" state. The legacy flat `PARSER.<mode>.yaml` (cases without
+sub-cases) does NOT carry `ref` — those entries predate the convention.
 
 #### Embedded divergence comments
 

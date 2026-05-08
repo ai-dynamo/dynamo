@@ -128,13 +128,13 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     # kimi_k2/PARSER.batch.yaml after the regenerator runs.
     ("kimi_k2", "PARSER.batch.8.a"): {
         "description": "Narration before tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L272",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L272",
         "text": 'I\'ll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("kimi_k2", "PARSER.batch.8.b"): {
         "description": "Narration after tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L435",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L435",
         "text": '<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me know if you need more.',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -262,7 +262,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("glm47", "PARSER.batch.8.a"): {
         "description": "Narration before tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_glm47_moe_tool_parser.py#L94",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_glm47_moe_tool_parser.py#L94",
         "text": "I will check the weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>",
         "tools": [_GET_WEATHER_LOC],
     },
@@ -405,7 +405,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("harmony", "PARSER.batch.8.c"): {
         "description": "Narration both before and after (sandwich)",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_openai_tool_parser.py#L220",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_openai_tool_parser.py#L220",
         "text": 'I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -462,7 +462,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("minimax_m2", "PARSER.batch.8.a"): {
         "description": "Narration before tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L126",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L126",
         "text": 'I will check the weather. <minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>\n</minimax:tool_call>',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -665,7 +665,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("gemma4", "PARSER.batch.8.a"): {
         "description": "Narration before tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L194",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L194",
         "text": 'I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -745,7 +745,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("deepseek_v3", "PARSER.batch.8.c"): {
         "description": "Narration both before and after (sandwich)",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282",
         "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜> Let me know if you need more.',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -876,7 +876,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("hermes", "PARSER.batch.8.a"): {
         "description": "Narration before tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L221",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L221",
         "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -1019,7 +1019,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("mistral", "PARSER.batch.8.c"): {
         "description": "Narration both before and after (sandwich)",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L1858",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L1858",
         "text": 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Let me know if you need more.',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -1152,7 +1152,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("llama3_json", "PARSER.batch.8.c"): {
         "description": "Narration both before and after (sandwich)",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L128",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L128",
         "text": 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Let me know if you need more.',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -1219,7 +1219,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("phi4", "PARSER.batch.8.c"): {
         "description": "Narration both before and after (sandwich)",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282",
         "text": 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Let me know if you need more.',
         "tools": [_GET_WEATHER_LOC],
     },
@@ -1342,7 +1342,7 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     },
     ("deepseek_v3_2", "PARSER.batch.8.a"): {
         "description": "Narration before tool call only",
-        "ref": "https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L158",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L158",
         "text": 'I will check the weather. <｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
         "tools": [_GET_WEATHER_LOC],
     },
