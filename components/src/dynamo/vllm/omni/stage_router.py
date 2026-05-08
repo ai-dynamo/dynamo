@@ -8,7 +8,10 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.entrypoints.utils import (
+    get_final_stage_id_for_e2e,
+    load_stage_configs_from_model,
+)
 
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
@@ -38,7 +41,9 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        self.stage_configs = load_stage_configs_from_yaml(stage_configs_path)
+        self.stage_configs = load_stage_configs_from_model(
+            config.model, deploy_config_path=stage_configs_path
+        )
         self.stage_clients: Dict[str, Any] = {}
 
         media_fs = (
@@ -62,9 +67,10 @@ class OmniStageRouter:
     ) -> AsyncGenerator[dict, None]:
         request_id = str(uuid.uuid4())
         _, request_type = parse_request_type(request, self.config.output_modalities)
+        final_stage_id = self._final_stage_id(request.get("modalities"))
 
         stage_outputs: List[StageOutput] = []
-        for stage_idx, stage_cfg in enumerate(self.stage_configs):
+        for stage_idx, stage_cfg in enumerate(self.stage_configs[: final_stage_id + 1]):
             model_stage = getattr(
                 stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
             )
@@ -78,15 +84,22 @@ class OmniStageRouter:
 
             if stage_idx == 0:
                 # This is a workaround for now to pass in the raw request to stage 0. StageRequest validates it but ignores any unknown keys, so it gets passed through.
-                stage_request = {"request_id": request_id, **request}
+                stage_request = {
+                    **request,
+                    "request_id": request_id,
+                    "final_stage_id": final_stage_id,
+                }
             else:
-                stage_request = stage_outputs[-1].to_next_stage_request(request_id)
+                stage_request = stage_outputs[-1].to_next_stage_request(
+                    request_id, final_stage_id
+                )
 
             raw_stage_output = {}
             logger.info(
-                "Router: stage %d request keys=%s",
+                "Router: stage %d request keys=%s final_stage_id=%s",
                 stage_idx,
                 list(stage_request.keys()),
+                final_stage_id,
             )
             # For now, it is just one chunk output from the stage. Keeping the loop style in mind if in future we decide to stream multiple chunks from the stage.
             async for chunk in await client.round_robin(stage_request):
@@ -125,10 +138,19 @@ class OmniStageRouter:
             if request_type == RequestType.AUDIO_GENERATION
             else request.get("output_format")
         )
+        request_audio = request.get("audio")
+        if (
+            output_format is None
+            and request_type == RequestType.CHAT_COMPLETION
+            and isinstance(request_audio, dict)
+        ):
+            output_format = request_audio.get("format")
         if response_format is not None:
             fmt_ctx["response_format"] = response_format
         if output_format is not None:
             fmt_ctx["output_format"] = output_format
+        if final.stage_text_output:
+            fmt_ctx["text_output"] = final.stage_text_output
 
         async for chunk in self._format_output(
             final, request_id, request_type, fmt_ctx
@@ -164,6 +186,19 @@ class OmniStageRouter:
                 "error": f"Formatter returned no output for type '{final_output_type}'",
                 "finished": True,
             }
+
+    def _final_stage_id(self, request_modalities: list[str] | None) -> int:
+        default_modalities = self.config.output_modalities or [
+            stage_cfg.final_output_type
+            for stage_cfg in self.stage_configs
+            if getattr(stage_cfg, "final_output", False)
+            and getattr(stage_cfg, "final_output_type", None)
+        ]
+        return get_final_stage_id_for_e2e(
+            request_modalities,
+            default_modalities,
+            self.stage_configs,
+        )
 
 
 async def init_omni_stage_router(

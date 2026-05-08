@@ -37,6 +37,122 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
     return prompt
 
 
+def _chat_additional_information(request: dict) -> dict[str, Any]:
+    """Build Omni prompt metadata from chat/audio request fields."""
+    additional_information: dict[str, Any] = {}
+    audio = request.get("audio") if isinstance(request.get("audio"), dict) else {}
+
+    speaker = (
+        request.get("voice")
+        or request.get("speaker")
+        or audio.get("voice")
+        or audio.get("speaker")
+    )
+    if isinstance(speaker, str) and speaker.strip():
+        additional_information["speaker"] = [speaker.lower().strip()]
+
+    language = request.get("language") or audio.get("language")
+    if isinstance(language, str) and language.strip():
+        additional_information["language"] = [language.strip()]
+
+    instructions = request.get("instructions") or audio.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        additional_information["instruction"] = instructions.strip()
+
+    return additional_information
+
+
+_CHATML_PLACEHOLDERS = {
+    "audio": "<|audio_start|><|audio_pad|><|audio_end|>",
+    "input_audio": "<|audio_start|><|audio_pad|><|audio_end|>",
+    "image": "<|vision_start|><|image_pad|><|vision_end|>",
+    "image_url": "<|vision_start|><|image_pad|><|vision_end|>",
+    "video": "<|vision_start|><|video_pad|><|vision_end|>",
+    "video_url": "<|vision_start|><|video_pad|><|vision_end|>",
+}
+
+
+def _message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                pieces.append(part)
+                continue
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                pieces.append(text)
+                continue
+            part_type = part.get("type")
+            if isinstance(part_type, str):
+                pieces.append(_CHATML_PLACEHOLDERS.get(part_type, ""))
+        return "".join(pieces)
+    return "" if content is None else str(content)
+
+
+def _apply_chat_template(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
+    last_error: Exception | None = None
+    candidates = [tokenizer, getattr(tokenizer, "tokenizer", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        apply_chat_template = getattr(candidate, "apply_chat_template", None)
+        if not callable(apply_chat_template):
+            continue
+        try:
+            return apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception as e:
+            last_error = e
+    if last_error is not None:
+        raise last_error
+    raise AttributeError("tokenizer does not expose apply_chat_template")
+
+
+def _tokenizer_supports_chatml(tokenizer: Any) -> bool:
+    candidates = [tokenizer, getattr(tokenizer, "tokenizer", None)]
+    return any(
+        _tokenizer_has_token(candidate, "<|im_start|>")
+        and _tokenizer_has_token(candidate, "<|im_end|>")
+        for candidate in candidates
+        if candidate is not None
+    )
+
+
+def _tokenizer_has_token(tokenizer: Any, token: str) -> bool:
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if not callable(convert):
+        return False
+    try:
+        token_id = convert(token)
+    except Exception:
+        return False
+    if token_id is None:
+        return False
+    return token_id != getattr(tokenizer, "unk_token_id", None)
+
+
+def _render_chatml_messages(messages: list[dict[str, Any]]) -> str:
+    prompt_parts = []
+    for message in messages:
+        role = message.get("role")
+        if role == "developer":
+            role = "system"
+        if role not in {"system", "user", "assistant", "tool"}:
+            role = "user"
+        prompt_parts.append(
+            f"<|im_start|>{role}\n"
+            f"{_message_content_text(message.get('content'))}<|im_end|>\n"
+        )
+    prompt_parts.append("<|im_start|>assistant\n")
+    return "".join(prompt_parts)
+
+
 async def parse_omni_request(
     request: dict,
     output_modalities: list,
@@ -78,8 +194,14 @@ async def parse_omni_request(
 
     # Chat / text
     messages = request.get("messages", [])
+    if not isinstance(messages, list):
+        messages = []
     text = next(
-        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+        (
+            _message_content_text(m.get("content", ""))
+            for m in reversed(messages)
+            if m.get("role") == "user"
+        ),
         request.get("prompt", ""),
     )
 
@@ -88,19 +210,41 @@ async def parse_omni_request(
     # without it the thinker receives bare text instead of the full
     # chat-formatted prompt.
     if messages and tokenizer_getter is not None:
+        tokenizer = None
         try:
             tokenizer = await tokenizer_getter()
-            text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            text = _apply_chat_template(tokenizer, messages)
         except Exception:
+            if _tokenizer_supports_chatml(tokenizer):
+                text = _render_chatml_messages(messages)
+            else:
+                logging.getLogger(__name__).debug(
+                    "Chat template not available, using raw text", exc_info=True
+                )
+
+        if text == "":
             logging.getLogger(__name__).debug(
-                "Chat template not available, using raw text"
+                "Chat template rendered empty prompt, using raw text"
+            )
+            text = next(
+                (
+                    _message_content_text(m.get("content", ""))
+                    for m in reversed(messages)
+                    if m.get("role") == "user"
+                ),
+                request.get("prompt", ""),
             )
 
+    engine_prompt = OmniTextPrompt(prompt=text)
+    additional_information = _chat_additional_information(request)
+    if additional_information:
+        engine_prompt["additional_information"] = additional_information
+    if request.get("modalities"):
+        engine_prompt["modalities"] = request["modalities"]
+
     return {
-        "engine_inputs": text,
-        "original_prompt": {"prompt": text},
+        "engine_inputs": engine_prompt,
+        "original_prompt": dict(engine_prompt),
         "sampling_params_list": None,
     }
 

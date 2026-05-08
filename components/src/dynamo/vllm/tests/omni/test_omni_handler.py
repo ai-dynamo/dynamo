@@ -306,6 +306,63 @@ class TestParseOmniRequest:
         assert "num_inference_steps" not in op
         assert "guidance_scale" not in op
 
+    @pytest.mark.asyncio
+    async def test_chat_audio_metadata_goes_into_prompt(self):
+        request = {
+            "messages": [{"role": "user", "content": "say hello"}],
+            "modalities": ["text", "audio"],
+            "audio": {"voice": "Cherry", "format": "wav"},
+        }
+
+        result = await parse_omni_request(request, ["text", "audio"])
+
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "say hello"
+        assert prompt["modalities"] == ["text", "audio"]
+        assert prompt["additional_information"] == {"speaker": ["cherry"]}
+        assert result["original_prompt"] == prompt
+
+    @pytest.mark.asyncio
+    async def test_chatml_fallback_when_qwen_tokenizer_has_no_template(self):
+        class QwenTokenizerWithoutTemplate:
+            unk_token_id = None
+
+            def apply_chat_template(self, *args, **kwargs):  # noqa: ARG002
+                raise ValueError("chat template unavailable")
+
+            def convert_tokens_to_ids(self, token):
+                return {
+                    "<|im_start|>": 151644,
+                    "<|im_end|>": 151645,
+                }.get(token)
+
+        async def tokenizer_getter():
+            return QwenTokenizerWithoutTemplate()
+
+        request = {
+            "messages": [
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "Say hello."},
+            ],
+            "modalities": ["text", "audio"],
+            "audio": {"voice": "Cherry", "format": "wav"},
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text", "audio"],
+            tokenizer_getter=tokenizer_getter,
+        )
+
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == (
+            "<|im_start|>system\nBe concise.<|im_end|>\n"
+            "<|im_start|>user\nSay hello.<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        assert prompt["modalities"] == ["text", "audio"]
+        assert prompt["additional_information"] == {"speaker": ["cherry"]}
+
 
 # ---------------------------------------------------------------------------
 # AudioGenerationHandler — data_source / response_format field mapping

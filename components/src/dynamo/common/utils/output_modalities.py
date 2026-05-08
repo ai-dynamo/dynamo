@@ -80,12 +80,19 @@ def parse_request_type(
     # Fetch the first output modality from the list.
     if not output_modalities:
         raise ValueError("output_modalities must not be empty")
+
+    normalized_modalities = {name.lower() for name in output_modalities}
+
+    if "messages" in raw_request:
+        return raw_request, RequestType.CHAT_COMPLETION
+
+    if "input" in raw_request and "audio" in normalized_modalities:
+        return NvCreateAudioSpeechRequest(**raw_request), RequestType.AUDIO_GENERATION
+
     output_modality = output_modalities[0]
     modality = OutputModality.from_name(output_modality)
 
     if modality is OutputModality.IMAGE:
-        if "messages" in raw_request:
-            return raw_request, RequestType.CHAT_COMPLETION
         return NvCreateImageRequest(**raw_request), RequestType.IMAGE_GENERATION
 
     if modality is OutputModality.VIDEO:

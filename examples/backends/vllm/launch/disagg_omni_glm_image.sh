@@ -7,7 +7,16 @@
 # Stage 1: DiT (GPU 1) — diffusion denoising + VAE decode → image
 # Router: orchestrates the 2-stage pipeline, formats response
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
+GENERATED_STAGE_CONFIG=""
+
+cleanup() {
+    echo Cleaning up...
+    if [ -n "$GENERATED_STAGE_CONFIG" ]; then
+        rm -f "$GENERATED_STAGE_CONFIG"
+    fi
+    kill 0
+}
+trap cleanup EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
@@ -16,7 +25,7 @@ MODEL="${MODEL:-zai-org/GLM-Image}"
 
 # Resolve vllm-omni's built-in GLM-Image stage config
 if [ -z "$STAGE_CONFIG" ]; then
-    STAGE_CONFIG="$(python -c "import vllm_omni, os; print(os.path.join(os.path.dirname(vllm_omni.__file__), 'model_executor/stage_configs/glm_image.yaml'))" 2>/dev/null | tail -1)"
+    STAGE_CONFIG="$(python -c "import vllm_omni, os; print(os.path.join(os.path.dirname(vllm_omni.__file__), 'deploy/glm_image.yaml'))" 2>/dev/null | tail -1)"
 fi
 
 EXTRA_ARGS=()
@@ -28,6 +37,45 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+STAGE_CONFIG_SOURCE="$STAGE_CONFIG"
+GENERATED_STAGE_CONFIG="$(python - "$STAGE_CONFIG_SOURCE" <<'PY'
+import sys
+import tempfile
+
+import yaml
+
+source = sys.argv[1]
+with open(source) as f:
+    config = yaml.safe_load(f) or {}
+
+connector_name = "connector_of_shared_memory"
+connectors = config.setdefault("connectors", {})
+connectors.setdefault(
+    connector_name,
+    {
+        "name": "SharedMemoryConnector",
+        "extra": {},
+    },
+)
+
+for stage in config.get("stages", []):
+    if int(stage.get("stage_id", -1)) == 1:
+        stage.setdefault("input_connectors", {}).setdefault(
+            "from_stage_0", connector_name
+        )
+        break
+else:
+    raise SystemExit("GLM deploy config does not define stage_id 1")
+
+with tempfile.NamedTemporaryFile(
+    mode="w", prefix="dynamo_glm_image_", suffix=".yaml", delete=False
+) as f:
+    yaml.safe_dump(config, f, sort_keys=False)
+    print(f.name)
+PY
+)"
+STAGE_CONFIG="$GENERATED_STAGE_CONFIG"
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 # Use an isolated namespace by default to avoid stale discovery/model-card
 # collisions from previous disaggregated runs (which can route directly to dit).
@@ -35,6 +83,7 @@ if [ -z "${DYN_NAMESPACE:-}" ]; then
     export DYN_NAMESPACE="dynamo-omni-glm-$(date +%s)"
 fi
 echo "Namespace:   ${DYN_NAMESPACE}"
+echo "Stage config: ${STAGE_CONFIG} (generated from ${STAGE_CONFIG_SOURCE})"
 print_launch_banner --no-curl "Disaggregated GLM-Image (2-stage, 2 GPUs)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
 curl -s http://localhost:${HTTP_PORT}/v1/images/generations \\

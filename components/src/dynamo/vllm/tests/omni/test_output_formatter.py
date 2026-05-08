@@ -335,6 +335,7 @@ class TestAudioFormatterFormat:
     async def test_successful_generation(self):
         import numpy as np
 
+        from dynamo.common.utils.output_modalities import RequestType
         from dynamo.vllm.omni.output_formatter import AudioFormatter
 
         f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
@@ -344,6 +345,19 @@ class TestAudioFormatterFormat:
         assert result["object"] == "audio.speech"
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
+
+        chat_result = await f.format(
+            mm,
+            "req-2",
+            request_type=RequestType.CHAT_COMPLETION,
+            text_output="spoken text",
+        )
+        content = chat_result["choices"][0]["delta"]["content"]
+        assert chat_result["object"] == "chat.completion.chunk"
+        assert content[0] == {"type": "text", "text": "spoken text"}
+        audio_part = content[1]
+        assert audio_part["type"] == "audio_url"
+        assert audio_part["audio_url"]["url"].startswith("data:audio/wav;base64,")
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────
@@ -405,6 +419,11 @@ class TestOutputFormatter:
             stage, "req-1", request_type=RequestType.AUDIO_GENERATION, **self._FULL_CTX
         )
         assert chunk["status"] == "completed"
+
+        chat_chunk = await f.format(
+            stage, "req-2", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
+        )
+        assert chat_chunk["choices"][0]["delta"]["content"][0]["type"] == "audio_url"
 
     @pytest.mark.asyncio
     async def test_unknown_type_returns_none(self):

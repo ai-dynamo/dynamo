@@ -5,6 +5,7 @@
 
 import asyncio
 import importlib
+import inspect
 import logging
 import os
 import tempfile
@@ -16,7 +17,7 @@ from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connec
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.entrypoints.utils import load_stage_configs_from_model
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -29,6 +30,10 @@ from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
 from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
 
 logger = logging.getLogger(__name__)
+
+_DYNAMO_PIPELINE_FINAL_STAGE_KEY = "_dynamo_pipeline_final_stage_id"
+_DYNAMO_NATIVE_ASYNC_REF_KEY = "_dynamo_native_async"
+_DYNAMO_NATIVE_ASYNC_PROMPT_IDS_KEY = "prompt_token_ids"
 
 
 @dataclass
@@ -78,17 +83,34 @@ class OmniStageWorker:
         self._requires_mm: bool = getattr(
             stage_config, "requires_multimodal_data", False
         )
+        self._native_async = _stage_async_chunk_enabled(stage_config)
 
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
         req = StageRequest.model_validate(request)
         request_id = req.request_id or context.id()
         original_prompt = req.original_prompt
+        final_stage_id = req.final_stage_id
+        stage_text_output = req.stage_text_output
         # JSON sends dict keys as strings; normalize to int for stage_connector_refs.
         stage_connector_refs = _int_keyed(req.stage_connector_refs)
 
         # --- Resolve engine inputs ---
         sampling_params_list_override: dict | None = None
-        if stage_connector_refs:
+        if (
+            stage_connector_refs
+            and self._native_async
+            and _native_async_input_ref(stage_connector_refs, self.stage_id) is not None
+        ):
+            # Native vLLM-Omni async-chunk stages receive real tensors through
+            # their connector on the model-runner thread. Dynamo only needs to
+            # submit a placeholder request with the same external request id.
+            sampling_params_list_override = req.sampling_params_list
+            prompt = self._build_native_async_request(
+                stage_connector_refs,
+                request_id,
+                sampling_params_list_override,
+            )
+        elif stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
             sampling_params_list_override = req.sampling_params_list
             try:
@@ -108,12 +130,7 @@ class OmniStageWorker:
                 )
 
             if self._processor is not None:
-                prompt = self._processor(
-                    stage_list,
-                    self._engine_input_source,
-                    [original_prompt],
-                    self._requires_mm,
-                )
+                prompt = self._process_stage_inputs(stage_list, original_prompt)
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
             else:
@@ -154,12 +171,17 @@ class OmniStageWorker:
             type(prompt).__name__,
         )
 
+        prompt = _attach_pipeline_final_stage(prompt, final_stage_id)
+        output_modalities = _request_output_modalities(request, original_prompt)
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
         last_result = None
 
         try:
             async for chunk in self.engine.generate(
-                prompt, request_id=request_id, sampling_params_list=sp
+                prompt,
+                request_id=request_id,
+                sampling_params_list=sp,
+                output_modalities=output_modalities,
             ):
                 last_result = chunk
         except Exception as e:
@@ -181,10 +203,37 @@ class OmniStageWorker:
         # determines whether output should go to a connector or to SHM.
         from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
         connector = self.connectors.get((from_s, to_s))
-        if connector is not None:
+        if connector is not None and (
+            final_stage_id is None or self.stage_id < final_stage_id
+        ):
+            connector_result = last_result
+            stage_text_output = stage_text_output or _extract_text_output(
+                connector_result
+            )
+            if self._native_async:
+                out: dict = {
+                    "original_prompt": original_prompt,
+                    "stage_connector_refs": {
+                        **{str(k): v for k, v in stage_connector_refs.items()},
+                        str(self.stage_id): _native_async_output_ref(
+                            connector_result, stage_connector_refs
+                        ),
+                    },
+                    "finished": True,
+                }
+                if stage_text_output:
+                    out["stage_text_output"] = stage_text_output
+                if sampling_params_list_override is not None:
+                    out["sampling_params_list"] = sampling_params_list_override
+                yield out
+                return
+
             try:
                 ok, _, metadata = connector.put(  # type: ignore[arg-type]
-                    from_s, to_s, request_id, last_result
+                    from_s,
+                    to_s,
+                    request_id,
+                    _prepare_connector_payload(connector_result),
                 )
             except Exception as e:
                 logger.error(
@@ -207,6 +256,8 @@ class OmniStageWorker:
                 },
                 "finished": True,
             }
+            if stage_text_output:
+                out["stage_text_output"] = stage_text_output
             if sampling_params_list_override is not None:
                 out["sampling_params_list"] = sampling_params_list_override
             yield out
@@ -220,7 +271,10 @@ class OmniStageWorker:
         # solution would use a connector edge (like inter-stage connectors) instead.
         # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
-        yield {"shm_meta": shm_meta, "finished": True}
+        out = {"shm_meta": shm_meta, "finished": True}
+        if stage_text_output:
+            out["stage_text_output"] = stage_text_output
+        yield out
 
     def _build_engine_core_request_from_upstream(
         self,
@@ -262,19 +316,73 @@ class OmniStageWorker:
             prompt=tokens_prompt,
             params=params,
         )
-        # Pre-built EngineCoreRequests skip the output processor registration
-        # in _build_add_request_message (the isinstance(prompt, EngineCoreRequest)
-        # branch bypasses that block).  Register manually so that the engine's
-        # output processor can match the response back to this request.
+        # vLLM-Omni registers pre-built EngineCoreRequests through
+        # StagePool.submit_initial(), but vLLM still requires an external ID
+        # on the request before it reaches the output processor.
         prompt.external_req_id = prompt.request_id
-        self.engine.engine.output_processors[0].add_request(
-            request=prompt,
-            prompt=None,
-            parent_req=None,
-            request_index=0,
-            queue=None,
-        )
         return prompt
+
+    def _build_native_async_request(
+        self,
+        stage_connector_refs: dict[int, Any],
+        request_id: str,
+        sampling_params_list_override: dict | None,
+    ):
+        ref = _native_async_input_ref(stage_connector_refs, self.stage_id)
+        prompt_token_ids = (
+            ref.get(_DYNAMO_NATIVE_ASYNC_PROMPT_IDS_KEY, [])
+            if isinstance(ref, dict)
+            else []
+        )
+        prompt_len = _native_async_placeholder_len(prompt_token_ids)
+        tokens_prompt = OmniTokensPrompt(prompt_token_ids=[0] * prompt_len)
+        sp_list = _build_sampling_params(
+            self.stage_config, sampling_params_list_override
+        )
+        params = sp_list[0] if sp_list else None
+        prompt = build_engine_core_request_from_tokens(
+            request_id=request_id,
+            prompt=tokens_prompt,
+            params=params,
+        )
+        prompt.external_req_id = request_id
+        return prompt
+
+    def _process_stage_inputs(self, stage_list: list[_Proxy], original_prompt: Any):
+        """Call vLLM-Omni stage processors with the v0.20 transition API."""
+        if self._processor is None:
+            raise RuntimeError(f"Stage {self.stage_id}: no processor configured")
+
+        signature = inspect.signature(self._processor)
+        parameter_names = list(signature.parameters)
+
+        # ming_flash_omni still uses the stage-list transition signature in
+        # vLLM-Omni v0.20. Most other processors use direct source_outputs.
+        if parameter_names[:2] == ["stage_list", "engine_input_source"]:
+            return self._processor(
+                stage_list,
+                self._engine_input_source,
+                [original_prompt],
+                self._requires_mm,
+            )
+
+        source_outputs = [
+            output
+            for stage_input in stage_list
+            for output in (stage_input.engine_outputs or [])
+        ]
+        if len(parameter_names) >= 4:
+            return self._processor(
+                source_outputs,
+                original_prompt,
+                self._requires_mm,
+                None,
+            )
+        return self._processor(
+            source_outputs,
+            original_prompt,
+            self._requires_mm,
+        )
 
     def _fetch_stage_inputs(
         self, stage_connector_refs: dict[int, Any], request_id: str
@@ -311,11 +419,14 @@ class OmniStageWorker:
                 raise RuntimeError(
                     f"Stage {self.stage_id}: empty payload from connector ({stage_k}→{self.stage_id})"
                 )
-            engine_inputs = (
-                payload_data.get("engine_inputs")
-                if isinstance(payload_data, dict)
-                else payload_data
-            )
+            if isinstance(payload_data, dict) and "engine_inputs" in payload_data:
+                engine_inputs = payload_data["engine_inputs"]
+                _restore_completion_output_attrs(
+                    engine_inputs,
+                    payload_data.get("_dynamo_completion_output_attrs"),
+                )
+            else:
+                engine_inputs = payload_data
             stage_list.append(_Proxy(engine_outputs=[engine_inputs]))
         return stage_list
 
@@ -333,7 +444,9 @@ async def init_omni_stage(
     if config.stage_id is None:
         raise ValueError("--stage-id is required for stage worker initialization")
     stage_id: int = config.stage_id
-    stage_configs = load_stage_configs_from_yaml(config.stage_configs_path)  # type: ignore[arg-type]
+    stage_configs = load_stage_configs_from_model(
+        config.model, deploy_config_path=config.stage_configs_path
+    )
     if stage_id >= len(stage_configs):
         raise ValueError(
             f"--stage-id {stage_id} out of range (YAML has {len(stage_configs)} stages)"
@@ -347,12 +460,15 @@ async def init_omni_stage(
     generate_endpoint = runtime.endpoint(f"{config.namespace}.{model_stage}.generate")
     shutdown_endpoints[:] = [generate_endpoint]
 
-    engine = _create_engine(config.model, my_config, stage_type)
+    transfer_config, connectors = initialize_orchestrator_connectors(  # type: ignore[arg-type]
+        config.stage_configs_path
+    )
+
+    engine = _create_engine(config.model, my_config, stage_type, transfer_config)
     logger.info("Stage %d: engine created (type=%s)", stage_id, stage_type)
 
     # Connectors for inter-stage output transfer — type determined by YAML config
     # (SharedMemoryConnector, MooncakeConnector, etc.)
-    _, connectors = initialize_orchestrator_connectors(config.stage_configs_path)  # type: ignore[arg-type]
 
     worker = OmniStageWorker(
         engine=engine,
@@ -410,6 +526,158 @@ def _connector_key(from_stage: int, to_stage: int) -> tuple[str, str]:
     return (str(from_stage), str(to_stage))
 
 
+def _request_output_modalities(request: dict, original_prompt: Any) -> list[str] | None:
+    """Resolve requested output modalities from the raw request or original prompt."""
+    modalities = request.get("modalities")
+    if modalities is None and isinstance(original_prompt, dict):
+        modalities = original_prompt.get("modalities")
+    return modalities if isinstance(modalities, list) else None
+
+
+def _stage_async_chunk_enabled(stage_config: Any) -> bool:
+    engine_args = getattr(stage_config, "engine_args", None)
+    return bool(_config_value(engine_args, "async_chunk", False))
+
+
+def _config_value(config: Any, name: str, default: Any = None) -> Any:
+    if config is None:
+        return default
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        try:
+            return getter(name, default)
+        except TypeError:
+            pass
+    return getattr(config, name, default)
+
+
+def _native_async_input_ref(
+    stage_connector_refs: dict[int, Any], stage_id: int
+) -> dict[str, Any] | None:
+    ref = stage_connector_refs.get(stage_id - 1)
+    if isinstance(ref, dict) and ref.get(_DYNAMO_NATIVE_ASYNC_REF_KEY):
+        return ref
+    return None
+
+
+def _native_async_output_ref(
+    engine_outputs: Any, stage_connector_refs: dict[int, Any]
+) -> dict[str, Any]:
+    prompt_token_ids = _native_async_prompt_token_ids(
+        engine_outputs, stage_connector_refs
+    )
+    return {
+        _DYNAMO_NATIVE_ASYNC_REF_KEY: True,
+        _DYNAMO_NATIVE_ASYNC_PROMPT_IDS_KEY: prompt_token_ids,
+    }
+
+
+def _native_async_prompt_token_ids(
+    engine_outputs: Any, stage_connector_refs: dict[int, Any]
+) -> list[int]:
+    for ref in stage_connector_refs.values():
+        if isinstance(ref, dict) and ref.get(_DYNAMO_NATIVE_ASYNC_REF_KEY):
+            prompt_token_ids = ref.get(_DYNAMO_NATIVE_ASYNC_PROMPT_IDS_KEY)
+            if isinstance(prompt_token_ids, list):
+                return list(prompt_token_ids)
+
+    prompt_token_ids = getattr(engine_outputs, "prompt_token_ids", None)
+    if prompt_token_ids is None:
+        return []
+    return list(prompt_token_ids)
+
+
+def _native_async_placeholder_len(prompt_token_ids: list[int]) -> int:
+    try:
+        from vllm_omni.distributed.omni_connectors.adapter import (
+            compute_talker_prompt_ids_length,
+        )
+
+        return max(1, int(compute_talker_prompt_ids_length(prompt_token_ids)))
+    except Exception:
+        logger.debug("Could not compute native async placeholder length", exc_info=True)
+        return max(1, len(prompt_token_ids))
+
+
+def _attach_pipeline_final_stage(prompt: Any, final_stage_id: int | None) -> Any:
+    """Attach Dynamo's pipeline final stage without changing local Omni routing.
+
+    Each Dynamo worker runs a single-stage AsyncOmni instance, whose local
+    orchestrator must still finish at stage 0. vLLM-Omni also uses
+    omni_final_stage_id in request metadata to decide whether AR stages should
+    emit downstream multimodal payloads. This private marker lets the patched
+    metadata helper preserve the pipeline-level final stage for that purpose.
+    """
+    if final_stage_id is None:
+        return prompt
+    if isinstance(prompt, dict):
+        additional_information = prompt.setdefault("additional_information", {})
+        if isinstance(additional_information, dict):
+            additional_information[_DYNAMO_PIPELINE_FINAL_STAGE_KEY] = final_stage_id
+        return prompt
+
+    payload = getattr(prompt, "additional_information", None)
+    if payload is None and not hasattr(prompt, "request_id"):
+        return prompt
+
+    async_omni_engine = importlib.import_module("vllm_omni.engine.async_omni_engine")
+    try:
+        info = (
+            async_omni_engine.deserialize_additional_information(payload)
+            if payload is not None
+            else {}
+        )
+        info["omni_final_stage_id"] = int(final_stage_id)
+        serialized = async_omni_engine.serialize_additional_information(info)
+        try:
+            prompt.additional_information = serialized
+            return prompt
+        except AttributeError:
+            return async_omni_engine.OmniEngineCoreRequest.from_request(
+                prompt,
+                additional_information=serialized,
+            )
+    except Exception:
+        logger.debug("Could not attach Omni final stage metadata", exc_info=True)
+        return prompt
+
+
+def _patch_omni_final_stage_metadata() -> None:
+    """Preserve Dynamo's pipeline final stage in vLLM-Omni request metadata."""
+    async_omni_engine = importlib.import_module("vllm_omni.engine.async_omni_engine")
+
+    if getattr(async_omni_engine, "_dynamo_final_stage_patch", False):
+        return
+
+    original_apply = async_omni_engine._apply_omni_final_stage_metadata
+
+    def patched_apply(request, final_stage_id):
+        result = original_apply(request, final_stage_id)
+        payload = getattr(result, "additional_information", None)
+        if payload is None:
+            return result
+
+        info = async_omni_engine.deserialize_additional_information(payload)
+        pipeline_final_stage_id = info.pop(_DYNAMO_PIPELINE_FINAL_STAGE_KEY, None)
+        if pipeline_final_stage_id is None:
+            return result
+
+        try:
+            info["omni_final_stage_id"] = int(pipeline_final_stage_id)
+        except (TypeError, ValueError):
+            return result
+
+        return async_omni_engine.OmniEngineCoreRequest.from_request(
+            result,
+            additional_information=async_omni_engine.serialize_additional_information(
+                info
+            ),
+        )
+
+    async_omni_engine._apply_omni_final_stage_metadata = patched_apply
+    async_omni_engine._dynamo_final_stage_patch = True
+
+
 def _load_processor(func_path: str | None) -> Any:
     """Load a processor function from a dotted module path, or return None."""
     if not func_path:
@@ -418,10 +686,102 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
+def _prepare_connector_payload(engine_inputs: Any) -> Any:
+    """Preserve dynamic CompletionOutput attrs that Omni's msgpack codec drops."""
+    _promote_request_multimodal_output(engine_inputs)
+    output_attrs = _collect_completion_output_attrs(engine_inputs)
+    if not output_attrs:
+        return engine_inputs
+    return {
+        "engine_inputs": engine_inputs,
+        "_dynamo_completion_output_attrs": output_attrs,
+    }
+
+
+def _collect_completion_output_attrs(engine_inputs: Any) -> list[dict[str, Any]]:
+    output_attrs: list[dict[str, Any]] = []
+    for output in _iter_completion_outputs(engine_inputs):
+        attrs: dict[str, Any] = {}
+        cumulative_token_ids = getattr(output, "cumulative_token_ids", None)
+        if cumulative_token_ids is not None:
+            attrs["cumulative_token_ids"] = list(cumulative_token_ids)
+        multimodal_output = getattr(output, "multimodal_output", None)
+        if multimodal_output:
+            attrs["multimodal_output"] = multimodal_output
+        output_attrs.append(attrs)
+    return output_attrs if any(output_attrs) else []
+
+
+def _promote_request_multimodal_output(engine_inputs: Any) -> None:
+    """Expose request-level multimodal payloads on the sole completion output.
+
+    Some Omni outputs carry multimodal payloads on the request wrapper while
+    v0.20 stage processors read them from ``outputs[0].multimodal_output``.
+    Dynamo currently handles one completion per staged request, so promote the
+    request-level payload when the completion does not already carry one.
+    """
+    request_multimodal_output = getattr(engine_inputs, "multimodal_output", None)
+    if not request_multimodal_output:
+        return
+
+    outputs = _iter_completion_outputs(engine_inputs)
+    if len(outputs) != 1:
+        return
+
+    completion = outputs[0]
+    if not getattr(completion, "multimodal_output", None):
+        setattr(completion, "multimodal_output", request_multimodal_output)
+
+
+def _restore_completion_output_attrs(
+    engine_inputs: Any, output_attrs: Any | None
+) -> None:
+    if not isinstance(output_attrs, list):
+        return
+    for output, attrs in zip(_iter_completion_outputs(engine_inputs), output_attrs):
+        if not isinstance(attrs, dict):
+            continue
+        if "cumulative_token_ids" in attrs:
+            setattr(output, "cumulative_token_ids", list(attrs["cumulative_token_ids"]))
+        if "multimodal_output" in attrs:
+            setattr(output, "multimodal_output", attrs["multimodal_output"])
+
+
+def _iter_completion_outputs(engine_inputs: Any):
+    outputs = getattr(engine_inputs, "outputs", None)
+    if outputs is None:
+        request_output = getattr(engine_inputs, "request_output", None)
+        outputs = getattr(request_output, "outputs", None)
+    if not outputs:
+        return []
+    return list(outputs)
+
+
+def _extract_text_output(engine_inputs: Any) -> str | None:
+    for output in _iter_completion_outputs(engine_inputs):
+        text = getattr(output, "text", None)
+        if isinstance(text, str) and text:
+            return text
+    return None
+
+
+def _create_engine(
+    model: str, stage_config: Any, stage_type: str, transfer_config: Any | None = None
+) -> StageEngine:
     """Create AsyncOmni with a single-stage YAML."""
+    _patch_omni_final_stage_metadata()
+    native_async = _stage_async_chunk_enabled(stage_config)
+
     single_stage_config = {
-        "stage_args": [_stage_config_to_dict(stage_config, stage_type)],
+        "async_chunk": native_async,
+        "stage_args": [
+            _stage_config_to_dict(
+                stage_config,
+                stage_type,
+                native_async=native_async,
+                transfer_config=transfer_config,
+            )
+        ],
         "runtime": {"edges": []},
     }
 
@@ -435,7 +795,13 @@ def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngin
         os.unlink(tmp_path)
 
 
-def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
+def _stage_config_to_dict(
+    stage_config: Any,
+    stage_type: str,
+    *,
+    native_async: bool = False,
+    transfer_config: Any | None = None,
+) -> dict:
     """Convert a parsed stage config to a single-stage YAML dict."""
     from omegaconf import OmegaConf  # type: ignore[import-not-found]
 
@@ -447,9 +813,9 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
         return obj
 
     result: dict = {
-        "stage_id": 0,
+        "stage_id": int(getattr(stage_config, "stage_id", 0)) if native_async else 0,
         "stage_type": stage_type,
-        "engine_args": _to_plain(stage_config.engine_args),
+        "engine_args": _single_stage_engine_args(stage_config.engine_args),
         "final_output": True,
         "final_output_type": getattr(stage_config, "final_output_type", "text"),
     }
@@ -459,11 +825,59 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
         if val is not None:
             result[key] = _to_plain(val)
 
+    engine_input_source = getattr(stage_config, "engine_input_source", None)
+    if engine_input_source is not None:
+        result["engine_input_source"] = _to_plain(engine_input_source)
+
+    if native_async:
+        _attach_native_async_connectors(result, stage_config, transfer_config)
+
     runtime = getattr(stage_config, "runtime", None)
     if runtime is not None:
         rt = _to_plain(runtime)
         rt["devices"] = "0"
         result["runtime"] = rt
+
+    return result
+
+
+def _attach_native_async_connectors(
+    stage_config_dict: dict, stage_config: Any, transfer_config: Any | None
+) -> None:
+    connectors = getattr(transfer_config, "connectors", None)
+    if not connectors:
+        return
+
+    stage_id = str(getattr(stage_config, "stage_id", stage_config_dict["stage_id"]))
+    input_connectors: dict[str, Any] = {}
+    output_connectors: dict[str, Any] = {}
+
+    for (from_stage, to_stage), spec in connectors.items():
+        connector = {"name": spec.name, "extra": dict(spec.extra or {})}
+        if str(to_stage) == stage_id:
+            input_connectors[f"from_stage_{from_stage}"] = connector
+        if str(from_stage) == stage_id:
+            output_connectors[f"to_stage_{to_stage}"] = connector
+
+    if input_connectors:
+        stage_config_dict["input_connectors"] = input_connectors
+    if output_connectors:
+        stage_config_dict["output_connectors"] = output_connectors
+
+
+def _single_stage_engine_args(engine_args: Any) -> Any:
+    """Build engine args for Dynamo's one-stage AsyncOmni wrapper."""
+    from omegaconf import OmegaConf  # type: ignore[import-not-found]
+
+    if OmegaConf.is_config(engine_args):
+        result = OmegaConf.to_container(engine_args, resolve=True)
+    elif hasattr(engine_args, "__dict__"):
+        result = dict(vars(engine_args))
+    else:
+        result = engine_args
+
+    if isinstance(result, dict):
+        result = dict(result)
 
     return result
 
