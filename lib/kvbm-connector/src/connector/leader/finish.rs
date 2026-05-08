@@ -66,6 +66,31 @@ impl ConnectorLeader {
             }
         }
 
+        // Cancel path: request is finished while still in Onboarding.
+        // Mirrors the PreparingToOnboard branch above. Without this guard, the
+        // legacy `txn_take_offloading` call below errors with
+        // "Invalid transition from Onboarding to Inactive (via take_offloading)"
+        // and the request fails at finish time. Reuse the OnboardingState
+        // cleanup helper since both branches yield the same state type.
+        if matches!(slot.txn_state(), TransactionState::Onboarding(_)) {
+            match slot.txn_take_onboarding() {
+                Ok(onboarding_state) => {
+                    let _ = slot.slot_mark_finished();
+                    drop(slot);
+                    self.remove_slot(request_id);
+                    self.spawn_preparing_to_onboard_cleanup(request_id, onboarding_state);
+                    return FinishedStatus::Finished;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to take Onboarding state for request ID {}: {}",
+                        request_id,
+                        e
+                    );
+                }
+            }
+        }
+
         // Mark the slot for deletion
         let initial_status = slot.slot_mark_finished();
 
