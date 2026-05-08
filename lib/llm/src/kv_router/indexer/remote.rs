@@ -235,12 +235,14 @@ impl ServedIndexerMode {
 
 struct ServedIndexerService {
     mode: ServedIndexerMode,
+    _owns_singleton_claim: bool,
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 }
 
 impl ServedIndexerService {
     async fn start(component: Component, mode: ServedIndexerMode) -> Result<Arc<Self>> {
         verify_service_topology(&component, mode).await?;
+        let owns_singleton_claim = claim_served_indexer_singleton(&component, mode).await?;
 
         let bindings = Arc::new(RwLock::new(HashMap::new()));
         start_query_endpoint(component.clone(), bindings.clone())?;
@@ -248,7 +250,11 @@ impl ServedIndexerService {
             start_record_endpoint(component.clone(), bindings.clone())?;
         }
 
-        Ok(Arc::new(Self { mode, bindings }))
+        Ok(Arc::new(Self {
+            mode,
+            _owns_singleton_claim: owns_singleton_claim,
+            bindings,
+        }))
     }
 }
 
@@ -369,6 +375,41 @@ async fn verify_service_topology(component: &Component, mode: ServedIndexerMode)
     }
 
     Ok(())
+}
+
+async fn claim_served_indexer_singleton(
+    component: &Component,
+    mode: ServedIndexerMode,
+) -> Result<bool> {
+    if mode != ServedIndexerMode::Approximate {
+        return Ok(false);
+    }
+
+    let namespace = component.namespace().name();
+    let component_name = component.name();
+    let claim_key = format!("remote-indexer/approximate/{namespace}/{component_name}");
+    let instance_id = component.drt().connection_id();
+    let payload = serde_json::json!({
+        "namespace": namespace,
+        "component": component_name,
+        "mode": mode.topology_label(),
+        "instance_id": instance_id,
+    });
+
+    if component
+        .drt()
+        .discovery()
+        .try_claim_singleton(&claim_key, payload)
+        .await?
+    {
+        return Ok(true);
+    }
+
+    anyhow::bail!(
+        "cannot start approximate served indexer on {}.{}: singleton claim already exists",
+        namespace,
+        component_name
+    );
 }
 
 fn start_query_endpoint(

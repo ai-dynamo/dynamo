@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -19,6 +20,8 @@ use crate::storage::kv;
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
+const CLAIMS_BUCKET: &str = "v1/claims";
+const CLAIM_TTL: Duration = Duration::from_secs(10);
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -276,6 +279,24 @@ impl Discovery for KVStoreDiscovery {
         );
 
         Ok(instance)
+    }
+
+    async fn try_claim_singleton(
+        &self,
+        claim_key: &str,
+        payload: serde_json::Value,
+    ) -> Result<bool> {
+        let bucket = self
+            .store
+            .get_or_create_bucket(CLAIMS_BUCKET, Some(CLAIM_TTL))
+            .await?;
+        let key = kv::Key::new(claim_key.to_string());
+        let payload = serde_json::to_vec(&payload)?;
+
+        match bucket.insert(&key, payload.into(), 0).await? {
+            kv::StoreOutcome::Created(_) => Ok(true),
+            kv::StoreOutcome::Exists(_) => Ok(false),
+        }
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
@@ -601,6 +622,7 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
@@ -727,6 +749,29 @@ mod tests {
         }
 
         register_task.await.unwrap();
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_kv_store_discovery_singleton_claim() {
+        let store = kv::Manager::memory();
+        let cancel_token = CancellationToken::new();
+        let client_a = KVStoreDiscovery::new(store.clone(), cancel_token.clone());
+        let client_b = KVStoreDiscovery::new(store, cancel_token.clone());
+
+        assert!(
+            client_a
+                .try_claim_singleton("test/comp/approximate-indexer", json!({ "owner": "a" }))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !client_b
+                .try_claim_singleton("test/comp/approximate-indexer", json!({ "owner": "b" }))
+                .await
+                .unwrap()
+        );
+
         cancel_token.cancel();
     }
 }

@@ -53,6 +53,7 @@ reqwest = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
@@ -103,7 +104,6 @@ rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}
 jsonschema = {version = "0.17"}
-tempfile = { workspace = true }
 
 [[bench]]
 name = "compute_pool_overhead"

@@ -836,6 +836,20 @@ pub trait Discovery: Send + Sync {
     /// Backend-specific raw registration implementation.
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
 
+    /// Atomically claim a singleton discovery-scoped resource.
+    ///
+    /// Returns `true` when this process acquired the claim and `false` when
+    /// another process already owns it. Backends that cannot provide atomic
+    /// create-if-absent semantics should leave this unsupported.
+    async fn try_claim_singleton(
+        &self,
+        claim_key: &str,
+        payload: serde_json::Value,
+    ) -> Result<bool> {
+        let _ = payload;
+        anyhow::bail!("discovery backend does not support singleton claims for key {claim_key}");
+    }
+
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
 
