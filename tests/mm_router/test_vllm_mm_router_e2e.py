@@ -354,9 +354,7 @@ def _check_text_only_overlap_repeated_prompt(
 
 
 @pytest.mark.timeout(600)
-def _check_mm_overlap_repeated_three_images(
-    start_vllm_mm_services, predownload_models
-):
+def _check_mm_overlap_repeated_three_images(start_vllm_mm_services, predownload_models):
     """For repeated same 3-image request: low first overlap, then increase, then stable."""
     frontend_port, router_proc = start_vllm_mm_services
 
@@ -394,9 +392,7 @@ def _check_mm_overlap_repeated_three_images(
 
 
 @pytest.mark.timeout(600)
-def _check_mm_overlap_repeated_single_image(
-    start_vllm_mm_services, predownload_models
-):
+def _check_mm_overlap_repeated_single_image(start_vllm_mm_services, predownload_models):
     """For repeated same single-image request: low first overlap, then increase, then stable."""
     frontend_port, router_proc = start_vllm_mm_services
 
@@ -838,15 +834,9 @@ def test_vllm_mm_overlap_all(
     the 7.6 GiB allocation across the 10 scenarios per fixture parameter
     (shm/nixl/disabled) instead of paying it 30 times.
     """
-    _check_text_only_overlap_repeated_prompt(
-        start_vllm_mm_services, predownload_models
-    )
-    _check_mm_overlap_repeated_three_images(
-        start_vllm_mm_services, predownload_models
-    )
-    _check_mm_overlap_repeated_single_image(
-        start_vllm_mm_services, predownload_models
-    )
+    _check_text_only_overlap_repeated_prompt(start_vllm_mm_services, predownload_models)
+    _check_mm_overlap_repeated_three_images(start_vllm_mm_services, predownload_models)
+    _check_mm_overlap_repeated_single_image(start_vllm_mm_services, predownload_models)
     _check_mm_overlap_repeated_two_identical_images(
         start_vllm_mm_services, predownload_models
     )
