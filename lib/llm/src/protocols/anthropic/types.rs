@@ -823,6 +823,8 @@ mod tests {
                 }),
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);

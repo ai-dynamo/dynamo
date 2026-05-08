@@ -55,10 +55,6 @@ use crate::protocols::openai::{
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
-    tokenization::{
-        DetokenizeRequest, DetokenizeResponse, TokenizeCompletionRequest, TokenizeRequest,
-        TokenizeResponse,
-    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -940,7 +936,18 @@ async fn handler_chat_completions(
         .take()
         .unwrap_or_else(|| dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL"));
     if rl_want_token_ids {
-        tracing::info!("RL: want_token_ids=true, will promote nvext.extra_fields");
+        // Reject n > 1 for the RL token-id path: the streaming aggregator
+        // accumulates `completion_token_ids` into a single `Vec<u32>` shared
+        // across all choices, so the per-choice promotion downstream cannot
+        // recover which tokens belong to which choice. A keyed-by-index
+        // accumulator is the long-term fix.
+        if request.inner.n.unwrap_or(1) > 1 {
+            return Err(bad_request(
+                "n > 1 is not supported when RL token IDs are requested. \
+                 Send separate requests instead.",
+            ));
+        }
+        tracing::debug!("RL: want_token_ids=true, will promote nvext.extra_fields");
     }
     {
         // If `tokens` is provided, inject into nvext.token_data (pre-tokenized prompt path).
@@ -2113,138 +2120,6 @@ fn resolve_model_card(
     Ok((model, card))
 }
 
-// Handler kept (no callers in this branch) for downstream code that re-mounts
-// `tokenization_router` in `service_v2.rs` standalone, until the upstream
-// `/tokenize` and `/detokenize` work lands at the root paths.
-#[allow(dead_code)]
-async fn tokenize(
-    State(state): State<Arc<service_v2::State>>,
-    Json(request): Json<TokenizeRequest>,
-) -> Result<Response, ErrorResponse> {
-    check_ready(&state)?;
-
-    let (_, card) = resolve_model_card(&state, request.model())?;
-    let tokenizer = card
-        .tokenizer()
-        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
-
-    let (tokens, token_strs) = match request {
-        TokenizeRequest::Completion(TokenizeCompletionRequest {
-            prompt,
-            add_special_tokens,
-            return_token_strs,
-            ..
-        }) => {
-            let encoding = tokenizer
-                .encode_with_special_tokens(&prompt, add_special_tokens)
-                .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to tokenize prompt"))?;
-            let token_ids = encoding.token_ids().to_vec();
-            let token_strs = if return_token_strs {
-                Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
-                    ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
-                })?)
-            } else {
-                None
-            };
-            (token_ids, token_strs)
-        }
-        TokenizeRequest::Chat(request) => {
-            // Reject mutually-exclusive flags
-            // (continue_final_message + add_generation_prompt) up-front so the
-            // chat-template render below doesn't see an inconsistent state.
-            request
-                .validate()
-                .map_err(|err| bad_request(&format!("Invalid tokenize request: {err}")))?;
-            let model = request
-                .model
-                .clone()
-                .unwrap_or_else(|| card.display_name.clone());
-            // Render the chat messages to a prompt string via the model's chat template
-            let formatter = crate::preprocessor::prompt::PromptFormatter::from_mdc(&card)
-                .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to build chat formatter"))?;
-            let inner_request = dynamo_protocols::types::CreateChatCompletionRequest {
-                model,
-                messages: request.messages.clone(),
-                tools: request.tools.clone(),
-                ..Default::default()
-            };
-            let wrapped =
-                crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest {
-                    inner: inner_request,
-                    common: Default::default(),
-                    nvext: None,
-                    chat_template_args: Some(request.merged_chat_template_kwargs()),
-                    media_io_kwargs: None,
-                    tokens: None,
-                    return_token_ids: None,
-                    unsupported_fields: Default::default(),
-                };
-            let prompt = match formatter {
-                crate::preprocessor::prompt::PromptFormatter::OAI(f) => f.render(&wrapped),
-            }
-            .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to render chat prompt"))?;
-
-            let encoding = tokenizer
-                .encode_with_special_tokens(&prompt, request.add_special_tokens)
-                .map_err(|err| {
-                    ErrorMessage::from_anyhow(err, "Failed to tokenize rendered chat prompt")
-                })?;
-            let token_ids = encoding.token_ids().to_vec();
-            let token_strs = if request.return_token_strs {
-                Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
-                    ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
-                })?)
-            } else {
-                None
-            };
-            (token_ids, token_strs)
-        }
-    };
-
-    Ok(Json(TokenizeResponse {
-        count: tokens.len(),
-        max_model_len: card.context_length,
-        tokens,
-        token_strs,
-    })
-    .into_response())
-}
-
-#[allow(dead_code)] // see tokenize() above
-async fn detokenize(
-    State(state): State<Arc<service_v2::State>>,
-    Json(request): Json<DetokenizeRequest>,
-) -> Result<Response, ErrorResponse> {
-    check_ready(&state)?;
-
-    let (_, card) = resolve_model_card(&state, request.model.as_deref())?;
-    let tokenizer = card
-        .tokenizer()
-        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
-    let prompt: String = tokenizer
-        .decode(&request.tokens, false)
-        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?
-        .into();
-
-    Ok(Json(DetokenizeResponse { prompt }).into_response())
-}
-
-#[allow(dead_code)] // see tokenize() above; not mounted in service_v2 v2 surface
-pub fn tokenization_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
-    let tokenize_path = "/v1/tokenize";
-    let detokenize_path = "/v1/detokenize";
-    let docs = vec![
-        RouteDoc::new(axum::http::Method::POST, tokenize_path),
-        RouteDoc::new(axum::http::Method::POST, detokenize_path),
-    ];
-    let router = Router::new()
-        .route(tokenize_path, post(tokenize))
-        .route(detokenize_path, post(detokenize))
-        .layer(middleware::from_fn(smart_json_error_middleware))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
-        .with_state(state);
-    (docs, router)
-}
 
 /// openai compatible format
 /// Example:
@@ -2371,21 +2246,6 @@ pub fn chat_completions_router(
 /// 0.20+ skips chat templating when that field is present, identical
 /// behavior. The handler is kept as `#[allow(dead_code)]` for downstream
 /// code that still references it; deletion is a follow-up cleanup.
-#[allow(dead_code)]
-pub fn chat_completions_tokens_router(
-    state: Arc<service_v2::State>,
-    template: Option<RequestTemplate>,
-    path: Option<String>,
-) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/chat/completions/tokens".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
-    let router = Router::new()
-        .route(&path, post(handler_chat_completions_tokens))
-        .layer(middleware::from_fn(smart_json_error_middleware))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
-        .with_state((state, template));
-    (vec![doc], router)
-}
 
 /// Handler for TITO (Token-In / Token-Out) chat completions.
 ///
@@ -2397,104 +2257,6 @@ pub fn chat_completions_tokens_router(
 /// 4. Forces `logprobs = true` (RL always needs logprobs)
 /// 5. Ensures `messages` is non-empty (Dynamo requires it for chat template selection)
 /// 6. Delegates to the standard `chat_completions()` internal function (zero HTTP proxy)
-#[allow(dead_code)] // see chat_completions_tokens_router above
-async fn handler_chat_completions_tokens(
-    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    headers: HeaderMap,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
-) -> Result<Response, ErrorResponse> {
-    check_ready(&state)?;
-
-    // Extract the tokens field (Prime-RL's TITO input)
-    let tokens = request.tokens.take();
-    // Clear return_token_ids (not supported by Dynamo, avoid confusion)
-    request.return_token_ids = None;
-
-    if let Some(token_ids) = tokens {
-        if token_ids.is_empty() {
-            return Err(ErrorMessage::bad_request(
-                "TITO endpoint requires non-empty 'tokens' field",
-            ));
-        }
-
-        // Inject tokens into nvext.token_data
-        let mut nvext = request.nvext.take().unwrap_or_default();
-        nvext.token_data = Some(token_ids);
-
-        // Request token echo and completion token IDs in response
-        let mut extra_fields = nvext.extra_fields.take().unwrap_or_default();
-        for field in &["token_ids", "completion_token_ids"] {
-            if !extra_fields.contains(&field.to_string()) {
-                extra_fields.push(field.to_string());
-            }
-        }
-        nvext.extra_fields = Some(extra_fields);
-        request.nvext = Some(nvext);
-
-        // Force logprobs on (RL always needs them). Unconditional — an
-        // explicit logprobs=false from the caller would otherwise silently
-        // strip completion_token_ids from the response.
-        request.inner.logprobs = Some(true);
-
-        // Ensure messages is non-empty (Dynamo requires it for model lookup / chat template)
-        if request.inner.messages.is_empty() {
-            use dynamo_protocols::types::{
-                ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-                ChatCompletionRequestUserMessageContent,
-            };
-            request
-                .inner
-                .messages
-                .push(ChatCompletionRequestMessage::User(
-                    ChatCompletionRequestUserMessage {
-                        content: ChatCompletionRequestUserMessageContent::Text(
-                            "(token-in mode)".to_string(),
-                        ),
-                        name: None,
-                    },
-                ));
-        }
-    } else {
-        return Err(ErrorMessage::bad_request(
-            "Missing 'tokens' field for TITO endpoint. \
-             Use /v1/chat/completions for message-based requests.",
-        ));
-    }
-
-    // Apply header routing overrides
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
-
-    // Delegate to the standard chat completions flow (no HTTP proxy!)
-    let request_id = get_or_create_request_id(&headers);
-    let streaming = request.inner.stream.unwrap_or(false);
-    let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
-        endpoint: Endpoint::ChatCompletions.to_string(),
-        request_type: if streaming { "stream" } else { "unary" }.to_string(),
-    };
-    let request = Context::with_id(request, request_id);
-    let context = request.context();
-
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
-        context.clone(),
-        Some(state.metrics_clone()),
-        cancellation_labels,
-    )
-    .await;
-
-    let response =
-        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to await TITO chat completions task: {:?}",
-                    e,
-                ))
-            })?;
-
-    connection_handle.disarm();
-    response
-}
 
 /// Create an Axum [`Router`] for the OpenAI API Embeddings endpoint
 /// If not path is provided, the default path is `/v1/embeddings`
@@ -3131,6 +2893,9 @@ struct RlState {
     worker_system_urls: Vec<String>,
     /// Shared HTTP client for all fan-out calls to worker system ports.
     http_client: reqwest::Client,
+    /// Per-worker probe timeout for `/v1/rl/liveness` and `/v1/rl/ready`.
+    /// Read once from `DYN_RL_LIVENESS_TIMEOUT_MS` at construction.
+    probe_timeout: std::time::Duration,
 }
 
 impl RlState {
@@ -3141,19 +2906,39 @@ impl RlState {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
+        let probe_timeout_ms = std::env::var("DYN_RL_LIVENESS_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5000);
         tracing::info!(
             worker_count = worker_system_urls.len(),
             ?worker_system_urls,
+            probe_timeout_ms,
             "RL admin router configured"
         );
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build RL router HTTP client: {e}"))?;
-        Ok(Self {
+        Ok(Self::new(
             worker_system_urls,
             http_client,
-        })
+            std::time::Duration::from_millis(probe_timeout_ms),
+        ))
+    }
+
+    /// Test-friendly constructor — bypasses env reading so tests can pass in
+    /// fake worker URLs and a stubbed `reqwest::Client`.
+    fn new(
+        worker_system_urls: Vec<String>,
+        http_client: reqwest::Client,
+        probe_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            worker_system_urls,
+            http_client,
+            probe_timeout,
+        }
     }
 
     /// Call a single engine route on one worker. Returns the JSON body.
@@ -3207,11 +2992,7 @@ impl RlState {
 /// `DYN_RL_LIVENESS_TIMEOUT_MS`) so a wedged worker fails fast as 503 instead
 /// of hanging on the shared 600s `http_client` timeout.
 async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
-    let timeout_ms = std::env::var("DYN_RL_LIVENESS_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5000);
-    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let timeout = state.probe_timeout;
     let futures: Vec<_> = state
         .worker_system_urls
         .iter()
@@ -3219,12 +3000,10 @@ async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
             let client = state.http_client.clone();
             let health_url = format!("{url}/health");
             async move {
-                tokio::time::timeout(timeout, client.get(&health_url).send())
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false)
+                match tokio::time::timeout(timeout, client.get(&health_url).send()).await {
+                    Ok(Ok(resp)) => resp.status().is_success(),
+                    Ok(Err(_)) | Err(_) => false,
+                }
             }
         })
         .collect();
@@ -3253,10 +3032,36 @@ async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 /// Three-mode pause matches what vLLM exposes (abort / wait / keep). The
 /// default `mode=keep&clear_cache=false` preserves the original single-mode
 /// pause behavior so existing callers keep working without changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PauseMode {
+    Keep,
+    Wait,
+    Abort,
+}
+
+impl PauseMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            PauseMode::Keep => "keep",
+            PauseMode::Wait => "wait",
+            PauseMode::Abort => "abort",
+        }
+    }
+}
+
+impl Default for PauseMode {
+    fn default() -> Self {
+        PauseMode::Keep
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct RlPauseQuery {
+    /// Axum returns 400 automatically if this fails to deserialize as a
+    /// `PauseMode` (i.e. on `mode=invalid`), so we don't need a runtime check.
     #[serde(default)]
-    mode: Option<String>,
+    mode: Option<PauseMode>,
     #[serde(default)]
     clear_cache: Option<bool>,
 }
@@ -3265,29 +3070,18 @@ async fn rl_pause(
     State(state): State<Arc<RlState>>,
     axum::extract::Query(q): axum::extract::Query<RlPauseQuery>,
 ) -> impl IntoResponse {
-    let mode = q.mode.as_deref().unwrap_or("keep").to_string();
+    let mode = q.mode.unwrap_or_default();
     let clear_cache = q.clear_cache.unwrap_or(false);
-    if !matches!(mode.as_str(), "keep" | "wait" | "abort") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!(
-                    "Invalid mode '{mode}'; expected one of keep|wait|abort"
-                ),
-            })),
-        );
-    }
     let results = state
         .fan_out(
             "pause_generation",
-            serde_json::json!({"mode": mode, "clear_cache": clear_cache}),
+            serde_json::json!({"mode": mode.as_str(), "clear_cache": clear_cache}),
         )
         .await;
     if RlState::all_ok(&results) {
         tracing::info!(
             worker_count = results.len(),
-            mode = %mode,
+            mode = %mode.as_str(),
             clear_cache,
             "RL pause: all workers paused"
         );
@@ -3295,7 +3089,7 @@ async fn rl_pause(
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
-                "mode": mode,
+                "mode": mode.as_str(),
                 "clear_cache": clear_cache,
                 "workers": results,
             })),
@@ -3329,7 +3123,13 @@ async fn rl_resume(State(state): State<Arc<RlState>>) -> impl IntoResponse {
     }
 }
 
-/// `POST /v1/rl/update_weights` — atomic `flush_cache → update_weights_from_path` across all workers.
+/// `POST /v1/rl/update_weights` — fan out `flush_cache → update_weights_from_path` to all workers.
+///
+/// **Not atomic.** If `update_weights_from_path` succeeds on workers `0..N-1`
+/// and fails on worker `N`, the fleet is left in a mixed-version state: the
+/// successful workers serve the new version while worker `N` still runs the
+/// previous one. The response carries per-worker status so callers can
+/// retry / drain manually; a true rollback layer is a follow-up.
 ///
 /// Body schema (`reset_prefix_cache` defaults to `true` — the v1 sequence
 /// always flushed before reload, this just makes it explicit):
@@ -3365,7 +3165,16 @@ async fn rl_update_weights(
 ) -> impl IntoResponse {
     let reset_prefix_cache = body.reset_prefix_cache;
 
-    let Some(weight_dir) = body.weight_dir.clone() else {
+    // Treat empty string the same as missing/null (NCCL no-op). Otherwise
+    // an empty string would reach the engine as `path=""` and fail
+    // confusingly downstream.
+    let weight_dir = body
+        .weight_dir
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let Some(weight_dir) = weight_dir else {
         tracing::info!("RL update_weights: weight_dir=null (NCCL mode, no-op on Dynamo side)");
         return (
             StatusCode::OK,
@@ -3705,11 +3514,7 @@ async fn rl_liveness(State(state): State<Arc<RlState>>) -> impl IntoResponse {
             })),
         );
     }
-    let timeout_ms = std::env::var("DYN_RL_LIVENESS_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5000);
-    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let timeout = state.probe_timeout;
 
     let futures: Vec<_> = state
         .worker_system_urls
@@ -3742,7 +3547,7 @@ async fn rl_liveness(State(state): State<Arc<RlState>>) -> impl IntoResponse {
                 .unwrap_or_else(|_| serde_json::json!({
                     "status": "error",
                     "alive": false,
-                    "message": format!("liveness_probe timed out after {timeout_ms}ms")
+                    "message": format!("liveness_probe timed out after {}ms", timeout.as_millis())
                 }))
             }
         })
@@ -4168,6 +3973,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
@@ -4200,6 +4008,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
@@ -4416,6 +4227,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
 
         let result = validate_chat_completion_fields_generic(&request);
@@ -4446,6 +4260,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -4475,6 +4292,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -4504,6 +4324,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -4535,6 +4358,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -4564,6 +4390,9 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+        
+            return_token_ids: None,
+            tokens: None,
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -5590,5 +5419,66 @@ mod tests {
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "让我想想 🤔 分析完成 ✅");
+    }
+
+    // ── RL admin types ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_pause_mode_serde_roundtrip() {
+        for (mode, lower) in [
+            (PauseMode::Keep, "keep"),
+            (PauseMode::Wait, "wait"),
+            (PauseMode::Abort, "abort"),
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{lower}\""));
+            assert_eq!(mode.as_str(), lower);
+            let parsed: PauseMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, mode);
+        }
+        assert_eq!(PauseMode::default(), PauseMode::Keep);
+    }
+
+    #[test]
+    fn test_pause_mode_rejects_unknown_value() {
+        // Axum returns 400 on this deserialize failure before the handler
+        // runs — that's the whole point of the typed enum vs the prior
+        // string match.
+        let err = serde_json::from_str::<PauseMode>("\"foo\"")
+            .expect_err("foo is not a valid PauseMode");
+        assert!(err.to_string().to_lowercase().contains("foo"));
+    }
+
+    #[test]
+    fn test_rl_update_weights_body_defaults() {
+        let body: RlUpdateWeightsBody = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(body.weight_dir.is_none());
+        assert!(body.weight_version.is_none());
+        assert!(body.reset_prefix_cache);
+
+        let body: RlUpdateWeightsBody =
+            serde_json::from_str(r#"{"weight_dir":null}"#).unwrap();
+        assert!(body.weight_dir.is_none());
+        assert!(body.reset_prefix_cache);
+
+        let body: RlUpdateWeightsBody =
+            serde_json::from_str(r#"{"weight_dir":"/path","reset_prefix_cache":false}"#)
+                .unwrap();
+        assert_eq!(body.weight_dir.as_deref(), Some("/path"));
+        assert!(!body.reset_prefix_cache);
+    }
+
+    #[test]
+    fn test_rl_state_new_constructs_without_env() {
+        // Sanity check the testability constructor — needed so future
+        // route-level tests can build an `RlState` without env vars or a
+        // real network client.
+        let state = RlState::new(
+            vec!["http://w0:9090".to_string(), "http://w1:9090".to_string()],
+            reqwest::Client::new(),
+            std::time::Duration::from_millis(100),
+        );
+        assert_eq!(state.worker_system_urls.len(), 2);
+        assert_eq!(state.probe_timeout, std::time::Duration::from_millis(100));
     }
 }

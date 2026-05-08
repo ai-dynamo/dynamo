@@ -13,7 +13,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
+from typing import Any, AsyncIterator, Dict, Final, Generic, NoReturn, Optional, TypeVar
 
 import torch
 from vllm.config import ModelConfig, VllmConfig
@@ -568,6 +568,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
 
+    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
+        """Common handler for `EngineDeadError`: log, shut down the runtime,
+        hard-exit. Called from RL admin handler `except` clauses so a dead
+        engine surfaces as a worker restart instead of silent failure."""
+        logger.error(f"vLLM EngineDeadError: {e}")
+        logger.warning("Initiating Dynamo Runtime shutdown.")
+        self.runtime.shutdown()
+        os._exit(1)
+
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
     ) -> Optional[MultiModalEmbeddingLoader]:
@@ -826,8 +835,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": str(e)}
 
     # ── RL weight lifecycle engine routes ──────────────────────────────
-    # Signatures intentionally line up with the SGLang RL admin routes so a
-    # single admin coordinator can talk to either backend.
 
     async def pause_generation(self, body: dict) -> dict:
         """Pause the engine: drain in-flight requests, keep model loaded.
@@ -868,13 +875,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             if clear_cache:
                 try:
                     await self.engine_client.reset_prefix_cache()
-                    logger.info("[RL] pause: prefix cache cleared")
+                    logger.debug("[RL] pause: prefix cache cleared")
                 except Exception as flush_err:
                     logger.warning(
                         f"[RL] pause: clear_cache requested but reset_prefix_cache failed: {flush_err}"
                     )
             self._paused = True
-            logger.info(
+            logger.debug(
                 f"[RL] Engine paused (generation quiesced, mode={mode}, clear_cache={clear_cache})"
             )
             return {
@@ -884,10 +891,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "clear_cache": clear_cache,
             }
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.error(f"[RL] Failed to pause: {e}")
             return {"status": "error", "message": str(e)}
@@ -898,13 +902,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         try:
             await self.engine_client.resume_generation()
             self._paused = False
-            logger.info("[RL] Engine resumed")
+            logger.debug("[RL] Engine resumed")
             return {"status": "ok", "message": "Engine resumed"}
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.error(f"[RL] Failed to resume: {e}")
             return {"status": "error", "message": str(e)}
@@ -933,10 +934,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             await self.engine_client.collective_rpc("get_weight_version", kwargs={})
             return {"status": "ok", "alive": True}
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.warning(f"[RL] liveness_probe failed: {e}")
             return {"status": "error", "alive": False, "message": str(e)}
@@ -976,10 +974,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 ],
             }
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.error(f"[RL] get_state failed: {e}")
             return {"status": "error", "message": str(e)}
@@ -989,13 +984,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         body = body or {}
         try:
             await self.engine_client.reset_prefix_cache()
-            logger.info("[RL] Prefix cache flushed")
+            logger.debug("[RL] Prefix cache flushed")
             return {"status": "ok", "message": "Cache flushed"}
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.error(f"[RL] Failed to flush cache: {e}")
             return {"status": "error", "message": str(e)}
@@ -1021,17 +1013,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 kwargs={"weights_path": path},
             )
             self._weight_version = version
-            logger.info(f"[RL] Weights loaded from {path} (version={version})")
+            logger.debug(f"[RL] Weights loaded from {path} (version={version})")
             return {
                 "status": "ok",
                 "message": f"Weights loaded from {path}",
                 "version": version,
             }
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.error(f"[RL] Failed to load weights from {path}: {e}")
             return {"status": "error", "message": str(e)}
@@ -1162,7 +1151,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             lora_name=lora_name,
                             base_model_path=self.config.model,
                         )
-                        logger.info(
+                        logger.debug(
                             f"[RL] Published LoRA '{lora_name}' ModelDeploymentCard"
                         )
                     except Exception as e:
@@ -1187,7 +1176,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "lora_name": lora_name,
                         }
 
-                logger.info(
+                logger.debug(
                     f"[RL] LoRA adapter {'hot-swapped' if is_hot_swap else 'loaded'}: "
                     f"name={lora_name} id={lora_id} path={lora_path}"
                 )
@@ -1199,10 +1188,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "hot_swap": is_hot_swap,
                 }
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.exception(
                 f"[RL] Failed to load LoRA adapter '{lora_name}' from {lora_path}: {e}"
@@ -1262,7 +1248,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "lora_id": lora_id,
                         }
 
-                logger.info(
+                logger.debug(
                     f"[RL] LoRA adapter unloaded: name={lora_name} id={lora_id}"
                 )
                 return {
@@ -1272,10 +1258,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "lora_id": lora_id,
                 }
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
         except Exception as e:
             logger.exception(
                 f"[RL] Failed to unload LoRA adapter '{lora_name}': {e}"
@@ -2469,10 +2452,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     num_output_tokens_so_far[output_idx] = next_total_toks
 
         except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+            self._shutdown_on_engine_dead(e)
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -2714,10 +2694,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             ] = prefill_prompt_tokens_details
                         yield tok
                 except EngineDeadError as e:
-                    logger.error(f"vLLM EngineDeadError: {e}")
-                    logger.warning("Initiating Dynamo Runtime shutdown.")
-                    self.runtime.shutdown()
-                    os._exit(1)
+                    self._shutdown_on_engine_dead(e)
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""

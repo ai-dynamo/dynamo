@@ -538,13 +538,6 @@ impl HttpServiceConfigBuilder {
             } else {
                 super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok())
             },
-            // /v1/tokenize and /v1/detokenize are NOT required by prime-rl
-            // (source audit: zero references). Owned by jthomson04 PR #7699
-            // which mounts /tokenize and /detokenize at root paths for the
-            // NeMo-rl tokenize-then-generate pattern. Dropped from the v2
-            // surface here per `bis-dev/design-docs/rl-support.md` §1
-            // out-of-scope. Re-enable by uncommenting the next line:
-            // super::openai::tokenization_router(state.clone()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
@@ -618,16 +611,10 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_CHAT_PATH_ENV).ok(),
         );
-        // /v1/chat/completions/tokens (the v1 TITO fork URI) is dropped per
-        // `bis-dev/design-docs/rl-support.md` Phase 5 + hhzhang16 HH-22 / HH-26.
-        // TITO callers retarget to /v1/chat/completions with `prompt_token_ids`
-        // as a top-level extension (now in `validate.rs:104`
-        // PASSTHROUGH_EXTRA_FIELDS) — vLLM 0.20+ skips chat templating when
-        // that field is present, identical behavior to the dropped fork URI.
-        // The handler `handler_chat_completions_tokens` and helper
-        // `chat_completions_tokens_router` are intentionally left in the
-        // codebase as dead code for now; a subsequent commit can delete
-        // them once prime-rl has fully migrated.
+        // The legacy `/v1/chat/completions/tokens` TITO fork URI is dropped.
+        // TITO callers send `prompt_token_ids` as a top-level extension on
+        // `/v1/chat/completions` (allowlisted by `validate.rs::PASSTHROUGH_EXTRA_FIELDS`);
+        // vLLM 0.20+ skips chat templating when that field is present.
 
         let (cmpl_docs, cmpl_route) =
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());

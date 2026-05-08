@@ -2115,6 +2115,8 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let wrapped =
@@ -2176,6 +2178,8 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let wrapped =
@@ -2381,6 +2385,8 @@ thinking
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
@@ -2414,6 +2420,8 @@ thinking
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
@@ -2442,6 +2450,8 @@ thinking
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
@@ -2467,6 +2477,8 @@ thinking
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         };
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
@@ -2585,6 +2597,8 @@ thinking
                 usage: None,
             },
             nvext: None,
+        
+            prompt_token_ids: None,
         }
     }
 
