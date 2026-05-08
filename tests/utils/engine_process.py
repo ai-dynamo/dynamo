@@ -28,6 +28,19 @@ class EngineResponseError(Exception):
     pass
 
 
+class ResponseValidationError(EngineResponseError):
+    """Validation/assertion failure during process_response.
+
+    Subset of EngineResponseError raised only when payload.process_response
+    asserts on response content (the case the in-process retry was designed
+    for). Status (non-200) and handler errors continue to raise the parent
+    EngineResponseError so they surface immediately and aren't masked by
+    payload.max_attempts.
+    """
+
+    pass
+
+
 class EngineLogError(Exception):
     """Custom exception for engine log validation errors"""
 
@@ -110,7 +123,7 @@ class EngineProcess(ManagedProcess):
                 else content,
             )
         except AssertionError as e:
-            raise EngineResponseError(str(e))
+            raise ResponseValidationError(str(e))
         except Exception as e:
             raise EngineResponseError(f"Failed to handle response: {e}")
 
@@ -170,6 +183,7 @@ class EngineProcess(ManagedProcess):
             env.update(config.env)
         if extra_env:
             env.update(extra_env)
+
         frontend_checks = [
             (
                 f"http://localhost:{config.frontend_port}/v1/models",

@@ -150,7 +150,6 @@ def test_vllm_health_check_active(request, runtime_services_dynamic_ports):
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
-
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
@@ -210,7 +209,6 @@ def test_vllm_health_check_passive(
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
-
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 

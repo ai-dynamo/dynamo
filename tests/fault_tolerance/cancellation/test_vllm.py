@@ -59,7 +59,9 @@ class DynamoWorkerProcess(ManagedProcess):
         self.system_port = system_port
         self.frontend_port = frontend_port
 
-        # Determine max-model-len based on worker type
+        # Determine max-model-len based on worker type:
+        # Aggregated mode uses a smaller value (4096) to reduce GPU memory usage on XPU,
+        # while disaggregated prefill/decode workers need 16384 for long-context KV transfer tests.
         max_model_len = "4096" if is_prefill is None else "16384"
 
         command = [
@@ -307,7 +309,7 @@ def test_request_cancellation_vllm_aggregated(
 
                 # For streaming, read 5 responses before cancelling
                 if request_type == "chat_completion_stream":
-                    read_streaming_responses(cancellable_req, expected_count=3)
+                    read_streaming_responses(cancellable_req, expected_count=5)
 
                 # Now cancel the request
                 cancellable_req.cancel()
@@ -341,11 +343,9 @@ def test_request_cancellation_vllm_aggregated(
                 )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2606")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
-@pytest.mark.xpu_2
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -402,7 +402,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
                 # Read 5 streaming responses (decode phase)
-                read_streaming_responses(cancellable_req, expected_count=3)
+                read_streaming_responses(cancellable_req, expected_count=5)
 
                 # Now cancel the request
                 cancellable_req.cancel()
@@ -442,13 +442,11 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: OPS-4448")
 @pytest.mark.timeout(
     360
 )  # exceed worker startup timeout (300s) with test-body headroom
 @pytest.mark.nightly
 @pytest.mark.gpu_2
-@pytest.mark.xpu_2
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
