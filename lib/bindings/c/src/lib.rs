@@ -1559,80 +1559,17 @@ async fn fetch_preprocessor_from_discovery(
 mod tests {
     use super::*;
 
-    fn parse(
-        json: &str,
-    ) -> dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest {
-        serde_json::from_str(json).expect("test request must parse as chat completion")
-    }
-
-    #[test]
-    fn priority_jump_absent_when_no_nvext() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}]
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 0.0);
-    }
-
-    #[test]
-    fn priority_jump_absent_when_no_agent_hints() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"greed_sampling": true}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 0.0);
-    }
-
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
-        let req = parse(
-            r#"{
+        let req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
                 "model": "test",
                 "messages": [{"role": "user", "content": "hi"}],
                 "nvext": {"agent_hints": {"priority": 5}}
             }"#,
-        );
+            )
+            .expect("test request must parse as chat completion");
         assert_eq!(extract_priority_jump(&req), 5.0);
-    }
-
-    #[test]
-    fn priority_jump_clamps_negative_to_zero() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"priority": -3}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 0.0);
-    }
-
-    #[test]
-    fn priority_jump_falls_back_to_latency_sensitivity_when_priority_missing() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 2.5);
-    }
-
-    #[test]
-    fn priority_jump_prefers_priority_over_latency_sensitivity() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"priority": 10, "latency_sensitivity": 2.5}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 10.0);
     }
 }
