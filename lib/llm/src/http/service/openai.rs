@@ -1589,9 +1589,7 @@ pub fn validate_chat_completion_required_fields(
     // RL renderer / TITO callers send `prompt_token_ids` (or legacy
     // `nvext.token_data`) in place of `messages`. Treat either pre-tokenized
     // input as satisfying the "non-empty input" requirement.
-    let has_pretokenized_input = request
-        .unsupported_fields
-        .contains_key("prompt_token_ids")
+    let has_pretokenized_input = request.unsupported_fields.contains_key("prompt_token_ids")
         || request
             .nvext
             .as_ref()
@@ -2119,7 +2117,6 @@ fn resolve_model_card(
         })?;
     Ok((model, card))
 }
-
 
 /// openai compatible format
 /// Example:
@@ -2880,529 +2877,6 @@ pub fn audios_router(
 // ──────────────────────────────────────────────────────────────────────────
 // RL Admin router: /v1/rl/*
 // ──────────────────────────────────────────────────────────────────────────
-
-/// Environment variable for comma-separated worker system HTTP URLs.
-/// Defaults to `http://localhost:8081` when not set.
-const DYN_RL_WORKER_SYSTEM_URLS_ENV: &str = "DYN_RL_WORKER_SYSTEM_URLS";
-
-/// Shared state for the RL admin router.
-#[derive(Clone)]
-struct RlState {
-    /// Worker system HTTP base URLs (e.g. `http://localhost:8081`).
-    /// Set via `DYN_RL_WORKER_SYSTEM_URLS` (comma-separated list).
-    worker_system_urls: Vec<String>,
-    /// Shared HTTP client for all fan-out calls to worker system ports.
-    http_client: reqwest::Client,
-    /// Per-worker probe timeout for `/v1/rl/liveness` and `/v1/rl/ready`.
-    /// Read once from `DYN_RL_LIVENESS_TIMEOUT_MS` at construction.
-    probe_timeout: std::time::Duration,
-}
-
-impl RlState {
-    fn from_env() -> anyhow::Result<Self> {
-        let worker_system_urls = std::env::var(DYN_RL_WORKER_SYSTEM_URLS_ENV)
-            .unwrap_or_else(|_| "http://localhost:8081".to_string())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        let probe_timeout_ms = std::env::var("DYN_RL_LIVENESS_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5000);
-        tracing::info!(
-            worker_count = worker_system_urls.len(),
-            ?worker_system_urls,
-            probe_timeout_ms,
-            "RL admin router configured"
-        );
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build RL router HTTP client: {e}"))?;
-        Ok(Self::new(
-            worker_system_urls,
-            http_client,
-            std::time::Duration::from_millis(probe_timeout_ms),
-        ))
-    }
-
-    /// Test-friendly constructor — bypasses env reading so tests can pass in
-    /// fake worker URLs and a stubbed `reqwest::Client`.
-    fn new(
-        worker_system_urls: Vec<String>,
-        http_client: reqwest::Client,
-        probe_timeout: std::time::Duration,
-    ) -> Self {
-        Self {
-            worker_system_urls,
-            http_client,
-            probe_timeout,
-        }
-    }
-
-    /// Call a single engine route on one worker. Returns the JSON body.
-    async fn call_engine_route(
-        &self,
-        url: &str,
-        route: &str,
-        body: &serde_json::Value,
-    ) -> serde_json::Value {
-        let endpoint = format!("{url}/engine/{route}");
-        match self.http_client.post(&endpoint).json(body).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                match resp.json::<serde_json::Value>().await {
-                    Ok(v) => v,
-                    Err(e) => serde_json::json!({
-                        "status": "error",
-                        "message": format!("Failed to decode response from {endpoint}: {e}"),
-                        "http_status": status.as_u16()
-                    }),
-                }
-            }
-            Err(e) => serde_json::json!({
-                "status": "error",
-                "message": format!("Request to {endpoint} failed: {e}")
-            }),
-        }
-    }
-
-    /// Fan out an engine route call to all configured workers concurrently.
-    async fn fan_out(&self, route: &str, body: serde_json::Value) -> Vec<serde_json::Value> {
-        let futures: Vec<_> = self
-            .worker_system_urls
-            .iter()
-            .map(|url| self.call_engine_route(url, route, &body))
-            .collect();
-        futures::future::join_all(futures).await
-    }
-
-    /// Returns true only if all results have `status: "ok"`.
-    fn all_ok(results: &[serde_json::Value]) -> bool {
-        results
-            .iter()
-            .all(|r| r.get("status").and_then(|s| s.as_str()) == Some("ok"))
-    }
-}
-
-/// `GET /v1/rl/ready` — composite readiness check: worker health via system port.
-///
-/// Bounded with a per-worker probe timeout (default 5s, override via
-/// `DYN_RL_LIVENESS_TIMEOUT_MS`) so a wedged worker fails fast as 503 instead
-/// of hanging on the shared 600s `http_client` timeout.
-async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
-    let timeout = state.probe_timeout;
-    let futures: Vec<_> = state
-        .worker_system_urls
-        .iter()
-        .map(|url| {
-            let client = state.http_client.clone();
-            let health_url = format!("{url}/health");
-            async move {
-                match tokio::time::timeout(timeout, client.get(&health_url).send()).await {
-                    Ok(Ok(resp)) => resp.status().is_success(),
-                    Ok(Err(_)) | Err(_) => false,
-                }
-            }
-        })
-        .collect();
-    let results = futures::future::join_all(futures).await;
-    let all_ready = !results.is_empty() && results.iter().all(|ok| *ok);
-    if all_ready {
-        (StatusCode::OK, Json(serde_json::json!({"status": "ready"})))
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "not_ready",
-                "workers_ready": results.iter().filter(|ok| **ok).count(),
-                "workers_total": results.len()
-            })),
-        )
-    }
-}
-
-/// `POST /v1/rl/pause` — fan out `pause_generation` to all workers.
-///
-/// Query params (both optional):
-/// - `mode`: `keep` | `wait` | `abort` (default `keep`)
-/// - `clear_cache`: `true` | `false` (default `false`)
-///
-/// Three-mode pause matches what vLLM exposes (abort / wait / keep). The
-/// default `mode=keep&clear_cache=false` preserves the original single-mode
-/// pause behavior so existing callers keep working without changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum PauseMode {
-    Keep,
-    Wait,
-    Abort,
-}
-
-impl PauseMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            PauseMode::Keep => "keep",
-            PauseMode::Wait => "wait",
-            PauseMode::Abort => "abort",
-        }
-    }
-}
-
-impl Default for PauseMode {
-    fn default() -> Self {
-        PauseMode::Keep
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RlPauseQuery {
-    /// Axum returns 400 automatically if this fails to deserialize as a
-    /// `PauseMode` (i.e. on `mode=invalid`), so we don't need a runtime check.
-    #[serde(default)]
-    mode: Option<PauseMode>,
-    #[serde(default)]
-    clear_cache: Option<bool>,
-}
-
-async fn rl_pause(
-    State(state): State<Arc<RlState>>,
-    axum::extract::Query(q): axum::extract::Query<RlPauseQuery>,
-) -> impl IntoResponse {
-    let mode = q.mode.unwrap_or_default();
-    let clear_cache = q.clear_cache.unwrap_or(false);
-    let results = state
-        .fan_out(
-            "pause_generation",
-            serde_json::json!({"mode": mode.as_str(), "clear_cache": clear_cache}),
-        )
-        .await;
-    if RlState::all_ok(&results) {
-        tracing::info!(
-            worker_count = results.len(),
-            mode = %mode.as_str(),
-            clear_cache,
-            "RL pause: all workers paused"
-        );
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "mode": mode.as_str(),
-                "clear_cache": clear_cache,
-                "workers": results,
-            })),
-        )
-    } else {
-        tracing::warn!(?results, "RL pause: some workers failed");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"status": "error", "workers": results})),
-        )
-    }
-}
-
-/// `POST /v1/rl/resume` — fan out `resume_generation` to all workers.
-async fn rl_resume(State(state): State<Arc<RlState>>) -> impl IntoResponse {
-    let results = state
-        .fan_out("resume_generation", serde_json::json!({}))
-        .await;
-    if RlState::all_ok(&results) {
-        tracing::info!(worker_count = results.len(), "RL resume: all workers resumed");
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "workers": results})),
-        )
-    } else {
-        tracing::warn!(?results, "RL resume: some workers failed");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"status": "error", "workers": results})),
-        )
-    }
-}
-
-/// `POST /v1/rl/update_weights` — fan out `flush_cache → update_weights_from_path` to all workers.
-///
-/// **Not atomic.** If `update_weights_from_path` succeeds on workers `0..N-1`
-/// and fails on worker `N`, the fleet is left in a mixed-version state: the
-/// successful workers serve the new version while worker `N` still runs the
-/// previous one. The response carries per-worker status so callers can
-/// retry / drain manually; a true rollback layer is a follow-up.
-///
-/// Body schema (`reset_prefix_cache` defaults to `true` — the v1 sequence
-/// always flushed before reload, this just makes it explicit):
-/// ```json
-/// {
-///   "weight_dir": "/path/to/checkpoint" | null,   // null → NCCL mode no-op
-///   "weight_version": "step_42",                   // optional; derived from
-///                                                  //   weight_dir basename if missing
-///   "reset_prefix_cache": true
-/// }
-/// ```
-///
-/// Returns `{ "status": "ok", "applied_weight_version": "step_42", "workers": [...] }` on success.
-///
-/// The pause/resume envelope is left to the caller; full-FT updates MUST
-/// bracket this call with `/v1/rl/pause` and `/v1/rl/resume`.
-#[derive(Debug, serde::Deserialize)]
-struct RlUpdateWeightsBody {
-    weight_dir: Option<String>,
-    #[serde(default)]
-    weight_version: Option<String>,
-    #[serde(default = "default_reset_prefix_cache")]
-    reset_prefix_cache: bool,
-}
-
-fn default_reset_prefix_cache() -> bool {
-    true
-}
-
-async fn rl_update_weights(
-    State(state): State<Arc<RlState>>,
-    body: axum::extract::Json<RlUpdateWeightsBody>,
-) -> impl IntoResponse {
-    let reset_prefix_cache = body.reset_prefix_cache;
-
-    // Treat empty string the same as missing/null (NCCL no-op). Otherwise
-    // an empty string would reach the engine as `path=""` and fail
-    // confusingly downstream.
-    let weight_dir = body
-        .weight_dir
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let Some(weight_dir) = weight_dir else {
-        tracing::info!("RL update_weights: weight_dir=null (NCCL mode, no-op on Dynamo side)");
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "message": "NCCL mode, no-op on Dynamo side"
-            })),
-        );
-    };
-
-    let version = body.weight_version.clone().unwrap_or_else(|| {
-        std::path::Path::new(&weight_dir)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-    });
-    tracing::info!(
-        weight_dir = %weight_dir,
-        version = %version,
-        reset_prefix_cache,
-        "RL update_weights"
-    );
-
-    // Step 1 (optional): flush_cache across all workers.
-    if reset_prefix_cache {
-        let flush_results = state.fan_out("flush_cache", serde_json::json!({})).await;
-        if !RlState::all_ok(&flush_results) {
-            tracing::warn!(?flush_results, "RL update_weights: flush_cache failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "stage": "flush_cache",
-                    "workers": flush_results
-                })),
-            );
-        }
-    }
-
-    // Step 2: update_weights_from_path across all workers.
-    let load_body = serde_json::json!({"path": &weight_dir, "version": version});
-    let load_results = state.fan_out("update_weights_from_path", load_body).await;
-    if RlState::all_ok(&load_results) {
-        tracing::info!(
-            worker_count = load_results.len(),
-            weight_dir = %weight_dir,
-            "RL update_weights: all workers updated"
-        );
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "applied_weight_version": version,
-                "workers": load_results,
-            })),
-        )
-    } else {
-        tracing::warn!(
-            ?load_results,
-            "RL update_weights: update_weights_from_path failed"
-        );
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "status": "error",
-                "stage": "update_weights_from_path",
-                "workers": load_results
-            })),
-        )
-    }
-}
-
-/// `POST /v1/rl/load_lora_adapter` — hot-load/swap a LoRA adapter from a filesystem path.
-///
-/// Expected body: `{"lora_name": "r16-a32.0", "lora_path": "/path/to/adapter_dir"}`
-///
-/// The adapter directory must contain PEFT-style `adapter_model.safetensors` and
-/// `adapter_config.json`. This is the RL-specific LoRA path used by Prime-RL every
-/// training step (separate from Dynamo's URI-based `load_lora` gRPC endpoint which
-/// downloads adapters from S3/file URIs and publishes a new ModelDeploymentCard).
-///
-/// Hot-swap semantics: calling with a `lora_name` that is already loaded removes
-/// the previous adapter and loads the new one under the same deterministic int ID,
-/// then resets the prefix cache so stale KV entries don't poison new rollouts.
-///
-/// Pair with `/v1/rl/pause` and `/v1/rl/resume` for a full drain-swap-resume cycle.
-async fn rl_load_lora_adapter(
-    State(state): State<Arc<RlState>>,
-    body: axum::extract::Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let lora_name = body.get("lora_name").and_then(|v| v.as_str());
-    let lora_path = body.get("lora_path").and_then(|v| v.as_str());
-
-    let (lora_name, lora_path) = match (lora_name, lora_path) {
-        (Some(n), Some(p)) if !n.is_empty() && !p.is_empty() => (n.to_string(), p.to_string()),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "message": "Expected body: {\"lora_name\": str, \"lora_path\": str} (both required, non-empty)"
-                })),
-            );
-        }
-    };
-
-    tracing::info!(%lora_name, %lora_path, "RL load_lora_adapter");
-    let results = state
-        .fan_out(
-            "load_lora_adapter",
-            serde_json::json!({"lora_name": &lora_name, "lora_path": &lora_path}),
-        )
-        .await;
-
-    if RlState::all_ok(&results) {
-        tracing::info!(
-            worker_count = results.len(),
-            %lora_name,
-            %lora_path,
-            "RL load_lora_adapter: all workers loaded"
-        );
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "workers": results})),
-        )
-    } else {
-        tracing::warn!(?results, %lora_name, "RL load_lora_adapter: some workers failed");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"status": "error", "workers": results})),
-        )
-    }
-}
-
-/// `POST /v1/rl/unload_lora_adapter` — remove a previously loaded LoRA adapter by name.
-///
-/// Expected body: `{"lora_name": "r16-a32.0"}`
-///
-/// Idempotent: unloading an already-absent LoRA returns `status: ok` so callers
-/// can retry safely without special-casing not-found.
-async fn rl_unload_lora_adapter(
-    State(state): State<Arc<RlState>>,
-    body: axum::extract::Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let lora_name = body
-        .get("lora_name")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let lora_name = match lora_name {
-        Some(n) if !n.is_empty() => n,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "message": "Expected body: {\"lora_name\": str} (required, non-empty)"
-                })),
-            );
-        }
-    };
-
-    tracing::info!(%lora_name, "RL unload_lora_adapter");
-    let results = state
-        .fan_out(
-            "unload_lora_adapter",
-            serde_json::json!({"lora_name": &lora_name}),
-        )
-        .await;
-
-    if RlState::all_ok(&results) {
-        tracing::info!(
-            worker_count = results.len(),
-            %lora_name,
-            "RL unload_lora_adapter: all workers unloaded"
-        );
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "workers": results})),
-        )
-    } else {
-        tracing::warn!(?results, %lora_name, "RL unload_lora_adapter: some workers failed");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"status": "error", "workers": results})),
-        )
-    }
-}
-
-/// `GET /v1/rl/weight_version` — query weight version from all workers.
-async fn rl_weight_version(State(state): State<Arc<RlState>>) -> impl IntoResponse {
-    let results = state
-        .fan_out("get_weight_version", serde_json::json!({}))
-        .await;
-
-    // Collect distinct versions and check for consistency
-    let versions: Vec<_> = results
-        .iter()
-        .filter_map(|r| {
-            r.get("version")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .collect();
-
-    let unique: std::collections::HashSet<&str> = versions.iter().map(String::as_str).collect();
-    if unique.len() == 1 {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "version": unique.into_iter().next().unwrap_or(""),
-                "workers": results
-            })),
-        )
-    } else {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "inconsistent",
-                "versions": unique.into_iter().collect::<Vec<_>>(),
-                "workers": results
-            })),
-        )
-    }
-}
-
 /// Tokenize chat messages using the model's tokenizer and return prompt token IDs.
 /// Used by the RL post-processing path to populate `response.prompt_token_ids`.
 fn rl_tokenize_prompt(
@@ -3491,244 +2965,27 @@ fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
 /// **Deprecated in favor of `/v1/rl/state.ingress_alive`.** Kept for
 /// back-compat until existing clients migrate to `/v1/rl/state`; will be
 /// removed in a follow-up.
-async fn rl_health() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
-}
 
-/// `GET /v1/rl/liveness` — engine event-loop probe via the `liveness_probe`
-/// engine route. The legacy `/v1/rl/health` returns OK as long as the
-/// frontend process is up; this endpoint round-trips through the engine so
-/// a hung event loop or wedged worker surfaces as 503.
+// ── RL admin router ────────────────────────────────────────────────────
+// All `/v1/rl/*` handlers, `RlState`, body types, and fan-out logic now
+// live in the `dynamo-rl` crate (see `plans/rl-crate.md`). This shim
+// delegates and wraps the result into dynamo-llm's `RouteDoc` plus the
+// shared `smart_json_error_middleware` that all OpenAI-side routes use.
+
+/// Build the `/v1/rl/*` router. Delegates to `dynamo_rl::rl_router()` and
+/// wraps the documentation tuples into `RouteDoc`. Wraps the router with
+/// `smart_json_error_middleware` so 422s are coerced to 400s consistently
+/// with the OpenAI-compat surface.
 ///
-/// Each per-worker call carries a 5s timeout (override via
-/// `DYN_RL_LIVENESS_TIMEOUT_MS`). Returns 200 only when every worker
-/// reports `alive: true` within the deadline; 503 otherwise.
-async fn rl_liveness(State(state): State<Arc<RlState>>) -> impl IntoResponse {
-    if state.worker_system_urls.is_empty() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "error",
-                "alive": false,
-                "message": "no workers registered"
-            })),
-        );
-    }
-    let timeout = state.probe_timeout;
-
-    let futures: Vec<_> = state
-        .worker_system_urls
-        .iter()
-        .map(|url| {
-            let client = state.http_client.clone();
-            let endpoint = format!("{url}/engine/liveness_probe");
-            async move {
-                tokio::time::timeout(
-                    timeout,
-                    async {
-                        match client.post(&endpoint).json(&serde_json::json!({})).send().await {
-                            Ok(resp) => resp
-                                .json::<serde_json::Value>()
-                                .await
-                                .unwrap_or_else(|e| serde_json::json!({
-                                    "status": "error",
-                                    "alive": false,
-                                    "message": format!("decode failed: {e}")
-                                })),
-                            Err(e) => serde_json::json!({
-                                "status": "error",
-                                "alive": false,
-                                "message": format!("request failed: {e}")
-                            }),
-                        }
-                    },
-                )
-                .await
-                .unwrap_or_else(|_| serde_json::json!({
-                    "status": "error",
-                    "alive": false,
-                    "message": format!("liveness_probe timed out after {}ms", timeout.as_millis())
-                }))
-            }
-        })
-        .collect();
-    let results = futures::future::join_all(futures).await;
-    let all_alive = results
-        .iter()
-        .all(|r| r.get("alive").and_then(|v| v.as_bool()) == Some(true));
-    if all_alive {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "alive": true,
-                "workers": results,
-            })),
-        )
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "error",
-                "alive": false,
-                "workers": results,
-            })),
-        )
-    }
-}
-
-/// `GET /v1/rl/state` — composite RL fleet state snapshot.
-///
-/// Replaces three v1 endpoints (`/v1/rl/health` + `/v1/rl/ready` +
-/// `/v1/rl/weight_version`) with a single composite, scoped to RL-specific
-/// readiness (engine alive, pause state, applied weight version, loaded
-/// LoRAs).
-///
-/// Aggregates per-worker `get_state` engine-route responses into:
-///
-/// ```json
-/// {
-///   "ready": bool,
-///   "ingress_alive": true,
-///   "engine_alive": bool,            // every worker's engine.check_health() ok
-///   "pause_state": "running"|"paused"|"mixed",
-///   "applied_weight_version": str,   // when consistent across workers; null if mixed
-///   "loras": [{name, loaded_on: [worker_idx]}],
-///   "workers": [<per-worker get_state payloads>]
-/// }
-/// ```
-///
-/// `ingress_alive` is unconditionally `true` because reaching this handler
-/// means the frontend HTTP listener is up. `ready = ingress_alive AND
-/// engine_alive AND len(workers) > 0`.
-async fn rl_state(State(state): State<Arc<RlState>>) -> impl IntoResponse {
-    if state.worker_system_urls.is_empty() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "ready": false,
-                "ingress_alive": true,
-                "engine_alive": false,
-                "pause_state": "running",
-                "applied_weight_version": null,
-                "loras": [],
-                "workers": [],
-                "status": "error",
-                "message": "no workers registered"
-            })),
-        );
-    }
-    let results = state.fan_out("get_state", serde_json::json!({})).await;
-
-    let engine_alive = results
-        .iter()
-        .all(|r| r.get("engine_alive").and_then(|v| v.as_bool()) == Some(true));
-
-    // Aggregate pause_state: if all workers agree, surface that; else "mixed".
-    let pause_states: std::collections::HashSet<&str> = results
-        .iter()
-        .filter_map(|r| r.get("pause_state").and_then(|v| v.as_str()))
-        .collect();
-    let pause_state = if pause_states.len() == 1 {
-        pause_states.into_iter().next().unwrap_or("running").to_string()
-    } else if pause_states.is_empty() {
-        "running".to_string()
-    } else {
-        "mixed".to_string()
-    };
-
-    // applied_weight_version is reported only when consistent.
-    let weight_versions: std::collections::HashSet<&str> = results
-        .iter()
-        .filter_map(|r| r.get("applied_weight_version").and_then(|v| v.as_str()))
-        .collect();
-    let applied_weight_version: Option<String> = if weight_versions.len() == 1 {
-        weight_versions.into_iter().next().map(|s| s.to_string())
-    } else {
-        None
-    };
-
-    // LoRA name → list of worker indices that have it loaded.
-    let mut lora_loaded_on: std::collections::BTreeMap<String, Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for (idx, worker) in results.iter().enumerate() {
-        if let Some(loras) = worker.get("loras").and_then(|v| v.as_array()) {
-            for lora in loras {
-                if let Some(name) = lora.get("name").and_then(|v| v.as_str()) {
-                    lora_loaded_on.entry(name.to_string()).or_default().push(idx);
-                }
-            }
-        }
-    }
-    let loras: Vec<serde_json::Value> = lora_loaded_on
-        .into_iter()
-        .map(|(name, loaded_on)| serde_json::json!({"name": name, "loaded_on": loaded_on}))
-        .collect();
-
-    let ready = engine_alive && !results.is_empty();
-    let body = serde_json::json!({
-        "ready": ready,
-        "ingress_alive": true,
-        "engine_alive": engine_alive,
-        "pause_state": pause_state,
-        "applied_weight_version": applied_weight_version,
-        "loras": loras,
-        "workers": results,
-    });
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (status, Json(body))
-}
-
-/// Create an Axum [`Router`] for the RL admin endpoints at `/v1/rl/*`.
-///
-/// Worker system URLs are read from the `DYN_RL_WORKER_SYSTEM_URLS` environment
-/// variable (comma-separated, defaults to `http://localhost:8081`).
-///
-/// Exposed only when `DYN_ENABLE_RL=true` or `HttpServiceConfig.enable_rl` is set.
-///
-/// Prime-RL usage: set `admin_base_url = ["http://dynamo-frontend:8000/v1/rl"]`
-/// in the orchestrator config. Prime-RL strips the trailing `/v1` suffix only
-/// if present, so `/v1/rl` is preserved and all routes resolve correctly.
+/// Exposed only when `DYN_ENABLE_RL=true` or `HttpServiceConfig.enable_rl`
+/// is set. Mounted by `service_v2.rs`.
 pub fn rl_router() -> anyhow::Result<(Vec<RouteDoc>, Router)> {
-    let rl_state_arc = Arc::new(RlState::from_env()?);
-    let docs = vec![
-        // Phase 1: composite endpoints.
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/state"),
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/liveness"),
-        // Pause / resume / update_weights bracket.
-        RouteDoc::new(axum::http::Method::POST, "/v1/rl/pause"),
-        RouteDoc::new(axum::http::Method::POST, "/v1/rl/resume"),
-        RouteDoc::new(axum::http::Method::POST, "/v1/rl/update_weights"),
-        // LoRA hot-swap.
-        RouteDoc::new(axum::http::Method::POST, "/v1/rl/load_lora_adapter"),
-        // Legacy (deprecated; subsumed by /v1/rl/state — Phase 5 will drop):
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/health"),
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/ready"),
-        RouteDoc::new(axum::http::Method::GET, "/v1/rl/weight_version"),
-        RouteDoc::new(axum::http::Method::POST, "/v1/rl/unload_lora_adapter"),
-    ];
-    let router = Router::new()
-        // Phase 1: composite read-only endpoints.
-        .route("/v1/rl/state", get(rl_state))
-        .route("/v1/rl/liveness", get(rl_liveness))
-        // Pause / resume / update_weights bracket.
-        .route("/v1/rl/pause", post(rl_pause))
-        .route("/v1/rl/resume", post(rl_resume))
-        .route("/v1/rl/update_weights", post(rl_update_weights))
-        // LoRA hot-swap.
-        .route("/v1/rl/load_lora_adapter", post(rl_load_lora_adapter))
-        // Legacy endpoints — kept for back-compat until existing clients
-        // migrate to /v1/rl/state. Removed in a follow-up.
-        .route("/v1/rl/health", get(rl_health))
-        .route("/v1/rl/ready", get(rl_ready))
-        .route("/v1/rl/weight_version", get(rl_weight_version))
-        .route("/v1/rl/unload_lora_adapter", post(rl_unload_lora_adapter))
-        .layer(middleware::from_fn(smart_json_error_middleware))
-        .with_state(rl_state_arc);
+    let (rl_docs, router) = dynamo_rl::rl_router()?;
+    let docs = rl_docs
+        .into_iter()
+        .map(|d| RouteDoc::new(d.method, d.path))
+        .collect();
+    let router = router.layer(middleware::from_fn(smart_json_error_middleware));
     Ok((docs, router))
 }
 
@@ -3973,7 +3230,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4008,7 +3265,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4227,7 +3484,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4260,7 +3517,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4292,7 +3549,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4324,7 +3581,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4358,7 +3615,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -4390,7 +3647,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         };
@@ -5444,8 +4701,8 @@ mod tests {
         // Axum returns 400 on this deserialize failure before the handler
         // runs — that's the whole point of the typed enum vs the prior
         // string match.
-        let err = serde_json::from_str::<PauseMode>("\"foo\"")
-            .expect_err("foo is not a valid PauseMode");
+        let err =
+            serde_json::from_str::<PauseMode>("\"foo\"").expect_err("foo is not a valid PauseMode");
         assert!(err.to_string().to_lowercase().contains("foo"));
     }
 
@@ -5456,14 +4713,12 @@ mod tests {
         assert!(body.weight_version.is_none());
         assert!(body.reset_prefix_cache);
 
-        let body: RlUpdateWeightsBody =
-            serde_json::from_str(r#"{"weight_dir":null}"#).unwrap();
+        let body: RlUpdateWeightsBody = serde_json::from_str(r#"{"weight_dir":null}"#).unwrap();
         assert!(body.weight_dir.is_none());
         assert!(body.reset_prefix_cache);
 
         let body: RlUpdateWeightsBody =
-            serde_json::from_str(r#"{"weight_dir":"/path","reset_prefix_cache":false}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"weight_dir":"/path","reset_prefix_cache":false}"#).unwrap();
         assert_eq!(body.weight_dir.as_deref(), Some("/path"));
         assert!(!body.reset_prefix_cache);
     }
