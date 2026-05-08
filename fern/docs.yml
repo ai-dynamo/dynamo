@@ -106,6 +106,11 @@ redirects:
     destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
   - source: "/dynamo/backends/sg-lang/hi-cache"
     destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
+  # Legacy Integrations slug before Fern normalization (sg-lang-hi-cache)
+  - source: "/dynamo/dev/integrations/sglang-hicache"
+    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
+  - source: "/dynamo/integrations/sglang-hicache"
+    destination: "/dynamo/dev/integrations/sg-lang-hi-cache"
 
 # GitHub repository link in navbar
 navbar-links:
