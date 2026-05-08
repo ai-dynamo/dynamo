@@ -101,12 +101,12 @@ cases:
       calls:
       - name: process_data
         arguments:
+          config:
+            nested: true
           items:
           - 1
           - 2
           - 3
-          config:
-            nested: true
       normal_text: ''
   PARSER.batch.9:
     description: Empty input

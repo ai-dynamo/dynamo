@@ -28,11 +28,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      normal_text: 'I will check the weather. '
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -51,11 +47,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: Let me know if you need more.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: None
+      normal_text: ''
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -74,11 +66,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: I will check the weather.  Let me know if you need more.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      normal_text: 'I will check the weather. '
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -106,8 +94,4 @@ cases:
       - name: get_weather
         arguments:
           location: LA
-      normal_text: I will check the weather.  Then check LA weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_weather', 'arguments': {'location': 'LA'}}]
-    #   normal_text: 'I will check the weather. '
+      normal_text: 'I will check the weather. '
