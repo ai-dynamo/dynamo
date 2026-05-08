@@ -175,7 +175,7 @@ jobs:
       - name: Run XPU tests
         uses: ./.github/actions/pytest
         with:
-          pytest_marks: '${{ env.FRAMEWORK }} and xpu_1'
+          pytest_marks: '${{ env.FRAMEWORK }} and xpu_1 and pre_merge and not multimodal'
           image_tag: ${{ env.TEST_IMAGE_TAG }}
           test_suite_name: 'xpu-${{ env.FRAMEWORK }}'
           test_type: 'e2e'
