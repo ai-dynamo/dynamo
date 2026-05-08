@@ -274,13 +274,11 @@ pub(crate) async fn start_kv_router_background(
     }
 
     spawn_startup_orphan_cleanup(
-        &mut nats_queue,
         component.clone(),
         stream_name.clone(),
         nats_server.clone(),
         consumer_id.clone(),
-    )
-    .await;
+    );
 
     // Wait for at least one worker instance before proceeding
     let mut instance_event_stream =
@@ -470,23 +468,32 @@ fn select_startup_orphaned_consumers(
         .collect()
 }
 
-async fn spawn_startup_orphan_cleanup(
-    nats_queue: &mut NatsQueue,
+fn spawn_startup_orphan_cleanup(
     component: Component,
     stream_name: String,
     nats_server: String,
     consumer_id: String,
 ) {
-    let Ok(mut startup_candidates) = nats_queue.list_consumers().await else {
-        return;
-    };
-    startup_candidates.retain(|consumer| consumer != &consumer_id);
-
-    if startup_candidates.is_empty() {
-        return;
-    };
-
     tokio::spawn(async move {
+        let mut cleanup_queue = NatsQueue::new_without_consumer(
+            stream_name,
+            nats_server,
+            std::time::Duration::from_secs(60),
+        );
+        if let Err(e) = cleanup_queue.connect().await {
+            tracing::debug!("Failed to connect NATS queue for startup orphan cleanup: {e:?}");
+            return;
+        }
+
+        let Ok(mut startup_candidates) = cleanup_queue.list_consumers().await else {
+            return;
+        };
+        startup_candidates.retain(|consumer| consumer != &consumer_id);
+
+        if startup_candidates.is_empty() {
+            return;
+        };
+
         tokio::time::sleep(STARTUP_ORPHAN_CLEANUP_GRACE).await;
 
         let discovery = component.drt().discovery();
@@ -510,19 +517,11 @@ async fn spawn_startup_orphan_cleanup(
             return;
         }
 
-        let mut cleanup_queue = NatsQueue::new_without_consumer(
-            stream_name,
-            nats_server,
-            std::time::Duration::from_secs(60),
-        );
-        if let Err(e) = cleanup_queue.connect().await {
-            tracing::debug!("Failed to connect NATS queue for startup orphan cleanup: {e:?}");
-            return;
-        }
-
         for consumer in orphans {
             tracing::info!("Cleaning up startup orphaned consumer: {consumer}");
-            let _ = cleanup_queue.shutdown(Some(consumer)).await;
+            if let Err(e) = cleanup_queue.shutdown(Some(consumer.clone())).await {
+                tracing::warn!("Failed to clean up startup orphaned consumer {consumer}: {e}");
+            }
         }
     });
 }
