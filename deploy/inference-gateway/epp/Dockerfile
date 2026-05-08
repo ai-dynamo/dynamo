@@ -137,6 +137,16 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \
     -o epp ./cmd/epp
 
+# Compliance: emit a CycloneDX SBOM for EPP's Go module set so the frontend
+# build (which COPYs /epp from this image) can consume it in its licenses
+# stage. EPP itself is not customer-facing — the SBOM lives here purely as
+# a build artifact for frontend's compliance pipeline. cyclonedx-gomod is
+# pinned to v1.7.0 to keep the SBOM tool itself reproducible.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
+    cyclonedx-gomod app -licenses -json -main ./cmd/epp -output /sbom-go.cdx.json .
+
 # =============================================================================
 # Stage 3: Runtime
 # =============================================================================
@@ -150,6 +160,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /
 
 COPY --from=go-builder /workspace/epp .
+
+# EPP is not shipped to customers, but the frontend image's licenses stage
+# consumes this CycloneDX SBOM via COPY --from=epp /sbom-go.cdx.json.
+COPY --from=go-builder /sbom-go.cdx.json /sbom-go.cdx.json
 
 # Note: EPP config is mounted via Kubernetes ConfigMap at runtime
 # See helm/dynamo-gaie/templates/epp-configmap.yaml

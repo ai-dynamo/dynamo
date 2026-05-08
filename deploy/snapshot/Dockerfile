@@ -66,6 +66,12 @@ RUN go test ./... -v
 # =============================================================================
 # Stage: Builder - Build Go binaries
 # =============================================================================
+#
+# TODO: inline-compliance integration for snapshot-agent — same pattern as
+# operator (see deploy/operator/Dockerfile's TODO comment in the builder
+# stage). One extra wrinkle: snapshot-agent's final stage is Ubuntu-based,
+# so dpkg generator runs too — `--ecosystem go,dpkg,native`. The native
+# component covers CRIU + cuda-checkpoint already in native_packages.yaml.
 FROM go-base AS builder
 
 ARG TARGETOS=linux

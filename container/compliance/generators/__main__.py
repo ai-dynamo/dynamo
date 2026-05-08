@@ -88,7 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--go-sbom",
         type=Path,
-        help="Path to cyclonedx-gomod output (required for go)",
+        action="append",
+        default=[],
+        help=(
+            "Path to a cyclonedx-gomod output (required for go). Repeatable when "
+            "an image combines multiple Go binaries — e.g. frontend pulls in /epp "
+            "from the EPP image and consumes EPP's emitted SBOM alongside any "
+            "Go SBOM produced inside the frontend build itself."
+        ),
     )
     parser.add_argument(
         "--native-yaml",
@@ -140,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
                 from . import dpkg as gen  # type: ignore[no-redef]
                 gen.generate(eco_out)
             elif eco == "go":
-                if args.go_sbom is None:
-                    failures.append("go: --go-sbom is required")
+                if not args.go_sbom:
+                    failures.append("go: at least one --go-sbom is required")
                     continue
                 from . import go as gen  # type: ignore[no-redef]
                 gen.generate(args.go_sbom, eco_out)

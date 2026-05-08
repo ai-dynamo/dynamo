@@ -136,9 +136,18 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
+
+# Approach A: EPP self-describes. The EPP image (already pulled via
+# FROM ${EPP_IMAGE} AS epp at the top of this template) carries a
+# CycloneDX SBOM at /sbom-go.cdx.json — emitted by cyclonedx-gomod in
+# EPP's go-builder stage. The frontend's licenses stage consumes it so
+# the rendered NOTICES-Go.txt accurately reflects EPP's Go module set.
+COPY --from=epp /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
+
 RUN python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg \
+    --ecosystem python,rust,dpkg,go \
     --venv ${VIRTUAL_ENV} \
+    --go-sbom /tmp/sbom-go-epp.cdx.json \
     --output-dir /legal \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \

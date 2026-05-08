@@ -52,6 +52,27 @@ FROM base AS builder
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go
 
+# TODO: emit Go SBOM here for the inline-compliance pipeline. When wired:
+#   RUN go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0
+#   RUN cyclonedx-gomod app -licenses -json -main ./cmd/main.go \
+#       -output /sbom-go.cdx.json .
+# The SBOM is then COPY'd into the licenses stage (added below) which runs
+# python3 -m compliance.generators --ecosystem go to render NOTICES-Go.txt.
+#
+# This requires:
+#   1. Adding --build-context compliance=../../container/compliance to the
+#      buildx invocation in .github/actions/build-deploy-component/action.yml
+#      so the licenses stage can COPY in the compliance code.
+#   2. Adding a `licenses` stage FROM python:3.12-slim that runs the
+#      generator + policy validator. (operator's distroless final has no
+#      shell or Python; the licenses generation happens in a separate
+#      Python-bearing stage and only the resulting /legal tree gets COPY'd
+#      into the final.)
+#   3. Adding `sboms` and `legal` scratch stages following the same shape
+#      as container/templates/dynamo_runtime.Dockerfile.
+#   4. Modifying the runtime stage below to COPY --from=licenses /legal /legal
+#      so the operator image ships its NOTICES.
+
 # Runtime stage
 FROM nvcr.io/nvidia/distroless/go:v4.0.3
 WORKDIR /
