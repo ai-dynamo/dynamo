@@ -301,6 +301,18 @@ pub(crate) fn task_token(task: &str) -> Option<&'static str> {
     }
 }
 
+const USER_FIELDS_TO_PRESERVE: [&str; 3] = ["task", "wo_eos", "mask"];
+
+fn preserve_user_fields(target: &mut JsonValue, source: &JsonValue) {
+    if let Some(obj) = target.as_object_mut() {
+        for key in USER_FIELDS_TO_PRESERVE {
+            if let Some(v) = source.get(key) {
+                obj.insert(key.to_string(), v.clone());
+            }
+        }
+    }
+}
+
 // Merge `tool` role messages into preceding user `content_blocks` and collapse
 // consecutive user turns, matching Python's `merge_tool_messages`.
 pub(crate) fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
@@ -358,12 +370,16 @@ pub(crate) fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
 
             if can_merge {
                 let last = merged.last_mut().unwrap();
-                if let Some(blocks) = last
+                let appended = last
                     .as_object_mut()
                     .and_then(|o| o.get_mut("content_blocks"))
                     .and_then(|v| v.as_array_mut())
-                {
-                    blocks.push(text_block);
+                    .map(|blocks| {
+                        blocks.push(text_block);
+                    })
+                    .is_some();
+                if appended {
+                    preserve_user_fields(last, msg);
                 }
             } else {
                 let mut new_msg = serde_json::json!({
@@ -371,14 +387,7 @@ pub(crate) fn merge_tool_messages(messages: &[JsonValue]) -> Vec<JsonValue> {
                     "content": text,
                     "content_blocks": [text_block],
                 });
-                // Preserve extra fields.
-                if let Some(obj) = new_msg.as_object_mut() {
-                    for key in ["task", "wo_eos", "mask"] {
-                        if let Some(v) = msg.get(key) {
-                            obj.insert(key.to_string(), v.clone());
-                        }
-                    }
-                }
+                preserve_user_fields(&mut new_msg, msg);
                 merged.push(new_msg);
             }
         } else {

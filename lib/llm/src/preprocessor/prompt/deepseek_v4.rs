@@ -495,6 +495,32 @@ mod tests {
     }
 
     #[test]
+    fn test_user_task_preserved_when_merged_after_tool_result() {
+        let messages = json!([
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "search", "arguments": "{}"}
+            }]},
+            {"role": "tool", "tool_call_id": "c1", "content": "RESULT"},
+            {"role": "user", "content": "Search", "task": "action"},
+            {"role": "assistant", "content": "OK"}
+        ]);
+
+        let out = encode_messages(messages.as_array().unwrap(), ThinkingMode::Chat, true).unwrap();
+        assert!(
+            out.contains(&format!(
+                "{}Search{}{}{}OK",
+                "<tool_result>RESULT</tool_result>\n\n",
+                tokens::ASSISTANT_START,
+                tokens::THINKING_END,
+                tokens::TASK_ACTION
+            )),
+            "expected merged user text to keep the action task transition, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_drop_thinking_auto_disable_when_tools_present() {
         let messages = json!([
             {"role": "system", "content": "s", "tools": [{
