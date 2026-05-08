@@ -84,6 +84,57 @@ class TestBuildEngineInputs:
         assert inputs.sampling_params_list is None
 
     @pytest.mark.asyncio
+    async def test_chat_completion_uses_renderer_when_available(self):
+        class FakeRenderer:
+            async def render_chat_async(
+                self,
+                conversations,  # noqa: ARG002
+                chat_params,  # noqa: ARG002
+                tok_params,  # noqa: ARG002
+                *,
+                prompt_extras=None,  # noqa: ARG002
+            ):
+                return conversations, [
+                    {
+                        "prompt_token_ids": [1, 2, 3],
+                        "multi_modal_data": {"image": object()},
+                    }
+                ]
+
+        class FakeEngineClient:
+            renderer = FakeRenderer()
+            model_config = SimpleNamespace(max_model_len=4096)
+
+            async def get_tokenizer(self):
+                return None
+
+        handler = _make_handler()
+        handler.config.output_modalities = ["text", "audio"]
+        handler.engine_client = FakeEngineClient()
+        raw = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://x/img.jpg"},
+                        },
+                        {"type": "text", "text": "describe this"},
+                    ],
+                }
+            ],
+            "modalities": ["text", "audio"],
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt_token_ids"] == [1, 2, 3]
+        assert inputs.prompt["modalities"] == ["text", "audio"]
+        assert "multi_modal_data" in inputs.prompt
+
+    @pytest.mark.asyncio
     async def test_image_generation(self):
         """Image request parses prompt, size, and creates diffusion sampling params."""
         handler = _make_handler()

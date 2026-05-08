@@ -22,6 +22,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.utils import parse_omni_request
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ class OmniHandler(BaseOmniHandler):
         """
         if request_type == RequestType.CHAT_COMPLETION:
             assert isinstance(parsed_request, dict)
-            return self._engine_inputs_from_chat(parsed_request)
+            return await self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
             assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
@@ -245,18 +246,23 @@ class OmniHandler(BaseOmniHandler):
 
         raise ValueError(f"Unknown request type: {request_type}")
 
-    def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
+    async def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
-        text_prompt = self._extract_text_prompt(request)
-        if text_prompt is None:
+        parsed = await parse_omni_request(
+            request,
+            self.config.output_modalities,
+            DEFAULT_VIDEO_FPS,
+            tokenizer_getter=self.engine_client.get_tokenizer,
+            engine=self.engine_client,
+        )
+        prompt = parsed["engine_inputs"]
+        if not prompt:
             raise ValueError("No user message found in chat completion request")
-
-        prompt = OmniTextPrompt(prompt=text_prompt)
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=None,
+            sampling_params_list=parsed["sampling_params_list"],
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
