@@ -29,7 +29,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 
 
 # Install the Inference Extension CRDs
-IGW_LATEST_RELEASE=v1.5.0-rc.2
+IGW_LATEST_RELEASE=v1.5.0
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml
 
 
