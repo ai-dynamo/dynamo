@@ -495,6 +495,80 @@ pub(crate) fn drop_thinking_messages(messages: Vec<JsonValue>) -> Vec<JsonValue>
     out
 }
 
+pub(crate) fn resolve_thinking_mode(
+    args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    default_mode: ThinkingMode,
+) -> ThinkingMode {
+    if let Some(enabled) = super::thinking_bool_from_args(args) {
+        return if enabled {
+            ThinkingMode::Thinking
+        } else {
+            ThinkingMode::Chat
+        };
+    }
+    if let Some(args) = args
+        && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+    {
+        match mode {
+            "chat" => return ThinkingMode::Chat,
+            "thinking" => return ThinkingMode::Thinking,
+            _ => {}
+        }
+    }
+    default_mode
+}
+
+pub(crate) fn inject_tools_and_response_format(
+    messages_array: &mut Vec<JsonValue>,
+    req: &dyn super::OAIChatLikeRequest,
+) -> Result<()> {
+    let tools_json = req
+        .tools()
+        .map(|t| serde_json::to_value(&t))
+        .transpose()
+        .context("Failed to convert tools to JSON")?;
+
+    let response_format_json = req
+        .response_format()
+        .map(|rf| serde_json::to_value(&rf))
+        .transpose()
+        .context("Failed to convert response_format to JSON")?;
+
+    if tools_json.is_some() || response_format_json.is_some() {
+        let system_idx = messages_array
+            .iter()
+            .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+
+        if let Some(idx) = system_idx {
+            if let Some(msg) = messages_array.get_mut(idx)
+                && let Some(obj) = msg.as_object_mut()
+            {
+                if let Some(tools) = tools_json {
+                    obj.insert("tools".to_string(), tools);
+                }
+                if let Some(rf) = response_format_json {
+                    obj.insert("response_format".to_string(), rf);
+                }
+            }
+        } else {
+            let mut system_msg = serde_json::json!({
+                "role": "system",
+                "content": ""
+            });
+            if let Some(obj) = system_msg.as_object_mut() {
+                if let Some(tools) = tools_json {
+                    obj.insert("tools".to_string(), tools);
+                }
+                if let Some(rf) = response_format_json {
+                    obj.insert("response_format".to_string(), rf);
+                }
+            }
+            messages_array.insert(0, system_msg);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

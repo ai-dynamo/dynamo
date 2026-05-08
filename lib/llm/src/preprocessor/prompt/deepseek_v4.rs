@@ -378,29 +378,6 @@ impl DeepSeekV4Formatter {
         );
         true
     }
-
-    fn resolve_thinking_mode(
-        &self,
-        args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    ) -> ThinkingMode {
-        if let Some(enabled) = super::thinking_bool_from_args(args) {
-            return if enabled {
-                ThinkingMode::Thinking
-            } else {
-                ThinkingMode::Chat
-            };
-        }
-        if let Some(args) = args
-            && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
-        {
-            match mode {
-                "chat" => return ThinkingMode::Chat,
-                "thinking" => return ThinkingMode::Thinking,
-                _ => {}
-            }
-        }
-        self.thinking_mode
-    }
 }
 
 impl super::OAIPromptFormatter for DeepSeekV4Formatter {
@@ -410,7 +387,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
 
     fn render(&self, req: &dyn super::OAIChatLikeRequest) -> Result<String> {
         let args = req.chat_template_args();
-        let thinking_mode = self.resolve_thinking_mode(args);
+        let thinking_mode = super::deepseek_common::resolve_thinking_mode(args, self.thinking_mode);
         let reasoning_effort = Self::resolve_reasoning_effort(args);
         let drop_thinking = Self::resolve_drop_thinking(args);
 
@@ -425,50 +402,7 @@ impl super::OAIPromptFormatter for DeepSeekV4Formatter {
 
         normalize_message_contents(&mut messages_array, NormalizeNonText::LeaveUntouched);
 
-        let tools_json = req
-            .tools()
-            .map(|t| serde_json::to_value(&t))
-            .transpose()
-            .context("Failed to convert tools to JSON")?;
-
-        let response_format_json = req
-            .response_format()
-            .map(|rf| serde_json::to_value(&rf))
-            .transpose()
-            .context("Failed to convert response_format to JSON")?;
-
-        if tools_json.is_some() || response_format_json.is_some() {
-            let system_idx = messages_array
-                .iter()
-                .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
-
-            if let Some(idx) = system_idx {
-                if let Some(msg) = messages_array.get_mut(idx)
-                    && let Some(obj) = msg.as_object_mut()
-                {
-                    if let Some(tools) = tools_json {
-                        obj.insert("tools".to_string(), tools);
-                    }
-                    if let Some(rf) = response_format_json {
-                        obj.insert("response_format".to_string(), rf);
-                    }
-                }
-            } else {
-                let mut system_msg = serde_json::json!({
-                    "role": "system",
-                    "content": ""
-                });
-                if let Some(obj) = system_msg.as_object_mut() {
-                    if let Some(tools) = tools_json {
-                        obj.insert("tools".to_string(), tools);
-                    }
-                    if let Some(rf) = response_format_json {
-                        obj.insert("response_format".to_string(), rf);
-                    }
-                }
-                messages_array.insert(0, system_msg);
-            }
-        }
+        super::deepseek_common::inject_tools_and_response_format(&mut messages_array, req)?;
 
         encode_messages_with_options(
             &messages_array,
@@ -643,15 +577,26 @@ mod tests {
     #[test]
     fn test_resolve_thinking_mode_honors_enable_thinking() {
         use std::collections::HashMap;
-        let f = DeepSeekV4Formatter::new_thinking();
         let mut args = HashMap::new();
         args.insert(
             "enable_thinking".to_string(),
             serde_json::Value::Bool(false),
         );
-        assert_eq!(f.resolve_thinking_mode(Some(&args)), ThinkingMode::Chat);
+        assert_eq!(
+            super::super::deepseek_common::resolve_thinking_mode(
+                Some(&args),
+                ThinkingMode::Thinking
+            ),
+            ThinkingMode::Chat
+        );
         args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
-        assert_eq!(f.resolve_thinking_mode(Some(&args)), ThinkingMode::Thinking);
+        assert_eq!(
+            super::super::deepseek_common::resolve_thinking_mode(
+                Some(&args),
+                ThinkingMode::Thinking
+            ),
+            ThinkingMode::Thinking
+        );
     }
 
     struct MockRequest {

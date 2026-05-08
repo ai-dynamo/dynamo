@@ -286,33 +286,6 @@ impl DeepSeekV32Formatter {
     pub fn new_chat() -> Self {
         Self::new(ThinkingMode::Chat)
     }
-
-    /// Resolve thinking mode from per-request `chat_template_args`, falling back to the
-    /// formatter's default. Two conventions are supported:
-    ///   - `{"thinking": bool}` — common across models (e.g. Kimi K25)
-    ///   - `{"thinking_mode": "chat"|"thinking"}` — matches the DSV3.2 Jinja template parameter
-    fn resolve_thinking_mode(
-        &self,
-        args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    ) -> ThinkingMode {
-        if let Some(args) = args {
-            if let Some(thinking) = args.get("thinking").and_then(|v| v.as_bool()) {
-                return if thinking {
-                    ThinkingMode::Thinking
-                } else {
-                    ThinkingMode::Chat
-                };
-            }
-            if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                match mode {
-                    "chat" => return ThinkingMode::Chat,
-                    "thinking" => return ThinkingMode::Thinking,
-                    _ => {}
-                }
-            }
-        }
-        self.thinking_mode
-    }
 }
 
 impl super::OAIPromptFormatter for DeepSeekV32Formatter {
@@ -321,7 +294,10 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
     }
 
     fn render(&self, req: &dyn super::OAIChatLikeRequest) -> Result<String> {
-        let thinking_mode = self.resolve_thinking_mode(req.chat_template_args());
+        let thinking_mode = super::deepseek_common::resolve_thinking_mode(
+            req.chat_template_args(),
+            self.thinking_mode,
+        );
 
         // Get messages from request
         let messages_value = req.messages();
@@ -341,53 +317,7 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
 
         // Inject tools and response_format from request into the first system message
         // DeepSeek V3.2 expects these to be part of the system message for prompt rendering
-        let tools_json = req
-            .tools()
-            .map(|t| serde_json::to_value(&t))
-            .transpose()
-            .context("Failed to convert tools to JSON")?;
-
-        let response_format_json = req
-            .response_format()
-            .map(|rf| serde_json::to_value(&rf))
-            .transpose()
-            .context("Failed to convert response_format to JSON")?;
-
-        if tools_json.is_some() || response_format_json.is_some() {
-            // Find or create system message
-            let system_idx = messages_array
-                .iter()
-                .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
-
-            if let Some(idx) = system_idx {
-                // Add to existing system message
-                if let Some(msg) = messages_array.get_mut(idx)
-                    && let Some(obj) = msg.as_object_mut()
-                {
-                    if let Some(tools) = tools_json {
-                        obj.insert("tools".to_string(), tools);
-                    }
-                    if let Some(rf) = response_format_json {
-                        obj.insert("response_format".to_string(), rf);
-                    }
-                }
-            } else {
-                // Create a system message if none exists
-                let mut system_msg = serde_json::json!({
-                    "role": "system",
-                    "content": ""
-                });
-                if let Some(obj) = system_msg.as_object_mut() {
-                    if let Some(tools) = tools_json {
-                        obj.insert("tools".to_string(), tools);
-                    }
-                    if let Some(rf) = response_format_json {
-                        obj.insert("response_format".to_string(), rf);
-                    }
-                }
-                messages_array.insert(0, system_msg);
-            }
-        }
+        super::deepseek_common::inject_tools_and_response_format(&mut messages_array, req)?;
 
         // Encode with native implementation
         encode_messages(
