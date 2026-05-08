@@ -929,39 +929,17 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// xxh3-64 of a URL string, with HTTP cache-busters stripped from the
-    /// query so signed-URL drift doesn't break routing affinity.
+    /// xxh3-64 of the full URL string. Used as the routing `mm_hash` in the
+    /// URL-passthrough path. Two callers will collide on the same image only
+    /// when they send byte-identical URLs — including any query string. Any
+    /// query parameter that differs between requests (signed-URL `?sig=…`,
+    /// cache-buster `?v=…`, content selector `?width=…`) breaks the collision
+    /// and routes to a fresh worker. Frontend-decoding mode replaces this
+    /// with content-addressed hashing over decoded RGB bytes, which does
+    /// give cross-URL cache reuse.
     #[cfg(feature = "lightseek-mm")]
     fn hash_image_url(url: &str) -> u64 {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            Self::hash_normalized_url(url)
-        } else {
-            // data: URIs are content-addressed; hash the whole URI (mediatype + base64 body)
-            xxhash_rust::xxh3::xxh3_64(url.as_bytes())
-        }
-    }
-
-    #[cfg(feature = "lightseek-mm")]
-    fn hash_normalized_url(url: &str) -> u64 {
-        const BUSTERS: [&str; 7] = ["v", "t", "cache", "_", "ts", "sig", "signature"];
-        let normalized = match url.split_once('?') {
-            Some((base, query)) => {
-                let kept: Vec<&str> = query
-                    .split('&')
-                    .filter(|part| {
-                        let key = part.split_once('=').map(|(k, _)| k).unwrap_or(part);
-                        !BUSTERS.contains(&key)
-                    })
-                    .collect();
-                if kept.is_empty() {
-                    Cow::Borrowed(base)
-                } else {
-                    Cow::Owned(format!("{}?{}", base, kept.join("&")))
-                }
-            }
-            None => Cow::Borrowed(url),
-        };
-        xxhash_rust::xxh3::xxh3_64(normalized.as_bytes())
+        xxhash_rust::xxh3::xxh3_64(url.as_bytes())
     }
 
     /// Header-only image dim fetch. For HTTP/HTTPS we issue a Range request
@@ -2909,32 +2887,19 @@ mod tests {
     }
 
     /// HTTP cache-buster keys (`v`, `t`, `cache`, `_`, `ts`, `sig`, `signature`)
-    /// must be stripped from the query string before hashing — otherwise
-    /// signed-URL drift breaks routing affinity for the same image.
+    /// Different query strings must produce different hashes — what looks
+    /// like a cache-buster (`?v=1` vs `?v=2`) may also be a content selector
+    /// (e.g. version → different image). Hash the full URL and let the URL
+    /// be the identity.
     #[cfg(feature = "lightseek-mm")]
     #[test]
-    fn hash_normalized_url_strips_cache_busters() {
+    fn hash_image_url_distinguishes_query_strings() {
         let base = "https://cdn.example.com/img.jpg";
-        let hashed_no_query = OpenAIPreprocessor::hash_image_url(base);
-        let hashed_with_busters = OpenAIPreprocessor::hash_image_url(&format!(
-            "{base}?v=12345&sig=deadbeef&signature=feedface&t=999&cache=abc&_=1&ts=9999"
-        ));
-        assert_eq!(
-            hashed_no_query, hashed_with_busters,
-            "cache-buster query params should be stripped before hashing"
-        );
-    }
-
-    /// Non-buster query params must survive normalization (different identity → different hash).
-    #[cfg(feature = "lightseek-mm")]
-    #[test]
-    fn hash_normalized_url_keeps_meaningful_query() {
-        let a = OpenAIPreprocessor::hash_image_url("https://x.com/i.jpg?width=512");
-        let b = OpenAIPreprocessor::hash_image_url("https://x.com/i.jpg?width=1024");
-        assert_ne!(
-            a, b,
-            "non-cache-buster query params should differentiate hashes"
-        );
+        let v1 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=1"));
+        let v2 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=2"));
+        let no_q = OpenAIPreprocessor::hash_image_url(base);
+        assert_ne!(v1, v2, "?v=1 and ?v=2 may identify different images");
+        assert_ne!(v1, no_q, "presence of any query string changes the URL");
     }
 
     /// data: URIs are content-addressed; hashing the entire URI gives content equality.
