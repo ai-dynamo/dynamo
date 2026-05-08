@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch 4 dynamo_kvrouter sbatch scripts × 5 concurrencies × 3 reps = 60 jobs.
+# Launch 4 dynamo_kvrouter sbatch scripts × 8 concurrencies × 3 reps = 96 jobs.
 # Reps are interleaved so a complete (script,concurrency) sweep finishes before
 # any duplicate runs start — useful for partial best-of-3.
 #
@@ -9,7 +9,7 @@
 # Submitted job IDs are appended to launch_<timestamp>.log next to this script.
 #
 # Override defaults with env:
-#   CONCURRENCIES="24 32 48 64 96"
+#   CONCURRENCIES="16 32 48 64 80 96 112 128"
 #   REPS=3
 #   HOSTCACHE=0
 #   WORKER_METRICS=0   # 1 = enable --publish-events-and-metrics + capture_metrics sidecar
@@ -25,7 +25,7 @@ SCRIPTS=(
   "$SCRIPT_DIR/run_benchx_4ctx1gen_dynamo_kvrouter.sh"
 )
 
-read -r -a CONCURRENCIES <<<"${CONCURRENCIES:-24 32 48 64 96}"
+read -r -a CONCURRENCIES <<<"${CONCURRENCIES:-16 32 48 64 80 96 112 128}"
 REPS="${REPS:-3}"
 HOSTCACHE="${HOSTCACHE:-0}"
 WORKER_METRICS="${WORKER_METRICS:-0}"
