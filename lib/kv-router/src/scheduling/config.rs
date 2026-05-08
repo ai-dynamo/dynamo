@@ -265,6 +265,12 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
         let mut prefill_load_scale = compat.prefill_load_scale;
 
         if let Some(overlap_score_weight) = compat.overlap_score_weight {
+            if overlap_score_credit.is_some() || prefill_load_scale.is_some() {
+                return Err(
+                    "overlap_score_weight cannot be combined with overlap_score_credit or prefill_load_scale"
+                        .to_string(),
+                );
+            }
             apply_overlap_score_weight_override_alias(
                 overlap_score_weight,
                 &mut overlap_score_credit,
@@ -789,6 +795,23 @@ mod tests {
 
         assert_eq!(config.overlap_score_credit, Some(0.0));
         assert_eq!(config.prefill_load_scale, Some(0.0));
+    }
+
+    #[test]
+    fn test_router_config_override_rejects_mixed_deprecated_and_canonical_overlap_fields() {
+        let credit_error = serde_json::from_str::<RouterConfigOverride>(
+            r#"{"overlap_score_weight":2.0,"overlap_score_credit":0.5}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        let scale_error = serde_json::from_str::<RouterConfigOverride>(
+            r#"{"overlap_score_weight":2.0,"prefill_load_scale":3.0}"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(credit_error.contains("cannot be combined"));
+        assert!(scale_error.contains("cannot be combined"));
     }
 
     #[test]
