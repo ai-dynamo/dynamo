@@ -235,6 +235,7 @@ pub struct InitTransportRequest(pub serde_json::Value);
 pub struct UpdateWeightsRequest {
     pub version: String,
     pub target: serde_json::Value,
+    #[serde(default)]
     pub transport: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_mode: Option<String>,
@@ -838,6 +839,7 @@ async fn rl_resume(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 struct RlUpdateWeightsBody {
     version: String,
     target: serde_json::Value,
+    #[serde(default)]
     transport: serde_json::Value,
     #[serde(default)]
     pause_mode: Option<String>,
@@ -852,11 +854,43 @@ async fn rl_update_weights(
     let RlUpdateWeightsBody {
         version,
         target,
-        transport,
+        mut transport,
         pause_mode,
         clear_cache,
     } = body.0;
+    if is_lora_unload(&target) && transport.get("backend").is_none() {
+        transport = serde_json::json!({
+            "backend": "filesystem",
+            "filesystem": {},
+        });
+    }
     rl_update_weights_inner(state, version, target, transport, pause_mode, clear_cache).await
+}
+
+fn is_lora_unload(target: &serde_json::Value) -> bool {
+    target.get("kind").and_then(|v| v.as_str()) == Some("lora")
+        && target.get("op").and_then(|v| v.as_str()) == Some("unload")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_weights_body_accepts_lora_unload_without_transport() {
+        let body: RlUpdateWeightsBody = serde_json::from_value(serde_json::json!({
+            "version": "step_44",
+            "target": {
+                "kind": "lora",
+                "name": "adapter",
+                "op": "unload"
+            }
+        }))
+        .unwrap();
+
+        assert!(is_lora_unload(&body.target));
+        assert!(body.transport.is_null());
+    }
 }
 
 /// WeightTransferConfig path — fans out to ``weight_transport_update``.
