@@ -400,6 +400,35 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
+                // Topology fields participate in the checksum so that a rolling
+                // update that changes only worker_type/needs is correctly
+                // rejected as incompatible with the existing WorkerSet (forcing
+                // drain-and-redeploy) instead of silently joining and serving
+                // stale readiness data.
+                //
+                // worker_type discriminator: 0 = None, then the variant ordinal.
+                match self.worker_type {
+                    None => bytes_to_hash.push(0),
+                    Some(crate::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
+                    Some(crate::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
+                    Some(crate::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
+                    Some(crate::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
+                }
+                // needs is DNF: hash length(outer) || for each alt { length(inner) || each variant }
+                bytes_to_hash.extend((self.needs.len() as u32).to_be_bytes());
+                for alt in &self.needs {
+                    bytes_to_hash.extend((alt.len() as u32).to_be_bytes());
+                    for w in alt {
+                        let v: u8 = match w {
+                            crate::worker_type::WorkerType::Prefill => 1,
+                            crate::worker_type::WorkerType::Decode => 2,
+                            crate::worker_type::WorkerType::Encode => 3,
+                            crate::worker_type::WorkerType::Aggregated => 4,
+                        };
+                        bytes_to_hash.push(v);
+                    }
+                }
+
                 // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -1349,6 +1378,62 @@ mod worker_type_tests {
         assert_eq!(back.needs.len(), 2);
         assert_eq!(back.needs[0], vec![WorkerType::Prefill, WorkerType::Decode]);
         assert_eq!(back.needs[1], vec![WorkerType::Aggregated]);
+    }
+
+    /// mdcsum must cover `worker_type` and `needs` so that a rolling update
+    /// which changes only topology metadata produces a different checksum,
+    /// triggering the drain-and-redeploy path in `watcher.rs` instead of
+    /// silently joining an existing WorkerSet with a stale card.
+    ///
+    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so
+    /// each case builds a fresh card rather than mutating one and re-hashing.
+    #[test]
+    fn mdcsum_covers_worker_type_and_needs() {
+        fn hash(worker_type: Option<WorkerType>, needs: Vec<Vec<WorkerType>>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = worker_type;
+            card.needs = needs;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None, vec![]);
+        let prefill_only = hash(Some(WorkerType::Prefill), vec![]);
+        let decode_only = hash(Some(WorkerType::Decode), vec![]);
+        assert_ne!(baseline, prefill_only, "worker_type must change mdcsum");
+        assert_ne!(
+            prefill_only, decode_only,
+            "swapping worker_type must change mdcsum"
+        );
+
+        let prefill_with_decode = hash(Some(WorkerType::Prefill), vec![vec![WorkerType::Decode]]);
+        let prefill_with_decode_encode = hash(
+            Some(WorkerType::Prefill),
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+        );
+        assert_ne!(
+            prefill_only, prefill_with_decode,
+            "adding needs must change mdcsum"
+        );
+        assert_ne!(
+            prefill_with_decode, prefill_with_decode_encode,
+            "extending an AND-set must change mdcsum"
+        );
+
+        let encode_dnf = hash(
+            Some(WorkerType::Encode),
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+        let encode_single_alt = hash(
+            Some(WorkerType::Encode),
+            vec![vec![WorkerType::Prefill, WorkerType::Decode]],
+        );
+        assert_ne!(
+            encode_dnf, encode_single_alt,
+            "adding an OR alternative must change mdcsum"
+        );
     }
 
     /// Serde back-compat: an old-format card (no `worker_type` / `needs`
