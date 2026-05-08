@@ -26,6 +26,8 @@ import (
 )
 
 func TestBugDGDRStaleHubDeployedPhaseRequiresDGDNameMatch(t *testing.T) {
+	const newDGDName = "new-deployed-dgd"
+
 	src := &DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -38,7 +40,7 @@ func TestBugDGDRStaleHubDeployedPhaseRequiresDGDNameMatch(t *testing.T) {
 		Status: DynamoGraphDeploymentRequestStatus{
 			State: DGDRStateReady,
 			Deployment: &DeploymentStatus{
-				Name: "new-dgd",
+				Name: newDGDName,
 			},
 		},
 	}
@@ -51,8 +53,8 @@ func TestBugDGDRStaleHubDeployedPhaseRequiresDGDNameMatch(t *testing.T) {
 	if dst.Status.Phase != v1beta1.DGDRPhaseReady {
 		t.Fatalf("phase = %q, want %q", dst.Status.Phase, v1beta1.DGDRPhaseReady)
 	}
-	if dst.Status.DGDName != "new-dgd" {
-		t.Fatalf("dgdName = %q, want %q", dst.Status.DGDName, "new-dgd")
+	if dst.Status.DGDName != newDGDName {
+		t.Fatalf("dgdName = %q, want %q", dst.Status.DGDName, newDGDName)
 	}
 }
 
@@ -88,6 +90,8 @@ func TestBugDGDRStaleHubProfilingSubstatusRequiresProfilingPhase(t *testing.T) {
 }
 
 func TestBugDGDRStaleHubDeploymentInfoRequiresDGDNameMatch(t *testing.T) {
+	const newDGDName = "new-info-dgd"
+
 	replicas := int32(3)
 	availableReplicas := int32(2)
 	src := &DynamoGraphDeploymentRequest{
@@ -105,7 +109,7 @@ func TestBugDGDRStaleHubDeploymentInfoRequiresDGDNameMatch(t *testing.T) {
 		Status: DynamoGraphDeploymentRequestStatus{
 			State: DGDRStateReady,
 			Deployment: &DeploymentStatus{
-				Name: "new-dgd",
+				Name: newDGDName,
 			},
 		},
 	}
@@ -115,8 +119,8 @@ func TestBugDGDRStaleHubDeploymentInfoRequiresDGDNameMatch(t *testing.T) {
 		t.Fatalf("ConvertTo() error = %v", err)
 	}
 
-	if dst.Status.DGDName != "new-dgd" {
-		t.Fatalf("dgdName = %q, want %q", dst.Status.DGDName, "new-dgd")
+	if dst.Status.DGDName != newDGDName {
+		t.Fatalf("dgdName = %q, want %q", dst.Status.DGDName, newDGDName)
 	}
 	if dst.Status.DeploymentInfo != nil {
 		t.Fatalf("deploymentInfo = %#v, want nil", dst.Status.DeploymentInfo)
@@ -124,6 +128,8 @@ func TestBugDGDRStaleHubDeploymentInfoRequiresDGDNameMatch(t *testing.T) {
 }
 
 func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
+	const newDGDName = "new-deleted-dgd"
+
 	src := &v1beta1.DynamoGraphDeploymentRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -138,7 +144,7 @@ func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
 			Phase:   v1beta1.DGDRPhaseReady,
-			DGDName: "new-dgd",
+			DGDName: newDGDName,
 		},
 	}
 
@@ -153,8 +159,8 @@ func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
 	if dst.Status.Deployment == nil {
 		t.Fatal("deployment = nil, want minimal live deployment")
 	}
-	if dst.Status.Deployment.Name != "new-dgd" {
-		t.Fatalf("deployment.name = %q, want %q", dst.Status.Deployment.Name, "new-dgd")
+	if dst.Status.Deployment.Name != newDGDName {
+		t.Fatalf("deployment.name = %q, want %q", dst.Status.Deployment.Name, newDGDName)
 	}
 	if dst.Status.Deployment.Created {
 		t.Fatal("deployment.created = true, want false")
