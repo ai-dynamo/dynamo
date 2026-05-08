@@ -252,18 +252,25 @@ pub struct ModelDeploymentCard {
     /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
-    /// Every worker is expected to set this explicitly; empty means
-    /// misconfiguration (namespace not ready). A temporary shim in
-    /// `Model::ws_topology` softens this while backends are being migrated
-    /// — see `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]`
-    /// is kept so pre-field cards still deserialize.
+    /// Every worker is expected to set this explicitly; `None` means the
+    /// worker has not declared a role and is treated as misconfiguration
+    /// (workers not ready). A temporary shim in `Model::ws_topology`
+    /// softens this while backends are being migrated — see
+    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
+    /// kept so pre-field cards still deserialize.
     #[serde(default)]
-    pub worker_type: crate::worker_type::WorkerType,
+    pub worker_type: Option<crate::worker_type::WorkerType>,
 
-    /// Worker types this worker requires on peers in its namespace to serve
-    /// traffic. Used by the frontend's topology readiness check.
+    /// Peer worker types this worker requires to serve traffic, in DNF form.
+    /// The outer `Vec` is OR; each inner `Vec` is an AND-set of required
+    /// worker types. Empty outer `Vec` means "no peers required."
+    ///
+    /// Examples:
+    /// - Prefill worker: `[[Decode]]` — needs a Decode peer.
+    /// - Encode worker: `[[Prefill, Decode], [Aggregated]]` — needs either a
+    ///   P+D pair or a single Aggregated peer.
     #[serde(default)]
-    pub needs: crate::worker_type::WorkerType,
+    pub needs: Vec<Vec<crate::worker_type::WorkerType>>,
 
     /// LoRA metadata for routing
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1289,10 +1296,10 @@ mod worker_type_tests {
     use crate::worker_type::WorkerType;
 
     #[test]
-    fn default_card_has_empty_worker_type_and_needs() {
+    fn default_card_has_no_worker_type_and_no_needs() {
         let card = ModelDeploymentCard::with_name_only("test-model");
-        assert_eq!(card.worker_type, WorkerType::empty());
-        assert_eq!(card.needs, WorkerType::empty());
+        assert_eq!(card.worker_type, None);
+        assert!(card.needs.is_empty());
     }
 
     #[test]
@@ -1300,59 +1307,62 @@ mod worker_type_tests {
         let card = ModelDeploymentCard::with_name_only("test-model");
         let json = serde_json::to_string(&card).unwrap();
         let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.worker_type, WorkerType::empty());
-        assert_eq!(back.needs, WorkerType::empty());
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
     }
 
     #[test]
     fn serde_round_trip_decode_needs_prefill() {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
-        card.worker_type = WorkerType::Decode;
-        card.needs = WorkerType::Prefill;
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
         let json = serde_json::to_string(&card).unwrap();
         let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.worker_type, WorkerType::Decode);
-        assert_eq!(back.needs, WorkerType::Prefill);
+        assert_eq!(back.worker_type, Some(WorkerType::Decode));
+        assert_eq!(back.needs, vec![vec![WorkerType::Prefill]]);
     }
 
     #[test]
     fn serde_round_trip_aggregated_needs_encode() {
         // E-PD pattern: an aggregated worker with --route-to-encoder.
         let mut card = ModelDeploymentCard::with_name_only("test-model");
-        card.worker_type = WorkerType::Aggregated;
-        card.needs = WorkerType::Encode;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.needs = vec![vec![WorkerType::Encode]];
         let json = serde_json::to_string(&card).unwrap();
         let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.worker_type, WorkerType::Aggregated);
-        assert_eq!(back.worker_type, WorkerType::Prefill | WorkerType::Decode);
-        assert_eq!(back.needs, WorkerType::Encode);
+        assert_eq!(back.worker_type, Some(WorkerType::Aggregated));
+        assert_eq!(back.needs, vec![vec![WorkerType::Encode]]);
     }
 
     #[test]
-    fn serde_round_trip_encode_needs_prefill_and_decode() {
+    fn serde_round_trip_encode_needs_dnf() {
+        // Encode worker: needs (Prefill AND Decode) OR Aggregated.
         let mut card = ModelDeploymentCard::with_name_only("test-model");
-        card.worker_type = WorkerType::Encode;
-        card.needs = WorkerType::Prefill | WorkerType::Decode;
+        card.worker_type = Some(WorkerType::Encode);
+        card.needs = vec![
+            vec![WorkerType::Prefill, WorkerType::Decode],
+            vec![WorkerType::Aggregated],
+        ];
         let json = serde_json::to_string(&card).unwrap();
         let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.worker_type, WorkerType::Encode);
-        assert_eq!(back.needs, WorkerType::Prefill | WorkerType::Decode);
-        // And the E-PD satisfaction condition: needs satisfied by Aggregated alone.
-        assert_eq!(back.needs & WorkerType::Aggregated, back.needs);
+        assert_eq!(back.worker_type, Some(WorkerType::Encode));
+        assert_eq!(back.needs.len(), 2);
+        assert_eq!(back.needs[0], vec![WorkerType::Prefill, WorkerType::Decode]);
+        assert_eq!(back.needs[1], vec![WorkerType::Aggregated]);
     }
 
     /// Serde back-compat: an old-format card (no `worker_type` / `needs`
     /// keys in the JSON payload) must deserialize with both fields defaulted
-    /// to `WorkerType::empty()` — this is an attribute of the `#[serde(default)]`
-    /// contract and is independent of how readers subsequently interpret the
-    /// empty value. Construction of the test payload strips the new keys from a
-    /// fresh serialization so the test tracks schema drift rather than a
-    /// hand-rolled JSON literal.
+    /// (`None` and empty `Vec`) — this is an attribute of the
+    /// `#[serde(default)]` contract and is independent of how readers
+    /// subsequently interpret the missing values. Construction of the test
+    /// payload strips the new keys from a fresh serialization so the test
+    /// tracks schema drift rather than a hand-rolled JSON literal.
     #[test]
-    fn backward_compat_missing_fields_default_to_empty() {
+    fn backward_compat_missing_fields_default_to_none_and_empty() {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
-        card.worker_type = WorkerType::Prefill;
-        card.needs = WorkerType::Decode;
+        card.worker_type = Some(WorkerType::Prefill);
+        card.needs = vec![vec![WorkerType::Decode]];
         let mut value: serde_json::Value = serde_json::to_value(&card).unwrap();
         let obj = value.as_object_mut().unwrap();
         assert!(
@@ -1365,7 +1375,7 @@ mod worker_type_tests {
         );
         let stripped = serde_json::to_string(&value).unwrap();
         let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
-        assert_eq!(back.worker_type, WorkerType::empty());
-        assert_eq!(back.needs, WorkerType::empty());
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
     }
 }

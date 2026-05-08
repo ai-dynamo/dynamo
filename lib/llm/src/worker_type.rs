@@ -3,17 +3,19 @@
 
 //! # WorkerType
 //!
-//! `WorkerType` is a bitflag describing which processing stage a worker
-//! handles in a (potentially disaggregated) serving topology:
+//! `WorkerType` is the processing stage a worker handles in a (potentially
+//! disaggregated) serving topology. Four canonical values:
 //!
 //! - `WorkerType::Prefill`
 //! - `WorkerType::Decode`
 //! - `WorkerType::Encode`
-//! - `WorkerType::Aggregated` — defined as `Prefill | Decode` (bitflag alias)
+//! - `WorkerType::Aggregated` — handles Prefill+Decode in a single process
 //!
-//! The `Aggregated` alias is load-bearing: it means an encode worker declaring
-//! `needs = Prefill | Decode` is satisfied equally by a P+D pair or by a single
-//! Aggregated worker, with plain bitwise AND semantics. See
+//! Each worker has exactly one role; values are not combinable. To express
+//! "an encode worker needs Prefill+Decode OR a single Aggregated peer," the
+//! `needs` field on `ModelDeploymentCard` is in DNF form
+//! (`Vec<Vec<WorkerType>>`): the outer Vec is OR, each inner Vec is an
+//! AND-set of required peer worker types. See
 //! `docs/proposals/health-disagg-readiness.md`.
 //!
 //! `WorkerType` is **orthogonal** to [`crate::model_type::ModelType`]:
@@ -23,130 +25,30 @@
 //! worker serving the same Chat model both advertise `ModelType::Chat`; they
 //! differ only in `WorkerType`.
 
-use bitflags::bitflags;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-bitflags! {
-    /// Processing stage(s) a worker handles. See module docs for the full design.
-    ///
-    /// Canonical values (and the only ones accepted at registration):
-    /// `Prefill`, `Decode`, `Encode`, `Aggregated` (= `Prefill | Decode`).
-    /// Other combinations (e.g. `Prefill | Encode`) are not valid worker types.
-    ///
-    /// Note: `Serialize`/`Deserialize` are implemented manually (below) so the
-    /// JSON wire format is the canonical lowercase string (`"aggregated"`,
-    /// `"prefill"`, …) rather than bitflags 2.x's default formatted-string
-    /// representation (`"Prefill | Decode"`). Binary formats use raw `u8` bits.
-    #[derive(Copy, Debug, Default, Clone, Eq, PartialEq, Hash)]
-    pub struct WorkerType: u8 {
-        const Prefill    = 1 << 0;
-        const Decode     = 1 << 1;
-        const Encode     = 1 << 2;
-
-        /// Aggregated is an alias for `Prefill | Decode`, not a separate bit.
-        /// This lets `Encode::needs = Prefill | Decode` be satisfied equally by
-        /// a P+D pair or by a single Aggregated worker.
-        const Aggregated = Self::Prefill.bits() | Self::Decode.bits();
-    }
-}
-
-impl Serialize for WorkerType {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            // JSON / YAML / TOML: canonical lowercase string form. This is the
-            // documented wire format and matches the readiness endpoint JSON.
-            serializer.serialize_str(&self.as_str())
-        } else {
-            // bincode / postcard / etc.: raw bits for compactness.
-            serializer.serialize_u8(self.bits())
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for WorkerType {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            let s = String::deserialize(deserializer)?;
-            WorkerType::from_str(&s).map_err(serde::de::Error::custom)
-        } else {
-            let bits = u8::deserialize(deserializer)?;
-            WorkerType::from_bits(bits).ok_or_else(|| {
-                serde::de::Error::custom(format!("invalid WorkerType bits: 0b{bits:b}"))
-            })
-        }
-    }
+/// Processing stage a single worker handles. See module docs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerType {
+    Prefill,
+    Decode,
+    Encode,
+    Aggregated,
 }
 
 impl WorkerType {
-    /// The canonical string form. Used in the WorkerSet key and on the wire.
-    ///
-    /// Returns the canonical lowercase name for the four valid worker types,
-    /// or a `|`-joined decomposition for non-canonical combinations.
-    pub fn as_str(&self) -> String {
-        // Canonical single-name forms first.
-        if *self == WorkerType::Aggregated {
-            return "aggregated".to_string();
+    /// Canonical lowercase string form. Used in error messages, logs, and
+    /// (via the derived serde rename) on the wire.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkerType::Prefill => "prefill",
+            WorkerType::Decode => "decode",
+            WorkerType::Encode => "encode",
+            WorkerType::Aggregated => "aggregated",
         }
-        if *self == WorkerType::Prefill {
-            return "prefill".to_string();
-        }
-        if *self == WorkerType::Decode {
-            return "decode".to_string();
-        }
-        if *self == WorkerType::Encode {
-            return "encode".to_string();
-        }
-        if self.is_empty() {
-            return String::new();
-        }
-        // Fallback: decompose into single bits joined by '|'.
-        self.units()
-            .iter()
-            .map(|u| u.as_str())
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-
-    pub fn contains_prefill(&self) -> bool {
-        self.contains(WorkerType::Prefill)
-    }
-    pub fn contains_decode(&self) -> bool {
-        self.contains(WorkerType::Decode)
-    }
-    pub fn contains_encode(&self) -> bool {
-        self.contains(WorkerType::Encode)
-    }
-
-    /// True iff this is the `Aggregated` value (i.e. `Prefill | Decode`).
-    pub fn is_aggregated(&self) -> bool {
-        *self == WorkerType::Aggregated
-    }
-
-    /// True iff this is one of the four canonical worker-type values.
-    /// Registration should reject any card whose `worker_type` fails this check.
-    pub fn is_canonical(&self) -> bool {
-        matches!(
-            *self,
-            WorkerType::Prefill | WorkerType::Decode | WorkerType::Encode | WorkerType::Aggregated
-        )
-    }
-
-    /// Decompose into single-bit components. `Aggregated` decomposes to
-    /// `[Prefill, Decode]` since it is the alias `Prefill | Decode`.
-    pub fn units(&self) -> Vec<WorkerType> {
-        let mut result = Vec::new();
-        if self.contains_prefill() {
-            result.push(WorkerType::Prefill);
-        }
-        if self.contains_decode() {
-            result.push(WorkerType::Decode);
-        }
-        if self.contains_encode() {
-            result.push(WorkerType::Encode);
-        }
-        result
     }
 }
 
@@ -164,7 +66,7 @@ pub struct ParseWorkerTypeError {
 
 impl fmt::Display for ParseWorkerTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unrecognized worker_type token: {:?}", self.token)
+        write!(f, "unrecognized worker_type: {:?}", self.token)
     }
 }
 
@@ -173,30 +75,19 @@ impl std::error::Error for ParseWorkerTypeError {}
 impl FromStr for WorkerType {
     type Err = ParseWorkerTypeError;
 
-    /// Parse a worker type from its string form. Accepts:
-    /// - canonical names: `"prefill"`, `"decode"`, `"encode"`, `"aggregated"`
-    /// - `|`-joined decompositions: `"prefill|decode"` (== `"aggregated"`)
-    /// - empty string: `WorkerType::empty()`
-    ///
-    /// Case-insensitive; whitespace around tokens and separators is ignored.
+    /// Parse a worker type. Accepts the four canonical names
+    /// (`"prefill"`, `"decode"`, `"encode"`, `"aggregated"`),
+    /// case-insensitive and whitespace-tolerant. Anything else errors.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Ok(WorkerType::empty());
+        match s.trim().to_ascii_lowercase().as_str() {
+            "prefill" => Ok(WorkerType::Prefill),
+            "decode" => Ok(WorkerType::Decode),
+            "encode" => Ok(WorkerType::Encode),
+            "aggregated" => Ok(WorkerType::Aggregated),
+            _ => Err(ParseWorkerTypeError {
+                token: s.to_string(),
+            }),
         }
-        let mut result = WorkerType::empty();
-        for raw_token in trimmed.split('|') {
-            let token = raw_token.trim().to_ascii_lowercase();
-            let bit = match token.as_str() {
-                "prefill" => WorkerType::Prefill,
-                "decode" => WorkerType::Decode,
-                "encode" => WorkerType::Encode,
-                "aggregated" => WorkerType::Aggregated,
-                _ => return Err(ParseWorkerTypeError { token }),
-            };
-            result |= bit;
-        }
-        Ok(result)
     }
 }
 
@@ -204,90 +95,16 @@ impl FromStr for WorkerType {
 mod tests {
     use super::*;
 
-    // -- Bitflag semantics --
-
     #[test]
-    fn aggregated_is_prefill_or_decode_alias() {
-        // The load-bearing invariant of this whole design.
-        assert_eq!(
-            WorkerType::Aggregated,
-            WorkerType::Prefill | WorkerType::Decode
-        );
-        assert!(WorkerType::Aggregated.contains_prefill());
-        assert!(WorkerType::Aggregated.contains_decode());
-        assert!(!WorkerType::Aggregated.contains_encode());
-        assert!(WorkerType::Aggregated.is_aggregated());
-    }
-
-    #[test]
-    fn bitwise_operations() {
-        let p = WorkerType::Prefill;
-        let d = WorkerType::Decode;
-        let e = WorkerType::Encode;
-
-        assert_eq!(p | d, WorkerType::Aggregated);
-        assert_eq!((p | d) & p, p);
-        assert_eq!((p | d | e) & WorkerType::Aggregated, WorkerType::Aggregated);
-
-        // Encode-needs-Prefill|Decode satisfied by Aggregated alone.
-        let required = WorkerType::Prefill | WorkerType::Decode;
-        let present = WorkerType::Aggregated;
-        assert_eq!(required & present, required);
-
-        // Encode-needs-P|D satisfied by P+D pair.
-        let present_pd = WorkerType::Prefill | WorkerType::Decode;
-        assert_eq!(required & present_pd, required);
-
-        // Encode-needs-P|D NOT satisfied by encode-alone.
-        let present_encode_only = WorkerType::Encode;
-        assert_ne!(required & present_encode_only, required);
-    }
-
-    // -- Canonical value validation --
-
-    #[test]
-    fn is_canonical_matches_only_the_four() {
-        assert!(WorkerType::Prefill.is_canonical());
-        assert!(WorkerType::Decode.is_canonical());
-        assert!(WorkerType::Encode.is_canonical());
-        assert!(WorkerType::Aggregated.is_canonical());
-
-        assert!(!WorkerType::empty().is_canonical());
-        assert!(!(WorkerType::Prefill | WorkerType::Encode).is_canonical());
-        assert!(!WorkerType::all().is_canonical());
-    }
-
-    // -- Display / as_str --
-
-    #[test]
-    fn display_canonicalizes_aggregated() {
-        assert_eq!(WorkerType::Aggregated.to_string(), "aggregated");
-        // Even though Aggregated == Prefill | Decode at the bit level, Display
-        // prefers the canonical shorthand.
-        assert_eq!(
-            (WorkerType::Prefill | WorkerType::Decode).to_string(),
-            "aggregated"
-        );
-
+    fn display_canonical_lowercase() {
         assert_eq!(WorkerType::Prefill.to_string(), "prefill");
         assert_eq!(WorkerType::Decode.to_string(), "decode");
         assert_eq!(WorkerType::Encode.to_string(), "encode");
-        assert_eq!(WorkerType::empty().to_string(), "");
+        assert_eq!(WorkerType::Aggregated.to_string(), "aggregated");
     }
 
     #[test]
-    fn display_non_canonical_combinations() {
-        // Sanity: non-canonical combos still render something sensible.
-        assert_eq!(
-            (WorkerType::Prefill | WorkerType::Encode).to_string(),
-            "prefill|encode"
-        );
-    }
-
-    // -- FromStr --
-
-    #[test]
-    fn from_str_canonical_names() {
+    fn from_str_accepts_canonical_names() {
         assert_eq!(
             "prefill".parse::<WorkerType>().unwrap(),
             WorkerType::Prefill
@@ -301,78 +118,38 @@ mod tests {
     }
 
     #[test]
-    fn from_str_decomposed_equals_aggregated() {
-        // "prefill|decode" parses to the same value as "aggregated".
-        assert_eq!(
-            "prefill|decode".parse::<WorkerType>().unwrap(),
-            WorkerType::Aggregated
-        );
-    }
-
-    #[test]
-    fn from_str_empty_is_empty() {
-        assert_eq!("".parse::<WorkerType>().unwrap(), WorkerType::empty());
-        assert_eq!("   ".parse::<WorkerType>().unwrap(), WorkerType::empty());
-    }
-
-    #[test]
     fn from_str_case_insensitive_and_whitespace_tolerant() {
         assert_eq!(
-            "Prefill".parse::<WorkerType>().unwrap(),
+            "PREFILL".parse::<WorkerType>().unwrap(),
             WorkerType::Prefill
         );
         assert_eq!(
-            "  PREFILL | Decode ".parse::<WorkerType>().unwrap(),
-            WorkerType::Aggregated
+            "  Decode  ".parse::<WorkerType>().unwrap(),
+            WorkerType::Decode
         );
     }
 
     #[test]
-    fn from_str_rejects_unknown_token() {
-        let err = "wibble".parse::<WorkerType>().unwrap_err();
-        assert_eq!(err.token, "wibble");
+    fn from_str_rejects_unknown_and_empty() {
+        assert!("wibble".parse::<WorkerType>().is_err());
+        assert!("".parse::<WorkerType>().is_err());
+        assert!("prefill|decode".parse::<WorkerType>().is_err());
     }
 
     #[test]
-    fn display_from_str_round_trip_canonical() {
+    fn display_from_str_round_trip() {
         for wt in [
             WorkerType::Prefill,
             WorkerType::Decode,
             WorkerType::Encode,
             WorkerType::Aggregated,
         ] {
-            let s = wt.to_string();
-            let parsed: WorkerType = s.parse().unwrap();
-            assert_eq!(parsed, wt, "round-trip failed for {s:?}");
+            assert_eq!(wt.to_string().parse::<WorkerType>().unwrap(), wt);
         }
     }
 
-    // -- serde round-trip --
-
-    #[test]
-    fn serde_json_round_trip() {
-        for wt in [
-            WorkerType::empty(),
-            WorkerType::Prefill,
-            WorkerType::Decode,
-            WorkerType::Encode,
-            WorkerType::Aggregated,
-            WorkerType::Prefill | WorkerType::Encode, // non-canonical combo
-        ] {
-            let j = serde_json::to_string(&wt).unwrap();
-            let back: WorkerType = serde_json::from_str(&j).unwrap();
-            assert_eq!(back, wt, "serde round-trip failed for {wt:?} (json={j})");
-        }
-    }
-
-    /// Strict wire-format test: assert the exact JSON string produced by
-    /// Serialize matches the documented canonical lowercase form. Without
-    /// this, the bitflags 2.x derive would silently produce
-    /// `"Prefill | Decode"` (capitalized, spaced) and the mismatch between
-    /// docs, `as_str()`, `FromStr`, and serde would go unnoticed.
     #[test]
     fn serde_json_wire_format_is_canonical_lowercase() {
-        assert_eq!(serde_json::to_string(&WorkerType::empty()).unwrap(), "\"\"");
         assert_eq!(
             serde_json::to_string(&WorkerType::Prefill).unwrap(),
             "\"prefill\""
@@ -389,75 +166,24 @@ mod tests {
             serde_json::to_string(&WorkerType::Aggregated).unwrap(),
             "\"aggregated\""
         );
-        // Prefill | Decode is the same value as Aggregated (bitflag alias),
-        // so it also renders as "aggregated".
-        assert_eq!(
-            serde_json::to_string(&(WorkerType::Prefill | WorkerType::Decode)).unwrap(),
-            "\"aggregated\""
-        );
-        // Non-canonical combination decomposes to pipe-joined lowercase.
-        assert_eq!(
-            serde_json::to_string(&(WorkerType::Prefill | WorkerType::Encode)).unwrap(),
-            "\"prefill|encode\""
-        );
     }
 
-    /// Deserialization accepts both the canonical form and the decomposed
-    /// form; asserts the wire contract documented in `as_str()` and `FromStr`.
     #[test]
-    fn serde_json_deserialize_accepts_canonical_and_decomposed() {
-        assert_eq!(
-            serde_json::from_str::<WorkerType>("\"aggregated\"").unwrap(),
-            WorkerType::Aggregated,
-        );
-        assert_eq!(
-            serde_json::from_str::<WorkerType>("\"prefill|decode\"").unwrap(),
-            WorkerType::Aggregated,
-        );
-        assert_eq!(
-            serde_json::from_str::<WorkerType>("\"prefill\"").unwrap(),
+    fn serde_json_round_trip() {
+        for wt in [
             WorkerType::Prefill,
-        );
-        assert_eq!(
-            serde_json::from_str::<WorkerType>("\"\"").unwrap(),
-            WorkerType::empty(),
-        );
-        // Case-insensitive / whitespace-tolerant per FromStr.
-        assert_eq!(
-            serde_json::from_str::<WorkerType>("\"  PREFILL | Decode  \"").unwrap(),
+            WorkerType::Decode,
+            WorkerType::Encode,
             WorkerType::Aggregated,
-        );
-        // Unknown tokens fail cleanly.
+        ] {
+            let j = serde_json::to_string(&wt).unwrap();
+            let back: WorkerType = serde_json::from_str(&j).unwrap();
+            assert_eq!(back, wt);
+        }
+    }
+
+    #[test]
+    fn serde_json_rejects_unknown_value() {
         assert!(serde_json::from_str::<WorkerType>("\"wibble\"").is_err());
-    }
-
-    /// Binary formats use raw `u8` bits for compactness. Round-trip via
-    /// bincode (a common non-human-readable format) should use the bit
-    /// representation, not strings.
-    #[test]
-    fn serde_binary_uses_u8_bits() {
-        let wt = WorkerType::Aggregated;
-        let bytes = bincode::serde::encode_to_vec(wt, bincode::config::standard()).unwrap();
-        // Aggregated = 0b011 = 3 in a single byte.
-        assert_eq!(bytes, vec![3u8]);
-        let (back, _): (WorkerType, _) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
-        assert_eq!(back, wt);
-    }
-
-    // -- units() --
-
-    #[test]
-    fn units_decomposes_to_single_bits() {
-        assert_eq!(WorkerType::empty().units(), Vec::<WorkerType>::new());
-        assert_eq!(WorkerType::Prefill.units(), vec![WorkerType::Prefill]);
-        assert_eq!(
-            WorkerType::Aggregated.units(),
-            vec![WorkerType::Prefill, WorkerType::Decode],
-        );
-        assert_eq!(
-            (WorkerType::Prefill | WorkerType::Encode).units(),
-            vec![WorkerType::Prefill, WorkerType::Encode],
-        );
     }
 }
