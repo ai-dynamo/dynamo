@@ -563,20 +563,30 @@ fn kv_router_config_from_env() -> KvRouterConfig {
             })
     }
 
-    if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
-        tracing::warn!("DYN_OVERLAP_SCORE_WEIGHT is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
-        cfg.prefill_load_scale = v;
-        if v == 0.0 {
-            cfg.overlap_score_credit = 0.0;
+    let legacy_overlap_weight_envs = [
+        "DYN_OVERLAP_SCORE_WEIGHT",
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+    ];
+    let has_canonical_overlap_env = std::env::var_os("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT")
+        .is_some()
+        || std::env::var_os("DYN_ROUTER_PREFILL_LOAD_SCALE").is_some();
+    if has_canonical_overlap_env {
+        for key in legacy_overlap_weight_envs {
+            if std::env::var_os(key).is_some() {
+                tracing::warn!(
+                    "{key} is deprecated and ignored because a canonical router overlap env var is set"
+                );
+            }
         }
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT") {
-        tracing::warn!(
-            "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE"
-        );
-        cfg.prefill_load_scale = v;
-        if v == 0.0 {
-            cfg.overlap_score_credit = 0.0;
+    } else {
+        for key in legacy_overlap_weight_envs {
+            if let Some(v) = env_f64(key) {
+                tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
+                cfg.prefill_load_scale = v;
+                if v == 0.0 {
+                    cfg.overlap_score_credit = 0.0;
+                }
+            }
         }
     }
     if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {

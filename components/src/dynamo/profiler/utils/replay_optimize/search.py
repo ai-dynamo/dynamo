@@ -254,7 +254,7 @@ def optimize_dense_disagg_with_replay(
     1. `(prefill_tp, decode_tp)` at equal worker counts that fit the budget.
     2. `(prefill_workers, decode_workers)` on the budget edge for the incumbent TP
        shape.
-    3. `(router_mode, overlap_score_credit)`.
+    3. `(router_mode, overlap_score_credit, prefill_load_scale)`.
 
     Returned "best" records are best among visited states, not a global optimum.
     """
@@ -377,7 +377,7 @@ def optimize_dense_agg_with_replay(
     bounds in `spec.sla`. The descended dimensions are:
     1. `tp` at the maximum worker count that fits the budget.
     2. `workers` for the incumbent `tp`.
-    3. `(router_mode, overlap_score_credit)`.
+    3. `(router_mode, overlap_score_credit, prefill_load_scale)`.
 
     Returned "best" records are best among visited states, not a global optimum.
     """

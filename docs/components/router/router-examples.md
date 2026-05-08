@@ -128,6 +128,8 @@ spec:
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
         - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+          value: "1.0"  # Prefer device-local KV cache reuse
+        - name: DYN_ROUTER_PREFILL_LOAD_SCALE
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
