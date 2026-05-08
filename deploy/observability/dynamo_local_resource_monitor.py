@@ -269,7 +269,7 @@ def _main_worker(conn, gpu_count, interval_sec):
     prev_net = psutil.net_io_counters()
     last_mono = time.monotonic()
     # Temperature changes slowly; sample at ~1/s by collecting every temp_every-th cycle.
-    temp_every = max(1, round(1.0 / (1.0 * interval_sec)))
+    temp_every = max(1, round(1 / interval_sec))
     cycle = 0
     prev_temps: list[float] = [0.0] * gpu_count
     while True:
