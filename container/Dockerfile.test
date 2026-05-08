@@ -26,8 +26,6 @@ USER dynamo
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
-# Top-level conftest.py keeps dynamo.vllm/sglang from shadowing the installed
-# vllm/sglang at pytest startup; without it, EngineCore subprocesses spawned
-# from tests crash with `ModuleNotFoundError: No module named 'vllm.v1'`.
+# Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
