@@ -141,10 +141,18 @@ impl Router {
         })
     }
 
-    /// Tokenize a JSON request body and return token IDs.
-    pub fn tokenize(&self, request_json: &str) -> Result<Vec<u32>> {
+    /// Tokenize a JSON request body and extract the router-relevant
+    /// `priority_jump` from `nvext.agent_hints.priority`.
+    ///
+    /// Returns `(token_ids, priority_jump)`. `priority_jump` is `0.0` when no
+    /// hint is present. Mirrors the standalone Dynamo preprocessor lift in
+    /// `lib/llm/src/preprocessor.rs` so this gateway path produces the same
+    /// queue ordering as a non-GAIE deployment.
+    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64)> {
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(request_json)?;
+
+        let priority_jump = extract_priority_jump(&request);
 
         let formatted_prompt = self
             .preprocessor
@@ -152,7 +160,7 @@ impl Router {
             .unwrap_or_default();
 
         let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
-        Ok(encoding.token_ids().to_vec())
+        Ok((encoding.token_ids().to_vec(), priority_jump))
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -178,9 +186,14 @@ impl Router {
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
+    ///
+    /// `priority_jump` is forwarded to the prefill scheduler queue so that
+    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
+    /// arrivals when the router queue is active.
     pub async fn route_prefill(
         &self,
         tokens: &[u32],
+        priority_jump: f64,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -188,16 +201,28 @@ impl Router {
         }
 
         self.prefill_router
-            .query_prefill_worker(tokens, None, false, None, 0.0, allowed_worker_ids)
+            .query_prefill_worker(
+                tokens,
+                None,
+                false,
+                None,
+                priority_jump,
+                allowed_worker_ids,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
+    ///
+    /// `priority_jump` is forwarded to the decode scheduler queue so that
+    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
+    /// arrivals when the router queue is active.
     pub async fn route_decode(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        priority_jump: f64,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -223,7 +248,7 @@ impl Router {
                 config_override.as_ref(),
                 false,
                 None,
-                0.0,
+                priority_jump,
                 None,
                 allowed_worker_ids,
             )
@@ -311,6 +336,29 @@ impl Router {
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
+}
+
+/// Extract the router queue `priority_jump` from a chat completion request's
+/// `nvext.agent_hints.priority`.
+///
+/// Negative priorities are clamped to `0.0` so a low-priority hint never
+/// pushes a request behind FCFS arrivals (matches the standalone preprocessor
+/// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
+/// `latency_sensitivity` alias for callers still on the old field name.
+/// Returns `0.0` when `nvext` is absent.
+fn extract_priority_jump(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> f64 {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| {
+            h.priority
+                .map(|p| p.max(0) as f64)
+                .or(h.latency_sensitivity)
+        })
+        .unwrap_or(0.0)
 }
 
 struct DiscoveredModelBootstrap {
@@ -702,7 +750,7 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let tokens = self
+        let (tokens, priority_jump) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
 
@@ -710,13 +758,18 @@ impl EndpointPicker for Router {
         // If the prefill router is not activated, this returns an error
         // and we fall back to aggregated (decode-only) routing.
         let prefill_result = self
-            .route_prefill(&tokens, allowed_worker_ids.clone())
+            .route_prefill(&tokens, priority_jump, allowed_worker_ids.clone())
             .await;
 
         let is_disaggregated = prefill_result.is_ok();
 
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, allowed_worker_ids)
+            .route_decode(
+                &tokens,
+                is_disaggregated,
+                priority_jump,
+                allowed_worker_ids,
+            )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -793,6 +846,7 @@ impl EndpointPicker for Router {
             is_disaggregated,
             endpoint = %endpoint,
             token_count = tokens.len(),
+            priority_jump,
             model = %req.model,
             header_count = headers.len(),
             "Picked endpoint"
@@ -833,5 +887,86 @@ impl EndpointPicker for Router {
                 "Failed to free request from router bookkeeping"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest
+    {
+        serde_json::from_str(json).expect("test request must parse as chat completion")
+    }
+
+    #[test]
+    fn priority_jump_absent_when_no_nvext() {
+        let req = parse(
+            r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}]
+            }"#,
+        );
+        assert_eq!(extract_priority_jump(&req), 0.0);
+    }
+
+    #[test]
+    fn priority_jump_absent_when_no_agent_hints() {
+        let req = parse(
+            r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"greed_sampling": true}
+            }"#,
+        );
+        assert_eq!(extract_priority_jump(&req), 0.0);
+    }
+
+    #[test]
+    fn priority_jump_lifted_from_agent_hints_priority() {
+        let req = parse(
+            r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
+        );
+        assert_eq!(extract_priority_jump(&req), 5.0);
+    }
+
+    #[test]
+    fn priority_jump_clamps_negative_to_zero() {
+        let req = parse(
+            r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"priority": -3}}
+            }"#,
+        );
+        assert_eq!(extract_priority_jump(&req), 0.0);
+    }
+
+    #[test]
+    fn priority_jump_falls_back_to_latency_sensitivity_when_priority_missing() {
+        let req = parse(
+            r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}}
+            }"#,
+        );
+        assert_eq!(extract_priority_jump(&req), 2.5);
+    }
+
+    #[test]
+    fn priority_jump_prefers_priority_over_latency_sensitivity() {
+        let req = parse(
+            r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"priority": 10, "latency_sensitivity": 2.5}}
+            }"#,
+        );
+        assert_eq!(extract_priority_jump(&req), 10.0);
     }
 }
