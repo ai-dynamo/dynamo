@@ -604,7 +604,13 @@ async fn tcp_listener(
                 prologue
             }
             _ => {
-                panic!("Expected HeaderOnly ControlMessage; internally logic error")
+                // Worker sent a non-HeaderOnly frame in the prologue slot
+                // (protocol violation, version skew, corruption). Notify the
+                // requester so the generate call chain fails cleanly, then
+                // return Err so the connection task ends without panicking.
+                let msg = "malformed prologue: expected HeaderOnly ControlMessage".to_string();
+                let _ = connection.send(Err(msg.clone()));
+                return Err(error!("{msg}"));
             }
         };
 
@@ -697,7 +703,18 @@ async fn tcp_listener(
                                 match process_control_message(header) {
                                     Ok(ControlAction::Continue) => {}
                                     Ok(ControlAction::Shutdown) => {
-                                        assert!(data.is_empty(), "received sentinel message with data; this should never happen");
+                                        if !data.is_empty() {
+                                            // Client sent Sentinel with a data
+                                            // payload (protocol violation). Kill
+                                            // this stream rather than panic the
+                                            // process via assert!.
+                                            tracing::warn!(
+                                                data_len = data.len(),
+                                                "client sent Sentinel with data (protocol violation); killing stream"
+                                            );
+                                            control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                                            break;
+                                        }
                                         tracing::trace!("received sentinel message; shutting down");
                                         break;
                                     }
@@ -1391,5 +1408,217 @@ mod tests {
             "Different namespace/component must not be tombstoned"
         );
         assert_eq!(server.cancel_instance_streams(&id_b).await, 1);
+    }
+
+    // ===== peer-controlled-bytes panic-replacement coverage =====
+    //
+    // The four tests below stand up a real registered response stream
+    // (handshake + prologue) and feed it bytes that previously triggered
+    // panic!()/assert!() in process_response_stream/network_receive_handler.
+    // Each test asserts the worker (a) does NOT panic and (b) tears down
+    // only the affected stream via ControlMessage::Kill.
+
+    use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+    use tokio::net::TcpStream;
+
+    type TestFramedRead = FramedRead<ReadHalf<TcpStream>, TwoPartCodec>;
+    type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
+    type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
+
+    /// Stand up a TcpStreamServer, register a response stream, connect a
+    /// client, drive the handshake + prologue, and return the client-side
+    /// framed reader/writer along with the receiver.
+    async fn open_registered_response_stream() -> TestResponseStream {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let registered_stream = pending_connection.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(stream);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ResponseStreamPrologue { error: None })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        // SAFETY (test-only): each `.expect` below describes a condition that
+        // can only fail if the test harness itself is broken; in production,
+        // a connected localhost socket always drives all three layers
+        // (timeout → stream_provider → response stream registration) to a
+        // non-error outcome. A panic in the test thread is the desired
+        // failure mode here.
+        let receiver = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
+            .await
+            .expect("server should establish response stream within timeout")
+            .expect("stream provider should not be dropped")
+            .expect("response stream should be accepted");
+
+        (framed_reader, framed_writer, receiver)
+    }
+
+    async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
+        // SAFETY (test-only): a misbehaving server (closing early, sending
+        // garbage, or sending data alongside a control header) is exactly the
+        // kind of harness failure we want surfaced as a test panic.
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), framed_reader.next())
+            .await
+            .expect("server should send a control message within timeout")
+            .expect("server should not close before sending control")
+            .expect("control message should decode");
+        let (header, data) = message.optional_parts();
+        assert!(data.is_none(), "control message should not contain data");
+        serde_json::from_slice(header.expect("control header missing").as_ref()).unwrap()
+    }
+
+    /// Sending an unexpected control message (Stop or Kill from the data
+    /// direction) is a protocol violation. The server's
+    /// network_receive_handler must reply with ControlMessage::Kill on
+    /// that stream alone, not panic.
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_unexpected_control_message() {
+        let (mut framed_reader, mut framed_writer, _receiver) =
+            open_registered_response_stream().await;
+
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ControlMessage::Stop).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "unexpected control message should kill only this stream"
+        );
+    }
+
+    /// A framing/decode error from the worker side is unrecoverable for
+    /// this stream but must not panic the worker. Server should send Kill
+    /// and tear down only this connection.
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_read_error() {
+        let (mut framed_reader, framed_writer, _receiver) = open_registered_response_stream().await;
+
+        let mut raw_writer = framed_writer.into_inner();
+        raw_writer.write_all(&[0u8; 8]).await.unwrap();
+        raw_writer.shutdown().await.unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "framing read error should kill only this stream"
+        );
+    }
+
+    /// Sentinel is supposed to be header-only. A misbehaving client that
+    /// attaches a data payload must not panic the worker via assert!().
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_on_sentinel_with_data() {
+        let (mut framed_reader, mut framed_writer, _receiver) =
+            open_registered_response_stream().await;
+
+        let header = serde_json::to_vec(&ControlMessage::Sentinel)
+            .unwrap()
+            .into();
+        framed_writer
+            .send(TwoPartMessage::from_parts(
+                header,
+                Bytes::from_static(b"unexpected payload"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "Sentinel with data should kill only this stream"
+        );
+    }
+
+    /// The prologue must be a HeaderOnly frame. A non-HeaderOnly prologue
+    /// (data-only or mixed) must surface as Err to the requester rather
+    /// than panic the worker.
+    #[tokio::test]
+    async fn test_tcp_stream_server_returns_error_on_invalid_prologue() {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let registered_stream = pending_connection.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (_read_half, write_half) = tokio::io::split(stream);
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        // Send a data-only frame in the prologue slot.
+        framed_writer
+            .send(TwoPartMessage::from_data(Bytes::from_static(
+                b"not a prologue",
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("stream provider channel should not be dropped");
+        // StreamReceiver doesn't impl Debug, so we can't use `.expect_err`.
+        match outcome {
+            Err(err) => assert!(
+                err.contains("malformed prologue"),
+                "expected malformed-prologue error, got: {err}"
+            ),
+            Ok(_) => std::panic!("invalid prologue should produce an error, but got Ok"),
+        }
     }
 }
