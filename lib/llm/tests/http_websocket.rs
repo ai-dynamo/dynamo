@@ -10,9 +10,12 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use dynamo_llm::endpoint_type::EndpointType;
-use dynamo_llm::http::service::{realtime, service_v2::HttpService};
+use dynamo_llm::engines::EchoBidirectionalEngine;
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -23,17 +26,10 @@ use tokio_tungstenite::tungstenite::Message;
 mod ports;
 use ports::bind_random_port;
 
-/// Engine slot is process-global; ensure we install the echo mock at most once
-/// across all tests in this binary.
-///
-/// #9174 (2/N) will replace `OnceLock`-based engine registration with proper
-/// `ModelManager`-keyed lookups; this helper goes away then.
-fn ensure_echo_engine_installed() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let _ = realtime::install_echo_engine();
-    });
-}
+/// Default model name used by tests; the fixture's first `session.update`
+/// frame must carry this in `session.model` so the handler's
+/// `get_realtime_engine` lookup hits the registered echo engine.
+const ECHO_MODEL: &str = "echo";
 
 async fn wait_for_health(port: u16) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -50,14 +46,18 @@ async fn wait_for_health(port: u16) {
     panic!("frontend never became healthy on port {port}");
 }
 
-/// Spawn an `HttpService` on a free port with the echo engine installed and
-/// the `/health` endpoint live, returning the port plus a cancel-token /
-/// join-handle pair the caller cleans up at the end of the test.
+fn register_echo(service: &HttpService) {
+    service
+        .model_manager()
+        .add_realtime_model(ECHO_MODEL, "0", Arc::new(EchoBidirectionalEngine))
+        .expect("register echo realtime engine");
+}
+
 async fn spawn_test_service() -> (u16, CancellationToken, JoinHandle<Result<()>>) {
-    ensure_echo_engine_installed();
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     service.enable_model_endpoint(EndpointType::Realtime, true);
+    register_echo(&service);
     let token = CancellationToken::new();
     let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
@@ -66,11 +66,22 @@ async fn spawn_test_service() -> (u16, CancellationToken, JoinHandle<Result<()>>
 
 async fn spawn_test_service_realtime_disabled() -> (u16, CancellationToken, JoinHandle<Result<()>>)
 {
-    ensure_echo_engine_installed();
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
+    register_echo(&service);
     let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_health(port).await;
+    (port, token, handle)
+}
+
+async fn spawn_test_service_no_engine() -> (u16, CancellationToken, JoinHandle<Result<()>>) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(EndpointType::Realtime, true);
+    // No engine registered — exercises the `model_not_found` error path.
+    let token = CancellationToken::new();
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
     (port, token, handle)
 }
@@ -160,7 +171,7 @@ async fn realtime_websocket_session_update_echoes_session_updated() {
 
     let body = serde_json::json!({
         "type": "session.update",
-        "session": { "type": "realtime", "model": "gpt-realtime" }
+        "session": { "type": "realtime", "model": ECHO_MODEL }
     });
     ws.send(Message::Text(body.to_string().into()))
         .await
@@ -173,7 +184,7 @@ async fn realtime_websocket_session_update_echoes_session_updated() {
     );
     assert_eq!(
         event.pointer("/session/model").and_then(|s| s.as_str()),
-        Some("gpt-realtime")
+        Some(ECHO_MODEL)
     );
 
     let _ = ws.close(None).await;
@@ -202,7 +213,7 @@ async fn realtime_websocket_audio_append_streams_response_envelope() {
     // session.update first to pick the engine.
     let session_update = serde_json::json!({
         "type": "session.update",
-        "session": { "type": "realtime", "model": "gpt-realtime" }
+        "session": { "type": "realtime", "model": ECHO_MODEL }
     });
     ws.send(Message::Text(session_update.to_string().into()))
         .await
@@ -340,7 +351,7 @@ async fn realtime_websocket_emits_close_after_client_close() {
 
     let body = serde_json::json!({
         "type": "session.update",
-        "session": { "type": "realtime" }
+        "session": { "type": "realtime", "model": ECHO_MODEL }
     });
     ws.send(Message::Text(body.to_string().into()))
         .await
@@ -421,4 +432,116 @@ async fn realtime_websocket_rejects_binary_frame() {
         got_close,
         "server should close the connection on a binary frame"
     );
+}
+
+/// Wait for an `error` event then drain frames until a `Close` arrives.
+async fn expect_error_event_then_close(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
+    let event = expect_text_event(ws, "error").await;
+    let mut got_close = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !got_close && tokio::time::Instant::now() < deadline {
+        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        let Ok(maybe) = frame else { break };
+        match maybe {
+            Some(Ok(Message::Close(_))) => got_close = true,
+            None => break,
+            _ => {}
+        }
+    }
+    assert!(got_close, "server should send Close after error event");
+    event
+}
+
+#[tokio::test]
+async fn realtime_websocket_unknown_model_emits_error_and_closes() {
+    let (port, token, handle) = spawn_test_service_no_engine().await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+
+    let body = serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "realtime", "model": "does-not-exist" }
+    });
+    ws.send(Message::Text(body.to_string().into()))
+        .await
+        .expect("send");
+
+    let event = expect_error_event_then_close(&mut ws).await;
+    assert_eq!(
+        event.pointer("/error/code").and_then(|s| s.as_str()),
+        Some("model_not_found"),
+        "error event should report model_not_found: {event}"
+    );
+
+    token.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn realtime_websocket_first_frame_must_be_session_update() {
+    let (port, token, handle) = spawn_test_service().await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+
+    let body = serde_json::json!({
+        "type": "input_audio_buffer.append",
+        "audio": "AAAA",
+    });
+    ws.send(Message::Text(body.to_string().into()))
+        .await
+        .expect("send");
+
+    let event = expect_error_event_then_close(&mut ws).await;
+    assert_eq!(
+        event.pointer("/error/code").and_then(|s| s.as_str()),
+        Some("invalid_request"),
+        "error event should report invalid_request: {event}"
+    );
+
+    token.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn realtime_websocket_session_update_missing_model_emits_error() {
+    let (port, token, handle) = spawn_test_service().await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+
+    let body = serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "realtime" }
+    });
+    ws.send(Message::Text(body.to_string().into()))
+        .await
+        .expect("send");
+
+    let event = expect_error_event_then_close(&mut ws).await;
+    assert_eq!(
+        event.pointer("/error/code").and_then(|s| s.as_str()),
+        Some("invalid_request"),
+        "error event should report invalid_request when model is absent: {event}"
+    );
+
+    token.cancel();
+    let _ = handle.await;
 }

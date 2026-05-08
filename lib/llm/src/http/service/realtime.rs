@@ -12,18 +12,15 @@
 //!
 //! On connect the handler synthesizes a `session.created` server event before any
 //! engine event flows — the spec requires it to be the first server event on the
-//! wire. The handler then waits for the first client frame; if it's a
-//! `session.update`, the carried `session.model` field is the routing input for
-//! engine selection. The selected engine handles everything subsequent
-//! (including `session.updated` echoes, audio-buffer state, and response
-//! generation).
-//!
-//! For now the engine is a process-scoped mock ([`EchoBidirectionalEngine`]) held
-//! in a `OnceLock` and `select_engine` ignores the model field — there's only
-//! one engine to return. The architectural shape (model in, engine out) is in
-//! place for #9174 to swap the static for a `ModelManager`-keyed lookup.
+//! wire. The handler then waits for the first client frame; it must be a
+//! `session.update`, and its `session.model` field selects the engine via
+//! [`ModelManager::get_realtime_engine`]. The selected engine handles everything
+//! subsequent (including `session.updated` echoes, audio-buffer state, and
+//! response generation). The first `session.update` is forwarded onto the
+//! engine's input stream verbatim — the handler used it only to pick the
+//! engine, the rest of the carried session config is the engine's to apply.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -38,7 +35,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, RequestStream};
+use dynamo_runtime::engine::{AsyncEngineContextProvider, RequestStream};
 use dynamo_runtime::pipeline::Context;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -55,38 +52,12 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::{RouteDoc, service_v2};
-use crate::engines::EchoBidirectionalEngine;
+use crate::discovery::ModelManagerError;
 use dynamo_protocols::types::realtime::{
     EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent,
     RealtimeServerEventError, RealtimeServerEventSessionCreated, Session,
 };
 use uuid::Uuid;
-
-/// Process-scoped registry for the bidirectional engine. Populated by tests and
-/// (in production) by whatever wires up the experimental endpoint. If unset when
-/// a connection arrives, the handler closes with `INTERNAL_ERROR`.
-///
-/// **Placeholder.** Tracked in #9174 (2/N). The proper registration path is
-/// through `ModelManager` keyed on `model_name`, parallel to chat / completions
-/// / embeddings engines, but no bidirectional accessor exists on `ModelManager`
-/// yet. When that lands, replace this static and the `install_*` helpers below
-/// with `state.manager().get_realtime_engine(model_name)` lookups in `handle_socket`,
-/// and remove the install-time API entirely.
-static BIDIRECTIONAL_ENGINE: OnceLock<EchoBidirectionalEngine> = OnceLock::new();
-
-/// Install the bidirectional engine to be used by `/v1/realtime`. Returns `Err` if an
-/// engine is already installed (the static can only be set once per process).
-/// See [`BIDIRECTIONAL_ENGINE`] for why this install-time API exists.
-pub fn install_engine(engine: EchoBidirectionalEngine) -> Result<(), &'static str> {
-    BIDIRECTIONAL_ENGINE
-        .set(engine)
-        .map_err(|_| "realtime bidirectional engine already installed")
-}
-
-/// Convenience installer for tests/dev: registers the echo mock engine.
-pub fn install_echo_engine() -> Result<(), &'static str> {
-    install_engine(EchoBidirectionalEngine)
-}
 
 pub fn realtime_router(
     state: Arc<service_v2::State>,
@@ -107,12 +78,11 @@ async fn realtime_ws_handler(
     upgrade.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<service_v2::State>) {
     // OpenAI Realtime spec requires `session.created` to be the first server
     // frame on the wire, before any client event arrives. The handler synthesizes
     // it here so the connection handshake works regardless of which engine is
-    // installed; engine selection happens once we observe the client's first
-    // frame (typically `session.update` carrying the desired model).
+    // selected later.
     let session_created = RealtimeServerEvent::SessionCreated(RealtimeServerEventSessionCreated {
         event_id: format!("event_{}", Uuid::new_v4()),
         session: Session::RealtimeSession(Box::default()),
@@ -140,36 +110,88 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<service_v2::State>) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // Strict: the first client frame must be `session.update` so we can pick
-    // the engine by `session.model`. Any other event, malformed JSON, or
-    // binary frame closes the connection — there is no default-engine path.
     let session_update = match expect_session_update(&mut ws_rx).await {
         Ok(req) => req,
         Err(close) => {
             if let Some((code, reason)) = close {
+                send_error_event(
+                    &mut ws_tx,
+                    "invalid_request",
+                    &reason,
+                    Some("session.update"),
+                )
+                .await;
                 let _ = ws_tx.send(close_message(code, &reason)).await;
                 let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
             }
             return;
         }
     };
+
     let model = match &session_update.session {
-        Session::RealtimeSession(s) => s.model.as_deref(),
+        Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
         Session::RealtimeTranscriptionSession(_) => None,
     };
-    let Some(engine) = select_engine(model) else {
-        tracing::error!(
-            ?model,
-            "/v1/realtime connection rejected: no engine available"
-        );
+    let Some(model_name) = model else {
+        send_error_event(
+            &mut ws_tx,
+            "invalid_request",
+            "session.model required",
+            Some("session.model"),
+        )
+        .await;
         let _ = ws_tx
-            .send(close_message(
-                close_code::ERROR,
-                "no realtime engine available",
-            ))
+            .send(close_message(close_code::POLICY, "session.model required"))
             .await;
         let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
         return;
+    };
+
+    let engine = match state.manager().get_realtime_engine(model_name) {
+        Ok(engine) => engine,
+        Err(ModelManagerError::ModelNotFound(_)) => {
+            send_error_event(
+                &mut ws_tx,
+                "model_not_found",
+                &format!("unknown model: {model_name}"),
+                Some("session.model"),
+            )
+            .await;
+            let _ = ws_tx
+                .send(close_message(close_code::POLICY, "unknown model"))
+                .await;
+            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
+            return;
+        }
+        Err(ModelManagerError::ModelUnavailable(_)) => {
+            send_error_event(
+                &mut ws_tx,
+                "model_unavailable",
+                &format!("model unavailable: {model_name}"),
+                Some("session.model"),
+            )
+            .await;
+            let _ = ws_tx
+                .send(close_message(close_code::AGAIN, "model unavailable"))
+                .await;
+            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
+            return;
+        }
+        Err(err) => {
+            tracing::error!(%err, "/v1/realtime engine lookup failed");
+            send_error_event(
+                &mut ws_tx,
+                "server_error",
+                &err.to_string(),
+                Some("session.model"),
+            )
+            .await;
+            let _ = ws_tx
+                .send(close_message(close_code::ERROR, "engine lookup failed"))
+                .await;
+            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
+            return;
+        }
     };
 
     let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
@@ -380,15 +402,26 @@ where
     Err(None)
 }
 
-/// Pick the realtime engine for this connection.
-///
-/// Today the slot is a single `OnceLock<EchoBidirectionalEngine>` and the
-/// model is logged but not used for routing — there's only one engine to
-/// return. #9174 will replace this with a `ModelManager`-keyed lookup; the
-/// function signature is the architectural seam.
-fn select_engine(model: Option<&str>) -> Option<&'static EchoBidirectionalEngine> {
-    if let Some(m) = model {
-        tracing::debug!(model = m, "/v1/realtime engine selection by model");
-    }
-    BIDIRECTIONAL_ENGINE.get()
+async fn send_error_event<S>(ws_tx: &mut S, code: &str, message: &str, param: Option<&str>)
+where
+    S: futures::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let event = RealtimeServerEvent::Error(RealtimeServerEventError {
+        event_id: format!("event_{}", Uuid::new_v4()),
+        error: RealtimeAPIError {
+            r#type: "invalid_request_error".to_string(),
+            code: Some(code.to_string()),
+            message: message.to_string(),
+            param: param.map(|s| s.to_string()),
+            event_id: None,
+        },
+    });
+    let payload = match serde_json::to_string(&event) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(%err, "/v1/realtime serializing error event failed");
+            return;
+        }
+    };
+    let _ = ws_tx.send(Message::Text(Utf8Bytes::from(payload))).await;
 }
