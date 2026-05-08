@@ -1,38 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for ``VllmLLMEngine``.
+"""Unit tests for ``VllmLLMEngine`` — the vLLM LLMEngine implementation for
+the unified backend.
 
-These exercise the adapter logic between the ``LLMEngine`` ABC and vLLM's
-``AsyncLLM`` using a stub ``AsyncLLM``. They do NOT spawn a real vLLM
-``EngineCore`` subprocess.
-
-End-to-end coverage of a real vLLM engine lifecycle (start, generate,
-shutdown) runs through
-``tests/serve/test_vllm.py::test_serve_deployment[aggregated_unified]``,
-which boots a real vllm-backed ``dynamo serve`` in a subprocess and issues
-chat / completion requests. That is the right place to assert "vLLM
-actually works" — pytest-process spawning of vLLM here adds no extra
-coverage and re-imports ``vllm`` from a dirty ``sys.path`` in the child.
+Only tests that exercise actual logic:
+  * ``start`` extracts context_length / kv_cache_block_size / etc. from the
+    underlying vLLM engine into ``EngineConfig`` (Rust-side model
+    registration depends on these values being populated, not None).
+  * ``generate`` produces the streaming chunk shape the Rust layer expects:
+    every chunk has ``token_ids``, final chunk adds ``finish_reason`` and a
+    coherent ``completion_usage``.
+  * ``abort`` and ``cleanup`` are safe to call before ``start`` and on
+    already-cleaned engines (Worker may call them on any failure path).
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib.util
-from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, patch
 
 import pytest
+import pytest_asyncio
+
+MODEL_ID = "Qwen/Qwen3-0.6B"
+_BASE_ARGV = [
+    "--model",
+    MODEL_ID,
+    "--gpu-memory-utilization",
+    "0.3",
+    "--max-model-len",
+    "1024",
+    "--max-num-seqs",
+    "4",
+    "--enforce-eager",
+]
 
 pytestmark = [
-    pytest.mark.unit,
+    pytest.mark.asyncio(loop_scope="module"),
+    pytest.mark.integration,
     pytest.mark.vllm,
-    # gpu_1 not gpu_0: importing dynamo.vllm.handlers pulls in vllm modules
-    # whose import-time setup fails on CPU-only arm64. Mirrors test_vllm_unit.py.
+    pytest.mark.unified,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.timeout(300),
     pytest.mark.skipif(
         importlib.util.find_spec("vllm") is None,
         reason="vllm not installed in this container",
@@ -41,7 +53,7 @@ pytestmark = [
 
 
 class _FakeContext:
-    """Duck-typed ``dynamo._core.Context``. ``VllmLLMEngine`` only calls
+    """Duck-typed ``dynamo._core.Context``.  ``VllmLLMEngine`` only calls
     ``context.id()``."""
 
     def __init__(self, request_id: str = "unit-test-req") -> None:
@@ -50,179 +62,81 @@ class _FakeContext:
     def id(self) -> str:
         return self._id
 
+    def is_stopped(self) -> bool:
+        return False
 
-def _fake_vllm_config(
-    *,
-    max_model_len: int = 1024,
-    block_size: int = 16,
-    num_gpu_blocks: int = 128,
-    max_num_seqs: int = 4,
-    max_num_batched_tokens: int = 2048,
-) -> SimpleNamespace:
-    """Stub the subset of ``VllmConfig`` that ``VllmLLMEngine.start`` reads."""
-    return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=max_model_len),
-        cache_config=SimpleNamespace(
-            block_size=block_size, num_gpu_blocks=num_gpu_blocks
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=max_num_seqs,
-            max_num_batched_tokens=max_num_batched_tokens,
-        ),
-    )
+    async def async_killed_or_stopped(self) -> None:
+        await asyncio.Event().wait()
 
 
-def _make_engine(vllm_config: SimpleNamespace | None = None):
-    """Construct a ``VllmLLMEngine`` directly with stubbed ``engine_args``,
-    bypassing ``parse_args`` so the test doesn't need a real vLLM CLI parse."""
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def started_engine():
+    # Use vLLM's default spawn for the EngineCore subprocess (set by
+    # VllmLLMEngine.start). Fork would inherit pytest's filterwarnings=error
+    # and crash the child on transitive flashinfer DeprecationWarnings.
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
-    if vllm_config is None:
-        vllm_config = _fake_vllm_config()
-
-    engine_args = SimpleNamespace(
-        model="Qwen/Qwen3-0.6B",
-        served_model_name="Qwen/Qwen3-0.6B",
-        create_engine_config=MagicMock(return_value=vllm_config),
-        create_model_config=MagicMock(
-            return_value=SimpleNamespace(
-                get_diff_sampling_param=MagicMock(return_value={})
-            )
-        ),
-    )
-    return VllmLLMEngine(engine_args)
+    engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
+    try:
+        engine_config = await engine.start()
+        yield engine, engine_config
+    finally:
+        await engine.cleanup()
 
 
-@pytest.mark.asyncio
-async def test_start_populates_registration_metadata():
-    """``start`` must surface non-None values pulled from ``VllmConfig`` —
-    the Rust registration path reads these fields, and a None there means
-    the model appears in /v1/models but fails to actually serve."""
-    vllm_config = _fake_vllm_config(
-        max_model_len=2048,
-        block_size=32,
-        num_gpu_blocks=256,
-        max_num_seqs=8,
-        max_num_batched_tokens=4096,
-    )
-    engine = _make_engine(vllm_config=vllm_config)
-
-    fake_async_llm = MagicMock()
-    with patch(
-        "dynamo.vllm.llm_engine.AsyncLLM.from_vllm_config",
-        return_value=fake_async_llm,
-    ):
-        cfg = await engine.start()
-
-    assert cfg.context_length == 2048
-    assert cfg.kv_cache_block_size == 32
-    assert cfg.total_kv_blocks == 256
-    assert cfg.max_num_seqs == 8
-    assert cfg.max_num_batched_tokens == 4096
-    assert cfg.model == "Qwen/Qwen3-0.6B"
-    assert cfg.served_model_name == "Qwen/Qwen3-0.6B"
-
-    await engine.cleanup()
+async def test_start_populates_registration_metadata(started_engine):
+    """``start`` must surface non-None values for the fields the Rust
+    registration path reads — if any of them come back None, the model
+    appears in /v1/models but fails to actually serve."""
+    _engine, cfg = started_engine
+    assert cfg.context_length and cfg.context_length > 0
+    assert cfg.kv_cache_block_size and cfg.kv_cache_block_size > 0
+    assert cfg.total_kv_blocks and cfg.total_kv_blocks > 0
+    assert cfg.max_num_seqs and cfg.max_num_seqs > 0
+    assert cfg.max_num_batched_tokens and cfg.max_num_batched_tokens > 0
 
 
-@pytest.mark.asyncio
-async def test_generate_streams_chunks_with_coherent_final_usage():
-    """Every chunk carries ``token_ids``; the final chunk additionally carries
+async def test_generate_streams_chunks_with_coherent_final_usage(started_engine):
+    """Every chunk must carry ``token_ids``; the final chunk must also carry
     ``finish_reason`` and a ``completion_usage`` whose totals add up."""
-    engine = _make_engine()
+    engine, _ = started_engine
+    ctx = _FakeContext("gen-1")
 
-    def _output(token_ids, finish_reason=None, index=0):
-        return SimpleNamespace(
-            index=index, token_ids=token_ids, finish_reason=finish_reason
-        )
-
-    def _request_output(prompt_token_ids, outputs):
-        return SimpleNamespace(prompt_token_ids=prompt_token_ids, outputs=outputs)
-
-    async def fake_generate(prompt, sampling_params, request_id):
-        # Two streaming RequestOutputs: cumulative token_ids per vLLM contract,
-        # final carries finish_reason.
-        yield _request_output([1, 2, 3], [_output([10, 11, 12])])
-        yield _request_output(
-            [1, 2, 3],
-            [_output([10, 11, 12, 13, 14], finish_reason="stop")],
-        )
-
-    fake_async_llm = MagicMock()
-    fake_async_llm.generate = fake_generate
-
-    with patch(
-        "dynamo.vllm.llm_engine.AsyncLLM.from_vllm_config",
-        return_value=fake_async_llm,
-    ), patch(
-        "dynamo.vllm.llm_engine.build_sampling_params",
-        return_value=MagicMock(),
+    chunks = []
+    async for chunk in engine.generate(
+        cast(
+            dict,
+            {
+                "token_ids": [1, 2, 3, 4, 5],
+                "stop_conditions": {"max_tokens": 16},
+                "sampling_options": {"temperature": 0.0},
+            },
+        ),
+        cast(object, ctx),  # type: ignore[arg-type]
     ):
-        await engine.start()
+        chunks.append(chunk)
+        assert "token_ids" in chunk
 
-        ctx = _FakeContext("gen-1")
-        chunks = []
-        async for chunk in engine.generate(
-            cast(
-                dict,
-                {
-                    "token_ids": [1, 2, 3],
-                    "sampling_options": {"temperature": 0.0},
-                    "stop_conditions": {"max_tokens": 16},
-                },
-            ),
-            cast(object, ctx),  # type: ignore[arg-type]
-        ):
-            assert "token_ids" in chunk
-            chunks.append(chunk)
-
-    assert len(chunks) == 2
-    # First chunk: 3 new tokens, no finish_reason
-    assert chunks[0]["token_ids"] == [10, 11, 12]
-    assert "finish_reason" not in chunks[0]
-    # Final chunk: 2 new tokens (delta from cumulative), finish_reason + usage
-    assert chunks[-1]["token_ids"] == [13, 14]
-    assert chunks[-1]["finish_reason"] == "stop"
-    usage = chunks[-1]["completion_usage"]
-    assert usage["prompt_tokens"] == 3
-    assert usage["completion_tokens"] == 5
-    assert usage["total_tokens"] == 8
-
-    await engine.cleanup()
+    final = chunks[-1]
+    assert "finish_reason" in final
+    usage = final["completion_usage"]
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
 
-@pytest.mark.asyncio
 async def test_abort_and_cleanup_are_safe_before_start():
-    """Worker may call ``abort`` / ``cleanup`` on any failure path. Neither
+    """Worker may call ``abort`` / ``cleanup`` on any failure path.  Neither
     must raise on a just-constructed engine, and ``cleanup`` must be
     idempotent."""
-    engine = _make_engine()
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
     await engine.abort(cast(object, _FakeContext()))  # type: ignore[arg-type]
     await engine.cleanup()
     await engine.cleanup()
 
 
-@pytest.mark.asyncio
-async def test_abort_forwards_request_id_to_engine_client():
-    """``abort`` is a thin pass-through to ``AsyncLLM.abort`` keyed by
-    ``context.id()``."""
-    engine = _make_engine()
-
-    fake_async_llm = MagicMock()
-
-    abort_calls: list[str] = []
-
-    async def fake_abort(request_id: str) -> None:
-        abort_calls.append(request_id)
-
-    fake_async_llm.abort = fake_abort
-
-    with patch(
-        "dynamo.vllm.llm_engine.AsyncLLM.from_vllm_config",
-        return_value=fake_async_llm,
-    ):
-        await engine.start()
-        await engine.abort(cast(object, _FakeContext("req-42")))  # type: ignore[arg-type]
-
-    assert abort_calls == ["req-42"]
-    await engine.cleanup()
+async def test_abort_unknown_request_on_running_engine(started_engine):
+    """vLLM's ``AsyncLLM.abort`` is a best-effort lookup.  Aborting a request
+    id the engine has never seen must not raise."""
+    engine, _ = started_engine
+    await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
