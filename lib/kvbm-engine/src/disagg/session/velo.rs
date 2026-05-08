@@ -1125,6 +1125,32 @@ impl Session for VeloSession {
             let _ = self.enqueue_finalize();
         }
         *self.inner.closed.lock() = true;
+        // Drain holder-side pins.  In the cooperative path
+        // (`finalize()`), pins are held until the peer's `PullAck`
+        // arrives — finalize() never reaches here.  `close()` is the
+        // abort path: the wire is being torn down, no further
+        // `PullAck` can ever arrive (peer's monitor surfaces
+        // `Detached` once the `Finalized` sentinel lands), and the
+        // session's per-request scheduling has already concluded
+        // before this point — so any in-flight peer pull has either
+        // settled (and PullAck'd, draining naturally) or has already
+        // errored out with the session's failure reason.
+        //
+        // Dropping the maps here releases the strong refs on the
+        // pinned `ImmutableBlock<G2>`s that `make_available`
+        // installed but never saw a `PullAck` for; without this
+        // they leak past `session_inner_dropped` only because
+        // long-lived sender/monitor task refs keep the inner alive,
+        // which in turn keeps the pin maps populated and the
+        // underlying G2 blocks active — surfacing as
+        // `BlockPoolError::ResetError` ("total blocks: N, available
+        // blocks: N - leaked") on test teardown.
+        //
+        // `inbound_pulls` matches the same shape (peer-authorized
+        // pull frames awaiting a `PullAck` that will never arrive),
+        // so drain it alongside.
+        self.inner.available_pins.lock().clear();
+        self.inner.inbound_pulls.clear();
     }
 }
 

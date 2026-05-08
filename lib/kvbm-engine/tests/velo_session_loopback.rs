@@ -544,3 +544,71 @@ async fn sync_methods_callable_from_non_tokio_thread() -> Result<()> {
     result.map_err(|e| anyhow::anyhow!("sync method failed: {}", e))?;
     Ok(())
 }
+
+// ============================================================================
+// Case: close() drains holder pins that never received PullAck
+// ============================================================================
+//
+// Regression for the prefill-side `Reset pool count mismatch: expected N,
+// got N-3` observed in the conditional-disagg two-request smoke (R1 cold,
+// `kv_load_failure_policy=recompute`).  When a peer pull errors before
+// emitting `Frame::PullAck`, holder pins inserted by `make_available`
+// stay live in `available_pins` indefinitely — the pin map is only
+// drained on `PullAck`.  The pinned `ImmutableBlock<G2>` strong refs
+// keep the underlying G2 blocks active, so `ManagedBlockPool::reset()`
+// fails with `total blocks: N, available blocks: N - leaked`.
+//
+// Fix: `close()` is the abort path and runs only after per-request
+// scheduling has concluded, so any in-flight peer pull has already
+// settled.  Drain `available_pins` (and the parallel `inbound_pulls`
+// authorize-but-no-PullAck map) so the strong refs drop synchronously
+// with `close()`.  `finalize()` is unchanged — the cooperative path
+// must hold pins until the peer's `PullAck` lands.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_drains_unacked_holder_pins() -> Result<()> {
+    let h = build_side().await;
+    let session_id = uuid::Uuid::new_v4();
+    let h_session = h.factory.open_concrete(session_id)?;
+
+    // Holder publishes 3 blocks (matches the smoke's "3 missing
+    // blocks unaccounted for" failure shape).
+    let blocks = make_blocks(&h.g2_manager, 3, 800);
+    let hashes: Vec<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+    h_session.commit(hashes.clone())?;
+    h_session.make_available(blocks)?;
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        3,
+        "make_available should pin all 3 blocks"
+    );
+
+    // Forge an inbound Frame::Pull authorizing one of the hashes.
+    // This installs the pull_id into `inbound_pulls` — the parallel
+    // map that `PullAck` would also drain.  No Frame::PullAck ever
+    // arrives (the simulated peer-pull-fails-before-PullAck case).
+    let pull_id: u64 = 7;
+    h_session.test_inject_inbound_frame(Frame::Pull {
+        pull_id,
+        hashes: vec![hashes[0]],
+    });
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        3,
+        "Frame::Pull alone must not drop pins"
+    );
+
+    // Abort path.  After close() the wire is being torn down, no
+    // PullAck can ever arrive — pins are dead weight, must be
+    // released so the underlying G2 blocks can be reset.
+    h_session.close(Some("simulated peer abort".to_string()));
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        0,
+        "close() must drain `available_pins`; otherwise the strong \
+         refs keep the underlying G2 blocks active and \
+         ManagedBlockPool::reset() returns ResetError"
+    );
+
+    Ok(())
+}
