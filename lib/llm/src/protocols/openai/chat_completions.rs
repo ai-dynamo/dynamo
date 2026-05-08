@@ -59,15 +59,16 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_io_kwargs: Option<MediaDecoder>,
 
-    /// RL: Pre-tokenized prompt tokens from Prime-RL's TITO interface.
-    /// On the standard `/v1/chat/completions` endpoint this field is accepted but ignored
-    /// (use `/v1/chat/completions/tokens` for TITO mode where tokens are authoritative).
-    /// Accepting it here avoids 400 errors when Prime-RL sends it without the rl-admin proxy.
+    /// Legacy RL field (pre-tokenized prompt). Accepted but ignored on
+    /// `/v1/chat/completions` — the canonical TITO channel is now the
+    /// top-level `prompt_token_ids` extension on the same endpoint
+    /// (allowlisted in `validate.rs::PASSTHROUGH_EXTRA_FIELDS`). Kept here
+    /// so older clients still sending `tokens` don't 400.
     #[serde(default, skip_serializing)]
     pub tokens: Option<Vec<u32>>,
 
-    /// RL: Prime-RL requests token IDs in the response via this field.
-    /// Accepted but ignored on standard chat completions (use `nvext.extra_fields` instead).
+    /// Legacy RL field. Accepted but ignored on standard chat completions —
+    /// use `nvext.extra_fields = ["completion_token_ids"]` instead.
     #[serde(default, skip_serializing)]
     pub return_token_ids: Option<bool>,
 

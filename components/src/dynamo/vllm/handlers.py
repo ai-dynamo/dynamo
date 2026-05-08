@@ -883,6 +883,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "mode": mode,
                 "clear_cache": clear_cache,
             }
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.error(f"[RL] Failed to pause: {e}")
             return {"status": "error", "message": str(e)}
@@ -895,6 +900,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self._paused = False
             logger.info("[RL] Engine resumed")
             return {"status": "ok", "message": "Engine resumed"}
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.error(f"[RL] Failed to resume: {e}")
             return {"status": "error", "message": str(e)}
@@ -922,6 +932,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # event loop is wedged the frontend's 5s timeout fires.
             await self.engine_client.collective_rpc("get_weight_version", kwargs={})
             return {"status": "ok", "alive": True}
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.warning(f"[RL] liveness_probe failed: {e}")
             return {"status": "error", "alive": False, "message": str(e)}
@@ -940,6 +955,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             try:
                 if hasattr(self.engine_client, "check_health"):
                     await self.engine_client.check_health()
+                else:
+                    # Same fallback as liveness_probe: a no-op collective_rpc
+                    # round-trip is the liveness signal when check_health is
+                    # absent; otherwise older engines would always look alive.
+                    await self.engine_client.collective_rpc(
+                        "get_weight_version", kwargs={}
+                    )
             except Exception as health_err:
                 engine_alive = False
                 logger.warning(f"[RL] get_state: engine_alive=false ({health_err})")
@@ -953,6 +975,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     for name, info in getattr(self, "loaded_loras", {}).items()
                 ],
             }
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.error(f"[RL] get_state failed: {e}")
             return {"status": "error", "message": str(e)}
@@ -964,6 +991,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             await self.engine_client.reset_prefix_cache()
             logger.info("[RL] Prefix cache flushed")
             return {"status": "ok", "message": "Cache flushed"}
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.error(f"[RL] Failed to flush cache: {e}")
             return {"status": "error", "message": str(e)}
@@ -995,6 +1027,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": f"Weights loaded from {path}",
                 "version": version,
             }
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.error(f"[RL] Failed to load weights from {path}: {e}")
             return {"status": "error", "message": str(e)}
@@ -1052,12 +1089,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         # Invalidate the cache entry immediately after remove succeeds.
                         # If add_lora below fails, this prevents a stale entry pointing
                         # at an adapter the engine no longer holds from poisoning future
-                        # rollouts with wrong importance ratios (Tier-1 RL correctness risk).
+                        # rollouts with wrong importance ratios.
                         self.loaded_loras.pop(lora_name, None)
                     except Exception as e:
-                        logger.warning(
+                        # remove_lora failure during hot-swap is non-recoverable
+                        # for this request: add_lora below would no-op against
+                        # the still-registered ID. Surface as error so the
+                        # caller doesn't think the swap succeeded.
+                        logger.error(
                             f"[RL] remove_lora({lora_name}, id={old_id}) failed during hot-swap: {e}"
                         )
+                        return {
+                            "status": "error",
+                            "message": (
+                                f"Failed to remove existing LoRA '{lora_name}' "
+                                f"before hot-swap: {e}"
+                            ),
+                            "lora_name": lora_name,
+                        }
 
                 await self.engine_client.add_lora(
                     LoRARequest(
@@ -1074,15 +1123,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     try:
                         await self.engine_client.reset_prefix_cache()
                     except Exception as e:
-                        # ERROR not WARNING: a failed cache reset means subsequent requests
-                        # sharing a prefix with an old rollout can reuse KV state computed
-                        # under the previous adapter — causing silent logprobs mismatch.
+                        # A failed cache reset means subsequent requests sharing
+                        # a prefix with an old rollout can reuse KV state
+                        # computed under the previous adapter — silent logprobs
+                        # mismatch. Surface as an error so the caller doesn't
+                        # treat the swap as safe to serve.
                         logger.error(
-                            f"[RL] reset_prefix_cache after LoRA swap failed — KV cache may "
-                            f"be contaminated with stale entries from the old adapter. "
-                            f"Rollouts on this worker are unreliable until the next successful "
-                            f"swap: {e}"
+                            f"[RL] reset_prefix_cache after LoRA swap failed: {e}"
                         )
+                        return {
+                            "status": "error",
+                            "message": (
+                                f"LoRA '{lora_name}' was loaded but prefix cache "
+                                f"reset failed; worker is not safe to serve until "
+                                f"the next successful swap."
+                            ),
+                            "lora_name": lora_name,
+                            "lora_id": lora_id,
+                        }
 
                 # Publish an MDC for the LoRA on first load so Dynamo's frontend
                 # can route requests with model=<lora_name> to this worker.
@@ -1140,6 +1198,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "lora_id": lora_id,
                     "hot_swap": is_hot_swap,
                 }
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.exception(
                 f"[RL] Failed to load LoRA adapter '{lora_name}' from {lora_path}: {e}"
@@ -1173,7 +1236,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 del self.loaded_loras[lora_name]
 
                 # Unregister the MDC published on load so the frontend stops
-                # routing `model=<lora_name>` requests to this worker.
+                # routing `model=<lora_name>` requests to this worker. If this
+                # fails the engine no longer has the adapter but the frontend
+                # still routes to us — `_resolve_lora_request` then falls back
+                # to the base model, silently changing semantics. Surface as
+                # an error so the caller can retry / drain explicitly.
                 if self.generate_endpoint is not None:
                     try:
                         await unregister_model(
@@ -1181,9 +1248,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             lora_name=lora_name,
                         )
                     except Exception as e:
-                        logger.warning(
-                            f"[RL] Failed to unregister LoRA '{lora_name}' MDC (adapter already removed from engine): {e}"
+                        logger.error(
+                            f"[RL] Failed to unregister LoRA '{lora_name}' MDC after engine removal: {e}"
                         )
+                        return {
+                            "status": "error",
+                            "message": (
+                                f"LoRA '{lora_name}' removed from engine but "
+                                f"discovery unregister failed; frontend may "
+                                f"still route to this worker until retried: {e}"
+                            ),
+                            "lora_name": lora_name,
+                            "lora_id": lora_id,
+                        }
 
                 logger.info(
                     f"[RL] LoRA adapter unloaded: name={lora_name} id={lora_id}"
@@ -1194,6 +1271,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "lora_name": lora_name,
                     "lora_id": lora_id,
                 }
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+            os._exit(1)
         except Exception as e:
             logger.exception(
                 f"[RL] Failed to unload LoRA adapter '{lora_name}': {e}"

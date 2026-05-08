@@ -309,7 +309,9 @@ fi
 # LoRA, etc.) automatically in every vLLM worker process -- including spawned
 # subprocesses. Required for prime-rl / Dynamo RL training integration.
 #
-# Override at build time:  --build-arg PRIME_RL_REF=v0.5.1.dev101
+# Pinned to an immutable commit SHA (not a tag) for reproducibility; tags can
+# be re-pointed upstream. PRIME_RL_REF is kept for human-readable build logs.
+# Override at build time:  --build-arg PRIME_RL_COMMIT=<full-sha>
 # --no-deps: prime-rl's full dep tree includes trainer + wandb; Dynamo only
 #            needs the inference-side plugin and worker-extension classes.
 # Python version: prime-rl pins requires-python = "~=3.12.0"; Dynamo containers
@@ -317,9 +319,11 @@ fi
 #            dev venvs use the regular pip (not uv) with --ignore-requires-python.
 # ---------------------------------------------------------------------------
 PRIME_RL_REF="${PRIME_RL_REF:-v0.5.1.dev101}"
-echo "\n=== Installing prime-rl vLLM plugin (ref=${PRIME_RL_REF}) ==="
+PRIME_RL_COMMIT="${PRIME_RL_COMMIT:-d49f3939e7dca29bceb9ed515cc1782497b67e81}"
+printf '\n=== Installing prime-rl vLLM plugin (ref=%s commit=%s) ===\n' \
+    "$PRIME_RL_REF" "$PRIME_RL_COMMIT"
 uv pip install --no-deps \
-    "prime-rl @ git+https://github.com/PrimeIntellect-ai/prime-rl@${PRIME_RL_REF}"
+    "prime-rl @ git+https://github.com/PrimeIntellect-ai/prime-rl@${PRIME_RL_COMMIT}"
 
 # Sanity-check: confirm vllm.general_plugins entry-point is registered.
 python3 - <<'PY_SANITY'

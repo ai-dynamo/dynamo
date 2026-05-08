@@ -981,10 +981,12 @@ async fn handler_chat_completions(
                     }
                 }
                 nvext.extra_fields = Some(extra_fields);
-                // Also force logprobs on when RL is requesting token IDs
-                if request.inner.logprobs.is_none() {
-                    request.inner.logprobs = Some(true);
-                }
+                // RL token-id extraction depends on logprobs being enabled at
+                // the engine. Override unconditionally — an explicit
+                // logprobs=false would otherwise drop completion_token_ids
+                // from the response while we silently still claim to return
+                // them.
+                request.inner.logprobs = Some(true);
             }
 
             request.nvext = Some(nvext);
@@ -2147,6 +2149,12 @@ async fn tokenize(
             (token_ids, token_strs)
         }
         TokenizeRequest::Chat(request) => {
+            // Reject mutually-exclusive flags
+            // (continue_final_message + add_generation_prompt) up-front so the
+            // chat-template render below doesn't see an inconsistent state.
+            request
+                .validate()
+                .map_err(|err| bad_request(&format!("Invalid tokenize request: {err}")))?;
             let model = request
                 .model
                 .clone()
@@ -2423,10 +2431,10 @@ async fn handler_chat_completions_tokens(
         nvext.extra_fields = Some(extra_fields);
         request.nvext = Some(nvext);
 
-        // Force logprobs on (RL always needs them)
-        if request.inner.logprobs.is_none() {
-            request.inner.logprobs = Some(true);
-        }
+        // Force logprobs on (RL always needs them). Unconditional — an
+        // explicit logprobs=false from the caller would otherwise silently
+        // strip completion_token_ids from the response.
+        request.inner.logprobs = Some(true);
 
         // Ensure messages is non-empty (Dynamo requires it for model lookup / chat template)
         if request.inner.messages.is_empty() {
@@ -3194,7 +3202,16 @@ impl RlState {
 }
 
 /// `GET /v1/rl/ready` — composite readiness check: worker health via system port.
+///
+/// Bounded with a per-worker probe timeout (default 5s, override via
+/// `DYN_RL_LIVENESS_TIMEOUT_MS`) so a wedged worker fails fast as 503 instead
+/// of hanging on the shared 600s `http_client` timeout.
 async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
+    let timeout_ms = std::env::var("DYN_RL_LIVENESS_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5000);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
     let futures: Vec<_> = state
         .worker_system_urls
         .iter()
@@ -3202,10 +3219,10 @@ async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
             let client = state.http_client.clone();
             let health_url = format!("{url}/health");
             async move {
-                client
-                    .get(&health_url)
-                    .send()
+                tokio::time::timeout(timeout, client.get(&health_url).send())
                     .await
+                    .ok()
+                    .and_then(Result::ok)
                     .map(|r| r.status().is_success())
                     .unwrap_or(false)
             }
