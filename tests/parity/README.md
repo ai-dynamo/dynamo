@@ -99,7 +99,7 @@ Both servers receive identical chat-completion requests with `structured_outputs
 | **Real tokenizer?** | yes | no | yes |
 | **Real chat template?** | yes | no | yes |
 | **Real HTTP?** | yes | no | yes |
-| **Cost** | (TBD) | ~3 s for 210 tests | ~60 s for 30 tests (server boot dominates) |
+| **Cost** | (TBD) | ~3 s for 570 tests | ~60 s for 30 tests (server boot dominates) |
 | **GPU** | yes | none | yes (`--load-format dummy` still allocates ~2.5 GiB) |
 | **CI markers** | (TBD) | `unit, pre_merge, gpu_0` | `e2e, pre_merge, gpu_1` |
 
@@ -117,37 +117,74 @@ They're stacked diagnostics:
 
 ## Current parity status (M2, batch mode)
 
-`✓` = matches the YAML expected output. `X` = divergence recorded
-in `KNOWN_DIVERGENCES` (xfailed, not silenced). `n/a` = the impl has
-no parser registered for that family. `dynamo` rows are always `ok`
-because Dynamo is the regenerator's oracle.
+Each row is a parser family; each column `bN` is
+[`PARSER.batch.N`](../../lib/parsers/PARSER_CASES.md):
 
-| family#impl            |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  | 10  |
-|--------------------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| kimi_k2#dynamo         | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| kimi_k2#vllm           | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
-| kimi_k2#sglang         | ✓   | ✓   | ✓   |  X  | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
-| qwen3_coder#dynamo     | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| qwen3_coder#vllm       | ✓   | ✓   | ✓   |  X  |  X  | ✓   | ✓   |  X  | ✓   | ✓   |
-| qwen3_coder#sglang     | ✓   | ✓   | ✓   |  X  |  X  | ✓   | ✓   |  X  | ✓   | ✓   |
-| glm47#dynamo           | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| glm47#vllm             | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
-| glm47#sglang           | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
-| deepseek_v3_1#dynamo   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| deepseek_v3_1#vllm     | ✓   | ✓   | ✓   |  X  |  X  | ✓   | ✓   | ✓   | ✓   | ✓   |
-| deepseek_v3_1#sglang   | ✓   | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |  X  | ✓   | ✓   |
-| harmony#dynamo         | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| harmony#vllm           | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| harmony#sglang         |  X  |  X  | ✓   |  X  |  X  |  X  |  X  |  X  | ✓   |  X  |
-| minimax_m2#dynamo      | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| minimax_m2#vllm        | ✓   | ✓   | ✓   |  X  | ✓   | ✓   | ✓   |  X  | ✓   | ✓   |
-| minimax_m2#sglang      | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| nemotron_deci#dynamo   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| nemotron_deci#vllm     | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| nemotron_deci#sglang   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
+```
+b1   =  PARSER.batch.1   "single happy-path call"
+b2   =  PARSER.batch.2   "multiple calls"
+b3   =  PARSER.batch.3   "no tool call (plain text)"
+b4   =  PARSER.batch.4   "malformed JSON args"
+b5   =  PARSER.batch.5   "missing end-token recovery"
+b6   =  PARSER.batch.6   "empty args (no-arg call)"
+b7   =  PARSER.batch.7   "complex args (nested JSON / arrays)"
+b8   =  PARSER.batch.8   "interleaved normal text"
+b9   =  PARSER.batch.9   "empty input"
+b10  =  PARSER.batch.10  "duplicate calls (same name twice)"
+```
 
-Tally (excluding `dynamo` since it's the oracle): 140 cells against
-the YAML expected — 95 parity, 25 divergence (xfailed), 20 n/a.
+Cell values show divergence from Dynamo (the oracle):
+
+- `✓` — both vLLM and SGLang match Dynamo's expected output.
+- `V` — vLLM diverges (xfailed via `KNOWN_DIVERGENCES`).
+- `S` — SGLang diverges.
+- `VS` — both diverge.
+- `n/a` — no peer parser registered for that family.
+
+19 parser families total — split into the **Top-N models** we prioritize
+(rows tagged with the model name in parens) and **Others** that aren't
+top-N today but are wired into the harness for completeness. Both sections
+sorted alphabetically within themselves.
+
+| family                          |  b1 |  b2 |  b3 |  b4 |  b5 |  b6 |  b7 |  b8 |  b9 | b10 |
+|---------------------------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Top-N models**                |     |     |     |     |     |     |     |     |     |     |
+| deepseek_v4 § (DeepSeek V4)     | ✓   | ✓   | ✓   | ✓   | V   | ✓   | V   | ✓   | ✓   | ✓   |
+| gemma4 § (Gemma 4)              | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | V   | ✓   | ✓   |
+| glm47 (GLM 5.1)                 | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   | V   | ✓   | ✓   |
+| harmony † (gpt-oss)             | S   | S   | ✓   | S   | S   | S   | S   | S   | ✓   | S   |
+| kimi_k2 (Kimi K2.6)             | ✓   | ✓   | ✓   | S   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
+| minimax_m2 (MiniMax 2.7)        | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | VS  | ✓   | ✓   |
+| nemotron_deci †§ (Nemotron)     | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| qwen3_coder (Qwen 3.5)          | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
+| **Others**                      |     |     |     |     |     |     |     |     |     |     |
+| deepseek_v3                     | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | S   | ✓   | ✓   |
+| deepseek_v3_1                   | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | S   | ✓   | ✓   |
+| deepseek_v3_2                   | ✓   | ✓   | ✓   | ✓   | V   | ✓   | V   | S   | ✓   | ✓   |
+| hermes                          | ✓   | ✓   | ✓   | VS  | ✓   | ✓   | ✓   | V   | ✓   | ✓   |
+| jamba §                         | ✓   | ✓   | ✓   | ✓   | V   | ✓   | ✓   | V   | ✓   | ✓   |
+| llama3_json §                   | ✓   | V   | ✓   | V   | V   | ✓   | ✓   | ✓   | ✓   | V   |
+| mistral                         | S   | S   | ✓   | VS  | S   | S   | S   | VS  | ✓   | S   |
+| nemotron_nano †§                | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| phi4 §                          | ✓   | ✓   | ✓   | ✓   | V   | ✓   | V   | V   | ✓   | ✓   |
+| pythonic                        | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
+| qwen25 †                        | S   | S   | ✓   | S   | S   | S   | S   | S   | ✓   | S   |
+
+### Footnotes
+
+† vLLM has no peer parser (or returns `UNAVAILABLE` at runtime, e.g.
+  `harmony#vllm` requires token IDs not text). Cells show SGLang status
+  only when SGLang is wired; otherwise the row is fully `n/a`.
+§ SGLang has no peer detector for this family. Cells show vLLM status
+  only when vLLM is wired; otherwise the row is fully `n/a`.
+
+`nemotron_deci` and `nemotron_nano` carry both daggers (`†§`) — neither
+upstream has a peer parser, so the rows are fully `n/a`. Listed here for
+completeness; Dynamo-only self-parity could be added in a follow-up but
+yields no cross-impl signal.
+
+Tally (excluding `dynamo` since it's the oracle): 380 cells against
+the YAML expected — 203 parity, 67 divergence (xfailed), 110 n/a.
 
 **Hot columns:**
 - `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing
@@ -205,23 +242,12 @@ U+2581) appear as literal characters rather than escape sequences.
 
 Open any two family files side-by-side and the case shells look
 nearly identical: same `description` strings, same `tools` schemas,
-same case keys `"1"`–`"10"`. **That's by design** — case N is the
-same logical scenario across every family:
+same case keys `"PARSER.batch.1"`–`"PARSER.batch.10"`. **That's by
+design** — `PARSER.batch.N` is the same logical scenario across every
+family (full list in the [Current parity status](#current-parity-status-m2-batch-mode)
+section above).
 
-```
-case 1  =  "single happy-path call"
-case 2  =  "multiple calls"
-case 3  =  "no tool call (plain text)"
-case 4  =  "malformed JSON args"
-case 5  =  "missing end-token recovery"
-case 6  =  "empty args (no-arg call)"
-case 7  =  "complex args (nested JSON / arrays)"
-case 8  =  "interleaved normal text"
-case 9  =  "empty input"
-case 10 =  "duplicate calls (same name twice)"
-```
-
-So a reviewer can grep `PARSER.batch.4` across all 7 families and
+So a reviewer can grep `PARSER.batch.4` across all 10 families and
 immediately see how each parser handles the same scenario. The
 repetition *is* the diff: it's what makes per-case cross-family
 comparison trivial.
@@ -317,7 +343,7 @@ will guide which stages are worth adding when.
 
 Today there's overlap between this harness's fixtures and the
 hand-written Rust unit tests under `lib/parsers/src/tool_calling/*`
-— for the ~70 black-box "given input X, parser returns Y" tests,
+— for the ~190 black-box "given input X, parser returns Y" tests,
 the same input + expected appears in both places (the M2 fixtures
 were originally extracted from those Rust tests by hand).
 
@@ -368,7 +394,7 @@ Effort sketch (separate PRs after M2 + M3 land):
   schema + streaming PyO3 + streaming Rust harness. Roughly
   the size of the original M3 work.
 
-Until then, M2 and the Rust suite both exist; for ~70 cases they
+Until then, M2 and the Rust suite both exist; for ~100 cases they
 test the same Dynamo contract through different surfaces. M2's
 real value-add is the cross-impl half (vLLM and SGLang).
 

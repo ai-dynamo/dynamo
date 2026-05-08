@@ -15,7 +15,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
@@ -243,7 +243,10 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             # Bisected with tests/utils/profile_pytest.py: min=1104, 2x=2208.
-            pytest.mark.profiled_vram_gib(11.1),
+            # Keep this unprofiled for now so the GPU-parallel stage leaves it
+            # in the sequential stage; parallel E/P/D runs can trip UCX mm
+            # transport init on larger single-GPU runners.
+            # pytest.mark.profiled_vram_gib(11.1),
             pytest.mark.requested_sglang_kv_tokens(2208),
             pytest.mark.timeout(206),  # profiled 34s on RTX 6000 Ada
             pytest.mark.pre_merge,
@@ -537,6 +540,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(19.3),
+            pytest.mark.requested_sglang_vram_gib(19.3),
             pytest.mark.timeout(240),
             pytest.mark.nightly,
         ],
@@ -576,6 +580,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
+            pytest.mark.requested_sglang_vram_gib(17.6),
             pytest.mark.timeout(180),
             pytest.mark.nightly,
         ],
@@ -708,6 +713,7 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(DEFAULT_LORA_REPO)
 @pytest.mark.profiled_vram_gib(4.7)
 @pytest.mark.requested_sglang_kv_tokens(2848)
 @pytest.mark.timeout(158)

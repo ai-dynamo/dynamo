@@ -147,6 +147,16 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
     (
         "vllm",
+        "deepseek_v4",
+        "PARSER.batch.5",
+    ): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "deepseek_v4",
+        "PARSER.batch.7",
+    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
+    (
+        "vllm",
         "minimax_m2",
         "PARSER.batch.8",
     ): "preserves trailing space; Dynamo trims it",
@@ -173,6 +183,102 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("sglang", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "harmony", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    # ----- new families: hermes / qwen25 / mistral / jamba / llama3_json / phi4 / nemotron_nano / deepseek_v3_2 -----
+    ("vllm", "deepseek_v3_2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "deepseek_v3_2",
+        "PARSER.batch.7",
+    ): "emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
+    ("vllm", "hermes", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    ("vllm", "hermes", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "jamba", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    ("vllm", "jamba", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    (
+        "vllm",
+        "llama3_json",
+        "PARSER.batch.2",
+    ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
+    ("vllm", "llama3_json", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    ("vllm", "llama3_json", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "llama3_json",
+        "PARSER.batch.10",
+    ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
+    ("vllm", "mistral", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    ("vllm", "mistral", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "phi4", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    (
+        "vllm",
+        "phi4",
+        "PARSER.batch.7",
+    ): "emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
+    ("vllm", "phi4", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "deepseek_v3_2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "hermes", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    # SGLang's MistralDetector and Qwen25Detector both return empty `calls`
+    # on the bare wire formats Dynamo emits — format-detection failure rather
+    # than a recovery-contract divergence. The exact reason (different start
+    # token, schema-shape mismatch, missing chat-format envelope) is not
+    # investigated here; the cells are recorded as `X` so the matrix reflects
+    # the observed behavior.
+    (
+        "sglang",
+        "mistral",
+        "PARSER.batch.1",
+    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
+    (
+        "sglang",
+        "mistral",
+        "PARSER.batch.2",
+    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
+    ("sglang", "mistral", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    ("sglang", "mistral", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    (
+        "sglang",
+        "mistral",
+        "PARSER.batch.6",
+    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
+    (
+        "sglang",
+        "mistral",
+        "PARSER.batch.7",
+    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
+    ("sglang", "mistral", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    (
+        "sglang",
+        "mistral",
+        "PARSER.batch.10",
+    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
+    (
+        "sglang",
+        "qwen25",
+        "PARSER.batch.1",
+    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
+    (
+        "sglang",
+        "qwen25",
+        "PARSER.batch.2",
+    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
+    ("sglang", "qwen25", "PARSER.batch.4"): _RECOVERY_CONTRACT,
+    ("sglang", "qwen25", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    (
+        "sglang",
+        "qwen25",
+        "PARSER.batch.6",
+    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
+    (
+        "sglang",
+        "qwen25",
+        "PARSER.batch.7",
+    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
+    ("sglang", "qwen25", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    (
+        "sglang",
+        "qwen25",
+        "PARSER.batch.10",
+    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
 }
 
 

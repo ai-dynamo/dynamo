@@ -330,6 +330,11 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
+      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
+      # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
+      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -364,6 +369,11 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
       gpu_test_markers: pre_merge and trtllm and gpu_1
+      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
+      # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
+      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
   trtllm-multi-gpu-test:
