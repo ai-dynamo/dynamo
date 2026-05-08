@@ -244,6 +244,7 @@ spec:
                 --max-cudagraph-capture-size 128 \
                 --max-num-batched-tokens 128 \
                 --no-enable-prefix-caching \
+                --no-enable-flashinfer-autotune \
                 --gpu-memory-utilization 0.9 \
                 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","mode":0}' \
                 --stream-interval 50 \

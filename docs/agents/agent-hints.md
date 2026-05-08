@@ -9,8 +9,9 @@ Agent hints are optional per-request metadata that a harness sends under
 `nvext.agent_hints`. Dynamo parses these hints in the frontend and passes them
 to the router and, where supported, backend runtimes.
 
-Use hints only for serving-relevant intent. Use [Agent Context](agent-context.md)
-for passive trace identity.
+Use hints only for serving-relevant intent. Use
+[`nvext.agent_context`](agent-tracing.md#request-schema) for passive trace
+identity.
 
 ## Request Schema
 
