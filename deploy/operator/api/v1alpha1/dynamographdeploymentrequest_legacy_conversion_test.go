@@ -24,6 +24,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -48,7 +49,7 @@ func legacyDGDRConvertToHubForTest(src *DynamoGraphDeploymentRequest) (*v1beta1.
 		dst.Spec.Features.Mocker = &v1beta1.MockerSpec{Enabled: true}
 	}
 	if src.Spec.EnableGPUDiscovery != nil && *src.Spec.EnableGPUDiscovery {
-		setAnnotation(dst, legacyAnnDGDREnableGPUDisc, "true")
+		setAnnotation(dst, legacyAnnDGDREnableGPUDisc, annotationTrue)
 	}
 	if src.Spec.ProfilingConfig.Config != nil && src.Spec.ProfilingConfig.Config.Raw != nil {
 		var blob map[string]any
@@ -108,21 +109,27 @@ func legacyDGDRConvertFromHubForTest(src *v1beta1.DynamoGraphDeploymentRequest) 
 	dst := &DynamoGraphDeploymentRequest{}
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
-	dst.Spec.Model = src.Spec.Model
+	legacyDGDRConvertHubSpecForTest(src, &dst.Spec)
+	legacyDGDRConvertHubStatusForTest(src, &dst.Status, &dst.ObjectMeta)
+	return dst
+}
+
+func legacyDGDRConvertHubSpecForTest(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequestSpec) {
+	dst.Model = src.Spec.Model
 	if src.Spec.AutoApply != nil {
-		dst.Spec.AutoApply = *src.Spec.AutoApply
+		dst.AutoApply = *src.Spec.AutoApply
 	} else {
-		dst.Spec.AutoApply = true
+		dst.AutoApply = true
 	}
 	if src.Spec.Backend != "" {
-		dst.Spec.Backend = string(src.Spec.Backend)
+		dst.Backend = string(src.Spec.Backend)
 	}
 	if src.Spec.Features != nil && src.Spec.Features.Mocker != nil {
-		dst.Spec.UseMocker = src.Spec.Features.Mocker.Enabled
+		dst.UseMocker = src.Spec.Features.Mocker.Enabled
 	}
-	if raw, ok := getAnnFromObj(&src.ObjectMeta, legacyAnnDGDREnableGPUDisc); ok && raw == "true" {
+	if raw, ok := getAnnFromObj(&src.ObjectMeta, legacyAnnDGDREnableGPUDisc); ok && raw == annotationTrue {
 		v := true
-		dst.Spec.EnableGPUDiscovery = &v
+		dst.EnableGPUDiscovery = &v
 	}
 
 	var blob map[string]any
@@ -149,42 +156,43 @@ func legacyDGDRConvertFromHubForTest(src *v1beta1.DynamoGraphDeploymentRequest) 
 	}
 	if blob != nil {
 		if data, err := json.Marshal(blob); err == nil {
-			dst.Spec.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: data}
+			dst.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: data}
 		}
 	}
 	if src.Spec.Image != "" {
-		dst.Spec.ProfilingConfig.ProfilerImage = src.Spec.Image
+		dst.ProfilingConfig.ProfilerImage = src.Spec.Image
 	}
-	legacyDGDRRestoreAnnotationFields(src, &dst.Spec)
-	legacyDGDRRestoreProfilingJobResources(&src.Spec, &dst.Spec)
+	legacyDGDRRestoreAnnotationFields(src, dst)
+	legacyDGDRRestoreProfilingJobResources(&src.Spec, dst)
+}
 
-	dst.Status.State = DGDRState(dgdrPhaseToState(src.Status.Phase))
-	dst.Status.ObservedGeneration = src.Status.ObservedGeneration
-	dst.Status.Conditions = src.Status.Conditions
+func legacyDGDRConvertHubStatusForTest(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequestStatus, metadata *metav1.ObjectMeta) {
+	dst.State = DGDRState(dgdrPhaseToState(src.Status.Phase))
+	dst.ObservedGeneration = src.Status.ObservedGeneration
+	dst.Conditions = src.Status.Conditions
 	if v, ok := getAnnFromObj(&src.ObjectMeta, legacyAnnDGDRStatusBackend); ok {
-		dst.Status.Backend = v
+		dst.Backend = v
 	}
 	if v, ok := getAnnFromObj(&src.ObjectMeta, legacyAnnDGDRProfilingResults); ok {
-		dst.Status.ProfilingResults = v
+		dst.ProfilingResults = v
 	}
 	if src.Status.ProfilingResults != nil && src.Status.ProfilingResults.SelectedConfig != nil {
-		dst.Status.GeneratedDeployment = src.Status.ProfilingResults.SelectedConfig
+		dst.GeneratedDeployment = src.Status.ProfilingResults.SelectedConfig
 	}
 	if raw, ok := getAnnFromObj(&src.ObjectMeta, legacyAnnDGDRDeploymentStatus); ok && raw != "" {
 		if depStatus, requestState, ok := restoreDGDRDeploymentStatus(raw, &src.Status); ok {
-			dst.Status.Deployment = &depStatus
+			dst.Deployment = &depStatus
 			if requestState != "" {
-				dst.Status.State = requestState
+				dst.State = requestState
 			}
 		}
 	}
-	if dst.Status.Deployment == nil && src.Status.DGDName != "" {
-		dst.Status.Deployment = &DeploymentStatus{Name: src.Status.DGDName}
+	if dst.Deployment == nil && src.Status.DGDName != "" {
+		dst.Deployment = &DeploymentStatus{Name: src.Status.DGDName}
 	}
 	if src.Status.ProfilingJobName != "" {
-		setAnnOnObj(&dst.ObjectMeta, legacyAnnDGDRProfilingJobName, src.Status.ProfilingJobName)
+		setAnnOnObj(metadata, legacyAnnDGDRProfilingJobName, src.Status.ProfilingJobName)
 	}
-	return dst
 }
 
 func legacyDGDRConvertProfilingResourcesToOverrides(src *ProfilingConfigSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {

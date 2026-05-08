@@ -119,10 +119,7 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 
 	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
 
-	restoredSpokeSpec, restoredSpokeStatus, err := restoreDGDRSpokeAnnotations(&dst.ObjectMeta)
-	if err != nil {
-		return err
-	}
+	restoredSpokeSpec, restoredSpokeStatus := restoreDGDRSpokeAnnotations(&dst.ObjectMeta)
 	scrubDGDRInternalAnnotations(&dst.ObjectMeta)
 
 	var hubSpecSave v1beta1.DynamoGraphDeploymentRequestSpec
@@ -167,7 +164,7 @@ func restoreDGDRHubAnnotations(obj metav1.Object) (*v1beta1.DynamoGraphDeploymen
 	return restoredSpec, restoredStatus
 }
 
-func restoreDGDRSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentRequestSpec, *DynamoGraphDeploymentRequestStatus, error) {
+func restoreDGDRSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentRequestSpec, *DynamoGraphDeploymentRequestStatus) {
 	var restoredSpec *DynamoGraphDeploymentRequestSpec
 	var restoredStatus *DynamoGraphDeploymentRequestStatus
 	if raw, ok := getAnnFromObj(obj, annDGDRSpec); ok && raw != "" {
@@ -186,15 +183,12 @@ func restoreDGDRSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentReque
 		}
 	}
 	if restoredStatus == nil {
-		status, err := restoreDGDRLegacySpokeStatus(obj)
-		if err != nil {
-			return nil, nil, err
-		}
+		status := restoreDGDRLegacySpokeStatus(obj)
 		if !dgdrAlphaStatusSaveIsZero(status) {
 			restoredStatus = status
 		}
 	}
-	return restoredSpec, restoredStatus, nil
+	return restoredSpec, restoredStatus
 }
 
 func scrubDGDRInternalAnnotations(obj metav1.Object) {
@@ -551,7 +545,7 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 func saveDGDRLegacySpokeAnnotations(srcSpec *DynamoGraphDeploymentRequestSpec, srcStatus *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequest) {
 	if srcSpec != nil {
 		if srcSpec.EnableGPUDiscovery != nil && *srcSpec.EnableGPUDiscovery {
-			setAnnotation(dst, legacyAnnDGDREnableGPUDisc, "true")
+			setAnnotation(dst, legacyAnnDGDREnableGPUDisc, annotationTrue)
 		}
 		if srcSpec.ProfilingConfig.Config != nil && srcSpec.ProfilingConfig.Config.Raw != nil {
 			setAnnotation(dst, legacyAnnDGDRProfilingConfig, string(srcSpec.ProfilingConfig.Config.Raw))
@@ -981,7 +975,7 @@ func restoreDGDRLegacySpokeSpec(obj metav1.Object) *DynamoGraphDeploymentRequest
 			}
 		}
 	}
-	if raw, ok := getAnnFromObj(obj, legacyAnnDGDREnableGPUDisc); ok && raw == "true" {
+	if raw, ok := getAnnFromObj(obj, legacyAnnDGDREnableGPUDisc); ok && raw == annotationTrue {
 		v := true
 		restored.EnableGPUDiscovery = &v
 	}
@@ -1013,7 +1007,7 @@ func restoreDGDRLegacySpokeSpec(obj metav1.Object) *DynamoGraphDeploymentRequest
 	return restored
 }
 
-func restoreDGDRLegacySpokeStatus(obj metav1.Object) (*DynamoGraphDeploymentRequestStatus, error) {
+func restoreDGDRLegacySpokeStatus(obj metav1.Object) *DynamoGraphDeploymentRequestStatus {
 	restored := &DynamoGraphDeploymentRequestStatus{}
 	if v, ok := getAnnFromObj(obj, legacyAnnDGDRStatusBackend); ok {
 		restored.Backend = v
@@ -1028,7 +1022,7 @@ func restoreDGDRLegacySpokeStatus(obj metav1.Object) (*DynamoGraphDeploymentRequ
 			restored.State = state
 		}
 	}
-	return restored, nil
+	return restored
 }
 
 func restoreDGDRLegacyDeploymentStatus(raw string) (DeploymentStatus, DGDRState, bool) {
@@ -1122,7 +1116,7 @@ func saveDGDRAlphaOnlyStatus(src *DynamoGraphDeploymentRequestStatus, save *Dyna
 	}
 	save.Backend = src.Backend
 	save.ProfilingResults = src.ProfilingResults
-	if !dgdrAlphaStateHasHubPhase(src.State, src.Deployment) {
+	if !dgdrAlphaStateHasHubPhase(src.State) {
 		save.State = src.State
 	}
 	if dgdrAlphaDeploymentNeedsSave(src.State, src.Deployment) {
@@ -1138,7 +1132,7 @@ func dgdrAlphaDeploymentNeedsSave(state DGDRState, deployment *DeploymentStatus)
 	if deployment.Namespace != "" || deployment.State != "" || deployment.Created {
 		return true
 	}
-	return !dgdrAlphaStateHasHubPhase(state, deployment)
+	return !dgdrAlphaStateHasHubPhase(state)
 }
 
 func restoreDGDRAlphaOnlyStatus(restored *DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, src *v1beta1.DynamoGraphDeploymentRequestStatus) {
@@ -1205,7 +1199,7 @@ func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStat
 	}
 }
 
-func dgdrAlphaStateHasHubPhase(state DGDRState, deployment *DeploymentStatus) bool {
+func dgdrAlphaStateHasHubPhase(state DGDRState) bool {
 	return state == "" ||
 		state == DGDRStatePending ||
 		state == DGDRStateProfiling ||
