@@ -70,6 +70,7 @@ struct StateFlags {
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
 }
@@ -83,6 +84,7 @@ impl StateFlags {
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -109,6 +111,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Audios => self
                 .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Realtime => self
+                .realtime_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
@@ -137,6 +142,7 @@ impl State {
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
