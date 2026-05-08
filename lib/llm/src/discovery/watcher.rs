@@ -104,6 +104,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Prefill,
+    ModelType::Realtime,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -124,6 +125,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Prefill {
         manager.list_prefill_models().is_empty()
+    } else if model_type == ModelType::Realtime {
+        manager.list_realtime_models().is_empty()
     } else {
         true
     }
@@ -1221,6 +1224,20 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+        assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_is_model_type_list_empty_realtime_after_register() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine).unwrap();
+        assert!(!is_model_type_list_empty(&mm, ModelType::Realtime));
+    }
+
+    #[test]
+    fn test_realtime_in_all_model_types() {
+        assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
     }
 
     #[test]

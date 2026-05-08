@@ -14,6 +14,7 @@ use crate::{
     kv_router::{KvRouter, PrefillRouter},
     model_card::ModelDeploymentCard,
     types::{
+        RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
@@ -44,6 +45,7 @@ pub struct WorkerSet {
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
+    pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
 
     /// KV router for this set's workers (if KV mode)
     pub(crate) kv_router: Option<Arc<KvRouter>>,
@@ -73,6 +75,7 @@ impl WorkerSet {
             videos_engine: None,
             audios_engine: None,
             tensor_engine: None,
+            realtime_engine: None,
             kv_router: None,
             worker_monitor: None,
             prefill_router: None,
@@ -120,6 +123,10 @@ impl WorkerSet {
         self.tensor_engine.is_some()
     }
 
+    pub fn has_realtime_engine(&self) -> bool {
+        self.realtime_engine.is_some()
+    }
+
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
         self.has_chat_engine() || self.has_completions_engine()
@@ -133,6 +140,7 @@ impl WorkerSet {
             && !self.has_videos_engine()
             && !self.has_audios_engine()
             && !self.has_tensor_engine()
+            && !self.has_realtime_engine()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -197,8 +205,17 @@ mod tests {
         assert!(!ws.has_embeddings_engine());
         assert!(!ws.has_images_engine());
         assert!(!ws.has_tensor_engine());
+        assert!(!ws.has_realtime_engine());
         assert!(!ws.has_decode_engine());
         assert!(ws.is_prefill_set());
+    }
+
+    #[test]
+    fn test_realtime_only_set_is_not_prefill() {
+        let mut ws = make_worker_set("ns1", "abc123");
+        ws.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        assert!(ws.has_realtime_engine());
+        assert!(!ws.is_prefill_set());
     }
 
     #[test]
