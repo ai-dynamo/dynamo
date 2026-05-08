@@ -250,6 +250,11 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True
 
+    # Enable encoder_only mode for multimodal encode workers to load only vision encoder
+    # This significantly reduces memory usage by avoiding loading the full LLM weights
+    if dynamo_config.multimodal_encode_worker:
+        parsed_args.encoder_only = True
+
     endpoint = dynamo_config.endpoint
     if endpoint is None:
         if dynamo_config.embedding_worker:

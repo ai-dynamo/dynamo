@@ -613,7 +613,7 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_detect_tool_call_start() {
         let config = XmlParserConfig::default();
         assert!(detect_tool_call_start_xml("<tool_call>", &config));
@@ -624,7 +624,7 @@ mod tests {
         assert!(!detect_tool_call_start_xml("toolcall", &config));
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_find_tool_call_end_position() {
         let config = XmlParserConfig::default();
         let text = "<tool_call><function=test></function></tool_call>more text";
@@ -641,7 +641,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_xml so that the jail passes the
     /// entire group to extract_tool_calls rather than emitting the second (and later)
     /// calls as raw trailing text.
-    #[test] // CASE.2, CASE.20
+    #[test] // PARSER.batch.2, helper
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = XmlParserConfig::default();
 
@@ -682,7 +682,7 @@ mod tests {
         );
     }
 
-    #[rstest] // CASE.18 — helper
+    #[rstest] // helper
     #[case(r#"{"key": "value"}"#, serde_json::json!({"key": "value"}), "JSON object")]
     #[case(r#"[1, 2, 3]"#, serde_json::json!([1, 2, 3]), "JSON array")]
     #[case("42", serde_json::json!(42), "integer")]
@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(safe_parse_value(input), expected);
     }
 
-    #[rstest] // CASE.17 — helper
+    #[rstest] // helper
     #[case("&lt;div&gt;", "<div>", "HTML tags")]
     #[case("a &amp; b", "a & b", "ampersand")]
     #[case("&quot;quoted&quot;", "\"quoted\"", "quotes")]
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(html_unescape(input), expected);
     }
 
-    #[test] // CASE.1
+    #[test] // PARSER.batch.1
     fn test_parse_simple_tool_call() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -728,7 +728,7 @@ pwd && ls
         assert_eq!(args["command"], "pwd && ls");
     }
 
-    #[test] // CASE.1, CASE.7
+    #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_multiple_parameters() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -754,7 +754,7 @@ fahrenheit
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test] // CASE.13
+    #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"I'll help you with that. <tool_call>
 <function=get_weather>
@@ -774,7 +774,7 @@ Dallas
         );
     }
 
-    #[test] // CASE.2
+    #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -802,7 +802,7 @@ Orlando
         assert_eq!(args1["city"], "Orlando");
     }
 
-    #[test] // CASE.7
+    #[test] // PARSER.batch.7
     fn test_parse_json_parameter_value() {
         // With schema-aware parsing, we need to provide a schema to parse JSON objects
         let tools = vec![ToolDefinition {
@@ -833,7 +833,7 @@ Orlando
         assert_eq!(args["config"]["count"], 42);
     }
 
-    #[test] // CASE.3
+    #[test] // PARSER.batch.3
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
         let (calls, normal) =
@@ -842,7 +842,7 @@ Orlando
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test] // CASE.4
+    #[test] // PARSER.batch.4
     fn test_parse_malformed_tool_call() {
         let input = r#"<tool_call>
 <function=incomplete>
@@ -855,7 +855,7 @@ value
         assert!(result.is_ok());
     }
 
-    #[test] // CASE.4
+    #[test] // PARSER.batch.4
     fn test_parse_missing_parameter_closing_tag() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -872,7 +872,7 @@ ls -la
         assert_eq!(args["command"], "ls -la");
     }
 
-    #[test] // CASE.4
+    #[test] // PARSER.batch.4
     fn test_parse_missing_function_closing_tag() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -889,7 +889,7 @@ Boston
         assert_eq!(args["city"], "Boston");
     }
 
-    #[test] // CASE.4
+    #[test] // PARSER.batch.4
     fn test_parse_missing_both_closing_tags() {
         let input = r#"<tool_call>
 <function=run_query>
@@ -906,7 +906,7 @@ SELECT * FROM users
         assert_eq!(args["sql"], "SELECT * FROM users\n</tool_call>");
     }
 
-    #[test] // CASE.4
+    #[test] // PARSER.batch.4
     fn test_parse_multiple_parameters_missing_closing_tags() {
         let input = r#"<tool_call>
 <function=search>
@@ -931,7 +931,7 @@ rust programming
     // token and extract the call. Recovery is gated on a function-start
     // opener in the trailing slice so plain text that happens to start with
     // `<tool_call>` is preserved verbatim.
-    #[test] // CASE.5 — qwen3_coder
+    #[test] // PARSER.batch.5 — qwen3_coder
     fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -971,7 +971,7 @@ NYC
         );
     }
 
-    #[test] // CASE.5 — minimax_m2
+    #[test] // PARSER.batch.5 — minimax_m2
     fn test_parse_minimax_m2_no_outer_close_recovers() {
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -991,7 +991,7 @@ NYC
         assert_eq!(args["city"], "NYC");
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_schema_aware_type_conversion() {
         // This test matches the Python test_parse_streaming_increment_multiple_parameters
         // from the diff, showing schema-aware type conversion
@@ -1061,7 +1061,7 @@ NYC
         );
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_schema_aware_type_conversion_fallback() {
         // Test that invalid values fall back to strings with warnings
         let tools = vec![ToolDefinition {
@@ -1097,7 +1097,7 @@ NYC
         assert_eq!(args["bool_param"], false);
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_anyof_param_parsed_as_object_not_string() {
         // When a tool parameter uses "anyOf" instead of a direct "type", the value
         // should be JSON-parsed (treated as object), not double-encoded as a string.
@@ -1151,7 +1151,7 @@ NYC
         assert_eq!(args["location"]["city"], "Paris");
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_no_schema_fallback_behavior() {
         // Without schema, behavior should match old safe_parse_value logic
         let input = r#"<tool_call>
@@ -1173,8 +1173,8 @@ NYC
         assert_eq!(args["param3"], "hello");
     }
 
-    /// Helper for the new corner-case tests below (CASE.6 / CASE.12 / CASE.14
-    /// / CASE.15) — `allow_eof_recovery: false` because none of these tests
+    /// Helper for the new corner-case tests below (PARSER.batch.6 / PIPELINE.finish_reason / PARSER.batch.9
+    /// / PARSER.batch.10) — `allow_eof_recovery: false` because none of these tests
     /// rely on EOF recovery. The inline config in
     /// `test_parse_minimax_m2_no_outer_close_recovers` keeps that flag `true`
     /// because that test specifically exercises the recovery path.
@@ -1190,9 +1190,9 @@ NYC
         }
     }
 
-    /// CASE.6 — empty args. A no-arg call (no `<parameter=...>` block)
+    /// PARSER.batch.6 — empty args. A no-arg call (no `<parameter=...>` block)
     /// must still surface the function name with empty arguments.
-    #[test] // CASE.6 — qwen3_coder
+    #[test] // PARSER.batch.6 — qwen3_coder
     fn test_parse_qwen3_empty_args() {
         let input = r#"<tool_call>
 <function=current_time>
@@ -1205,8 +1205,8 @@ NYC
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// CASE.6 — empty args, minimax_m2 format.
-    #[test] // CASE.6 — minimax_m2
+    /// PARSER.batch.6 — empty args, minimax_m2 format.
+    #[test] // PARSER.batch.6 — minimax_m2
     fn test_parse_minimax_m2_empty_args() {
         let config = minimax_m2_config();
         let input =
@@ -1220,7 +1220,7 @@ NYC
 
     /// Parser-level invariant: the xml parser is byte-stable — it doesn't
     /// see `finish_reason` and produces the same output regardless of the
-    /// upstream stream-end reason. Real CASE.12 coverage (stop / tool_calls
+    /// upstream stream-end reason. Real PIPELINE.finish_reason coverage (stop / tool_calls
     /// / length mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs`
     /// and belongs in the cross-parser finish_reason mapping work-item
     /// (tracked separately).
@@ -1247,11 +1247,11 @@ NYC
         assert_eq!(calls.len(), 1);
     }
 
-    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string. Tested under both qwen3_coder and
     /// minimax_m2 configs.
-    #[test] // CASE.14 — qwen3_coder
+    #[test] // PARSER.batch.9 — qwen3_coder
     fn test_parse_qwen3_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
             let (calls, normal) =
@@ -1270,7 +1270,7 @@ NYC
         }
     }
 
-    #[test] // CASE.14 — minimax_m2
+    #[test] // PARSER.batch.9 — minimax_m2
     fn test_parse_minimax_m2_empty_and_whitespace_inputs() {
         let config = minimax_m2_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -1289,10 +1289,10 @@ NYC
         }
     }
 
-    /// CASE.15 — duplicate calls (same function name twice). qwen3_coder
+    /// PARSER.batch.10 — duplicate calls (same function name twice). qwen3_coder
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
-    #[test] // CASE.15 — qwen3_coder
+    #[test] // PARSER.batch.10 — qwen3_coder
     fn test_parse_qwen3_duplicate_calls_same_name() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -1320,10 +1320,10 @@ LA
         assert_eq!(args1["city"], "LA");
     }
 
-    /// CASE.15 — duplicate calls (same function name twice). minimax_m2
+    /// PARSER.batch.10 — duplicate calls (same function name twice). minimax_m2
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
-    #[test] // CASE.15 — minimax_m2
+    #[test] // PARSER.batch.10 — minimax_m2
     fn test_parse_minimax_m2_duplicate_calls_same_name() {
         let config = minimax_m2_config();
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke><invoke name="get_weather"><parameter name="city">LA</parameter></invoke></minimax:tool_call>"#;

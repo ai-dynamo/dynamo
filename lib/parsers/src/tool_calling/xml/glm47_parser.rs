@@ -310,7 +310,7 @@ mod tests {
         Glm47ParserConfig::default()
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_detect_tool_call_start() {
         let config = get_test_config();
 
@@ -328,7 +328,7 @@ mod tests {
         assert!(!detect_tool_call_start_glm47("Just normal text", &config));
     }
 
-    #[test] // CASE.1
+    #[test] // PARSER.batch.1
     fn test_parse_simple_tool_call() {
         let config = get_test_config();
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call>";
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(normal_text, Some("".to_string()));
     }
 
-    #[test] // CASE.1, CASE.7
+    #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_tool_call_with_multiple_args() {
         let config = get_test_config();
         let message = "<tool_call>book_flight<arg_key>from</arg_key><arg_value>NYC</arg_value><arg_key>to</arg_key><arg_value>LAX</arg_value><arg_key>date</arg_key><arg_value>2026-03-15</arg_value></tool_call>";
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(args.get("date").unwrap().as_str().unwrap(), "2026-03-15");
     }
 
-    #[test] // CASE.7
+    #[test] // PARSER.batch.7
     fn test_parse_tool_call_with_json_value() {
         let config = get_test_config();
         let message = r#"<tool_call>search<arg_key>filters</arg_key><arg_value>{"category": "books", "price_max": 50}</arg_value></tool_call>"#;
@@ -380,7 +380,7 @@ mod tests {
         assert!(filters.is_object());
     }
 
-    #[test] // CASE.2
+    #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let config = get_test_config();
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>timezone</arg_key><arg_value>EST</arg_value></tool_call>";
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test] // CASE.13
+    #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let config = get_test_config();
         let message = "I'll check the weather for you. <tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call>";
@@ -407,7 +407,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.6
+    #[test] // PARSER.batch.6
     fn test_parse_tool_call_no_args() {
         let config = get_test_config();
         let message = "<tool_call>get_current_time</tool_call>";
@@ -422,7 +422,7 @@ mod tests {
         assert!(args.is_empty());
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_find_tool_call_end_position() {
         let config = get_test_config();
         let chunk =
@@ -435,7 +435,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.7, CASE.22
+    #[test] // PARSER.batch.7, PARSER.fmt.2
     fn test_parse_multiline_arg_value() {
         let config = get_test_config();
         let message = "<tool_call>write_file<arg_key>path</arg_key><arg_value>/tmp/hello.py</arg_value><arg_key>content</arg_key><arg_value>#!/usr/bin/env python3\nprint(\"Hello, World!\")\n</arg_value></tool_call>";
@@ -456,7 +456,7 @@ mod tests {
         assert!(content.contains("print(\"Hello, World!\")"));
     }
 
-    #[test] // CASE.4
+    #[test] // PARSER.batch.4
     fn test_malformed_tool_call() {
         let config = get_test_config();
 
@@ -473,7 +473,7 @@ mod tests {
     // when the inner arg pairs are well-formed, treat EOF as the end token
     // and extract the call. The arg_key opener gates recovery so plain text
     // that happens to start with `<tool_call>` is still preserved verbatim.
-    #[test] // CASE.5
+    #[test] // PARSER.batch.5
     fn test_parse_no_end_tag_complete_args_recovers() {
         let config = Glm47ParserConfig {
             allow_eof_recovery: true,
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
-    #[test] // CASE.5
+    #[test] // PARSER.batch.5
     fn test_parse_no_end_tag_multiple_calls_recovers() {
         let config = Glm47ParserConfig {
             allow_eof_recovery: true,
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test] // CASE.4, CASE.13
+    #[test] // PARSER.batch.4, PARSER.batch.8
     fn test_unparseable_block_preserved_as_normal_text() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -526,7 +526,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.17
+    #[test] // helper
     fn test_xml_entity_decoding() {
         let config = get_test_config();
         let message = r#"<tool_call>write_file<arg_key>content</arg_key><arg_value>x &lt; y &amp;&amp; y &gt; z</arg_value></tool_call>"#;
@@ -542,7 +542,7 @@ mod tests {
         );
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_type_coercion_with_schema() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(args.get("label").unwrap().as_str().unwrap(), "warm");
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_type_coercion_array_comma_separated() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(tags[2].as_str().unwrap(), "go");
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_type_coercion_array_json() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(ids[0].as_i64().unwrap(), 1);
     }
 
-    #[test] // CASE.18
+    #[test] // helper
     fn test_type_coercion_falls_back_to_string() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
@@ -653,7 +653,7 @@ mod tests {
 
     /// Parser-level invariant: the glm47 parser is byte-stable — it doesn't
     /// see `finish_reason` and produces the same output regardless of the
-    /// upstream stream-end reason. Real CASE.12 coverage (stop / tool_calls
+    /// upstream stream-end reason. Real PIPELINE.finish_reason coverage (stop / tool_calls
     /// / length mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs`
     /// and belongs in the cross-parser finish_reason mapping work-item
     /// (tracked separately).
@@ -665,10 +665,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
-    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string.
-    #[test] // CASE.14
+    #[test] // PARSER.batch.9
     fn test_parse_glm47_empty_and_whitespace_inputs() {
         let config = get_test_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -687,10 +687,10 @@ mod tests {
         }
     }
 
-    /// CASE.15 — duplicate calls (same function name twice in one section).
+    /// PARSER.batch.10 — duplicate calls (same function name twice in one section).
     /// Universal gap noted in the test taxonomy; pin parser-level behavior —
     /// both calls returned with distinct ids.
-    #[test] // CASE.15
+    #[test] // PARSER.batch.10
     fn test_parse_glm47_duplicate_calls_same_name() {
         let config = get_test_config();
         let input = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>LA</arg_value></tool_call>";

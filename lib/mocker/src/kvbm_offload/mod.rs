@@ -17,5 +17,6 @@ pub mod worker;
 
 pub use bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
 pub use config::KvbmOffloadConfig;
+pub(crate) use engine::{G2BlockEventMetadata, G2OffloadBlock, G2RouterEvent};
 pub use engine::{MockOffloadEngine, SwapInHandle};
 pub use worker::{MockWorker, TransferDirection};

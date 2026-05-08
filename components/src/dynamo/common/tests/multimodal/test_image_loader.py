@@ -17,15 +17,14 @@
 
 import asyncio
 from io import BytesIO
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
 from PIL import Image
 
+from dynamo.common.http import HttpStatusError, HttpTimeoutError
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.url_validator import UrlValidationPolicy
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -33,6 +32,8 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+_FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_bytes"
 
 
 def _make_png_bytes() -> bytes:
@@ -57,50 +58,27 @@ def _permissive_policy(
     )
 
 
-def _mock_http_client(
+def _mock_fetch_bytes(
     content: bytes = PNG_BYTES,
-    status_code: int = 200,
     delay: float = 0.0,
     side_effect: Exception | None = None,
 ) -> AsyncMock:
-    """Return a mock httpx.AsyncClient compatible with fetch_with_revalidation.
-
-    ``fetch_with_revalidation`` uses ``client.build_request(...)`` then
-    ``client.send(request, follow_redirects=False)``. We stub both and also
-    keep ``client.get`` behaviour for any legacy callers.
+    """Return an AsyncMock drop-in for ``fetch_bytes(url, timeout, policy=...)``.
 
     Args:
-        content: Raw bytes returned as the HTTP response body.
-        status_code: HTTP status code; >=400 triggers raise_for_status().
+        content: Raw bytes returned as the fetch result.
         delay: Seconds to sleep before responding (simulates network latency).
-        side_effect: If set, .send()/.get() raises this exception instead.
+        side_effect: If set, the mock raises this exception instead of returning.
     """
 
-    def _build_response() -> Any:
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = status_code
-        resp.content = content
-        resp.is_redirect = False
-        resp.headers = {}
-        resp.raise_for_status = MagicMock()
-        if status_code >= 400:
-            resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-                "error", request=MagicMock(), response=resp
-            )
-        return resp
-
-    async def _respond(*_args: Any, **_kwargs: Any) -> Any:
+    async def _fetch(url, timeout, *, policy=None):
         if delay > 0:
             await asyncio.sleep(delay)
         if side_effect is not None:
             raise side_effect
-        return _build_response()
+        return content
 
-    client = AsyncMock()
-    client.get = AsyncMock(side_effect=_respond)
-    client.build_request = MagicMock(return_value=MagicMock(spec=httpx.Request))
-    client.send = AsyncMock(side_effect=_respond)
-    return client
+    return AsyncMock(side_effect=_fetch)
 
 
 @pytest.fixture(autouse=True)
@@ -117,11 +95,8 @@ def loader() -> ImageLoader:
 
 async def test_concurrent_same_url_deduplicates(loader: ImageLoader) -> None:
     """Two concurrent load_image calls for the same URL should issue only one HTTP fetch."""
-    mock_client = _mock_http_client(delay=0.05)
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
+    mock_fetch = _mock_fetch_bytes(delay=0.05)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
         results = await asyncio.gather(
             loader.load_image("https://example.com/img.png"),
             loader.load_image("https://example.com/img.png"),
@@ -129,25 +104,21 @@ async def test_concurrent_same_url_deduplicates(loader: ImageLoader) -> None:
 
     assert len(results) == 2
     assert results[0].size == results[1].size
-    # Only one HTTP GET should have been issued
-    assert mock_client.send.call_count == 1
+    assert mock_fetch.call_count == 1
 
 
 async def test_concurrent_different_urls_fetch_independently(
     loader: ImageLoader,
 ) -> None:
     """Different URLs should each get their own fetch."""
-    mock_client = _mock_http_client()
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
+    mock_fetch = _mock_fetch_bytes()
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
         await asyncio.gather(
             loader.load_image("https://example.com/a.png"),
             loader.load_image("https://example.com/b.png"),
         )
 
-    assert mock_client.send.call_count == 2
+    assert mock_fetch.call_count == 2
 
 
 # --- Waiter cancellation isolation ---
@@ -157,11 +128,8 @@ async def test_waiter_cancellation_does_not_cancel_shared_task(
     loader: ImageLoader,
 ) -> None:
     """Cancelling one waiter should not prevent the other from getting the image."""
-    mock_client = _mock_http_client(delay=0.1)
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
+    mock_fetch = _mock_fetch_bytes(delay=0.1)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
         task_a = asyncio.create_task(loader.load_image("https://example.com/img.png"))
         task_b = asyncio.create_task(loader.load_image("https://example.com/img.png"))
         await asyncio.sleep(0.01)
@@ -179,23 +147,17 @@ async def test_waiter_cancellation_does_not_cancel_shared_task(
 
 async def test_retry_after_failure(loader: ImageLoader) -> None:
     """After a fetch failure, the next caller should start a fresh fetch."""
-    fail_client = _mock_http_client(side_effect=httpx.TimeoutException("timeout"))
-    ok_client = _mock_http_client()
+    fail_fetch = _mock_fetch_bytes(side_effect=HttpTimeoutError("timeout"))
+    ok_fetch = _mock_fetch_bytes()
 
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=fail_client,
-    ):
+    with patch(_FETCH_BYTES_PATH, fail_fetch):
         with pytest.raises(ValueError, match="Timeout"):
             await loader.load_image("https://example.com/img.png")
 
     # _inflight should be cleared after failure
     assert "https://example.com/img.png" not in loader._inflight
 
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=ok_client,
-    ):
+    with patch(_FETCH_BYTES_PATH, ok_fetch):
         result = await loader.load_image("https://example.com/img.png")
         assert isinstance(result, Image.Image)
 
@@ -203,22 +165,17 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
 # --- Error contract preserved for non-HTTP ---
 
 
-async def test_file_url_is_rejected(loader: ImageLoader) -> None:
-    """file:// inputs should be rejected before any local file read is attempted."""
-    with pytest.raises(ValueError, match="Invalid image source scheme"):
-        await loader.load_image("file:///nonexistent/path/img.png")
+async def test_http_rejected_by_default() -> None:
+    """Wiring smoke: ImageLoader plumbs ``url_policy`` to the validator.
 
-
-@pytest.mark.parametrize("url_factory", [lambda p: p.as_uri(), lambda p: str(p)])
-async def test_local_file_inputs_are_rejected(
-    loader: ImageLoader, tmp_path, url_factory
-) -> None:
-    """Local filesystem image inputs must be rejected for both file:// and bare paths."""
-    image_path = tmp_path / "secret.png"
-    Image.new("RGB", (1, 1), color="red").save(image_path, format="PNG")
-
-    with pytest.raises(ValueError, match="Invalid image source scheme"):
-        await loader.load_image(url_factory(image_path))
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
+    """
+    strict_loader = ImageLoader(
+        cache_size=4, http_timeout=30.0, url_policy=UrlValidationPolicy()
+    )
+    with pytest.raises(ValueError, match="scheme|not allowed"):
+        await strict_loader.load_image("http://example.com/x.png")
 
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
@@ -233,69 +190,26 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
         await loader.load_image("data:text/plain;base64,aGVsbG8=")
 
 
-# --- SSRF / scheme rejection ---
-
-
-async def test_http_scheme_rejected_by_default(monkeypatch) -> None:
-    """With default env policy, http:// URLs must be rejected before any fetch."""
-    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
-    monkeypatch.delenv("DYN_MM_LOCAL_PATH", raising=False)
-
-    default_loader = ImageLoader(cache_size=4, http_timeout=30.0)
-
-    mock_client = _mock_http_client()
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
-        with pytest.raises(ValueError, match="scheme|not allowed"):
-            await default_loader.load_image("http://example.com/x.png")
-
-    # The shared HTTP client must not be touched when the URL is rejected.
-    assert mock_client.send.call_count == 0
-    assert mock_client.get.call_count == 0
-
-
-async def test_blocked_private_ip_rejected(monkeypatch) -> None:
-    """Cloud metadata / private IPs must be rejected even over https."""
-    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
-
-    strict_loader = ImageLoader(
-        cache_size=4,
-        http_timeout=30.0,
-        url_policy=UrlValidationPolicy(
-            allow_http=True,
-            allow_private_ips=False,
-        ),
-    )
-
-    with pytest.raises(ValueError, match="blocked range"):
-        await strict_loader.load_image("https://169.254.169.254/latest/meta-data/")
-
-
 # --- HTTP error contract ---
 
 
 async def test_http_timeout_raises_valueerror(loader: ImageLoader) -> None:
     """HTTP timeout should be normalized to ValueError."""
-    mock_client = _mock_http_client(side_effect=httpx.TimeoutException("timed out"))
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
+    mock_fetch = _mock_fetch_bytes(side_effect=HttpTimeoutError("timed out"))
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
         with pytest.raises(ValueError, match="Timeout loading image"):
             await loader.load_image("https://example.com/img.png")
 
 
 async def test_http_status_error_propagated(loader: ImageLoader) -> None:
-    """HTTP 4xx/5xx should propagate as HTTPStatusError."""
-    mock_client = _mock_http_client(status_code=404)
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
-        with pytest.raises(httpx.HTTPStatusError):
+    """HTTP 4xx/5xx should propagate as HttpStatusError."""
+    mock_fetch = _mock_fetch_bytes(
+        side_effect=HttpStatusError(404, "Not Found", "https://example.com/img.png")
+    )
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(HttpStatusError) as exc_info:
             await loader.load_image("https://example.com/img.png")
+        assert exc_info.value.status == 404
 
 
 # --- Cache behavior ---
@@ -313,13 +227,9 @@ async def test_cache_hit_skips_fetch(loader: ImageLoader) -> None:
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     """Accessing a cached entry should protect it from eviction (LRU, not FIFO)."""
     loader._cache_size = 3
-    mock_client = _mock_http_client()
+    mock_fetch = _mock_fetch_bytes()
 
-    with patch(
-        "dynamo.common.multimodal.image_loader.get_http_client",
-        return_value=mock_client,
-    ):
-        # Fill cache: a, b, c (oldest → newest)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
         await loader.load_image("https://example.com/a.png")
         await loader.load_image("https://example.com/b.png")
         await loader.load_image("https://example.com/c.png")

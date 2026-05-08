@@ -675,20 +675,18 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
         total
     }
 
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
-        self.shards
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, shard)| {
-                // ThreadPoolIndexer::shard_sizes() already populates node_count
-                // via backend.node_count() (O(1)).  No need to call
-                // node_edge_lengths().len() which allocates an O(N) Vec.
-                shard.shard_sizes().into_iter().map(move |mut s| {
-                    s.shard_idx = idx;
-                    s
-                })
-            })
-            .collect()
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        let mut sizes = Vec::new();
+        for (idx, shard) in self.shards.iter().enumerate() {
+            // ThreadPoolIndexer::shard_sizes() already populates node_count
+            // via backend.node_count() (O(1)).  No need to call
+            // node_edge_lengths().len() which allocates an O(N) Vec.
+            sizes.extend(shard.shard_sizes().await.into_iter().map(move |mut s| {
+                s.shard_idx = idx;
+                s
+            }));
+        }
+        sizes
     }
 
     fn node_edge_lengths(&self) -> Vec<usize> {

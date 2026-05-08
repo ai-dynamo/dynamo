@@ -116,10 +116,10 @@ def _flatten_args(
     request: dict[str, Any],
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
-        "workflow_type_id": agent_context.get("workflow_type_id"),
-        "workflow_id": agent_context.get("workflow_id"),
-        "program_id": agent_context.get("program_id"),
-        "parent_program_id": agent_context.get("parent_program_id"),
+        "session_type_id": agent_context.get("session_type_id"),
+        "session_id": agent_context.get("session_id"),
+        "trajectory_id": agent_context.get("trajectory_id"),
+        "parent_trajectory_id": agent_context.get("parent_trajectory_id"),
         "event_time_unix_ms": event.get("event_time_unix_ms"),
     }
 
@@ -157,10 +157,10 @@ def _flatten_tool_args(
     tool: dict[str, Any],
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
-        "workflow_type_id": agent_context.get("workflow_type_id"),
-        "workflow_id": agent_context.get("workflow_id"),
-        "program_id": agent_context.get("program_id"),
-        "parent_program_id": agent_context.get("parent_program_id"),
+        "session_type_id": agent_context.get("session_type_id"),
+        "session_id": agent_context.get("session_id"),
+        "trajectory_id": agent_context.get("trajectory_id"),
+        "parent_trajectory_id": agent_context.get("parent_trajectory_id"),
         "event_type": event.get("event_type"),
         "event_source": event.get("event_source"),
         "event_time_unix_ms": event.get("event_time_unix_ms"),
@@ -186,7 +186,7 @@ def _flatten_tool_args(
 
 class TrackTable:
     def __init__(self) -> None:
-        self._workflow_pids: dict[str, int] = {}
+        self._session_pids: dict[str, int] = {}
         self._track_tids: dict[tuple[str, str, int, str], int] = {}
         self._active_lanes: dict[tuple[str, str], list[tuple[int, int]]] = {}
         self._next_lane: dict[tuple[str, str], int] = {}
@@ -194,17 +194,17 @@ class TrackTable:
 
     def lane_for(
         self,
-        workflow_id: str,
-        program_id: str,
+        session_id: str,
+        trajectory_id: str,
         *,
         start_us: int,
         end_us: int,
     ) -> int:
-        if workflow_id not in self._workflow_pids:
-            self._workflow_pids[workflow_id] = len(self._workflow_pids) + 1
+        if session_id not in self._session_pids:
+            self._session_pids[session_id] = len(self._session_pids) + 1
 
-        program_key = (workflow_id, program_id)
-        active = self._active_lanes.setdefault(program_key, [])
+        trajectory_key = (session_id, trajectory_id)
+        active = self._active_lanes.setdefault(trajectory_key, [])
         while active and active[0][0] <= start_us:
             heapq.heappop(active)
 
@@ -212,55 +212,55 @@ class TrackTable:
         lane = 0
         while lane in active_lanes:
             lane += 1
-        if lane >= self._next_lane.get(program_key, 0):
-            self._next_lane[program_key] = lane + 1
-        self._max_lanes[program_key] = max(
-            self._max_lanes.get(program_key, 0), lane + 1
+        if lane >= self._next_lane.get(trajectory_key, 0):
+            self._next_lane[trajectory_key] = lane + 1
+        self._max_lanes[trajectory_key] = max(
+            self._max_lanes.get(trajectory_key, 0), lane + 1
         )
         heapq.heappush(active, (end_us, lane))
         return lane
 
     def track_for(
         self,
-        workflow_id: str,
-        program_id: str,
+        session_id: str,
+        trajectory_id: str,
         lane: int,
         track_kind: str,
     ) -> tuple[int, int]:
-        if workflow_id not in self._workflow_pids:
-            self._workflow_pids[workflow_id] = len(self._workflow_pids) + 1
-        pid = self._workflow_pids[workflow_id]
+        if session_id not in self._session_pids:
+            self._session_pids[session_id] = len(self._session_pids) + 1
+        pid = self._session_pids[session_id]
 
-        track_key = (workflow_id, program_id, lane, track_kind)
+        track_key = (session_id, trajectory_id, lane, track_kind)
         if track_key not in self._track_tids:
             self._track_tids[track_key] = (
-                len([1 for existing in self._track_tids if existing[0] == workflow_id])
+                len([1 for existing in self._track_tids if existing[0] == session_id])
                 + 1
             )
         return pid, self._track_tids[track_key]
 
     def metadata_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for workflow_id, pid in sorted(
-            self._workflow_pids.items(), key=lambda item: item[1]
+        for session_id, pid in sorted(
+            self._session_pids.items(), key=lambda item: item[1]
         ):
             events.append(
                 {
                     "name": "process_name",
                     "ph": "M",
                     "pid": pid,
-                    "args": {"name": f"workflow: {workflow_id}"},
+                    "args": {"name": f"session: {session_id}"},
                 }
             )
-        for (workflow_id, program_id, lane, track_kind), tid in sorted(
+        for (session_id, trajectory_id, lane, track_kind), tid in sorted(
             self._track_tids.items(),
-            key=lambda item: (self._workflow_pids[item[0][0]], item[1]),
+            key=lambda item: (self._session_pids[item[0][0]], item[1]),
         ):
-            pid = self._workflow_pids[workflow_id]
-            lane_count = self._max_lanes.get((workflow_id, program_id), 1)
-            track_name = program_id
+            pid = self._session_pids[session_id]
+            lane_count = self._max_lanes.get((session_id, trajectory_id), 1)
+            track_name = trajectory_id
             if lane_count > 1:
-                track_name = f"{program_id} [lane {lane + 1}]"
+                track_name = f"{trajectory_id} [lane {lane + 1}]"
             if track_kind != "request":
                 track_name = f"{track_name} {track_kind}"
             events.append(
@@ -336,7 +336,7 @@ def _prepare_tool_items(tool_records: list[dict[str, Any]]) -> list[dict[str, An
     for record in sorted(tool_records, key=lambda item: item["event_time_us"]):
         tool = record["tool"]
         tool_call_id = _safe_label(tool.get("tool_call_id"), "unknown-tool-call")
-        key = (record["workflow_id"], record["program_id"], tool_call_id)
+        key = (record["session_id"], record["trajectory_id"], tool_call_id)
         event_type = record["event_type"]
 
         if event_type == "tool_start":
@@ -426,8 +426,10 @@ def convert_records(
             continue
 
         event_type = event.get("event_type")
-        workflow_id = _safe_label(agent_context.get("workflow_id"), "unknown-workflow")
-        program_id = _safe_label(agent_context.get("program_id"), "unknown-program")
+        session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
+        trajectory_id = _safe_label(
+            agent_context.get("trajectory_id"), "unknown-trajectory"
+        )
 
         if event_type == "request_end":
             request = event.get("request")
@@ -450,8 +452,8 @@ def convert_records(
                     "args": _flatten_args(event, agent_context, request),
                     "ts_us": ts_us,
                     "dur_us": max(1, dur_us),
-                    "workflow_id": workflow_id,
-                    "program_id": program_id,
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
                 }
             )
             continue
@@ -468,8 +470,8 @@ def convert_records(
                     "event_type": event_type,
                     "args": _flatten_tool_args(event, agent_context, tool),
                     "event_time_us": event_time_us,
-                    "workflow_id": workflow_id,
-                    "program_id": program_id,
+                    "session_id": session_id,
+                    "trajectory_id": trajectory_id,
                 }
             )
 
@@ -484,8 +486,8 @@ def convert_records(
         ts_us = item["ts_us"]
         dur_us = item.get("dur_us", 1)
         lane = tracks.lane_for(
-            item["workflow_id"],
-            item["program_id"],
+            item["session_id"],
+            item["trajectory_id"],
             start_us=ts_us,
             end_us=ts_us + dur_us,
         )
@@ -493,8 +495,8 @@ def convert_records(
         if item["kind"] == "tool":
             tool = item["tool"]
             tool_pid, tool_tid = tracks.track_for(
-                item["workflow_id"],
-                item["program_id"],
+                item["session_id"],
+                item["trajectory_id"],
                 lane,
                 "tools",
             )
@@ -517,8 +519,8 @@ def convert_records(
         if item["kind"] == "tool_instant":
             tool = item["tool"]
             tool_pid, tool_tid = tracks.track_for(
-                item["workflow_id"],
-                item["program_id"],
+                item["session_id"],
+                item["trajectory_id"],
                 lane,
                 "tools",
             )
@@ -542,13 +544,13 @@ def convert_records(
 
         request = item["request"]
         request_pid, request_tid = tracks.track_for(
-            item["workflow_id"],
-            item["program_id"],
+            item["session_id"],
+            item["trajectory_id"],
             lane,
             "request",
         )
         stage_pid, stage_tid = (
-            tracks.track_for(item["workflow_id"], item["program_id"], lane, "stages")
+            tracks.track_for(item["session_id"], item["trajectory_id"], lane, "stages")
             if include_stages and separate_stage_tracks
             else (request_pid, request_tid)
         )

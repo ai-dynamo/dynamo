@@ -178,13 +178,11 @@ impl NodeState {
         let current_cutoff = self.current_cutoff(worker);
         if pos >= current_cutoff {
             return RemoveOutcome {
-                removed: 0,
                 stale_hashes: vec![removed_hash],
             };
         }
 
         let new_cutoff = pos;
-        let removed = current_cutoff - new_cutoff;
         let stale_hashes = self.uncovered_suffix_hashes(new_cutoff);
 
         if new_cutoff == 0 {
@@ -194,10 +192,7 @@ impl NodeState {
             self.worker_cutoffs.insert(worker, new_cutoff);
         }
 
-        RemoveOutcome {
-            removed,
-            stale_hashes,
-        }
+        RemoveOutcome { stale_hashes }
     }
 
     pub(super) fn has_any_workers(&self) -> bool {
