@@ -736,38 +736,77 @@ func stripDGDRTypedProfilingConfig(blob dgdrProfilingConfigBlob) dgdrProfilingCo
 	if len(out) == 0 {
 		return out
 	}
+
+	// The profiling config blob is opaque except for leaves that conversion can
+	// project into v1beta1 typed fields. Keep unprojectable values in the sparse
+	// remainder so an alpha->hub->alpha round trip does not drop user JSON.
 	if slaMap, ok := cloneStringAnyMap(out["sla"]); ok {
-		for _, key := range []string{"ttft", "itl", "optimizationType", "isl", "osl"} {
-			delete(slaMap, key)
-		}
-		if len(slaMap) == 0 {
+		stripped := stripDGDRProjectedSLAKeys(slaMap)
+		if stripped && len(slaMap) == 0 {
 			delete(out, "sla")
 		} else {
 			out["sla"] = slaMap
 		}
 	}
 	if deploymentMap, ok := cloneStringAnyMap(out["deployment"]); ok {
+		stripped := false
 		if modelCacheMap, ok := cloneStringAnyMap(deploymentMap["modelCache"]); ok {
-			for _, key := range []string{"pvcName", "modelPathInPvc", "pvcMountPath"} {
-				delete(modelCacheMap, key)
-			}
-			if len(modelCacheMap) == 0 {
+			stripped = stripDGDRProjectedModelCacheKeys(modelCacheMap)
+			if stripped && len(modelCacheMap) == 0 {
 				delete(deploymentMap, "modelCache")
 			} else {
 				deploymentMap["modelCache"] = modelCacheMap
 			}
 		}
-		if len(deploymentMap) == 0 {
+		if stripped && len(deploymentMap) == 0 {
 			delete(out, "deployment")
 		} else {
 			out["deployment"] = deploymentMap
 		}
 	}
-	delete(out, "planner")
+	if dgdrPlannerBlobProjects(out["planner"]) {
+		delete(out, "planner")
+	}
 	if len(out) == 0 {
 		return dgdrProfilingConfigBlob{}
 	}
 	return out
+}
+
+func stripDGDRProjectedSLAKeys(slaMap map[string]any) bool {
+	stripped := false
+	for _, key := range []string{"ttft", "itl", "isl", "osl"} {
+		if _, ok := slaMap[key].(float64); ok {
+			delete(slaMap, key)
+			stripped = true
+		}
+	}
+	if v, ok := slaMap["optimizationType"].(string); ok {
+		ot := v1beta1.OptimizationType(v)
+		if ot == v1beta1.OptimizationTypeLatency || ot == v1beta1.OptimizationTypeThroughput {
+			delete(slaMap, "optimizationType")
+			stripped = true
+		}
+	}
+	return stripped
+}
+
+func stripDGDRProjectedModelCacheKeys(modelCacheMap map[string]any) bool {
+	stripped := false
+	for _, key := range []string{"pvcName", "modelPathInPvc", "pvcMountPath"} {
+		// Empty strings are not reconstructed by projectModelCacheToProfilingConfigBlob,
+		// so they must remain in the opaque blob remainder.
+		if v, ok := modelCacheMap[key].(string); ok && v != "" {
+			delete(modelCacheMap, key)
+			stripped = true
+		}
+	}
+	return stripped
+}
+
+func dgdrPlannerBlobProjects(v any) bool {
+	plannerMap, ok := v.(map[string]any)
+	return ok && len(plannerMap) > 0
 }
 
 func cloneStringAnyMap(v any) (map[string]any, bool) {

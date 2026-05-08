@@ -19,9 +19,11 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -167,6 +169,48 @@ func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
 	}
 }
 
+func TestBugDGDRProfilingConfigPreservesUnprojectableTypedKeys(t *testing.T) {
+	config := []byte(`{
+		"sla": {
+			"ttft": "not-a-number",
+			"itl": false,
+			"optimizationType": "priority",
+			"isl": "1024",
+			"osl": null
+		},
+		"deployment": {
+			"modelCache": {
+				"pvcName": 123,
+				"modelPathInPvc": "",
+				"pvcMountPath": false
+			}
+		},
+		"planner": []
+	}`)
+	src := &DynamoGraphDeploymentRequest{
+		Spec: DynamoGraphDeploymentRequestSpec{
+			ProfilingConfig: ProfilingConfigSpec{
+				Config: &apiextensionsv1.JSON{Raw: config},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	if restored.Spec.ProfilingConfig.Config == nil {
+		t.Fatal("profilingConfig.config = nil, want preserved opaque JSON")
+	}
+	assertDGDRJSONEqual(t, config, restored.Spec.ProfilingConfig.Config.Raw)
+}
+
 func mustDGDRHubStatusAnnotation(t *testing.T, status v1beta1.DynamoGraphDeploymentRequestStatus) string {
 	t.Helper()
 	data, err := json.Marshal(status)
@@ -174,6 +218,23 @@ func mustDGDRHubStatusAnnotation(t *testing.T, status v1beta1.DynamoGraphDeploym
 		t.Fatalf("marshal DGDR hub status annotation: %v", err)
 	}
 	return string(data)
+}
+
+func assertDGDRJSONEqual(t *testing.T, wantRaw, gotRaw []byte) {
+	t.Helper()
+	var want, got any
+	if err := json.Unmarshal(wantRaw, &want); err != nil {
+		t.Fatalf("unmarshal wanted JSON: %v", err)
+	}
+	if err := json.Unmarshal(gotRaw, &got); err != nil {
+		t.Fatalf("unmarshal got JSON: %v", err)
+	}
+	if reflect.DeepEqual(want, got) {
+		return
+	}
+	wantJSON, _ := json.Marshal(want)
+	gotJSON, _ := json.Marshal(got)
+	t.Fatalf("JSON mismatch:\nwant: %s\n got: %s", wantJSON, gotJSON)
 }
 
 func mustDGDRAlphaStatusAnnotation(t *testing.T, status DynamoGraphDeploymentRequestStatus) string {

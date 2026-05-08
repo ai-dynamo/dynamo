@@ -527,6 +527,151 @@ func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	}
 }
 
+func TestStripDGDRTypedProfilingConfig(t *testing.T) {
+	const (
+		customKey         = "custom"
+		deployKey         = "deployment"
+		islKey            = "isl"
+		itlKey            = "itl"
+		keepValue         = "keep"
+		modelCache        = "modelCache"
+		modelPathInPvcKey = "modelPathInPvc"
+		optimizationType  = "optimizationType"
+		oslKey            = "osl"
+		plannerKey        = "planner"
+		pvcMountPathKey   = "pvcMountPath"
+		pvcNameKey        = "pvcName"
+		slaKey            = "sla"
+		ttftKey           = "ttft"
+		unrelatedKey      = "unrelated"
+	)
+	tests := []struct {
+		name string
+		in   dgdrProfilingConfigBlob
+		want dgdrProfilingConfigBlob
+	}{
+		{
+			name: "strips projected leaves and keeps opaque siblings",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          float64(10),
+					itlKey:           float64(20),
+					optimizationType: string(v1beta1.OptimizationTypeLatency),
+					islKey:           float64(30),
+					oslKey:           float64(40),
+					customKey:        keepValue,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        "cache-pvc",
+						modelPathInPvcKey: "/models",
+						pvcMountPathKey:   "/cache",
+						customKey:         keepValue,
+					},
+					unrelatedKey: keepValue,
+				},
+				plannerKey: map[string]any{"enabled": true},
+				"top":      keepValue,
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					customKey: keepValue,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						customKey: keepValue,
+					},
+					unrelatedKey: keepValue,
+				},
+				"top": keepValue,
+			},
+		},
+		{
+			name: "preserves typed-looking values that projection skips",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          "not-a-number",
+					itlKey:           false,
+					optimizationType: "priority",
+					islKey:           "1024",
+					oslKey:           nil,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        float64(123),
+						modelPathInPvcKey: "",
+						pvcMountPathKey:   false,
+					},
+				},
+				plannerKey: []any{},
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          "not-a-number",
+					itlKey:           false,
+					optimizationType: "priority",
+					islKey:           "1024",
+					oslKey:           nil,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        float64(123),
+						modelPathInPvcKey: "",
+						pvcMountPathKey:   false,
+					},
+				},
+				plannerKey: []any{},
+			},
+		},
+		{
+			name: "removes empty containers only when projected leaves were stripped",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey: float64(10),
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey: "cache-pvc",
+					},
+				},
+				plannerKey: map[string]any{"enabled": true},
+			},
+			want: dgdrProfilingConfigBlob{},
+		},
+		{
+			name: "preserves explicit empty maps that were not projected",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{},
+				deployKey: map[string]any{
+					modelCache: map[string]any{},
+				},
+				plannerKey: map[string]any{},
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{},
+				deployKey: map[string]any{
+					modelCache: map[string]any{},
+				},
+				plannerKey: map[string]any{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := mustDGDRJSON(t, tt.in)
+			got := stripDGDRTypedProfilingConfig(tt.in)
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("stripped config mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(string(before), string(mustDGDRJSON(t, tt.in))); diff != "" {
+				t.Fatalf("input was mutated (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want map[string]any) {
 	t.Helper()
 	if raw == nil {
@@ -541,6 +686,15 @@ func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want 
 			t.Fatalf("profiling config %q mismatch (-want +got):\n%s", key, diff)
 		}
 	}
+}
+
+func mustDGDRJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return data
 }
 
 func TestRestoreDGDRDeploymentStatusValidatesRequestState(t *testing.T) {
