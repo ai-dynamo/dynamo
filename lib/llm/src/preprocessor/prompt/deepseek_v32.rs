@@ -11,235 +11,13 @@
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 
-/// Special tokens for DeepSeek V3.2
-pub mod tokens {
-    pub const BOS: &str = "<｜begin▁of▁sentence｜>";
-    pub const EOS: &str = "<｜end▁of▁sentence｜>";
-    pub const THINKING_START: &str = "<think>";
-    pub const THINKING_END: &str = "</think>";
-    pub const DSML_TOKEN: &str = "｜DSML｜";
-    pub const USER_START: &str = "<｜User｜>";
-    pub const ASSISTANT_START: &str = "<｜Assistant｜>";
-}
+use super::deepseek_common::{
+    NormalizeNonText, RESPONSE_FORMAT_TEMPLATE, TOOL_CALL_TEMPLATE, TOOL_OUTPUT_TEMPLATE,
+    TOOLS_SYSTEM_TEMPLATE, encode_arguments_to_dsml, find_last_user_index,
+    normalize_message_contents, render_tools, to_json,
+};
 
-/// System message template for tools
-const TOOLS_SYSTEM_TEMPLATE: &str = r#"## Tools
-
-You have access to a set of tools you can use to answer the user's question.
-You can invoke functions by writing a "<{dsml_token}function_calls>" block like the following as part of your reply to the user:
-<{dsml_token}function_calls>
-<{dsml_token}invoke name="$FUNCTION_NAME">
-<{dsml_token}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml_token}parameter>
-...
-</{dsml_token}invoke>
-<{dsml_token}invoke name="$FUNCTION_NAME2">
-...
-</{dsml_token}invoke>
-</{dsml_token}function_calls>
-
-String and scalar parameters should be specified as is without any escaping or quotes, while lists and objects should use JSON format. The "string" attribute should be set to "true" for string type parameters and "false" for other types (numbers, booleans, arrays, objects).
-
-If the thinking_mode is enabled, then after function results you should strongly consider outputting a thinking block. Here is an example:
-
-<{dsml_token}function_calls>
-...
-</{dsml_token}function_calls>
-
-<function_results>
-...
-</function_results>
-
-{thinking_start_token}...thinking about results{thinking_end_token}
-
-Here are the functions available in JSONSchema format:
-<functions>
-{tool_schemas}
-</functions>
-"#;
-
-const RESPONSE_FORMAT_TEMPLATE: &str =
-    "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}";
-
-const TOOL_CALL_TEMPLATE: &str =
-    "<{dsml_token}invoke name=\"{name}\">\n{arguments}\n</{dsml_token}invoke>";
-
-#[allow(dead_code)]
-const TOOL_CALLS_TEMPLATE: &str =
-    "<{dsml_token}function_calls>\n{tool_calls}\n</{dsml_token}function_calls>";
-
-const TOOL_OUTPUT_TEMPLATE: &str = "\n<result>{content}</result>";
-
-/// Thinking mode for the model
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThinkingMode {
-    Chat,
-    Thinking,
-}
-
-impl ThinkingMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ThinkingMode::Chat => "chat",
-            ThinkingMode::Thinking => "thinking",
-        }
-    }
-}
-
-/// Convert value to JSON string matching Python's json.dumps() format with spaces
-fn to_json(value: &JsonValue) -> String {
-    // Python's json.dumps() adds spaces after colons and commas
-    // {"name": "value", "key": "value2"}
-    // Rust's serde_json::to_string() produces:
-    // {"name":"value","key":"value2"}
-    // We need to match Python's format for test compatibility
-
-    let compact = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-
-    // Add spaces after colons and commas (but not inside strings)
-    let mut result = String::with_capacity(compact.len() + compact.len() / 4);
-    let mut in_string = false;
-    let mut prev_char = '\0';
-
-    for ch in compact.chars() {
-        if ch == '"' && prev_char != '\\' {
-            in_string = !in_string;
-        }
-
-        result.push(ch);
-
-        // Add space after ':' or ',' if not inside a string
-        if !in_string && (ch == ':' || ch == ',') {
-            result.push(' ');
-        }
-
-        prev_char = ch;
-    }
-
-    result
-}
-
-/// Extract tools from OpenAI format
-fn tools_from_openai_format(tools: &[JsonValue]) -> Vec<JsonValue> {
-    tools
-        .iter()
-        .filter_map(|tool| tool.get("function").cloned())
-        .collect()
-}
-
-/// Render tools section for system prompt
-fn render_tools(tools: &[JsonValue]) -> String {
-    let tools_json: Vec<String> = tools_from_openai_format(tools)
-        .iter()
-        .map(to_json)
-        .collect();
-
-    TOOLS_SYSTEM_TEMPLATE
-        .replace("{tool_schemas}", &tools_json.join("\n"))
-        .replace("{dsml_token}", tokens::DSML_TOKEN)
-        .replace("{thinking_start_token}", tokens::THINKING_START)
-        .replace("{thinking_end_token}", tokens::THINKING_END)
-}
-
-/// Find the last user or developer message index
-fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
-    messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, msg)| {
-            msg.get("role")
-                .and_then(|r| r.as_str())
-                .map(|r| r == "user" || r == "developer")
-                .unwrap_or(false)
-        })
-        .map(|(idx, _)| idx)
-}
-
-/// Extract visible text from OpenAI-style message content.
-///
-/// Matches common chat-template behavior:
-/// - string content: returned as-is
-/// - array content: concatenates `type=text` parts and raw string items
-/// - other JSON types: serialized to JSON string
-fn extract_visible_text(content: &JsonValue) -> String {
-    match content {
-        JsonValue::String(text) => text.clone(),
-        JsonValue::Array(items) => items
-            .iter()
-            .filter_map(|item| {
-                if let Some(text) = item.as_str() {
-                    return Some(text.to_string());
-                }
-
-                let item_type = item.get("type").and_then(|v| v.as_str());
-                if item_type == Some("text") {
-                    return item
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .map(|text| text.to_string());
-                }
-
-                tracing::warn!(
-                    chunk_type = item_type.unwrap_or("unknown"),
-                    "DeepSeek V3.2 formatter dropped non-text content chunk while normalizing message content",
-                );
-
-                None
-            })
-            .collect::<String>(),
-        _ => to_json(content),
-    }
-}
-
-/// Normalize message `content` fields for text-only DeepSeek V3.2 rendering.
-fn normalize_message_contents(messages: &mut [JsonValue]) {
-    for msg in messages {
-        let Some(content) = msg.get("content") else {
-            continue;
-        };
-        let normalized = extract_visible_text(content);
-        if let Some(obj) = msg.as_object_mut() {
-            obj.insert("content".to_string(), JsonValue::String(normalized));
-        }
-    }
-}
-
-/// Encode arguments to DSML parameter format
-fn encode_arguments_to_dsml(tool_call: &JsonValue) -> Result<String> {
-    let arguments_str = tool_call
-        .get("arguments")
-        .and_then(|a| a.as_str())
-        .context("Missing or invalid 'arguments' field")?;
-
-    let arguments: JsonValue =
-        serde_json::from_str(arguments_str).context("Failed to parse arguments JSON")?;
-
-    let arguments_obj = arguments
-        .as_object()
-        .context("Arguments must be an object")?;
-
-    let mut params = Vec::new();
-    for (key, value) in arguments_obj {
-        let is_string = value.is_string();
-        let value_str = if is_string {
-            value.as_str().unwrap().to_string()
-        } else {
-            to_json(value)
-        };
-
-        let param = format!(
-            "<{}parameter name=\"{}\" string=\"{}\">{}</{}parameter>",
-            tokens::DSML_TOKEN,
-            key,
-            if is_string { "true" } else { "false" },
-            value_str,
-            tokens::DSML_TOKEN
-        );
-        params.push(param);
-    }
-
-    Ok(params.join("\n"))
-}
+pub use super::deepseek_common::{ThinkingMode, tokens};
 
 /// Render a single message
 fn render_message(
@@ -263,7 +41,7 @@ fn render_message(
 
             if let Some(tools) = msg.get("tools").and_then(|t| t.as_array()) {
                 prompt.push_str("\n\n");
-                prompt.push_str(&render_tools(tools));
+                prompt.push_str(&render_tools(TOOLS_SYSTEM_TEMPLATE, tools));
             }
 
             if let Some(response_format) = msg.get("response_format") {
@@ -297,7 +75,7 @@ fn render_message(
 
             if let Some(tools) = msg.get("tools").and_then(|t| t.as_array()) {
                 content_developer.push_str("\n\n");
-                content_developer.push_str(&render_tools(tools));
+                content_developer.push_str(&render_tools(TOOLS_SYSTEM_TEMPLATE, tools));
             }
 
             if let Some(response_format) = msg.get("response_format") {
@@ -559,7 +337,7 @@ impl super::OAIPromptFormatter for DeepSeekV32Formatter {
 
         // DeepSeek V3.2 native formatter expects text content in each message.
         // Normalize OpenAI content arrays (e.g. [{type: "text", text: "..."}]) to strings.
-        normalize_message_contents(&mut messages_array);
+        normalize_message_contents(&mut messages_array, NormalizeNonText::SerializeJson);
 
         // Inject tools and response_format from request into the first system message
         // DeepSeek V3.2 expects these to be part of the system message for prompt rendering
@@ -644,19 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_visible_text_from_content_array() {
-        let content = json!([
-            {"type": "text", "text": "who "},
-            {"type": "text", "text": "are "},
-            {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
-            {"type": "text", "text": "you?"}
-        ]);
-
-        let result = extract_visible_text(&content);
-        assert_eq!(result, "who are you?");
-    }
-
-    #[test]
     fn test_formatter_handles_user_content_array() {
         use super::super::OAIPromptFormatter;
 
@@ -672,6 +437,20 @@ mod tests {
         assert!(result.contains("who are you?"));
         assert!(result.contains(tokens::USER_START));
         assert!(result.contains(tokens::ASSISTANT_START));
+    }
+
+    #[test]
+    fn test_formatter_serializes_non_text_content() {
+        use super::super::OAIPromptFormatter;
+
+        let request = MockRequest::new(json!([
+            {"role": "user", "content": {"foo": "bar"}}
+        ]));
+
+        let formatter = DeepSeekV32Formatter::new_thinking();
+        let result = formatter.render(&request).unwrap();
+
+        assert!(result.contains(r#"{"foo": "bar"}"#));
     }
 
     #[test]
