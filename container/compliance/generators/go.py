@@ -70,7 +70,16 @@ def _component_from_sbom_entry(entry: dict) -> Component | None:
     if not name or not version:
         return None
 
-    spdx = _normalize_license(entry.get("licenses"))
+    # cyclonedx-gomod v1.7.0 emits detected licenses under evidence.licenses
+    # (CycloneDX evidence-based provenance) rather than the top-level
+    # licenses field. cargo-cyclonedx, by contrast, populates the top-level
+    # field directly. Read both so this generator handles either source
+    # without caring which tool emitted the SBOM.
+    licenses_field = entry.get("licenses")
+    if not licenses_field:
+        evidence = entry.get("evidence") or {}
+        licenses_field = evidence.get("licenses")
+    spdx = _normalize_license(licenses_field)
 
     purl = entry.get("purl") or ""
     source_url: str | None = None

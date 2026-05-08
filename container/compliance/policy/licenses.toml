@@ -37,6 +37,10 @@ allow = [
   "BSD-2-Clause-Patent",
   "BSD-3-Clause",
   "BSD-4-Clause",
+  "BSD-Source-Code",    # permissive BSD variant; cyclonedx-gomod's
+                        # go-license-detector frequently picks this for
+                        # golang.org/x/* (actual upstream is BSD-3-Clause,
+                        # which is allowed regardless).
   "BSL-1.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",

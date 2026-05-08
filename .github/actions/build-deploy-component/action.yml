@@ -151,6 +151,7 @@ runs:
             --platform ${{ steps.settings.outputs.build_platforms }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
             --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .
 
@@ -162,3 +163,52 @@ runs:
         for image_uri in "${IMAGE_URIS[@]}"; do
           echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
         done
+
+    # Inline-compliance extraction: reuses the warm BuildKit cache from the
+    # push step above. Both targets are FROM scratch so the export is a few
+    # MB regardless of runtime image size. Operator-only today; snapshot's
+    # compliance stages land in a follow-up.
+    - name: Compliance extract + verify
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        mkdir -p /tmp/legal /tmp/sboms
+        # Extraction runs on a single platform (lint platform) — both /legal
+        # and /sboms are platform-invariant for a Go-only build.
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.lint_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target legal \
+            --output type=local,dest=/tmp/legal \
+            --progress=plain \
+            -f Dockerfile .
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.lint_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target sboms \
+            --output type=local,dest=/tmp/sboms \
+            --progress=plain \
+            -f Dockerfile .
+
+    - name: Upload /legal/ NOTICES artifact
+      if: ${{ inputs.component == 'operator' && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-legal
+        path: /tmp/legal/
+        retention-days: 90
+
+    - name: Upload /sboms/ artifact
+      if: ${{ inputs.component == 'operator' && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-sboms
+        path: /tmp/sboms/
+        retention-days: 90
