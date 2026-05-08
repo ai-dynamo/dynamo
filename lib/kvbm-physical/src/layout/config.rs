@@ -24,8 +24,12 @@ pub struct LayoutConfig {
     #[validate(range(min = 1, max = 2))]
     pub outer_dim: usize,
 
-    /// Page size
-    #[validate(range(min = 1))]
+    /// Page size (tokens per block).
+    ///
+    /// Must be a positive power of two. KVBM layout indexing assumes
+    /// power-of-two page sizes for stride/alignment math; non-power-of-two
+    /// values are rejected at layout construction time.
+    #[validate(custom(function = "validate_page_size"))]
     pub page_size: usize,
 
     /// Inner dimension
@@ -167,6 +171,19 @@ pub fn validate_power_of_2(alignment: usize) -> Result<(), ValidationError> {
         ));
     }
     // Passes validation if alignment is a power of 2
+    Ok(())
+}
+
+/// Validation for `page_size`: must be a positive power of two.
+///
+/// KVBM layout indexing assumes power-of-two page sizes (stride/alignment
+/// math, chunked transfers). Non-power-of-two values are not supported.
+pub fn validate_page_size(page_size: usize) -> Result<(), ValidationError> {
+    if page_size == 0 || !page_size.is_power_of_two() {
+        return Err(validator::ValidationError::new(
+            "page_size_must_be_positive_power_of_2",
+        ));
+    }
     Ok(())
 }
 

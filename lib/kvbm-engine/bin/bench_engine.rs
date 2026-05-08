@@ -13,6 +13,16 @@
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0 --page-sizes 32,64 --concurrency 1,2 --iterations 10 --skip-disk --skip-gds
 //!
+//! # Weak-scaled sweep across the production page_size range. Per-iter bytes
+//! # stay roughly constant so GB/s numbers are directly comparable across page_sizes.
+//! # Without --weak-scale, per-iter bytes scale 16× between page_size=16 and 256
+//! # so cross-size comparisons are skewed (small sizes are launch-overhead-bound).
+//! # NOTE: --weak-scale overrides --num-blocks per page_size to satisfy the
+//! # allocation invariant.
+//! cargo run -p kvbm-engine --features bench --bin bench_engine --release -- \
+//!     --devices 0 --page-sizes 16,32,64,128,256 --weak-scale --iterations 50 \
+//!     --skip-disk --skip-gds --isolated-only
+//!
 //! # With offload pipeline:
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0 --page-sizes 64 --concurrency 1 --iterations 10 --skip-disk --skip-gds \
@@ -22,6 +32,13 @@
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0,1 --page-sizes 128 --concurrency 1,2,4 --iterations 50
 //! ```
+//!
+//! # Reading results
+//! - `bandwidth_gbs` = per-device steady-state throughput (bytes_per_iter / mean_us).
+//! - `bytes_per_iter` (printed as `iter=…MiB`) is the working set moved per measured
+//!   iteration. Under `--weak-scale`, this stays approximately constant across
+//!   page_sizes for a fixed concurrency — that's the property that makes the
+//!   sweep apples-to-apples.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +78,7 @@ struct Cli {
     devices: Vec<u32>,
 
     /// Tokens-per-block values to sweep
-    #[arg(long, value_delimiter = ',', default_values_t = vec![32, 64, 128, 256])]
+    #[arg(long, value_delimiter = ',', default_values_t = vec![16, 32, 64, 128, 256])]
     page_sizes: Vec<usize>,
 
     /// Concurrency levels to sweep
@@ -132,6 +149,14 @@ struct Cli {
     #[arg(long, short)]
     output: Option<PathBuf>,
 
+    /// Weak-scale work across the page_size sweep so per-iter bytes stay roughly
+    /// constant (effective_bpb = max(blocks_per_batch * 64 / page_size, 1)).
+    /// Without this, per-iter bytes scale linearly with page_size and GB/s numbers
+    /// across page_sizes are not directly comparable. When enabled, `--num-blocks`
+    /// is overridden per-page_size to satisfy the allocation invariant.
+    #[arg(long)]
+    weak_scale: bool,
+
     /// Optional TOML config file (overridden by CLI args)
     #[arg(long)]
     config: Option<PathBuf>,
@@ -160,6 +185,8 @@ struct BenchConfig {
     offload_batch_sizes: Vec<usize>,
     offload_concurrency: Vec<usize>,
     output: Option<PathBuf>,
+    #[serde(default)]
+    weak_scale: bool,
 }
 
 impl From<Cli> for BenchConfig {
@@ -184,7 +211,36 @@ impl From<Cli> for BenchConfig {
             offload_batch_sizes: cli.offload_batch_sizes,
             offload_concurrency: cli.offload_concurrency,
             output: cli.output,
+            weak_scale: cli.weak_scale,
         }
+    }
+}
+
+/// Reference token budget for weak scaling. The "natural" per-iter work at
+/// `page_size = REFERENCE_PAGE_SIZE, blocks_per_batch = N` becomes:
+///   effective_bpb(page_size) = max(N * REFERENCE_PAGE_SIZE / page_size, 1)
+const REFERENCE_PAGE_SIZE: usize = 64;
+
+fn effective_bpb(base_bpb: usize, page_size: usize) -> usize {
+    (base_bpb * REFERENCE_PAGE_SIZE / page_size).max(1)
+}
+
+/// Resolve the per-page_size config when weak-scaling is enabled.
+/// Recomputes `blocks_per_batch` and `num_blocks` so the allocation invariant
+/// holds for every page_size in the sweep.
+fn resolve_for_page_size(base: &BenchConfig, page_size: usize) -> BenchConfig {
+    if !base.weak_scale {
+        return base.clone();
+    }
+    let bpb = effective_bpb(base.blocks_per_batch, page_size);
+    let max_conc = base.concurrency.iter().max().copied().unwrap_or(1);
+    let max_bounce = base.bounce_blocks.iter().max().copied().unwrap_or(0);
+    let multiplier = if base.isolated_only { 1 } else { 2 };
+    let num_blocks = max_conc * bpb * multiplier + max_bounce;
+    BenchConfig {
+        blocks_per_batch: bpb,
+        num_blocks,
+        ..base.clone()
     }
 }
 
@@ -289,14 +345,16 @@ fn make_result(
 
 fn print_result_stderr(r: &BenchResult) {
     eprintln!(
-        "[GPU {}] {} | page={} conc={}{} | {:.1} GB/s (per-dev) {:.1} GB/s (agg) | p50={:.0}us p99={:.0}us",
+        "[GPU {}] {} | page={} bpb={} conc={}{} | iter={:.1} MiB | {:.1} GB/s (per-dev) {:.1} GB/s (agg) | p50={:.0}us p99={:.0}us",
         r.device_id,
         r.test,
         r.page_size,
+        r.blocks_per_batch,
         r.concurrency,
         r.bounce_blocks
             .map(|b| format!(" bounce={b}"))
             .unwrap_or_default(),
+        r.bytes_per_iter as f64 / (1024.0 * 1024.0),
         r.bandwidth_gbs,
         r.aggregate_bandwidth_gbs,
         r.latency_us.p50_us,
@@ -1168,22 +1226,37 @@ fn validate_config(config: &BenchConfig) -> Result<()> {
 
     // For bidir tests we need 2x the blocks (separate ranges for each direction)
     let multiplier = if config.isolated_only { 1 } else { 2 };
-    let transfer_blocks = max_conc * config.blocks_per_batch * multiplier;
 
-    // Bounce blocks come from the tail of G2, so they must not overlap with
-    // the transfer block range [0..transfer_blocks).
+    // When weak-scaling, num_blocks is recomputed per-page_size in main; the
+    // strict invariant is enforced there. Validate the worst case (smallest
+    // page_size in the sweep, which produces the largest effective_bpb).
+    let strict_bpb = if config.weak_scale {
+        let min_page_size = config
+            .page_sizes
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or(REFERENCE_PAGE_SIZE);
+        effective_bpb(config.blocks_per_batch, min_page_size)
+    } else {
+        config.blocks_per_batch
+    };
+
+    let transfer_blocks = max_conc * strict_bpb * multiplier;
     let min_blocks = transfer_blocks + max_bounce;
 
-    ensure!(
-        config.num_blocks >= min_blocks,
-        "num_blocks ({}) must be >= max_concurrency ({}) * blocks_per_batch ({}) * {} + max_bounce ({}) = {}",
-        config.num_blocks,
-        max_conc,
-        config.blocks_per_batch,
-        multiplier,
-        max_bounce,
-        min_blocks,
-    );
+    if !config.weak_scale {
+        ensure!(
+            config.num_blocks >= min_blocks,
+            "num_blocks ({}) must be >= max_concurrency ({}) * blocks_per_batch ({}) * {} + max_bounce ({}) = {}",
+            config.num_blocks,
+            max_conc,
+            strict_bpb,
+            multiplier,
+            max_bounce,
+            min_blocks,
+        );
+    }
 
     ensure!(
         !config.devices.is_empty(),
@@ -1239,8 +1312,24 @@ fn main() -> Result<()> {
     eprintln!("  Devices: {:?}", config.devices);
     eprintln!("  Page sizes: {:?}", config.page_sizes);
     eprintln!("  Concurrency: {:?}", config.concurrency);
-    eprintln!("  Blocks per batch: {}", config.blocks_per_batch);
-    eprintln!("  Total blocks per pool: {}", config.num_blocks);
+    eprintln!(
+        "  Blocks per batch: {}{}",
+        config.blocks_per_batch,
+        if config.weak_scale {
+            " (weak-scaled per page_size)"
+        } else {
+            ""
+        }
+    );
+    eprintln!(
+        "  Total blocks per pool: {}{}",
+        config.num_blocks,
+        if config.weak_scale {
+            " (overridden per page_size)"
+        } else {
+            ""
+        }
+    );
     eprintln!(
         "  Layers: {}, Inner dim: {}",
         config.num_layers, config.inner_dim
@@ -1285,11 +1374,20 @@ fn main() -> Result<()> {
         // Page-size sweep: rebuild full worker stack per page_size
         // (mirrors production where model config determines page_size at startup)
         for &page_size in &config.page_sizes {
+            let resolved = resolve_for_page_size(&config, page_size);
+
             eprintln!("\n{}", "=".repeat(72));
-            eprintln!("Page size: {page_size}");
+            if resolved.weak_scale {
+                eprintln!(
+                    "Page size: {page_size}  (weak-scaled: blocks_per_batch={}, num_blocks={})",
+                    resolved.blocks_per_batch, resolved.num_blocks
+                );
+            } else {
+                eprintln!("Page size: {page_size}");
+            }
             eprintln!("{}", "=".repeat(72));
 
-            let instance = BenchInstance::new(config.clone(), page_size).await?;
+            let instance = BenchInstance::new(resolved, page_size).await?;
             let results = instance.run_benchmarks().await?;
             all_results.extend(results);
             instance.shutdown();
