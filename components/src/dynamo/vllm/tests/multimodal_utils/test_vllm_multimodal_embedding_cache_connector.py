@@ -77,6 +77,11 @@ class TestSchedulerSideLRU:
         request = self._make_request([("hash_a", 100)])
         conn.update_state_after_alloc(request, 0)
 
+        # Lazy promotion: PENDING → READY requires save_step <
+        # _scheduling_step, which only happens after build_connector_meta
+        # bumps the step counter.
+        conn.build_connector_meta(MagicMock())
+
         assert conn.has_cache_item("hash_a")
 
     def test_update_state_plans_save(self):
@@ -87,7 +92,8 @@ class TestSchedulerSideLRU:
         scheduler_output = MagicMock()
         meta = conn.build_connector_meta(scheduler_output)
         assert isinstance(meta, mod.MultimodalEmbeddingCacheConnectorMetadata)
-        assert "hash_a" in meta.saves
+        # meta.saves is list[_SaveCmd] — match by mm_hash field.
+        assert any(cmd.mm_hash == "hash_a" for cmd in meta.saves)
         assert meta.loads == []
         assert meta.evicts == []
 
@@ -98,42 +104,67 @@ class TestSchedulerSideLRU:
         conn.update_state_after_alloc(request, 0)
         conn.build_connector_meta(MagicMock())
 
+        # Promotion is lazy in `has_cache_item`. The scheduler ordinarily
+        # calls `has_cache_item` on every request; do so explicitly so
+        # the next `update_state_after_alloc` sees state=READY and
+        # appends a load (not another save).
+        assert conn.has_cache_item("hash_a")
+
         conn.update_state_after_alloc(request, 0)
         meta = conn.build_connector_meta(MagicMock())
-        assert "hash_a" in meta.loads
+        assert any(cmd.mm_hash == "hash_a" for cmd in meta.loads)
         assert meta.saves == []
 
     def test_eviction_under_pressure(self):
-        # 4096 hidden_size * 2 bytes (fp16) = 8192 bytes per embed
+        # 4096 hidden_size * 2 bytes (fp16) = 8192 bytes per embed.
+        # Build a connector whose partition holds exactly 200 embeds.
         conn = self._make_connector()
-        bpe = conn._bytes_per_embed  # 8192
-        # Set capacity to hold exactly 200 embeds worth of bytes
-        conn._capacity_bytes = 200 * bpe
+        bpe = conn._bytes_per_embed
+        # Re-init the partition allocator with the smaller capacity so
+        # eviction kicks in. TP world size is 1 in this fixture, so
+        # there's a single partition.
+        conn._partition_bytes = 200 * bpe
+        conn._partitions = [
+            mod._PartitionAllocator(base_offset=0, capacity=conn._partition_bytes)
+        ]
+        conn._entries.clear()
 
         req_a = self._make_request([("hash_a", 100)])
         conn.update_state_after_alloc(req_a, 0)
         conn.build_connector_meta(MagicMock())
+        # Promote PENDING → READY so the eviction LRU walk considers it.
+        assert conn.has_cache_item("hash_a")
 
         req_b = self._make_request([("hash_b", 100)])
         conn.update_state_after_alloc(req_b, 0)
         conn.build_connector_meta(MagicMock())
+        assert conn.has_cache_item("hash_b")
 
-        assert conn._num_used_bytes == 200 * bpe
+        # Both entries fit; one full partition consumed.
+        free_bytes = sum(length for _, length in conn._partitions[0]._free_regions)
+        assert free_bytes == 0
 
-        # Adding hash_c (100 embeds) should evict hash_a (LRU)
+        # Adding hash_c (100 embeds) on a now-full partition triggers
+        # _evict_lru_in_partition, which marks hash_a (LRU) RETIRING and
+        # emits an evict cmd. The save itself is dropped this step
+        # (best-effort cache); reclaim happens next step.
         req_c = self._make_request([("hash_c", 100)])
         conn.update_state_after_alloc(req_c, 0)
         meta = conn.build_connector_meta(MagicMock())
 
-        assert "hash_c" in meta.saves
-        assert "hash_a" in meta.evicts
-        assert "hash_a" not in conn._cache_order
-        assert "hash_c" in conn._cache_order
+        evicted = {cmd.mm_hash for cmd in meta.evicts}
+        assert "hash_a" in evicted
+        assert conn._entries["hash_a"].state == "RETIRING"
 
     def test_skip_oversized_item(self):
         conn = self._make_connector()
         bpe = conn._bytes_per_embed
-        conn._capacity_bytes = 50 * bpe
+        # Shrink the partition so a 100-embed request can't fit.
+        conn._partition_bytes = 50 * bpe
+        conn._partitions = [
+            mod._PartitionAllocator(base_offset=0, capacity=conn._partition_bytes)
+        ]
+        conn._entries.clear()
 
         request = self._make_request([("huge_hash", 100)])
         conn.update_state_after_alloc(request, 0)
@@ -141,7 +172,7 @@ class TestSchedulerSideLRU:
 
         assert meta.saves == []
         assert meta.loads == []
-        assert "huge_hash" not in conn._cache_order
+        assert "huge_hash" not in conn._entries
 
 
 # ---------------------------------------------------------------------------

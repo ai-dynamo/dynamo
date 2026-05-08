@@ -965,6 +965,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                     self._maybe_log_pool_oom(group_total)
 
             if pool_offset is not None:
+                # mypy: pool_offset is set only when self._gpu_pool is not None.
+                assert self._gpu_pool is not None
                 packed = self._gpu_pool.buffer.narrow(0, pool_offset, group_total)
                 packed.copy_(cpu_uint8, non_blocking=True)
                 grp = _PoolGroup(
