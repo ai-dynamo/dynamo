@@ -2979,8 +2979,10 @@ fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
 ///
 /// Exposed only when `DYN_ENABLE_RL=true` or `HttpServiceConfig.enable_rl`
 /// is set. Mounted by `service_v2.rs`.
-pub fn rl_router() -> anyhow::Result<(Vec<RouteDoc>, Router)> {
-    let (rl_docs, router) = dynamo_rl::rl_router()?;
+pub fn rl_router(
+    drt: std::sync::Arc<dynamo_runtime::DistributedRuntime>,
+) -> anyhow::Result<(Vec<RouteDoc>, Router)> {
+    let (rl_docs, router) = dynamo_rl::rl_router(drt)?;
     let docs = rl_docs
         .into_iter()
         .map(|d| RouteDoc::new(d.method, d.path))

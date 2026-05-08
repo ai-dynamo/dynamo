@@ -1429,6 +1429,59 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.exception(f"[RL] weight_transport_update failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    # ── PR B: unified `rl` request-plane endpoint ─────────────────────
+    #
+    # Worker registers ``dyn://<namespace>.<component>.rl`` and serves this
+    # dispatcher. The frontend (dynamo-rl crate) discovers live `rl`
+    # instances via the standard discovery plane and dispatches via
+    # ``PushRouter::direct`` over NATS / shared TCP — no system-port HTTP
+    # fan-out, no static `DYN_RL_WORKER_SYSTEM_URLS` list.
+    #
+    # Wire shape: ``{"op": str, "body": dict}`` where `op` is one of
+    # ``pause | resume | init_transport | update_weights``. The dispatcher
+    # routes to the existing per-op handlers and yields a single response
+    # dict (matching the serve_endpoint async-generator contract used by
+    # ``generate``, ``load_lora``, etc.).
+    #
+    # Legacy ``register_engine_route`` HTTP-on-system-port routes stay
+    # live during PR B / PR C overlap so unmigrated callers don't break.
+    async def rl_dispatch(self, request=None):
+        """Single-endpoint RL admin dispatcher (PR B).
+
+        Async generator yielding exactly one response dict per call.
+        """
+        if request is None:
+            yield {"status": "error", "message": "rl_dispatch: request required"}
+            return
+        op = request.get("op")
+        body = request.get("body") or {}
+        if not isinstance(op, str) or not op:
+            yield {
+                "status": "error",
+                "message": "rl_dispatch: missing 'op' (str)",
+            }
+            return
+        try:
+            if op == "pause":
+                yield await self.pause_generation(body)
+            elif op == "resume":
+                yield await self.resume_generation(body)
+            elif op == "init_transport":
+                yield await self.weight_transport_init(body)
+            elif op == "update_weights":
+                yield await self.weight_transport_update(body)
+            else:
+                yield {
+                    "status": "error",
+                    "message": (
+                        f"rl_dispatch: unknown op {op!r}; expected one of "
+                        "pause|resume|init_transport|update_weights"
+                    ),
+                }
+        except Exception as e:
+            logger.exception(f"[RL] rl_dispatch op={op!r} failed: {e}")
+            yield {"status": "error", "op": op, "message": str(e)}
+
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError

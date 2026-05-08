@@ -5,17 +5,13 @@
 //!
 //! See `plans/rl-crate.md` and `plans/weight-transfer-config.md`.
 //!
-//! **PR A status:** pure refactor — handlers + state moved verbatim out of
-//! `lib/llm/src/http/service/openai.rs` so the admin code lives in its own
-//! crate. Behavior unchanged. Future work (per the plan):
-//!
-//! - **PR B:** replace `worker_system_urls: Vec<String>` (HTTP system-port
-//!   fan-out, env-driven) with discovery-backed fan-out via the dynamo
-//!   request plane. Drop `reqwest::Client`. Drop `DYN_RL_WORKER_SYSTEM_URLS`.
-//! - **PR C:** introduce `DYN_ENABLE_RL_ENDPOINTS` (frontend-only) to gate
-//!   this router on a separate Axum listener (`DYN_RL_PORT` / `--rl-port`).
-//!   `DYN_ENABLE_RL` keeps its meaning as the inference-plane RL extensions
-//!   gate plus worker-side engine-route registration.
+//! **PR B status:** request-plane fan-out via the dynamo discovery plane.
+//! Workers register one endpoint `dyn://<ns>.<component>.rl` (see
+//! `worker_factory.py::rl_endpoint.serve_endpoint(handler.rl_dispatch, …)`)
+//! and the frontend dispatches by listing live `rl` instances and calling
+//! each via [`PushRouter::direct`]. The legacy `register_engine_route`
+//! HTTP-on-system-port mechanism + `DYN_RL_WORKER_SYSTEM_URLS` static URL
+//! list are gone.
 
 use std::sync::Arc;
 
@@ -26,6 +22,15 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
+use dynamo_runtime::{
+    DistributedRuntime,
+    pipeline::{
+        SingleIn,
+        network::egress::push_router::{PushRouter, RouterMode},
+    },
+    protocols::annotated::Annotated,
+};
+use futures::StreamExt;
 
 /// Documentation tuple for an RL admin route. The dynamo-llm caller wraps
 /// each tuple into its own `RouteDoc` for `/openapi.json` aggregation.
@@ -44,92 +49,194 @@ impl RlRouteDoc {
     }
 }
 
-/// Environment variable for comma-separated worker system HTTP URLs.
-/// Defaults to `http://localhost:8081` when not set.
-const DYN_RL_WORKER_SYSTEM_URLS_ENV: &str = "DYN_RL_WORKER_SYSTEM_URLS";
-
 /// Shared state for the RL admin router.
+///
+/// Holds a runtime handle, a target `<namespace>.<component>` pair, and the
+/// name of the unified RL endpoint (always `"rl"`). Each fan-out call:
+///
+/// 1. Lists live instances of `<ns>.<comp>.rl` via discovery.
+/// 2. Builds a [`PushRouter`] over the runtime's request plane (NATS / shared TCP).
+/// 3. Calls [`PushRouter::direct`] per `instance_id` with a JSON
+///    `{"op": <route_name>, "body": <payload>}` envelope.
+/// 4. Drains the response stream and extracts the first `Annotated.data`.
 #[derive(Clone)]
 struct RlState {
-    /// Worker system HTTP base URLs (e.g. `http://localhost:8081`).
-    /// Set via `DYN_RL_WORKER_SYSTEM_URLS` (comma-separated list).
-    /// PR B (deferred) replaces this with discovery-backed enumeration.
-    worker_system_urls: Vec<String>,
-    /// Shared HTTP client for all fan-out calls to worker system ports.
-    http_client: reqwest::Client,
+    drt: Arc<DistributedRuntime>,
+    namespace: String,
+    component: String,
+    /// The endpoint name workers serve their RL dispatcher on. Always `"rl"`.
+    rl_endpoint: String,
 }
 
 impl RlState {
-    fn from_env() -> anyhow::Result<Self> {
-        let worker_system_urls = std::env::var(DYN_RL_WORKER_SYSTEM_URLS_ENV)
-            .unwrap_or_else(|_| "http://localhost:8081".to_string())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
+    fn from_env(drt: Arc<DistributedRuntime>) -> anyhow::Result<Self> {
+        let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".into());
+        // Workers default to component="backend" (vLLM, sglang). Allow
+        // override for disagg / multi-component deployments.
+        let component = std::env::var("DYN_RL_COMPONENT").unwrap_or_else(|_| "backend".into());
+        let rl_endpoint = "rl".to_string();
         tracing::info!(
-            worker_count = worker_system_urls.len(),
-            ?worker_system_urls,
-            "RL admin router configured"
+            ns = %namespace,
+            comp = %component,
+            rl_endpoint = %rl_endpoint,
+            "RL admin router configured (request-plane discovery)"
         );
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build RL router HTTP client: {e}"))?;
-        Ok(Self::new(worker_system_urls, http_client))
+        Ok(Self {
+            drt,
+            namespace,
+            component,
+            rl_endpoint,
+        })
     }
 
-    /// Test-friendly constructor — bypasses env reading so tests can pass in
-    /// fake worker URLs and a stubbed `reqwest::Client`.
-    fn new(worker_system_urls: Vec<String>, http_client: reqwest::Client) -> Self {
-        Self {
-            worker_system_urls,
-            http_client,
-        }
-    }
-
-    /// Call a single engine route on one worker. Returns the JSON body.
-    async fn call_engine_route(
-        &self,
-        url: &str,
-        route: &str,
-        body: &serde_json::Value,
-    ) -> serde_json::Value {
-        let endpoint = format!("{url}/engine/{route}");
-        match self.http_client.post(&endpoint).json(body).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                match resp.json::<serde_json::Value>().await {
-                    Ok(v) => v,
-                    Err(e) => serde_json::json!({
-                        "status": "error",
-                        "message": format!("Failed to decode response from {endpoint}: {e}"),
-                        "http_status": status.as_u16()
-                    }),
-                }
-            }
-            Err(e) => serde_json::json!({
-                "status": "error",
-                "message": format!("Request to {endpoint} failed: {e}")
-            }),
-        }
-    }
-
-    /// Fan out an engine route call to all configured workers concurrently.
+    /// Fan out an admin op to every live worker via the request plane.
+    ///
+    /// `route` is the legacy engine-route name (`pause_generation`,
+    /// `resume_generation`, `weight_transport_init`, `weight_transport_update`)
+    /// preserved from the call sites; we map it to the unified op name on
+    /// the wire.
+    ///
+    /// Source of truth for "which workers are live" is the
+    /// [`Client::instance_source`] watcher (etcd-backed), not a one-shot
+    /// discovery `list()`. PushRouter's `direct()` checks the same client
+    /// view internally — going through the client avoids the race where a
+    /// freshly-built client hasn't populated yet.
     async fn fan_out(&self, route: &str, body: serde_json::Value) -> Vec<serde_json::Value> {
-        let futures: Vec<_> = self
-            .worker_system_urls
+        let op = route_to_op(route);
+
+        let endpoint = match self
+            .drt
+            .namespace(&self.namespace)
+            .and_then(|ns| ns.component(&self.component))
+        {
+            Ok(comp) => comp.endpoint(&self.rl_endpoint),
+            Err(err) => {
+                tracing::warn!(%err, route, "RL fan_out: failed to build endpoint");
+                return vec![serde_json::json!({
+                    "status": "error",
+                    "message": format!("endpoint build failed: {err}"),
+                })];
+            }
+        };
+
+        let client = match endpoint.client().await {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::warn!(%err, route, "RL fan_out: failed to create endpoint client");
+                return vec![serde_json::json!({
+                    "status": "error",
+                    "message": format!("client create failed: {err}"),
+                })];
+            }
+        };
+
+        // Bound the watcher-population race: wait until the client sees
+        // ≥1 instance (or a short deadline elapses, in which case we
+        // surface the empty-fanout warning below). 5s is generous —
+        // workers register synchronously on serve_endpoint() before they
+        // start serving traffic, so by the time anything POSTs `/v1/rl/*`
+        // they should already be in etcd.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.wait_for_instances(),
+        )
+        .await;
+
+        let instance_ids: Vec<u64> = client.instance_ids();
+        if instance_ids.is_empty() {
+            tracing::warn!(
+                ns = %self.namespace,
+                comp = %self.component,
+                route,
+                "RL fan_out: no live workers under {}.{}.rl; \
+                 check DYN_NAMESPACE / DYN_RL_COMPONENT vs worker --component",
+                self.namespace,
+                self.component,
+            );
+            return Vec::new();
+        }
+
+        let router =
+            match PushRouter::<serde_json::Value, Annotated<serde_json::Value>>::from_client(
+                client,
+                RouterMode::Direct,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(%err, route, "RL fan_out: failed to build PushRouter");
+                    return vec![serde_json::json!({
+                        "status": "error",
+                        "message": format!("PushRouter build failed: {err}"),
+                    })];
+                }
+            };
+
+        let envelope = serde_json::json!({"op": op, "body": body});
+
+        let futures: Vec<_> = instance_ids
             .iter()
-            .map(|url| self.call_engine_route(url, route, &body))
+            .copied()
+            .map(|id| {
+                let router = router.clone();
+                let envelope = envelope.clone();
+                async move {
+                    let req = SingleIn::new(envelope.clone());
+                    match router.direct(req, id).await {
+                        Ok(mut stream) => {
+                            // Drain the first non-empty data chunk from the
+                            // worker's async-generator response.
+                            while let Some(chunk) = stream.next().await {
+                                if let Some(data) = chunk.data {
+                                    return data;
+                                }
+                                if let Some(err) = chunk.error {
+                                    return serde_json::json!({
+                                        "status": "error",
+                                        "instance_id": id,
+                                        "message": err.to_string(),
+                                    });
+                                }
+                            }
+                            serde_json::json!({
+                                "status": "error",
+                                "instance_id": id,
+                                "message": "empty response stream",
+                            })
+                        }
+                        Err(err) => serde_json::json!({
+                            "status": "error",
+                            "instance_id": id,
+                            "message": format!("dispatch failed: {err}"),
+                        }),
+                    }
+                }
+            })
             .collect();
         futures::future::join_all(futures).await
     }
 
-    /// Returns true only if all results have `status: "ok"`.
+    /// Returns true only if every result is `status: "ok"` AND there is at
+    /// least one. Empty fan-out (no workers found) is `503`, not silent OK.
     fn all_ok(results: &[serde_json::Value]) -> bool {
-        results
-            .iter()
-            .all(|r| r.get("status").and_then(|s| s.as_str()) == Some("ok"))
+        !results.is_empty()
+            && results
+                .iter()
+                .all(|r| r.get("status").and_then(|s| s.as_str()) == Some("ok"))
+    }
+}
+
+/// Map a legacy engine-route name to the corresponding `rl_dispatch` op.
+fn route_to_op(route: &str) -> &str {
+    match route {
+        "pause_generation" => "pause",
+        "resume_generation" => "resume",
+        "weight_transport_init" => "init_transport",
+        "weight_transport_update" => "update_weights",
+        // Anything else — pass through verbatim so `rl_dispatch` can return
+        // a meaningful "unknown op" error instead of us silently rewriting.
+        other => other,
     }
 }
 
@@ -430,23 +537,27 @@ async fn rl_init_transport(
 
 /// Create an Axum [`Router`] for the RL admin endpoints at `/v1/rl/*`.
 ///
-/// Worker system URLs are read from the `DYN_RL_WORKER_SYSTEM_URLS` environment
-/// variable (comma-separated, defaults to `http://localhost:8081`). Phase B of
-/// `rl-crate.md` will replace this with discovery-backed fan-out; until then
-/// the static URL list is the source of truth.
+/// **PR B:** fan-out goes through the dynamo discovery plane + request
+/// plane. Workers register `<DYN_NAMESPACE>.<DYN_RL_COMPONENT>.rl` (default
+/// `dynamo.backend.rl`) on the request plane via
+/// `runtime.endpoint(...).serve_endpoint(handler.rl_dispatch, ...)`. The
+/// frontend lists live instances via [`DistributedRuntime::discovery`]
+/// + [`DiscoveryQuery::NamespacedEndpoints`] and dispatches each call via
+/// [`PushRouter::direct`] over NATS / shared TCP.
 ///
-/// **Surface:** four POST routes after Phase 3 (this PR). Read-side endpoints
-/// (`state`, `health`, `ready`, `liveness`, `weight_version`) and the
-/// dedicated LoRA routes (`load_lora_adapter`, `unload_lora_adapter`) are
-/// dropped — replacements piggyback on the frontend's existing `/live` and
-/// `/health`, and LoRA flows through `update_weights {target.kind="lora"}`.
+/// **Surface:** four POST routes after Phase 3.
+/// `pause`, `resume`, `init_transport`, `update_weights`. Read-side
+/// endpoints (`state`, `health`, `ready`, `liveness`, `weight_version`)
+/// and the dedicated LoRA routes (`load_lora_adapter`, `unload_lora_adapter`)
+/// are dropped — replacements piggyback on the frontend's existing `/live`
+/// and `/health`, and LoRA flows through `update_weights {target.kind="lora"}`.
 /// See `weight-transfer-config.md` § "Constraints from existing surface".
 ///
 /// Mounted on the dedicated `/v1/rl/*` listener when
 /// `DYN_ENABLE_RL_ENDPOINTS=true`. prime-rl usage:
-/// `admin_base_url = "http://dynamo-frontend:8002/v1/rl"`.
-pub fn rl_router() -> anyhow::Result<(Vec<RlRouteDoc>, Router)> {
-    let rl_state_arc = Arc::new(RlState::from_env()?);
+/// `admin_base_url = "http://dynamo-frontend:8000/v1/rl"`.
+pub fn rl_router(drt: Arc<DistributedRuntime>) -> anyhow::Result<(Vec<RlRouteDoc>, Router)> {
+    let rl_state_arc = Arc::new(RlState::from_env(drt)?);
     let docs = vec![
         // Pause / resume bracket.
         RlRouteDoc::new(axum::http::Method::POST, "/v1/rl/pause"),

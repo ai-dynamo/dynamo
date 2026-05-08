@@ -270,6 +270,12 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// Required when `enable_rl` (or `DYN_ENABLE_RL_ENDPOINTS=true`): the
+    /// dynamo-rl crate uses this runtime's discovery + request planes to
+    /// fan out admin calls to live `<ns>.<comp>.rl` endpoint instances.
+    #[builder(default = "None")]
+    runtime: Option<Arc<dynamo_runtime::DistributedRuntime>>,
 }
 
 impl HttpService {
@@ -552,8 +558,19 @@ impl HttpServiceConfigBuilder {
             || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS")
             || env_is_truthy("DYN_ENABLE_RL")
         {
-            tracing::info!("RL admin routes enabled at /v1/rl/*");
-            system_routes.push(super::openai::rl_router()?);
+            match config.runtime.as_ref() {
+                Some(drt) => {
+                    tracing::info!("RL admin routes enabled at /v1/rl/* (request-plane fan-out)");
+                    system_routes.push(super::openai::rl_router(drt.clone())?);
+                }
+                None => {
+                    tracing::warn!(
+                        "RL admin routes requested (DYN_ENABLE_RL_ENDPOINTS=true) but \
+                         HttpServiceConfigBuilder.runtime is None — skipping mount. \
+                         The frontend caller must supply the DistributedRuntime."
+                    );
+                }
+            }
         }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {

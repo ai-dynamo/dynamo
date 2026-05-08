@@ -24,4 +24,3 @@ tokio        = { workspace = true }
 tracing      = { workspace = true }
 anyhow       = { workspace = true }
 futures      = { workspace = true }
-reqwest      = { workspace = true }

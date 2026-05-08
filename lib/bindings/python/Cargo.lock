@@ -2250,7 +2250,6 @@ dependencies = [
  "axum",
  "dynamo-runtime",
  "futures",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
