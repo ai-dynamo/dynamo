@@ -200,6 +200,29 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
+# Point TRT-LLM's bundled libnixl at the system NIXL build.
+#
+# Why: the TRT-LLM PyPI wheel ships its own libnixl.so under
+# tensorrt_llm/libs/nixl/. Two libnixl on disk + no SONAME version means
+# the wrong one can load if LD_LIBRARY_PATH is altered (e.g. by a deployer
+# pod spec). NIXL plugins live in the system tree, so bundle-libnixl loaded
+# against system-plugin → ABI mismatch.
+#
+# Without this fix: NIXL agent init crashes with "backend 'UCX' not found"
+# at TRT-LLM disagg startup. https://github.com/ai-dynamo/dynamo/issues/6671
+RUN TRTLLM_NIXL_BUNDLE=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/tensorrt_llm/libs/nixl && \
+    if [ -d "${TRTLLM_NIXL_BUNDLE}" ] && [ -d "${NIXL_LIB_DIR}" ]; then \
+        for f in libnixl.so libnixl_common.so libnixl_build.so libnixl_test_utils.so; do \
+            if [ -f "${TRTLLM_NIXL_BUNDLE}/${f}" ] && [ -f "${NIXL_LIB_DIR}/${f}" ]; then \
+                ln -sf "${NIXL_LIB_DIR}/${f}" "${TRTLLM_NIXL_BUNDLE}/${f}"; \
+            fi; \
+        done; \
+        if [ -d "${TRTLLM_NIXL_BUNDLE}/plugins" ] && [ -d "${NIXL_PLUGIN_DIR}" ]; then \
+            rm -rf "${TRTLLM_NIXL_BUNDLE}/plugins" && \
+            ln -sfn "${NIXL_PLUGIN_DIR}" "${TRTLLM_NIXL_BUNDLE}/plugins"; \
+        fi; \
+    fi
+
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 # Both arch paths are listed; the non-existent one is silently ignored by the linker.
 ENV LD_LIBRARY_PATH=\

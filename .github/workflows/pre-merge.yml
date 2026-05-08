@@ -44,12 +44,25 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy, nixl-alignment]
     if: always()
     steps:
       - name: "Check all dependent jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+  nixl-alignment:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: "3.12"
+    - run: pip install pyyaml
+    - run: python3 container/check_nixl_alignment.py
+      timeout-minutes: 1
 
   pre-commit:
     runs-on: ubuntu-latest
