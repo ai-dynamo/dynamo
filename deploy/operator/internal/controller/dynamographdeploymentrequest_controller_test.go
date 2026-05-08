@@ -275,6 +275,16 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(job.Spec.Template.Spec.Containers[0].Name).Should(Equal(ContainerNameProfiler))
 			Expect(job.Spec.Template.Spec.Containers[1].Name).Should(Equal(ContainerNameOutputCopier))
 
+			// With an empty Infrastructure config (no NATS/etcd installed),
+			// the profiler container must not be given env vars pointing at
+			// services that don't exist.
+			profilerEnvNames := map[string]struct{}{}
+			for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+				profilerEnvNames[e.Name] = struct{}{}
+			}
+			Expect(profilerEnvNames).ShouldNot(HaveKey("NATS_SERVER"))
+			Expect(profilerEnvNames).ShouldNot(HaveKey("ETCD_ENDPOINTS"))
+
 			// Verify emptyDir volume (not PVC)
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
 				corev1.Volume{
@@ -286,6 +296,91 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			))
 
 			// Clean up job
+			_ = k8sClient.Delete(ctx, job)
+		})
+
+		It("Should inject standard env vars on profiling job from OperatorConfiguration", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-profiling-stdenv"
+			namespace := defaultNamespace
+
+			reconciler.Config.Infrastructure = configv1alpha1.InfrastructureConfiguration{
+				NATSAddress:        "nats://platform-nats:4222",
+				ETCDAddress:        "platform-etcd:2379",
+				ModelExpressURL:    "http://model-express:8000",
+				PrometheusEndpoint: "http://prometheus:9090",
+			}
+
+			sa := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ServiceAccountProfilingJob,
+					Namespace: namespace,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() bool {
+				jobName := getProfilingJobName(dgdr)
+				job := &batchv1.Job{}
+				return k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job) == nil
+			}, timeout, interval).Should(BeTrue())
+
+			jobName := getProfilingJobName(dgdr)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+
+			var profiler *corev1.Container
+			for i := range job.Spec.Template.Spec.Containers {
+				if job.Spec.Template.Spec.Containers[i].Name == ContainerNameProfiler {
+					profiler = &job.Spec.Template.Spec.Containers[i]
+					break
+				}
+			}
+			Expect(profiler).ShouldNot(BeNil())
+
+			envByName := map[string]string{}
+			for _, e := range profiler.Env {
+				envByName[e.Name] = e.Value
+			}
+			Expect(envByName).Should(HaveKeyWithValue("NATS_SERVER", "nats://platform-nats:4222"))
+			Expect(envByName).Should(HaveKeyWithValue("ETCD_ENDPOINTS", "platform-etcd:2379"))
+			Expect(envByName).Should(HaveKeyWithValue("MODEL_EXPRESS_URL", "http://model-express:8000"))
+			Expect(envByName).Should(HaveKeyWithValue("PROMETHEUS_ENDPOINT", "http://prometheus:9090"))
+
 			_ = k8sClient.Delete(ctx, job)
 		})
 

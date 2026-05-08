@@ -174,6 +174,31 @@ impl ZmqKvEventSink {
 
                         tracing::debug!(dp_rank, start_seq, buffer_len = ring_buffer.len(), "Replay request received");
 
+                        let buffer_first = ring_buffer.front().map(|(seq, _)| *seq);
+                        let buffer_last = ring_buffer.back().map(|(seq, _)| *seq);
+                        let outside_buffer = match (buffer_first, buffer_last) {
+                            (Some(first), Some(last)) => start_seq < first || start_seq > last,
+                            _ => true,
+                        };
+                        if outside_buffer {
+                            let buffer_first_display = buffer_first
+                                .map(|seq| seq.to_string())
+                                .unwrap_or_else(|| "empty".to_string());
+                            let buffer_last_display = buffer_last
+                                .map(|seq| seq.to_string())
+                                .unwrap_or_else(|| "empty".to_string());
+                            tracing::warn!(
+                                dp_rank,
+                                start_seq,
+                                buffer_first = ?buffer_first,
+                                buffer_last = ?buffer_last,
+                                buffer_len = ring_buffer.len(),
+                                "Replay request outside buffer: start_seq={start_seq}, buffer=[{},{}]",
+                                buffer_first_display,
+                                buffer_last_display,
+                            );
+                        }
+
                         // Compute start index directly — sequences are monotonic.
                         let start_idx = ring_buffer.front()
                             .map(|(first_seq, _)| start_seq.saturating_sub(*first_seq) as usize)
