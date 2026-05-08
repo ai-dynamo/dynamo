@@ -33,6 +33,12 @@ from .common import check_module_available
 HAS_VLLM = check_module_available("vllm")
 HAS_TRTLLM = check_module_available("tensorrt_llm")
 
+pytestmark = [
+    pytest.mark.kvbm,
+    pytest.mark.vllm,
+    pytest.mark.trtllm,
+]
+
 # Build list of available engines for parameterization
 AVAILABLE_ENGINES = []
 if HAS_VLLM:

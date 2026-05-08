@@ -234,6 +234,12 @@ filterwarnings = [
     # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
     # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
+    # requests emits this at import time when its pinned urllib3/chardet/charset_normalizer
+    # supported-version set drifts from what's installed. Cosmetic — library still works.
+    "ignore::requests.exceptions.RequestsDependencyWarning",
+    # Ignore all DeprecationWarnings — many come from third-party deps we don't control,
+    # and treating them as errors blocks pytest collection on Python version bumps.
+    "ignore::DeprecationWarning",
 ]
 
 
@@ -269,6 +275,7 @@ markers = [
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
     "none: marks tests that do not require a framework-specific runtime",
+    "core: marks tests that exercise core/runtime functionality (residual bucket — disjoint from multimodal/router/kvbm/planner)",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",

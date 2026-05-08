@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),

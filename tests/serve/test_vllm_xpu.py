@@ -58,6 +58,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -91,6 +92,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -122,6 +124,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -144,6 +147,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_multiproc_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -169,6 +173,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -191,6 +196,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -214,6 +220,7 @@ vllm_configs = {
         script_name="xpu/agg_router_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],
@@ -237,6 +244,7 @@ vllm_configs = {
         script_name="xpu/agg_router_approx_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
+            pytest.mark.router,
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],
@@ -272,6 +280,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_710_490_000
@@ -311,6 +320,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 922_354_000
@@ -348,6 +358,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 922_354_000
@@ -471,6 +482,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.pre_merge,
             pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
         ],  # TODO: profile to get max_vram
@@ -499,6 +511,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -525,6 +538,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -599,6 +613,7 @@ def test_serve_deployment(
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.nightly
@@ -655,6 +670,7 @@ def test_multimodal_b64(
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
@@ -752,6 +768,7 @@ def lora_chat_payload(
 
 
 @pytest.mark.vllm
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
@@ -808,6 +825,7 @@ def test_lora_aggregated(
 
 
 @pytest.mark.vllm
+@pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
