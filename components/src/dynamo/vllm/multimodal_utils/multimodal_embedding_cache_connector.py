@@ -192,6 +192,100 @@ class _PartitionAllocator:
                 self._free_regions.pop(lo)
 
 
+class _GpuPoolAllocator:
+    """Pre-allocated GPU buffer with a first-fit free list over byte offsets.
+
+    `alloc(nbytes)` returns a contiguous byte offset; the connector then
+    narrows the backing buffer into a per-group slab. `free(offset, nbytes)`
+    returns the slab to the free list and coalesces with adjacent runs.
+
+    Lifetime is owned externally by the connector — see `_PoolGroup`. The
+    pool slab is freed only when ALL `mm_hash` views from the original
+    coalesced load group have dropped out of vLLM's `encoder_cache` dict
+    (per-group lifetime, not per-hash). The buffer is allocated once at
+    `_setup_worker` time, sized at 2x vLLM's encoder-cache token budget
+    so chunked-prefill workloads have headroom.
+    """
+
+    def __init__(self, pool_bytes: int, device: torch.device) -> None:
+        self._buffer: torch.Tensor = torch.empty(
+            pool_bytes, dtype=torch.uint8, device=device
+        )
+        self._capacity: int = pool_bytes
+        self._free_regions: list[tuple[int, int]] = (
+            [(0, pool_bytes)] if pool_bytes > 0 else []
+        )
+
+    @property
+    def buffer(self) -> torch.Tensor:
+        return self._buffer
+
+    @property
+    def capacity_bytes(self) -> int:
+        return self._capacity
+
+    def alloc(self, nbytes: int) -> int | None:
+        for i, (off, length) in enumerate(self._free_regions):
+            if length >= nbytes:
+                if length == nbytes:
+                    self._free_regions.pop(i)
+                else:
+                    self._free_regions[i] = (off + nbytes, length - nbytes)
+                return off
+        return None
+
+    def free(self, offset: int, nbytes: int) -> None:
+        lo, hi = 0, len(self._free_regions)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._free_regions[mid][0] < offset:
+                lo = mid + 1
+            else:
+                hi = mid
+        self._free_regions.insert(lo, (offset, nbytes))
+        if lo + 1 < len(self._free_regions):
+            a_off, a_len = self._free_regions[lo]
+            b_off, b_len = self._free_regions[lo + 1]
+            if a_off + a_len == b_off:
+                self._free_regions[lo] = (a_off, a_len + b_len)
+                self._free_regions.pop(lo + 1)
+        if lo > 0:
+            a_off, a_len = self._free_regions[lo - 1]
+            b_off, b_len = self._free_regions[lo]
+            if a_off + a_len == b_off:
+                self._free_regions[lo - 1] = (a_off, a_len + b_len)
+                self._free_regions.pop(lo)
+
+    def stats(self) -> tuple[int, int, int, int]:
+        """Returns (alive_bytes, free_bytes, free_runs, largest_free_bytes).
+
+        `largest_free` distinguishes fragmentation-OOM (large `free_bytes`,
+        small `largest_free`) from true capacity exhaustion in the warn log.
+        """
+        free_bytes = 0
+        largest = 0
+        for _, length in self._free_regions:
+            free_bytes += length
+            if length > largest:
+                largest = length
+        return self._capacity - free_bytes, free_bytes, len(self._free_regions), largest
+
+
+@dataclass(slots=True)
+class _PoolGroup:
+    """One pre-allocated pool slab backing a coalesced H2D group.
+
+    `nbytes` is the H2D-coalesced span (PR #9304's `group_total`); `hashes`
+    holds every `_LoadCmd.mm_hash` whose view shares this slab. The slab
+    is returned to `_GpuPoolAllocator` only when ALL hashes have left
+    `encoder_cache` — per-hash freeing would invalidate sibling views.
+    """
+
+    offset: int
+    nbytes: int
+    hashes: set[str]
+
+
 # ---------------------------------------------------------------------------
 # Connector
 # ---------------------------------------------------------------------------
@@ -277,6 +371,38 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         # bytes-per-embed; partitions further round to be a multiple of it.
         self._capacity_bytes -= self._capacity_bytes % self._bytes_per_embed
 
+        # Worker-side GPU pool sizing — 2x vLLM's encoder-cache token
+        # budget. Mirrors `max_num_batched_tokens` (the underlying knob
+        # vLLM derives `encoder_cache_size` from) rather than introducing
+        # a new CLI flag. The 2x headroom absorbs chunked-prefill cases
+        # where an encoder_cache entry survives across steps while new
+        # entries are loaded. `_pool_disabled_reason` makes a 0-byte pool
+        # operator-visible at the init banner.
+        self._pool_size_bytes: int
+        self._pool_disabled_reason: str
+        sched_cfg = getattr(vllm_config, "scheduler_config", None)
+        if sched_cfg is None:
+            self._pool_size_bytes = 0
+            self._pool_disabled_reason = "scheduler_config_missing"
+        elif self._bytes_per_embed <= 0:
+            self._pool_size_bytes = 0
+            self._pool_disabled_reason = "bytes_per_embed_zero"
+        else:
+            max_batched = getattr(sched_cfg, "max_num_batched_tokens", 0)
+            try:
+                max_batched_int = int(max_batched)
+            except (TypeError, ValueError):
+                max_batched_int = -1
+            if max_batched_int < 0:
+                self._pool_size_bytes = 0
+                self._pool_disabled_reason = "max_num_batched_tokens_non_numeric"
+            elif max_batched_int == 0:
+                self._pool_size_bytes = 0
+                self._pool_disabled_reason = "max_num_batched_tokens_zero"
+            else:
+                self._pool_size_bytes = 2 * max_batched_int * self._bytes_per_embed
+                self._pool_disabled_reason = ""
+
         # Discover TP shape early; used for partition layout on both
         # scheduler and worker. The scheduler also needs world_size to
         # compute writer_rank consistently with the worker. We read it from
@@ -331,6 +457,24 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         # `writer_rank != _tp_rank` early-return in `save_caches`
         # remains the correctness boundary.
         self._save_cmd_by_hash: dict[str, _SaveCmd] = {}
+
+        # Pre-allocated worker-side GPU pool. `_gpu_pool` is populated
+        # lazily in `_setup_worker` (needs `_device`). `_pool_groups`
+        # tracks per-coalesced-H2D-group slab metadata (one entry per
+        # PR #9304-coalesced load group); `_hash_to_group` is the
+        # mm_hash → owning slab index for save-side / debug lookups.
+        # `_pool_oom_log_step` is the rate-limit cursor; init to
+        # -(_LOG_EVERY_N_STEPS + 1) so the first OOM always logs.
+        # `_pool_oom_count` is bumped before the rate-limit gate, so the
+        # periodic stats line reflects total OOMs even when the warn
+        # log is suppressed.
+        self._gpu_pool: _GpuPoolAllocator | None = None
+        self._pool_groups: list[_PoolGroup] = []
+        self._hash_to_group: dict[str, _PoolGroup] = {}
+        # Init to a value that guarantees the first OOM log fires
+        # regardless of `_mm_active_steps` starting at 0.
+        self._pool_oom_log_step: int = -(self._LOG_EVERY_N_STEPS + 1)
+        self._pool_oom_count: int = 0
 
         # Plan B activation gate: the model's LLM forward must be known
         # to issue a same-stream TP NCCL all-reduce after _execute_mm_encoder.
@@ -393,7 +537,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
             "role=%s tp_world_size=%d capacity_gb=%.6f capacity_bytes=%d "
-            "partition_bytes=%d bytes_per_embed=%d sync_mode=%s (%s)",
+            "partition_bytes=%d bytes_per_embed=%d sync_mode=%s (%s) "
+            "gpu_pool_bytes=%d pool_disabled_reason=%s",
             role.name,
             self._tp_world_size,
             capacity_gb,
@@ -402,6 +547,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             self._bytes_per_embed,
             "PlanB" if self._nccl_fence_active else "PlanA",
             self._fence_reason,
+            self._pool_size_bytes,
+            self._pool_disabled_reason or "none",
         )
 
     @staticmethod
@@ -661,14 +808,34 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._device = torch.device(f"cuda:{device_idx}")
         self._save_stream = torch.cuda.Stream(device=self._device)
 
+        # Allocate the per-rank pre-allocated GPU pool. Skipped when
+        # sizing was 0 — `start_load_caches` falls through to the
+        # caching-allocator path verbatim. Emit a warning when disabled
+        # so an operator catches missing scheduler_config / config-shape
+        # drift before nsys shows the regression.
+        if self._pool_size_bytes > 0:
+            self._gpu_pool = _GpuPoolAllocator(
+                pool_bytes=self._pool_size_bytes, device=self._device
+            )
+        else:
+            logger.warning(
+                "EC GPU pool DISABLED: rank=%d/%d reason=%s; load path will "
+                "use the PyTorch caching allocator (per-step cudaMallocAsync)",
+                self._tp_rank,
+                self._tp_world_size,
+                self._pool_disabled_reason,
+            )
+
         self._worker_initialized = True
         logger.info(
-            "EC shared arena ready: rank=%d/%d shm=%s bytes=%d device=%s",
+            "EC shared arena ready: rank=%d/%d shm=%s bytes=%d device=%s "
+            "gpu_pool_bytes=%d",
             self._tp_rank,
             self._tp_world_size,
             shm_name,
             self._capacity_bytes,
             self._device,
+            self._gpu_pool.capacity_bytes if self._gpu_pool is not None else 0,
         )
 
     def _on_step_begin(self) -> None:
@@ -691,18 +858,33 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     def _maybe_log_distribution(self) -> None:
         """Periodic per-rank counter dump. Cheap (one int compare) on
         every-other step; logs once per _LOG_EVERY_N_STEPS multimodal-
-        active steps. Lets an operator confirm saves spread across ranks."""
+        active steps. Lets an operator confirm saves spread across ranks
+        and validate pool steady-state (alive + free + fragmentation)."""
         self._mm_active_steps += 1
         if self._mm_active_steps % self._LOG_EVERY_N_STEPS != 0:
             return
+        if self._gpu_pool is not None:
+            p_alive, p_free, p_runs, p_largest = self._gpu_pool.stats()
+            pool_field = (
+                f" pool_alive_mb={p_alive / 1024 / 1024:.2f}"
+                f" pool_free_mb={p_free / 1024 / 1024:.2f}"
+                f" pool_largest_free_mb={p_largest / 1024 / 1024:.2f}"
+                f" pool_free_runs={p_runs}"
+                f" pool_groups={len(self._pool_groups)}"
+                f" pool_oom_count={self._pool_oom_count}"
+            )
+        else:
+            pool_field = " pool=disabled"
         logger.info(
-            "ec_connector stats: rank=%d/%d step=%d saves_issued=%d loads_issued=%d sync_mode=%s",
+            "ec_connector stats: rank=%d/%d step=%d saves_issued=%d "
+            "loads_issued=%d sync_mode=%s%s",
             self._tp_rank,
             self._tp_world_size,
             self._mm_active_steps,
             self._saves_issued,
             self._loads_issued,
             "PlanB" if self._nccl_fence_active else "PlanA",
+            pool_field,
         )
 
     def start_load_caches(
@@ -710,6 +892,29 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     ) -> None:
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
+
+        # Pool alive sweep — runs BEFORE the empty-metadata early return
+        # so pool accounting doesn't go stale across MM-inactive steps.
+        # Per-group lifetime: a slab is freed only when ALL its hashes
+        # have dropped out of `encoder_cache`. The model runner pops
+        # entries from `encoder_cache` once the LLM forward consumes
+        # them — that's the alive-set source of truth.
+        if self._gpu_pool is not None and self._pool_groups:
+            survivors: list[_PoolGroup] = []
+            for grp in self._pool_groups:
+                dead = grp.hashes - encoder_cache.keys()
+                for h in dead:
+                    # Only clear the mapping if this group still owns h.
+                    # Defensive against duplicate-hash loads where a later
+                    # alloc may have remapped the hash to a newer group.
+                    if self._hash_to_group.get(h) is grp:
+                        self._hash_to_group.pop(h, None)
+                grp.hashes -= dead
+                if not grp.hashes:
+                    self._gpu_pool.free(grp.offset, grp.nbytes)
+                else:
+                    survivors.append(grp)
+            self._pool_groups = survivors
 
         if not (metadata.loads or metadata.saves or metadata.evicts):
             return
@@ -723,12 +928,20 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         # 5 imgs), the alternative is many small H2Ds. Sort by offset,
         # walk groups of contiguous cmds, issue one H2D per group, then
         # expose per-cmd tensors as PyTorch views into the packed
-        # allocation. The packed Storage is ref-counted by the views,
-        # and `record_stream(compute)` on each view tags that shared
-        # Storage, so the packed buffer lives until every view's
-        # compute consumption completes. Degrades cleanly to per-load
-        # H2D when no spans are contiguous (no regression vs prior).
-        pending = [c for c in metadata.loads if c.mm_hash not in encoder_cache]
+        # allocation. With a pre-allocated GPU pool the destination is
+        # a slab from the pool (no per-step `cudaMallocAsync`). Pool-OOM
+        # falls back to PR #9304's `.to(...)` path so the coalescing
+        # win is preserved even when the pool can't serve the group.
+        # De-duplicate by mm_hash (defensive against pathological
+        # metadata): the first occurrence wins, so a single slab backs
+        # the hash and `_pool_groups` accounting stays unique.
+        seen_hashes: set[str] = set()
+        pending: list[_LoadCmd] = []
+        for cmd in metadata.loads:
+            if cmd.mm_hash in encoder_cache or cmd.mm_hash in seen_hashes:
+                continue
+            seen_hashes.add(cmd.mm_hash)
+            pending.append(cmd)
         pending.sort(key=lambda c: c.offset)
         i, n = 0, len(pending)
         while i < n:
@@ -744,7 +957,27 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             group_start = group[0].offset
             group_total = group[-1].offset + group[-1].nbytes - group_start
             cpu_uint8 = self._arena_uint8.narrow(0, group_start, group_total)
-            packed = cpu_uint8.to(device=compute.device, non_blocking=True)
+
+            pool_offset: int | None = None
+            if self._gpu_pool is not None:
+                pool_offset = self._gpu_pool.alloc(group_total)
+                if pool_offset is None:
+                    self._maybe_log_pool_oom(group_total)
+
+            if pool_offset is not None:
+                packed = self._gpu_pool.buffer.narrow(0, pool_offset, group_total)
+                packed.copy_(cpu_uint8, non_blocking=True)
+                grp = _PoolGroup(
+                    offset=pool_offset,
+                    nbytes=group_total,
+                    hashes={c.mm_hash for c in group},
+                )
+                self._pool_groups.append(grp)
+                for c in group:
+                    self._hash_to_group[c.mm_hash] = grp
+            else:
+                # Fallback: PR #9304's group-packed cudaMallocAsync path.
+                packed = cpu_uint8.to(device=compute.device, non_blocking=True)
 
             for cmd in group:
                 rel = cmd.offset - group_start
@@ -753,9 +986,14 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                     .view(self._model_dtype)
                     .view(cmd.num_embeds, self._feature_dim)
                 )
-                # Tag the underlying packed Storage so the caching
-                # allocator keeps it alive until compute drains; vLLM
-                # may pop encoder_cache[h] before that point.
+                # `record_stream(compute)` is correctness-critical for
+                # the FALLBACK packed allocation: the caching allocator
+                # may recycle the storage as soon as `encoder_cache.pop(h)`
+                # drops the last ref. For pool-backed views, backing
+                # storage is held by `_GpuPoolAllocator._buffer` and
+                # suballocation lifetime is enforced by `_pool_groups`,
+                # so this call is harmless. Single-path code keeps the
+                # diff minimal.
                 view.record_stream(compute)
                 encoder_cache[cmd.mm_hash] = view
                 self._loads_issued += 1
@@ -763,9 +1001,38 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             i = j
 
         # Evict commands carry no worker-side state to clean up — the
-        # scheduler-side allocator owns slot lifetime.
+        # scheduler-side allocator owns host-arena slot lifetime; pool
+        # slabs are freed by the alive sweep at the next step's entry.
 
         self._maybe_log_distribution()
+
+    def _maybe_log_pool_oom(self, needed_bytes: int) -> None:
+        """Rate-limited warn on pool exhaustion.
+
+        Bumps `_pool_oom_count` BEFORE the rate-limit gate so the
+        periodic `ec_connector stats:` line reflects total OOMs even
+        when the warn log is suppressed.
+        """
+        self._pool_oom_count += 1
+        if (self._mm_active_steps - self._pool_oom_log_step) < self._LOG_EVERY_N_STEPS:
+            return
+        self._pool_oom_log_step = self._mm_active_steps
+        if self._gpu_pool is None:
+            return
+        alive, free, runs, largest = self._gpu_pool.stats()
+        logger.warning(
+            "ec_connector pool exhausted rank=%d/%d step=%d need=%d B "
+            "alive=%d B free=%d B free_runs=%d largest_free=%d B; "
+            "falling back to caching allocator",
+            self._tp_rank,
+            self._tp_world_size,
+            self._mm_active_steps,
+            needed_bytes,
+            alive,
+            free,
+            runs,
+            largest,
+        )
 
     def save_caches(
         self, encoder_cache: dict[str, torch.Tensor], mm_hash: str, **kwargs

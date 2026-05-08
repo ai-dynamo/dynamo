@@ -158,9 +158,14 @@ def _make_worker_connector(
     feature_dim: int = 4,
     arena_bytes: int = 4096,
     fence_active: bool = True,
+    pool_bytes: int = 0,
 ) -> mod.DynamoMultimodalEmbeddingCacheConnector:
     """Build a connector with worker-side state ready for load/save calls,
-    bypassing _setup_worker (which would touch shm + CUDA)."""
+    bypassing _setup_worker (which would touch shm + CUDA).
+
+    Pass `pool_bytes>0` to inject a CPU-backed `_GpuPoolAllocator` so the
+    pool path can be exercised without a GPU.
+    """
     with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
         conn = mod.DynamoMultimodalEmbeddingCacheConnector(
             vllm_config=_make_vllm_config(),
@@ -179,6 +184,10 @@ def _make_worker_connector(
     pattern = (torch.arange(arena_bytes, dtype=torch.long) % 256).to(torch.uint8)
     conn._arena_uint8 = pattern.contiguous()
     conn._connector_metadata = None
+    if pool_bytes > 0:
+        conn._gpu_pool = mod._GpuPoolAllocator(pool_bytes, torch.device("cpu"))
+        conn._pool_groups = []
+        conn._hash_to_group = {}
     return conn
 
 
@@ -766,3 +775,267 @@ class TestPlanBSingleEvent:
         assert conn._save_pending_this_step is False
         # Plan A still must increment the per-rank save counter.
         assert conn._saves_issued == 1
+
+
+# ---------------------------------------------------------------------------
+# GPU pool: allocator unit tests + pool-path integration tests on CPU buffer.
+# ---------------------------------------------------------------------------
+
+
+class TestGpuPoolAllocator:
+    def test_alloc_first_fit(self):
+        a = mod._GpuPoolAllocator(1024, torch.device("cpu"))
+        assert a.alloc(100) == 0
+        assert a.alloc(200) == 100
+        # Free the middle, re-alloc smaller fits the hole, larger goes to tail.
+        a.free(0, 100)
+        assert a.alloc(50) == 0
+        assert a.alloc(300) == 300
+
+    def test_alloc_returns_none_when_full(self):
+        a = mod._GpuPoolAllocator(128, torch.device("cpu"))
+        assert a.alloc(100) == 0
+        # Remaining = 28 bytes; a 50-byte alloc must fail.
+        assert a.alloc(50) is None
+        # Exact-fit succeeds.
+        assert a.alloc(28) == 100
+
+    def test_free_coalesces_neighbors(self):
+        a = mod._GpuPoolAllocator(300, torch.device("cpu"))
+        off_a = a.alloc(100)
+        off_b = a.alloc(100)
+        off_c = a.alloc(100)
+        assert (off_a, off_b, off_c) == (0, 100, 200)
+        # Free out of order; b in middle bridges a & c on the free list.
+        a.free(off_a, 100)
+        a.free(off_c, 100)
+        a.free(off_b, 100)
+        # All three runs should have coalesced back into a single free run.
+        alive, free, runs, largest = a.stats()
+        assert alive == 0
+        assert free == 300
+        assert runs == 1
+        assert largest == 300
+
+    def test_stats_largest_free(self):
+        a = mod._GpuPoolAllocator(1000, torch.device("cpu"))
+        # Cause fragmentation: 100, 100, 100, 100; free middle two.
+        offs = [a.alloc(100) for _ in range(4)]
+        a.free(offs[1], 100)
+        a.free(offs[3], 100)
+        # Free runs: [100..200), [300..400), [400..1000) — last two coalesce
+        # → 2 runs of sizes 100 and 700. With trailing free 600 already
+        # in the list, [400..1000) merged → run of 700.
+        alive, free, runs, largest = a.stats()
+        assert alive == 200
+        assert free == 800
+        assert runs == 2
+        assert largest == 700
+
+
+def _make_metadata_loads(
+    *pairs: tuple[str, int]
+) -> mod.MultimodalEmbeddingCacheConnectorMetadata:
+    return mod.MultimodalEmbeddingCacheConnectorMetadata(
+        loads=[
+            mod._LoadCmd(mm_hash=h, offset=off, nbytes=_NB, num_embeds=_NE)
+            for h, off in pairs
+        ]
+    )
+
+
+class TestStartLoadCachesPoolPath:
+    """Worker-side load path with `_gpu_pool` injected on CPU."""
+
+    def test_pool_used_when_available_skips_torch_to(self, monkeypatch):
+        conn = _make_worker_connector(pool_bytes=1024)
+        meta = _make_metadata_loads(("a", 0), ("b", _NB), ("c", 2 * _NB))
+        cache: dict[str, torch.Tensor] = {}
+        tracker = _start_load(monkeypatch, conn, meta, cache)
+        # Pool serves the group → no Tensor.to call.
+        assert tracker.to_calls == []
+        assert set(cache) == {"a", "b", "c"}
+        # One slab, three hashes alive.
+        assert len(conn._pool_groups) == 1
+        assert conn._pool_groups[0].hashes == {"a", "b", "c"}
+        assert conn._pool_groups[0].nbytes == 3 * _NB
+        # Storage shared with pool buffer.
+        for h in ("a", "b", "c"):
+            assert (
+                cache[h].untyped_storage().data_ptr()
+                == conn._gpu_pool.buffer.untyped_storage().data_ptr()
+            )
+
+    def test_two_groups_distinct_slabs(self, monkeypatch):
+        conn = _make_worker_connector(pool_bytes=1024)
+        # Gap between offsets → two coalesced groups.
+        meta = _make_metadata_loads(("a", 0), ("b", _NB), ("c", 256), ("d", 256 + _NB))
+        cache: dict[str, torch.Tensor] = {}
+        _start_load(monkeypatch, conn, meta, cache)
+        assert len(conn._pool_groups) == 2
+        offsets = sorted(grp.offset for grp in conn._pool_groups)
+        # Two contiguous slabs from the pool's free list, each 64 B.
+        assert offsets == [0, 2 * _NB]
+        assert all(grp.nbytes == 2 * _NB for grp in conn._pool_groups)
+
+    def test_alive_sweep_frees_evicted_group(self, monkeypatch):
+        conn = _make_worker_connector(pool_bytes=1024)
+        meta1 = _make_metadata_loads(("a", 0), ("b", _NB))
+        cache: dict[str, torch.Tensor] = {}
+        _start_load(monkeypatch, conn, meta1, cache)
+        assert len(conn._pool_groups) == 1
+
+        # vLLM evicts both hashes from encoder_cache.
+        cache.clear()
+        # Step 2: empty metadata, sweep runs first and frees the slab.
+        empty_meta = mod.MultimodalEmbeddingCacheConnectorMetadata()
+        _start_load(monkeypatch, conn, empty_meta, cache)
+        assert conn._pool_groups == []
+        assert conn._hash_to_group == {}
+        # Pool should be fully free again.
+        alive, free, _, _ = conn._gpu_pool.stats()
+        assert alive == 0
+        assert free == conn._gpu_pool.capacity_bytes
+
+    def test_partial_eviction_keeps_group(self, monkeypatch):
+        conn = _make_worker_connector(pool_bytes=1024)
+        meta1 = _make_metadata_loads(("a", 0), ("b", _NB))
+        cache: dict[str, torch.Tensor] = {}
+        _start_load(monkeypatch, conn, meta1, cache)
+        # vLLM consumes A but not B.
+        del cache["a"]
+        assert "b" in cache
+
+        empty_meta = mod.MultimodalEmbeddingCacheConnectorMetadata()
+        _start_load(monkeypatch, conn, empty_meta, cache)
+        # Slab survives because B is still alive.
+        assert len(conn._pool_groups) == 1
+        assert conn._pool_groups[0].hashes == {"b"}
+        assert "a" not in conn._hash_to_group
+        assert conn._hash_to_group["b"] is conn._pool_groups[0]
+
+    def test_chunked_prefill_keeps_slot(self, monkeypatch):
+        conn = _make_worker_connector(pool_bytes=1024)
+        meta1 = _make_metadata_loads(("a", 0))
+        cache: dict[str, torch.Tensor] = {}
+        _start_load(monkeypatch, conn, meta1, cache)
+        # A still in cache (chunked prefill not yet consumed).
+        assert "a" in cache
+        empty_meta = mod.MultimodalEmbeddingCacheConnectorMetadata()
+        _start_load(monkeypatch, conn, empty_meta, cache)
+        # Slab not freed.
+        assert len(conn._pool_groups) == 1
+        assert conn._pool_groups[0].hashes == {"a"}
+
+    def test_pool_oom_falls_back_to_packed_h2d(self, monkeypatch):
+        # Pool too small for a single 2-cmd group (64 B); first group succeeds,
+        # second group hits fallback.
+        conn = _make_worker_connector(pool_bytes=2 * _NB)
+        meta = _make_metadata_loads(
+            ("a", 0),
+            ("b", _NB),  # group 1 fills pool exactly
+            ("c", 256),
+            ("d", 256 + _NB),  # group 2 → OOM → fallback
+        )
+        cache: dict[str, torch.Tensor] = {}
+        with patch.object(mod.logger, "warning") as warn:
+            tracker = _start_load(monkeypatch, conn, meta, cache)
+        # Only group 2 hits Tensor.to (the fallback path).
+        assert len(tracker.to_calls) == 1
+        # Both groups landed in the encoder cache.
+        assert set(cache) == {"a", "b", "c", "d"}
+        # Pool tracks only group 1.
+        assert len(conn._pool_groups) == 1
+        assert conn._pool_groups[0].hashes == {"a", "b"}
+        # First OOM always logs.
+        assert warn.call_count == 1
+        assert conn._pool_oom_count == 1
+
+    def test_pool_oom_count_increments_under_rate_limit(self, monkeypatch):
+        # Force two OOMs in the same 100-step window — count bumps both
+        # times, warn fires only once.
+        conn = _make_worker_connector(pool_bytes=_NB)  # holds 1 cmd only
+        meta_oom1 = _make_metadata_loads(("a", 0), ("b", _NB))
+        meta_oom2 = _make_metadata_loads(("c", 256), ("d", 256 + _NB))
+        cache: dict[str, torch.Tensor] = {}
+        with patch.object(mod.logger, "warning") as warn:
+            _start_load(monkeypatch, conn, meta_oom1, cache)
+            _start_load(monkeypatch, conn, meta_oom2, cache)
+        assert conn._pool_oom_count == 2
+        assert warn.call_count == 1  # second log gated
+
+    def test_duplicate_mm_hash_loads_dedup(self, monkeypatch):
+        conn = _make_worker_connector(pool_bytes=1024)
+        # Same hash listed twice → second occurrence is filtered.
+        meta = _make_metadata_loads(("a", 0), ("a", 0), ("b", _NB))
+        cache: dict[str, torch.Tensor] = {}
+        _start_load(monkeypatch, conn, meta, cache)
+        assert len(conn._pool_groups) == 1
+        assert conn._pool_groups[0].hashes == {"a", "b"}
+        # Slab nbytes equals the deduped group total (a + b = 2 cmds).
+        assert conn._pool_groups[0].nbytes == 2 * _NB
+
+    def test_pool_disabled_falls_through_unchanged(self, monkeypatch):
+        # Default fixture has `_gpu_pool=None` — existing fallback behavior.
+        conn = _make_worker_connector()
+        assert conn._gpu_pool is None
+        meta = _make_metadata_loads(("a", 0), ("b", _NB), ("c", 2 * _NB))
+        cache: dict[str, torch.Tensor] = {}
+        tracker = _start_load(monkeypatch, conn, meta, cache)
+        # Single coalesced fallback H2D, three views.
+        assert len(tracker.to_calls) == 1
+        assert set(cache) == {"a", "b", "c"}
+        # No pool state mutated.
+        assert conn._pool_groups == []
+        assert conn._hash_to_group == {}
+
+
+class TestPoolDisabledReason:
+    """Init-time pool sizing with pathological vllm_config shapes."""
+
+    def _make_with_config_shape(
+        self, **overrides
+    ) -> mod.DynamoMultimodalEmbeddingCacheConnector:
+        config = MagicMock()
+        config.ec_transfer_config.ec_connector_extra_config = {
+            "multimodal_embedding_cache_capacity_gb": 1.0,
+        }
+        config.model_config.get_hidden_size.return_value = 4096
+        config.model_config.dtype = torch.float16
+        # Allow tests to override scheduler_config / max_num_batched_tokens.
+        for k, v in overrides.items():
+            cur = config
+            *path, last = k.split(".")
+            for p in path:
+                cur = getattr(cur, p)
+            setattr(cur, last, v)
+        with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
+            return mod.DynamoMultimodalEmbeddingCacheConnector(
+                vllm_config=config, role=MagicMock()
+            )
+
+    def test_missing_scheduler_config(self):
+        conn = self._make_with_config_shape(**{"scheduler_config": None})
+        assert conn._pool_size_bytes == 0
+        assert conn._pool_disabled_reason == "scheduler_config_missing"
+
+    def test_zero_max_num_batched_tokens(self):
+        conn = self._make_with_config_shape(
+            **{"scheduler_config.max_num_batched_tokens": 0}
+        )
+        assert conn._pool_size_bytes == 0
+        assert conn._pool_disabled_reason == "max_num_batched_tokens_zero"
+
+    def test_non_numeric_max_num_batched_tokens(self):
+        conn = self._make_with_config_shape(
+            **{"scheduler_config.max_num_batched_tokens": "abc"}
+        )
+        assert conn._pool_size_bytes == 0
+        assert conn._pool_disabled_reason == "max_num_batched_tokens_non_numeric"
+
+    def test_positive_max_num_batched_tokens(self):
+        conn = self._make_with_config_shape(
+            **{"scheduler_config.max_num_batched_tokens": 1024}
+        )
+        assert conn._pool_size_bytes == 2 * 1024 * conn._bytes_per_embed
+        assert conn._pool_disabled_reason == ""
