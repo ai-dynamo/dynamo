@@ -1,4 +1,4 @@
-name: 'Pytest'
+﻿name: 'Pytest'
 description: 'Run pytest on pre-built container images'
 inputs:
   pytest_marks:
@@ -51,6 +51,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  device:
+    description: 'Target device (cuda, xpu, cpu)'
+    required: false
+    default: 'cuda'
 
 runs:
   using: "composite"
@@ -222,14 +226,21 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          # Detect GPU availability and conditionally add GPU flags
+          # Set device-specific docker flags
           GPU_FLAGS=""
-          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
-          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+          DOCKER_EXTRA_FLAGS=()
+          if [[ "${{ inputs.device }}" == "xpu" ]]; then
+            echo "✓ XPU device specified, enabling /dev/dri device flags"
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            PYTEST_TIMEOUT_OPT="--timeout=600"
+          elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
+            PYTEST_TIMEOUT_OPT=""
           else
-            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            echo "⚠️  No GPU detected, running in CPU-only mode"
+            PYTEST_TIMEOUT_OPT=""
           fi
 
           # Determine parallelization based on parallel_mode input
@@ -283,7 +294,9 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+        docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
+          "${DOCKER_EXTRA_FLAGS[@]}" \
+          --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \

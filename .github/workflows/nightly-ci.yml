@@ -317,6 +317,20 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # XPU TEST JOBS
+  # ============================================================================
+
+  vllm-test-xpu:
+    name: vllm-xpu
+    needs: [resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/xpu-ci.yaml
+    with:
+      framework: vllm
+      pytest_markers: 'vllm and xpu_1 and not multimodal'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+  # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
   dynamo-pipeline:
