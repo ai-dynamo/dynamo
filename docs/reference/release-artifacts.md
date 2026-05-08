@@ -179,7 +179,7 @@ For backend version pins, see the version-pins table above and the [GitHub Relea
 
 **Stable Releases**
 
-- **v1.1.0**: **Images:** Split Planner into its own `dynamo-planner` image on NGC for Profiler jobs and Planner pods; worker and runtime images no longer bundle Planner (**artifact boundary change**, not a new engine capability). **Crates:** First publication on crates.io of **`dynamo-protocols`** (multi-protocol types; replaces **`dynamo-async-openai`**, deprecated — last release **`1.0.2`**).
+- **v1.1.0**: **Images:** Split Planner into its own `dynamo-planner` image on NGC for Profiler jobs and Planner pods; worker and runtime images no longer bundle Planner (**artifact boundary change**, not a new engine capability). **Crates:** First **`1.y.z`** publication on crates.io for **`dynamo-protocols`** (multi-protocol types; **`dynamo-async-openai`** remains deprecated with final release **`1.0.2`**).
 - **v1.0.2 / v1.0.1**: No artifact additions or removals versus v1.0.0.
 - **v1.0.0**: **Images:** `snapshot-agent`, EFA variants for vLLM and TRT-LLM (AMD64 only). **Crates:** First publish of `dynamo-mocker`, `dynamo-kv-router`. **Helm:** Added `snapshot` (preview); dropped deprecated `dynamo-crds` from the publish stream (CRDs owned by the Operator).
 - **v0.9.1**: No artifact additions or removals versus v0.9.0.
@@ -551,20 +551,11 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 #### dynamo-protocols (crate)
 
+On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable release (placeholder reservation **`0.0.0-prerelease.0`** omitted here like other **`0.0.0-prerelease.*`** uploads). Earlier semver lines for the OpenAI-compatible client shipped under **`dynamo-async-openai`** — see **`#### dynamo-async-openai (crate)`** below.
+
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
 | `dynamo-protocols@1.1.0` | `v1.82` | |
-| `dynamo-protocols@1.0.2` | `v1.82` | |
-| `dynamo-protocols@1.0.1` | `v1.82` | |
-| `dynamo-protocols@1.0.0` | `v1.82` | |
-| `dynamo-protocols@0.9.1` | `v1.82` | |
-| `dynamo-protocols@0.9.0` | `v1.82` | |
-| `dynamo-protocols@0.8.1` | `v1.82` | |
-| `dynamo-protocols@0.8.0` | `v1.82` | |
-| `dynamo-protocols@0.7.1` | `v1.82` | |
-| `dynamo-protocols@0.7.0` | `v1.82` | |
-| `dynamo-protocols@0.6.1` | `v1.82` | |
-| `dynamo-protocols@0.6.0` | `v1.82` | |
 
 #### dynamo-async-openai (crate)
 
