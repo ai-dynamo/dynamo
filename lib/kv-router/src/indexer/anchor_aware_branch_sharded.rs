@@ -387,6 +387,34 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         }
     }
 
+    fn remove_worker_anchor_entries(&self, worker: WorkerWithDpRank) {
+        let keys: Vec<_> = self
+            .installed_worker_anchors
+            .iter()
+            .filter_map(|entry| {
+                let key = *entry.key();
+                (key.1 == worker).then_some(key)
+            })
+            .collect();
+        for key in keys {
+            self.installed_worker_anchors.remove(&key);
+        }
+    }
+
+    fn tracked_workers_for_worker_id(&self, worker_id: WorkerId) -> FxHashSet<WorkerWithDpRank> {
+        let mut workers: FxHashSet<_> = self
+            .worker_block_index
+            .iter()
+            .filter(|entry| entry.key().worker_id == worker_id)
+            .map(|entry| *entry.key())
+            .collect();
+        workers.extend(self.installed_worker_anchors.iter().filter_map(|entry| {
+            let worker = entry.key().1;
+            (worker.worker_id == worker_id).then_some(worker)
+        }));
+        workers
+    }
+
     fn rewritten_store_event(
         &self,
         mut event: RouterEvent,
@@ -409,6 +437,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
     }
 
     fn remove_worker_entries(&self, worker: WorkerWithDpRank) {
+        self.remove_worker_anchor_entries(worker);
         let Some((_, lookup)) = self.worker_block_index.remove(&worker) else {
             return;
         };
@@ -715,13 +744,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
             KvCacheEventData::Removed(_) => self.apply_removed(event).await,
             KvCacheEventData::Cleared => {
                 let worker_id = event.worker_id;
-                let workers: Vec<_> = self
-                    .worker_block_index
-                    .iter()
-                    .filter(|entry| entry.key().worker_id == worker_id)
-                    .map(|entry| *entry.key())
-                    .collect();
-                for worker in workers {
+                for worker in self.tracked_workers_for_worker_id(worker_id) {
                     self.remove_worker_entries(worker);
                 }
                 for shard in &self.shards {
@@ -732,13 +755,7 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        let workers: Vec<_> = self
-            .worker_block_index
-            .iter()
-            .filter(|entry| entry.key().worker_id == worker_id)
-            .map(|entry| *entry.key())
-            .collect();
-        for worker in workers {
+        for worker in self.tracked_workers_for_worker_id(worker_id) {
             self.remove_worker_entries(worker);
         }
         for shard in &self.shards {
@@ -979,6 +996,31 @@ mod tests {
 
     fn score(scores: &OverlapScores, worker: WorkerWithDpRank) -> Option<u32> {
         scores.scores.get(&worker).copied()
+    }
+
+    fn has_anchor_for_worker(
+        index: &AnchorAwareBranchShardedIndexer<ConcurrentRadixTreeCompressed>,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        index
+            .installed_worker_anchors
+            .iter()
+            .any(|entry| entry.key().1 == worker)
+    }
+
+    async fn normalized_scores(
+        index: &AnchorAwareBranchShardedIndexer<ConcurrentRadixTreeCompressed>,
+        query: &[u64],
+    ) -> Vec<(WorkerWithDpRank, u32)> {
+        let mut scores: Vec<_> = index
+            .find_matches(local_hashes(query))
+            .await
+            .unwrap()
+            .scores
+            .into_iter()
+            .collect();
+        scores.sort_by_key(|(worker, score)| (worker.worker_id, worker.dp_rank, *score));
+        scores
     }
 
     #[tokio::test]
@@ -1442,5 +1484,84 @@ mod tests {
         index.apply_event(clear_event(0)).await;
         let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
         assert!(after_clear.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_installed_worker_anchors_for_returning_worker() {
+        let index = make_indexer(2, 3);
+        let dp0 = WorkerWithDpRank::new(0, 0);
+        let dp1 = WorkerWithDpRank::new(0, 1);
+
+        index
+            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))
+            .await;
+        index
+            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 5, 6]))
+            .await;
+        index.flush().await;
+
+        assert!(has_anchor_for_worker(&index, dp0));
+        assert!(has_anchor_for_worker(&index, dp1));
+
+        index.remove_worker_dp_rank(0, 0).await;
+        assert!(!has_anchor_for_worker(&index, dp0));
+        assert!(has_anchor_for_worker(&index, dp1));
+
+        index.apply_event(clear_event(0)).await;
+        assert!(!has_anchor_for_worker(&index, dp0));
+        assert!(!has_anchor_for_worker(&index, dp1));
+
+        index
+            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))
+            .await;
+        index.flush().await;
+
+        assert!(has_anchor_for_worker(&index, dp0));
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 3, 4]))
+            .await
+            .unwrap();
+        assert_eq!(score(&scores, dp0), Some(4));
+    }
+
+    #[tokio::test]
+    async fn dump_replay_preserves_query_scores() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+        index.apply_event(store_event(2, &[7, 8])).await;
+        index
+            .apply_event(remove_hash_event(1, 0, &[1, 2, 5, 6], 3))
+            .await;
+        index.flush().await;
+
+        let queries = [
+            &[1, 2, 3, 4][..],
+            &[1, 2, 5, 6],
+            &[1, 2, 9],
+            &[7, 8],
+            &[7, 8, 9],
+        ];
+        let mut expected = Vec::with_capacity(queries.len());
+        for query in &queries {
+            expected.push(normalized_scores(&index, query).await);
+        }
+
+        let dumped = index.dump_events().await.unwrap();
+        assert!(!dumped.is_empty());
+
+        let restored = make_indexer(2, 3);
+        for event in dumped {
+            restored.apply_event(event).await;
+        }
+        restored.flush().await;
+
+        for (query, expected_scores) in queries.iter().zip(expected.iter()) {
+            assert_eq!(
+                normalized_scores(&restored, query).await,
+                *expected_scores,
+                "dump replay changed scores for query {query:?}"
+            );
+        }
     }
 }
