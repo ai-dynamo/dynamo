@@ -27,6 +27,11 @@ from tests.serve.test_trtllm import trtllm_configs
 from tests.serve.test_vllm import vllm_configs
 from tests.utils.engine_process import EngineProcess
 
+
+def _is_cuda13() -> bool:
+    v = os.environ.get("CUDA_VERSION", "")
+    return v.startswith("13")
+
 logger = logging.getLogger(__name__)
 
 PAUSE_DETECT_BUDGET_S = 45
@@ -56,6 +61,20 @@ class RankPauseScenario:
 
 def _scenarios_for(backend: str) -> list:
     mark = getattr(pytest.mark, backend)
+
+    # sglang disagg workers use torch-memory-saver which preloads a .so that
+    # links libcudart.so.12.  That library doesn't exist in CUDA 13 images, so
+    # the scheduler subprocess dies with exit-code 127.  Skip these scenarios
+    # on CUDA 13 to match the skip already present in test_sglang.py configs.
+    disagg_marks: list = [mark]
+    if backend == "sglang":
+        disagg_marks.append(
+            pytest.mark.skipif(
+                _is_cuda13(),
+                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
+            )
+        )
+
     return [
         pytest.param(
             RankPauseScenario(f"{backend}-agg", backend, "aggregated", 0),
@@ -66,14 +85,14 @@ def _scenarios_for(backend: str) -> list:
             RankPauseScenario(
                 f"{backend}-disagg-prefill", backend, "disaggregated_same_gpu", 0
             ),
-            marks=mark,
+            marks=disagg_marks,
             id=f"{backend}-disagg-prefill",
         ),
         pytest.param(
             RankPauseScenario(
                 f"{backend}-disagg-decode", backend, "disaggregated_same_gpu", 1
             ),
-            marks=mark,
+            marks=disagg_marks,
             id=f"{backend}-disagg-decode",
         ),
     ]

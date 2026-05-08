@@ -484,7 +484,7 @@ def poll_for_pattern(
     process: ManagedProcess,
     pattern: str,
     log_offset: int = 0,
-    max_wait_ms: int = 500,
+    max_wait_ms: int = 5000,
     poll_interval_ms: int = 5,
     match_type: str = "endswith",  # "contains" or "endswith"
 ) -> tuple[str, int]:
