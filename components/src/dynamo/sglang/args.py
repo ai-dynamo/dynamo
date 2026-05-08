@@ -360,6 +360,7 @@ async def parse_args(args: list[str]) -> Config:
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
         server_args.load_format = None
+        server_args.enable_trace = getattr(parsed_args, "enable_trace", False)
         logging.info(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )

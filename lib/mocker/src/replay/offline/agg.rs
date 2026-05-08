@@ -17,7 +17,7 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+        ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
     },
     state::AggRequestState,
 };
@@ -257,7 +257,14 @@ impl AggRuntime {
         &mut self,
         admissions: Vec<WorkerAdmission>,
     ) -> anyhow::Result<()> {
-        for WorkerAdmission { uuid, worker_idx } in admissions {
+        for WorkerAdmission {
+            uuid,
+            worker_idx,
+            overlap_blocks,
+            isl_blocks,
+        } in admissions
+        {
+            self.traffic.on_admission(overlap_blocks, isl_blocks);
             let request = self
                 .requests
                 .get_mut(&uuid)
@@ -299,15 +306,14 @@ impl AggRuntime {
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
         }
-        let queued_request = request.clone();
-        self.requests
-            .insert(uuid, AggRequestState::new_queued(request));
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
-                .on_request_arrival(&queued_request, replay_hashes, self.now_ms)?
+                .on_request_arrival(&request, replay_hashes, self.now_ms)?
                 .admissions
         };
+        self.requests
+            .insert(uuid, AggRequestState::new_queued(request));
         self.record_router_pending();
         self.dispatch_router_admissions(admissions)?;
         self.record_in_flight_peak();
@@ -381,8 +387,12 @@ impl AggRuntime {
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            self.traffic
-                .on_request(removed_state.input_tokens, removed_state.output_tokens);
+            let latencies = self.collector.request_latencies(signal.uuid);
+            self.traffic.on_request(
+                removed_state.input_tokens,
+                removed_state.output_tokens,
+                latencies,
+            );
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -603,7 +613,7 @@ impl AggRuntime {
     }
 
     /// Drain accumulated traffic stats since the last drain.
-    pub(in crate::replay) fn drain_traffic(&mut self) -> (f64, usize, f64, f64) {
+    pub(in crate::replay) fn drain_traffic(&mut self) -> TrafficStats {
         self.traffic.drain(self.now_ms)
     }
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import logging
 from typing import Any, Protocol, Tuple
+from uuid import uuid4
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
@@ -512,7 +513,7 @@ class BaseConfigModifier:
         cfg = Config.model_validate(config)
 
         # Set metadata
-        cfg.metadata.name = f"{cls.BACKEND}-{mode}"
+        cfg.metadata.name = f"{cls.BACKEND}-{mode}-{uuid4().hex[:8]}"
         if namespace and hasattr(cfg.metadata, "namespace"):
             cfg.metadata.namespace = namespace
 
@@ -542,8 +543,10 @@ class BaseConfigModifier:
 
         # Update model (handles worker args + frontend patching)
         effective_model_path = model_path or model_name
-        if pvc_name and pvc_mount_path:
-            # Derive pvc_path from effective_model_path by stripping the mount prefix
+        if pvc_name and pvc_mount_path and model_path:
+            # pvcModelPath was explicitly provided — model weights live at a
+            # known path inside the PVC.  Let update_model_from_pvc handle
+            # volume mount + CLI patching.
             pvc_path = ""
             if effective_model_path and effective_model_path.startswith(pvc_mount_path):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
@@ -553,6 +556,17 @@ class BaseConfigModifier:
                 pvc_name=pvc_name,
                 pvc_mount_path=pvc_mount_path,
                 pvc_path=pvc_path,
+            )
+        elif pvc_name and pvc_mount_path:
+            # PVC configured as an HF cache directory (no explicit model path
+            # within it).  Mount the PVC so workers can find cached weights,
+            # but keep the HF model ID as the worker model argument.
+            cls._ensure_spec_pvc(cfg, pvc_name)
+            for _svc_name, svc in cfg.spec.services.items():
+                cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+            result = cls.update_model(
+                cfg.model_dump(),
+                model_name=model_name,
             )
         else:
             result = cls.update_model(
@@ -591,10 +605,11 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to a single worker service."""
         service.replicas = replicas
-        setup_worker_service_resources(service, gpus, num_gpus_per_node)
-
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
             service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
+
+        # Apply resources after args so multinode sizing can inspect final TP/PP flags.
+        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
     @classmethod
     def _apply_disagg_workers(

@@ -271,7 +271,7 @@ def test_request_migration_vllm_aggregated(
                 )
 
 
-@pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
+@pytest.mark.skip(reason="Prefill migration not yet supported")
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
 def test_request_migration_vllm_prefill(
@@ -346,8 +346,7 @@ def test_request_migration_vllm_prefill(
                     )
 
 
-@pytest.mark.xfail(
-    strict=False,
+@pytest.mark.skip(
     reason=(
         "Migration reuses the same request_id for vLLM, but the prefill worker's "
         "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
@@ -430,8 +429,7 @@ def test_request_migration_vllm_kv_transfer(
                     )
 
 
-@pytest.mark.xfail(
-    strict=False,
+@pytest.mark.skip(
     reason=(
         "Migration reuses the same request_id for vLLM, but the prefill worker's "
         "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "

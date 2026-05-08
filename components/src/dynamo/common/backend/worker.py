@@ -1,26 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Thin Python shim over ``dynamo._core.backend.Worker``.
+
+The lifecycle state machine, signal handling, discovery unregister,
+grace-period sleep, drain, cleanup, and 3-phase runtime shutdown all live
+in Rust (``dynamo_backend_common::Worker``). This module only:
+
+  * exposes the engine-author-friendly ``WorkerConfig`` dataclass with a
+    ``from_runtime_config`` helper, and
+  * drives the Rust ``Worker`` for a given ``LLMEngine`` instance.
+
+Engine semantics (``start``/``generate``/``abort``/``drain``/``cleanup``)
+remain the only thing engine authors implement.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-from dynamo._core import Context
-from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import ModelInput, ModelRuntimeConfig, register_model
-from dynamo.llm.exceptions import (
-    CannotConnect,
-    DynamoException,
-    EngineShutdown,
-    Unknown,
-)
+from dynamo._core import backend as _backend
+from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import GenerateChunk, GenerateRequest, LLMEngine
+from .engine import LLMEngine
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +43,14 @@ class WorkerConfig:
     endpoint_types: str = "chat,completions"
     discovery_backend: str = "etcd"
     request_plane: str = "tcp"
-    event_plane: str = "nats"
+    event_plane: Optional[str] = None
     use_kv_events: bool = False
     custom_jinja_template: Optional[str] = None
-    metrics_labels: list = field(default_factory=list)
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
+    exclude_tools_when_tool_choice_none: bool = True
+    enable_local_indexer: bool = True
+    metrics_labels: list[tuple[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_runtime_config(
@@ -71,6 +82,12 @@ class WorkerConfig:
             "custom_jinja_template": getattr(
                 runtime_cfg, "custom_jinja_template", None
             ),
+            "tool_call_parser": getattr(runtime_cfg, "dyn_tool_call_parser", None),
+            "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
+            "exclude_tools_when_tool_choice_none": getattr(
+                runtime_cfg, "exclude_tools_when_tool_choice_none", True
+            ),
+            "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
         }
         if model_input is not None:
             kwargs["model_input"] = model_input
@@ -79,107 +96,52 @@ class WorkerConfig:
 
 
 class Worker:
+    """Drive the Rust ``Worker`` for a single ``LLMEngine`` instance."""
+
     def __init__(self, engine: LLMEngine, config: WorkerConfig):
-        self.config = config
         self.engine = engine
-
-    async def generate(
-        self, request: GenerateRequest, context: Context
-    ) -> AsyncGenerator[GenerateChunk, None]:
-        async def _monitor_cancel():
-            await context.async_killed_or_stopped()
-            try:
-                await self.engine.abort(context)
-            except Exception:
-                logger.debug("Error during request abort", exc_info=True)
-
-        cancel_task = asyncio.create_task(_monitor_cancel())
-        try:
-            async for chunk in self.engine.generate(request, context):
-                if context.is_stopped():
-                    break
-                yield chunk
-        except DynamoException:
-            raise
-        except Exception as exc:
-            raise Unknown(f"Engine generate failed: {exc}") from exc
-        finally:
-            if not cancel_task.done():
-                cancel_task.cancel()
-                try:
-                    await cancel_task
-                except asyncio.CancelledError:
-                    pass
+        self.config = config
 
     async def run(self) -> None:
         configure_dynamo_logging()
-        cfg = self.config
-        shutdown_event = asyncio.Event()
 
-        try:
-            runtime, loop = create_runtime(
-                discovery_backend=cfg.discovery_backend,
-                request_plane=cfg.request_plane,
-                event_plane=cfg.event_plane,
-                use_kv_events=cfg.use_kv_events,
-            )
-        except DynamoException:
-            raise
-        except Exception as exc:
-            raise CannotConnect(f"Failed to create runtime: {exc}") from exc
-
-        endpoint = runtime.endpoint(f"{cfg.namespace}.{cfg.component}.{cfg.endpoint}")
-        shutdown_endpoints = [endpoint]
-
-        install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
-
-        try:
-            engine_config = await self.engine.start()
-        except DynamoException:
-            raise
-        except Exception as exc:
-            raise EngineShutdown(f"Engine initialization failed: {exc}") from exc
-
-        try:
-            runtime_config = ModelRuntimeConfig()
-            if engine_config.total_kv_blocks is not None:
-                runtime_config.total_kv_blocks = engine_config.total_kv_blocks
-            if engine_config.max_num_seqs is not None:
-                runtime_config.max_num_seqs = engine_config.max_num_seqs
-            if engine_config.max_num_batched_tokens is not None:
-                runtime_config.max_num_batched_tokens = (
-                    engine_config.max_num_batched_tokens
-                )
-
-            model_type = parse_endpoint_types(cfg.endpoint_types)
-
-            served_name = cfg.served_model_name or cfg.model_name
-
-            await register_model(
-                cfg.model_input,
-                model_type,
-                endpoint,
-                cfg.model_name,
-                served_name,
-                context_length=engine_config.context_length,
-                kv_cache_block_size=engine_config.kv_cache_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=cfg.custom_jinja_template,
+        if self.config.use_kv_events:
+            # The runtime auto-detects NATS now; the field is preserved on
+            # the dataclass for source-compat with existing callers but no
+            # longer plumbed anywhere. Surface the silent-drop loudly so
+            # operators don't assume their setting took effect.
+            warnings.warn(
+                "WorkerConfig.use_kv_events is deprecated and ignored. NATS "
+                "enablement is determined automatically from the event-plane "
+                "configuration; remove this argument.",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
-            logger.info(
-                "Serving %s on %s.%s.%s",
-                served_name,
-                cfg.namespace,
-                cfg.component,
-                cfg.endpoint,
-            )
+        runtime_cfg = _backend.RuntimeConfig(
+            discovery_backend=self.config.discovery_backend,
+            request_plane=self.config.request_plane,
+            event_plane=self.config.event_plane,
+        )
+        worker_cfg = _backend.WorkerConfig(
+            namespace=self.config.namespace,
+            component=self.config.component,
+            endpoint=self.config.endpoint,
+            model_name=self.config.model_name,
+            served_model_name=self.config.served_model_name,
+            model_input=self.config.model_input,
+            endpoint_types=self.config.endpoint_types,
+            custom_jinja_template=self.config.custom_jinja_template,
+            tool_call_parser=self.config.tool_call_parser,
+            reasoning_parser=self.config.reasoning_parser,
+            exclude_tools_when_tool_choice_none=(
+                self.config.exclude_tools_when_tool_choice_none
+            ),
+            enable_local_indexer=self.config.enable_local_indexer,
+            metrics_labels=list(self.config.metrics_labels),
+            runtime=runtime_cfg,
+        )
 
-            await endpoint.serve_endpoint(
-                self.generate,
-                graceful_shutdown=True,
-                metrics_labels=cfg.metrics_labels,
-            )
-        finally:
-            await self.engine.cleanup()
-            logger.info("Engine cleanup complete")
+        loop = asyncio.get_running_loop()
+        worker = _backend.Worker(self.engine, worker_cfg, loop)
+        await worker.run()

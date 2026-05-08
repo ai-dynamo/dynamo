@@ -23,31 +23,55 @@ import (
 
 type GroveMultinodeDeployer struct {
 	MultinodeDeployer
+	// IsInterPodGMS is true when this deployer produces pod specs for an
+	// engine PCLQ that uses the inter-pod GMS *layout* (one engine pod per
+	// rank, per shadow, with a dedicated GMS weight server pod). It is a
+	// layout/topology flag — not a failover policy flag — and governs how
+	// hostnames, node ranks, and per-pod wiring are computed. Today this
+	// layout is only produced when inter-pod GMS failover is enabled, but
+	// the deployer itself should not encode that assumption.
+	IsInterPodGMS bool
+	Rank          int32 // explicit node rank (used when IsInterPodGMS is true)
 }
 
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)", strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
+	if d.IsInterPodGMS {
+		// GMS: each PCLQ has multiple replicas; pods at the same index across
+		// ranks form a communication group, so use the dynamic pod index.
+		return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
+			strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
+	}
+	return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-0.$(GROVE_HEADLESS_SERVICE)",
+		strings.ToLower(serviceName), commonconsts.GroveRoleSuffixLeader)
 }
 
 func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
-	// This requires shell expansion for arithmetic expression
+	if d.IsInterPodGMS {
+		return fmt.Sprintf("%d", d.Rank), false
+	}
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
 }
 
 func (d *GroveMultinodeDeployer) NeedsDNSWait() bool {
-	// Grove doesn't need DNS wait - it handles startup coordination differently
 	return false
 }
 
 func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes int32) []string {
 	hostnames := make([]string, 0, numberOfNodes)
-	leaderHostname := d.GetLeaderHostname(serviceName)
-	hostnames = append(hostnames, leaderHostname)
-	// Add worker hostnames
-	for i := int32(0); i < numberOfNodes-1; i++ {
-		workerHostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d.$(GROVE_HEADLESS_SERVICE)",
-			strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, i)
-		hostnames = append(hostnames, workerHostname)
+	hostnames = append(hostnames, d.GetLeaderHostname(serviceName))
+
+	if d.IsInterPodGMS {
+		for rank := int32(1); rank < numberOfNodes; rank++ {
+			hostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
+				strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, rank)
+			hostnames = append(hostnames, hostname)
+		}
+	} else {
+		for i := int32(0); i < numberOfNodes-1; i++ {
+			hostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d.$(GROVE_HEADLESS_SERVICE)",
+				strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, i)
+			hostnames = append(hostnames, hostname)
+		}
 	}
 	return hostnames
 }
@@ -63,18 +87,16 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus, len(dgd.Spec.Services))
 
 	for serviceName, component := range dgd.Spec.Services {
-		isMultinode := component.GetNumberOfNodes() > 1
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
-		if isMultinode {
-			// Check PodCliqueScalingGroup: spec.replicas == status.availableReplicas
+		if usesPCSG {
 			ok, reason, serviceStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
 			serviceStatuses[serviceName] = serviceStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
 			}
 		} else {
-			// Check PodClique: spec.replicas == status.readyReplicas
 			ok, reason, serviceStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
 			serviceStatuses[serviceName] = serviceStatus
 			if !ok {

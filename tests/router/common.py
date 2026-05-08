@@ -19,6 +19,7 @@ from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
     get_runtime,
+    poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
     send_request_with_retry,
@@ -142,6 +143,118 @@ def _test_router_basic(
         )
 
         logger.info(f"Successfully completed {num_requests} requests")
+
+
+def _test_router_override_router_config(
+    endpoint: str,
+    engine_workers,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    num_requests: int,
+    cpu_count_file: str,
+    gpu_count_file: str,
+    block_size: int = BLOCK_SIZE,
+    frontend_timeout: int = 120,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Test that router config overrides are honoured by the frontend by starting frontend
+    with different router config and expect getting results aligning with the router config
+    set by the workers, note that a specific mock worker is used for this test.
+
+    The frontend is started with --router-mode round-robin.
+
+    Workers must already be started with CUDA_VISIBLE_DEVICES="" (CPU) and "0" (GPU)
+    and must call register_model(..., router_config=RouterConfig(RouterMode.DeviceAwareWeighted)),
+    this configures the router to use device-aware-weighted routing.
+
+    With the default cuda-to-cpu ratio of 8, sequential requests all go to the GPU worker because
+    allowed_cpu_inflight = gpu_inflight / 8 = 0, so the CPU worker receives nothing.
+
+    Args:
+        endpoint: Dotted endpoint path (e.g. "namespace.component.generate") used to
+            poll discovery for worker instance registration before starting the frontend.
+        engine_workers: Backend worker instance already initialized with __enter__().
+            Must expose .namespace and .num_workers.
+        request: Pytest request fixture for managing resources.
+        frontend_port: Port to start the HTTP frontend on.
+        test_payload: Payload sent to /v1/chat/completions.
+        num_requests: Number of sequential requests to send.
+        cpu_count_file: Path to the file where the CPU worker writes its request count.
+        gpu_count_file: Path to the file where the GPU worker writes its request count.
+        block_size: KV-cache block size (ignored for device-aware-weighted, kept for
+            interface consistency).
+        frontend_timeout: Seconds to wait for the frontend to become ready.
+        store_backend: "etcd" or "file".
+        request_plane: "nats" or "tcp".
+
+    Raises:
+        AssertionError: If routing distribution does not match expectations.
+    """
+
+    def _read_count(path: str) -> int:
+        try:
+            text = open(path).read().strip()
+            return int(text) if text else 0
+        except (OSError, ValueError):
+            return 0
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+        router_mode="round-robin",
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+
+        # Use endpoint polling to make sure all workers are ready before proceeding,
+        # the helper functions will send requests for liveness check which may
+        # affect counting if workers are partially ready.
+        runtime = get_runtime(store_backend, request_plane)
+        endpoint_obj = runtime.endpoint(endpoint)
+        asyncio.run(
+            poll_for_worker_instances(
+                endpoint_obj, engine_workers.num_workers, frontend_timeout
+            )
+        )
+
+        logger.info("Waiting for workers to register with frontend...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=frontend_timeout,
+            )
+        )
+
+        logger.info(
+            f"Sending {num_requests} requests via device-aware-weighted routing..."
+        )
+        asyncio.run(
+            send_inflight_requests(
+                [f"{frontend_url}/v1/chat/completions"],
+                test_payload,
+                num_requests,
+            )
+        )
+
+    cpu_count = _read_count(cpu_count_file)
+    gpu_count = _read_count(gpu_count_file)
+
+    # There is request sent to indicate liveness, so received request count is
+    # larger than the number of requests.
+    # This test should actually to confirm that no requests are sent to the CPU worker.
+    assert (
+        gpu_count >= num_requests
+    ), f"GPU worker should receive at least {num_requests} requests, got {gpu_count}"
+    assert cpu_count == 0, f"CPU worker should receive 0 requests, got {cpu_count}"
+    logger.info(
+        f"device-aware-weighted routing verified: GPU={gpu_count}, CPU={cpu_count}"
+    )
 
 
 def _test_router_two_routers(
@@ -477,7 +590,7 @@ def _test_remote_indexer_decisions(
             (serving_routers[0], A + C + D, worker_a_id, dp_rank_a, 0.1),
             (serving_routers[-1], A + C + E, worker_b_id, dp_rank_b, 2.0),
             (consumer_router, A + C + D + F, None, None, 2.0),
-            (consumer_router, A + C + G, None, None, 2.0),
+            (consumer_router, A + C + E + G, None, None, 2.0),
         ]
 
         responses: list[dict[str, Optional[int]]] = []
@@ -534,13 +647,13 @@ def _test_remote_indexer_decisions(
 
         req5 = responses[4]
         assert req5["prefill_worker_id"] == worker_b_id, (
-            f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+            f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
             f"got {req5['prefill_worker_id']}"
         )
         if test_dp_rank:
             assert req5["prefill_dp_rank"] == dp_rank_b, (
                 f"Request 5: expected prefill_dp_rank={dp_rank_b} "
-                f"(tiebreak by smaller tree), got {req5['prefill_dp_rank']}"
+                f"(longest prefix match), got {req5['prefill_dp_rank']}"
             )
 
         await wait_for_worker_ids(consumer_endpoint, expected_num_instances)
@@ -1060,6 +1173,192 @@ def _test_router_overload_503(
         logger.info(
             f"Successfully verified overload 503: {num_rejected} rejected, "
             f"{num_succeeded} succeeded, metrics match"
+        )
+
+
+def _test_router_threshold_none_disables_rejection(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    num_requests: int = 4,
+):
+    """Test that explicit CLI "None" thresholds disable busy-based rejection end to end.
+
+    Assumes engine_workers are already initialized. This function manages router lifecycle.
+    Starts the frontend with literal CLI "None" values for all three threshold knobs,
+    verifies the /busy_threshold API reports nulls, then sends overload-shaped traffic and
+    confirms no request is rejected with 503 and the frontend rejection metric stays at 0.
+
+    Args:
+        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port for the frontend HTTP server
+        test_payload: Base test payload to send to /v1/chat/completions
+        num_requests: Number of concurrent requests to send under load
+
+    Raises:
+        AssertionError: If thresholds are not null or any request is rejected/fails
+    """
+    logger.info(
+        "Starting KV router frontend on port %s with explicit CLI None thresholds",
+        frontend_port,
+    )
+
+    with KVRouterProcess(
+        request=request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=engine_workers.namespace,
+        blocks_threshold="None",
+        tokens_threshold="None",
+        tokens_threshold_frac="None",
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        model_name = test_payload.get("model", "test-model")
+        load_payload = {
+            **test_payload,
+            "max_tokens": 50,
+        }
+
+        logger.info("Waiting for frontend readiness before explicit-None test...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=1,
+                timeout=60,
+            )
+        )
+
+        async def verify_thresholds_and_send_load():
+            async with aiohttp.ClientSession() as session:
+                logger.info(
+                    "Checking /busy_threshold reports nulls for explicit CLI None thresholds"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (get) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_decode_blocks_threshold") is None
+                    ), f"Expected active_decode_blocks_threshold=None: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold") is None
+                    ), f"Expected active_prefill_tokens_threshold=None: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac") is None
+                    ), f"Expected active_prefill_tokens_threshold_frac=None: {data}"
+                    logger.info(
+                        "POST /busy_threshold returned expected null thresholds: %s",
+                        data,
+                    )
+
+            logger.info(
+                "Launching overload-shaped traffic with explicit None thresholds..."
+            )
+            stop_event = asyncio.Event()
+            response_statuses = asyncio.Queue()
+
+            async with aiohttp.ClientSession() as session:
+
+                async def send_request(req_id: int, payload: dict) -> int:
+                    try:
+                        async with session.post(chat_url, json=payload) as response:
+                            if response.status == 200:
+                                logger.info(
+                                    "Request %s accepted without rejection", req_id
+                                )
+                                await response_statuses.put(response.status)
+                                await stop_event.wait()
+                                return response.status
+
+                            body = await response.text()
+                            logger.info(
+                                "Request %s got unexpected status %s: %s",
+                                req_id,
+                                response.status,
+                                body,
+                            )
+                            await response_statuses.put(response.status)
+                            return response.status
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.info("Request %s failed with error: %s", req_id, exc)
+                        await response_statuses.put(exc)
+                        raise
+
+                tasks = []
+                try:
+                    for i in range(num_requests):
+                        content_words = test_payload["messages"][0]["content"].split()
+                        random.shuffle(content_words)
+                        unique_payload = {
+                            **load_payload,
+                            "messages": [
+                                {
+                                    **test_payload["messages"][0],
+                                    "content": " ".join(content_words),
+                                }
+                            ],
+                        }
+                        tasks.append(
+                            asyncio.create_task(send_request(i, unique_payload))
+                        )
+                        await asyncio.sleep(0.1)
+                finally:
+                    initial_results = [
+                        await response_statuses.get() for _ in range(num_requests)
+                    ]
+                    stop_event.set()
+                    done = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for result in initial_results + done:
+                    if isinstance(result, Exception):
+                        raise result
+
+                return done
+
+        results = asyncio.run(verify_thresholds_and_send_load())
+
+        num_succeeded = sum(1 for status in results if status == 200)
+        num_rejected = sum(1 for status in results if status == 503)
+        num_other = sum(1 for status in results if status not in (200, 503))
+
+        logger.info(
+            "Results with explicit None thresholds: %s succeeded, %s rejected (503), %s other",
+            num_succeeded,
+            num_rejected,
+            num_other,
+        )
+
+        assert num_rejected == 0, f"Expected 0 rejections, but got {num_rejected}"
+        assert (
+            num_other == 0
+        ), f"Expected only 200 or 503 responses, but got {num_other} other"
+        assert num_succeeded > 0, "Expected at least one successful request"
+        assert (
+            num_succeeded == num_requests
+        ), f"Expected {num_requests} successful requests, got {num_succeeded}"
+
+        _verify_frontend_rejection_metrics(
+            frontend_port,
+            model_name,
+            "chat_completions",
+            0,
+        )
+
+        logger.info(
+            "Explicit CLI None thresholds disabled busy rejection as expected: %s successes, metrics clean",
+            num_succeeded,
         )
 
 
@@ -1934,7 +2233,7 @@ def _test_router_decisions(
     standalone_indexer_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
 ):
-    """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
+    """Validate cross-worker routing decisions based on longest prefix match.
 
     Assumes engine workers are already initialized.
     Seeds two routing targets (worker a and worker b) with different prefix trees,
@@ -1945,7 +2244,7 @@ def _test_router_decisions(
     2. [A, C, D]    → force worker a        (branch under A on worker a)
     3. [A, C, E]    → force worker b        (seed worker b's tree)
     4. [A, C, D, F] → router picks          (worker a wins: prefix [A,C,D]=3 vs worker b [A,C]=2)
-    5. [A, C, G]    → router picks          (tie on [A,C], worker b wins by smaller tree: 3 vs 5)
+    5. [A, C, E, G] → router picks          (worker b wins: prefix [A,C,E]=3 vs worker a [A,C]=2)
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -1960,7 +2259,7 @@ def _test_router_decisions(
         router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
 
     Raises:
-        AssertionError: If routing decisions don't match expected prefix/tiebreak logic
+        AssertionError: If routing decisions don't match expected prefix logic
     """
 
     # Create KvRouterConfig with lower snapshot threshold for testing
@@ -2052,7 +2351,12 @@ def _test_router_decisions(
                 None,
                 2.0,
             ),  # req4: router picks (worker a should win)
-            (A + C + G, None, None, 2.0),  # req5: router picks (worker b should win)
+            (
+                A + C + E + G,
+                None,
+                None,
+                2.0,
+            ),  # req5: router picks (worker b should win)
         ]
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
@@ -2126,10 +2430,10 @@ def _test_router_decisions(
             req4["prefill_dp_rank"] == dp_rank_a
         ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
 
-    # Verify request 5 routed to worker b (tiebreak by smaller tree)
+    # Verify request 5 routed to worker b (longest prefix match)
     req5 = response_worker_ids[4]
     assert req5["prefill_worker_id"] == worker_b_id, (
-        f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+        f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
         f"got {req5['prefill_worker_id']}"
     )
     if test_dp_rank:

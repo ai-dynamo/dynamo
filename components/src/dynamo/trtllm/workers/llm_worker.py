@@ -63,6 +63,18 @@ from dynamo.trtllm.request_handlers.handlers import (
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 
+# Optional imports for Rust frontend media decoding support
+MediaDecoder: type | None = None
+MediaFetcher: type | None = None
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
@@ -119,6 +131,13 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     raise ValueError(
         "--model-loader-extra-config must be a JSON object string or a dict"
     )
+
+
+def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
+    """Sync MDC-visible config fields from final TensorRT-LLM engine args."""
+    for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
+        if field_name in engine_args:
+            setattr(config, field_name, engine_args[field_name])
 
 
 def _register_memory_routes(runtime, handler) -> None:
@@ -286,6 +305,8 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    _sync_config_from_engine_args(config, arg_map)
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
@@ -410,6 +431,7 @@ async def init_llm_worker(
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
+            enable_frontend_decoding=config.frontend_decoding,
         )
 
     else:
@@ -580,11 +602,27 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-            disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
+
+        media_decoder = None
+        media_fetcher = None
+        if config.frontend_decoding:
+            if not MEDIA_DECODER_AVAILABLE:
+                raise RuntimeError(
+                    "--frontend-decoding requires MediaDecoder support. "
+                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+                )
+            assert MediaDecoder is not None and MediaFetcher is not None
+            media_decoder = MediaDecoder()
+            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_fetcher = MediaFetcher()
+            media_fetcher.timeout_ms(30000)
+            allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+            media_fetcher.allow_direct_ip(allow_internal)
+            media_fetcher.allow_direct_port(allow_internal)
 
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only
@@ -600,10 +638,14 @@ async def init_llm_worker(
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
+                media_decoder=media_decoder,
+                media_fetcher=media_fetcher,
             )
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+        health_check_payload = TrtllmHealthCheckPayload(
+            tokenizer=tokenizer,
+            disaggregation_mode=config.disaggregation_mode,
+        ).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
@@ -631,6 +673,7 @@ async def init_llm_worker(
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
+                    enable_local_indexer=config.enable_local_indexer,
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "

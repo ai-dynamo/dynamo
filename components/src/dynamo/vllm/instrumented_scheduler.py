@@ -269,7 +269,7 @@ class InstrumentedScheduler(AsyncScheduler):
             **kwargs,
         )
 
-        dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", 0) or 0
+        dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
         self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
         self._fpm_dp_rank = dp_rank
 
@@ -296,6 +296,21 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         self._bench_init(vllm_config)
+
+    @staticmethod
+    def _resolve_dp_rank(parallel_config) -> int:
+        # ``data_parallel_index`` always holds the true global DP rank of the
+        # engine process. For dense (non-MoE) models in external DP mode,
+        # vLLM resets ``data_parallel_rank`` to 0 in every child process but
+        # preserves ``data_parallel_index`` (see ``vllm/v1/engine/core.py``:
+        # ``parallel_config.data_parallel_index = dp_rank`` then
+        # ``parallel_config.data_parallel_rank = 0``). Reading the rank field
+        # would make every DP child compute ``base_port + 0`` and the second
+        # ``bind()`` would fail with "Address already in use".
+        dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_rank", 0) or 0
+        return dp_rank
 
     # ------------------------------------------------------------------
     # Overrides
@@ -451,7 +466,38 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _compute_queued(self) -> QueuedRequestMetrics:
-        """Single-pass aggregation over self.waiting -- no intermediate list."""
+        """Single-pass aggregation over ``self.waiting`` and ``self.skipped_waiting``.
+
+        vLLM's scheduler parks requests in two queues:
+
+        * ``self.waiting`` holds requests in ``WAITING`` (new, never scheduled)
+          and ``PREEMPTED`` (were decoding, evicted back for memory) states.
+        * ``self.skipped_waiting`` holds "blocked-waiting" requests awaiting an
+          async precondition — see ``Scheduler._is_blocked_waiting_status`` /
+          ``Scheduler._enqueue_waiting_request``:
+
+              WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+                                          -- grammar/structured-output compile
+                                          -- WAITING_FOR_FSM on older vLLM
+              WAITING_FOR_REMOTE_KVS      -- disagg decode-engine KV transfer
+              WAITING_FOR_STREAMING_REQ   -- streaming request handshake
+
+        A ``WAITING_FOR_REMOTE_KVS`` request is a **decode** request: the
+        prefill engine has already computed its KV and is transferring it; once
+        finished the request goes straight to decode without a local prefill
+        step. ``num_computed_tokens`` is pre-set to the transferred KV length
+        (see ``Scheduler.schedule`` at the ``load_kv_async`` branch), so it is
+        the correct decode-KV-context value for FPM purposes.
+
+        ``WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR`` /
+        ``WAITING_FOR_STREAMING_REQ`` have no KV computed yet — they are queued
+        prefill requests blocked on a precondition.
+
+        Only iterating ``self.waiting`` (the previous behaviour) silently
+        misses every ``WAITING_FOR_REMOTE_KVS`` request on the decode engine
+        in disaggregated serving, and misclassifies it as queued prefill if it
+        ever transiently appears in ``self.waiting``.
+        """
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
 
@@ -459,6 +505,18 @@ class InstrumentedScheduler(AsyncScheduler):
             if request.status == RequestStatus.PREEMPTED:
                 decode_kv.add(request.num_computed_tokens)
             else:
+                prefill.add(request.num_tokens)
+
+        for request in self.skipped_waiting:
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                # Disagg decode side: KV already computed on the prefill
+                # engine and being transferred. Next schedule() step will
+                # start generating -- count as queued decode.
+                decode_kv.add(request.num_computed_tokens)
+            else:
+                # Structured-output waits / WAITING_FOR_STREAMING_REQ:
+                # no KV yet, essentially a queued prefill awaiting a
+                # precondition.
                 prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(

@@ -256,6 +256,46 @@ async def wait_for_frontend_ready(
         await asyncio.sleep(1)
 
 
+async def poll_for_worker_instances(
+    endpoint,
+    expected_num_workers: int,
+    max_wait_time: int = 60,
+) -> list[int]:
+    """Poll the endpoint's discovery client until the expected number of worker instances appear.
+
+    Args:
+        endpoint: The endpoint object to get the client from
+        expected_num_workers: Number of worker instances to wait for
+        max_wait_time: Timeout in seconds
+
+    Returns:
+        List of discovered instance IDs (unsorted).
+
+    Raises:
+        AssertionError: If the expected number of workers don't appear within max_wait_time.
+    """
+    logger.info(f"Waiting for {expected_num_workers} worker instance(s) to register...")
+    client = await endpoint.client()
+    instance_ids: list[int] = []
+    start_time = asyncio.get_running_loop().time()
+
+    while len(instance_ids) < expected_num_workers:
+        instance_ids = client.instance_ids()
+        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+
+        if len(instance_ids) >= expected_num_workers:
+            break
+
+        if asyncio.get_running_loop().time() - start_time > max_wait_time:
+            raise AssertionError(
+                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
+            )
+
+        await asyncio.sleep(1.0)
+
+    return instance_ids
+
+
 async def wait_for_workers_ready(
     endpoint,
     router: KvRouter,
@@ -280,31 +320,7 @@ async def wait_for_workers_ready(
     Raises:
         AssertionError: If workers don't become ready or warmup request fails.
     """
-    logger.info("Waiting for workers to be ready")
-
-    # Get the client from the endpoint
-    client = await endpoint.client()
-
-    # Poll for instance IDs until we have the expected number
-    instance_ids: list[int] = []
-    max_wait_time = 60  # seconds
-    start_time = asyncio.get_running_loop().time()
-
-    while len(instance_ids) < expected_num_workers:
-        instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
-
-        if len(instance_ids) >= expected_num_workers:
-            break
-
-        # Check timeout
-        if asyncio.get_running_loop().time() - start_time > max_wait_time:
-            raise AssertionError(
-                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
-            )
-
-        # Wait 1 second before polling again
-        await asyncio.sleep(1.0)
+    instance_ids = await poll_for_worker_instances(endpoint, expected_num_workers)
 
     # Send a warmup request to verify workers can handle requests
     test_token_ids = [random.randint(1, 10000) for _ in range(4)]

@@ -47,11 +47,18 @@ type OperatorConfiguration struct {
 	// Orchestrator configuration with optional overrides
 	Orchestrators OrchestratorConfiguration `json:"orchestrators"`
 
+	// DRA (Dynamic Resource Allocation) settings with optional override
+	DRA DRAConfiguration `json:"dra,omitempty"`
+
 	// Service mesh and infrastructure addresses
 	Infrastructure InfrastructureConfiguration `json:"infrastructure"`
 
 	// Ingress configuration
 	Ingress IngressConfiguration `json:"ingress"`
+
+	// ServiceMesh configures automatic generation of service-mesh resources
+	// (e.g., Istio DestinationRules) for EPP components.
+	ServiceMesh ServiceMeshConfiguration `json:"serviceMesh"`
 
 	// RBAC configuration for cross-namespace resource management (cluster-wide mode)
 	RBAC RBACConfiguration `json:"rbac"`
@@ -194,6 +201,24 @@ type KaiSchedulerConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+//
+// NOTE: auto-detection here only verifies that the resource.k8s.io API group is
+// registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+// GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
+// installed, that its DeviceClass exists, or that node-level GPU drivers are
+// compatible. An admin can use `enabled: false` to force-off DRA integration
+// on clusters where the API is present but the GPU driver stack is not wired
+// up — this makes the operator fail GMS / inter-pod failover admissions early
+// with a clear error instead of letting pods Pend with a confusing
+// "resourceclaim not found" at schedule time.
+type DRAConfiguration struct {
+	// Enabled overrides auto-detection of the resource.k8s.io API group.
+	// nil = auto-detect. Setting true requires detection to also succeed (the
+	// operator will exit at startup otherwise).
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 // InfrastructureConfiguration holds service mesh and backend addresses.
 type InfrastructureConfiguration struct {
 	// NATSAddress is the address of the NATS server
@@ -223,6 +248,41 @@ func (i *IngressConfiguration) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
 }
 
+// ServiceMeshProvider enumerates the supported service mesh implementations.
+type ServiceMeshProvider string
+
+const (
+	// ServiceMeshProviderIstio selects Istio as the service mesh.
+	ServiceMeshProviderIstio ServiceMeshProvider = "istio"
+)
+
+// ServiceMeshConfiguration holds service mesh integration settings.
+// The operator uses this to generate mesh-specific resources (e.g., Istio
+// DestinationRules) for EPP components so that sidecar proxies connect
+// correctly without double-TLS issues.
+type ServiceMeshConfiguration struct {
+	// Provider selects the service mesh implementation. Supported: "istio", "".
+	// Empty string disables service mesh resource generation.
+	Provider string `json:"provider"`
+	// Istio holds Istio-specific settings. Only used when Provider is "istio".
+	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
+}
+
+// IsEnabled returns true if a supported service mesh provider is configured.
+func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
+}
+
+// IstioMeshConfiguration holds Istio-specific mesh settings.
+type IstioMeshConfiguration struct {
+	// TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").
+	// Defaults to "SIMPLE".
+	TLSMode string `json:"tlsMode"`
+	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
+	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
+	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+}
+
 // RBACConfiguration holds RBAC settings for cluster-wide mode.
 type RBACConfiguration struct {
 	// PlannerClusterRoleName is the ClusterRole for planner
@@ -241,17 +301,55 @@ type MPIConfiguration struct {
 	SSHSecretNamespace string `json:"sshSecretNamespace"`
 }
 
+// DefaultSeccompProfile is the localhost seccomp profile applied to checkpoint
+// and restore pods when the operator config does not specify one explicitly.
+const DefaultSeccompProfile = "profiles/block-iouring.json"
+
 // CheckpointConfiguration holds checkpoint/restore settings.
 type CheckpointConfiguration struct {
 	// Enabled indicates if checkpoint functionality is enabled
 	Enabled bool `json:"enabled"`
-	// ReadyForCheckpointFilePath signals model readiness for checkpoint jobs
-	// +kubebuilder:default="/tmp/ready-for-checkpoint"
-	ReadyForCheckpointFilePath string `json:"readyForCheckpointFilePath"`
+	// Seccomp controls the localhost seccomp profile applied to checkpoint and
+	// restore pods. A nil value means "use the default profile"; set
+	// Seccomp.Disabled=true to disable seccomp injection entirely.
+	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
 	// Deprecated: Storage is retained for compatibility and ignored by the
 	// current snapshot flow. Snapshot storage is discovered from the
 	// snapshot-agent DaemonSet instead.
 	Storage CheckpointStorageConfiguration `json:"storage"`
+}
+
+// CheckpointSeccompConfiguration controls the localhost seccomp profile applied
+// to checkpoint and restore pods. The profile blocks io_uring syscalls (which
+// CRIU cannot dump). Default behavior (zero-value substruct, or absent
+// substruct) applies DefaultSeccompProfile. Set Disabled=true on OpenShift
+// (custom localhost profiles require privileged SCC) or when using a CRIU
+// build with io_uring support. Set Profile to override the default path.
+type CheckpointSeccompConfiguration struct {
+	// Disabled, when true, suppresses seccomp profile injection entirely.
+	// Use this for clusters where custom localhost profiles are not allowed
+	// (e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle
+	// io_uring natively.
+	Disabled bool `json:"disabled,omitempty"`
+	// Profile is the localhost seccomp profile path. Empty falls back to
+	// DefaultSeccompProfile. Ignored when Disabled is true.
+	Profile string `json:"profile,omitempty"`
+}
+
+// EffectiveSeccompProfile returns the seccomp profile to use, or "" to disable.
+// nil substruct or zero-value substruct → DefaultSeccompProfile. Disabled=true
+// → "". Profile override takes effect when Disabled is false.
+func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
+	if c.Seccomp == nil {
+		return DefaultSeccompProfile
+	}
+	if c.Seccomp.Disabled {
+		return ""
+	}
+	if c.Seccomp.Profile == "" {
+		return DefaultSeccompProfile
+	}
+	return c.Seccomp.Profile
 }
 
 // Deprecated: CheckpointStorageConfiguration is retained for compatibility and

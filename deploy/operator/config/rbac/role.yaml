@@ -35,6 +35,8 @@ rules:
   resources:
   - pods
   verbs:
+  - delete
+  - deletecollection
   - get
   - list
   - watch
@@ -130,6 +132,8 @@ rules:
   - grove.io
   resources:
   - clustertopologies
+  - podcliques
+  - podcliquescalinggroups
   verbs:
   - get
   - list
@@ -182,6 +186,7 @@ rules:
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create

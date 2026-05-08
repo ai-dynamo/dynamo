@@ -6,8 +6,8 @@
 import asyncio
 import logging
 import os
-import signal
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from dynamo.common.utils.namespace import get_worker_namespace
@@ -25,23 +25,31 @@ KUBERNETES_OPTIONAL_PODINFO_FILES = {
 }
 EngineT = TypeVar("EngineT")
 
+# Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,ReadyForCheckpointFile}.
+SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
+RESTORE_COMPLETE_FILE = "restore-complete"
+READY_FOR_CHECKPOINT_FILE = "ready-for-checkpoint"
+
+# Poll interval for the snapshot-control directory. Checkpoint and restore
+# latencies are seconds, so 100ms is negligible overhead.
+_SENTINEL_POLL_INTERVAL_SEC = 0.1
+
 
 class CheckpointConfig:
-    """Parsed checkpoint configuration plus the watcher-driven lifecycle."""
+    """Parsed checkpoint configuration plus the sentinel-driven lifecycle."""
 
-    def __init__(self, ready_file: str):
-        self.ready_file = ready_file
-        self._checkpoint_done = asyncio.Event()
-        self._restore_done = asyncio.Event()
+    def __init__(self, control_dir: str):
+        self.control_dir = control_dir
+        self.ready_file = os.path.join(control_dir, READY_FOR_CHECKPOINT_FILE)
 
     @classmethod
     def from_env(cls) -> "CheckpointConfig | None":
-        ready_file = os.environ.get("DYN_READY_FOR_CHECKPOINT_FILE")
-        if not ready_file:
+        control_dir = os.environ.get("DYN_SNAPSHOT_CONTROL_DIR")
+        if not control_dir:
             return None
 
         configure_checkpoint_transport_env()
-        return cls(ready_file=ready_file)
+        return cls(control_dir=control_dir)
 
     async def run_lifecycle(
         self,
@@ -51,65 +59,53 @@ class CheckpointConfig:
         logger.info("Quiescing model")
         await quiesce_controller.quiesce(*quiesce_args)
 
-        self._install_signal_handlers()
         try:
             with open(self.ready_file, "w", encoding="utf-8") as ready_file:
                 ready_file.write("ready")
-        except Exception:
-            self._remove_signal_handlers()
-            raise
 
-        logger.info(
-            "Ready for checkpoint. Waiting for watcher signal "
-            "(SIGUSR1=checkpoint complete, SIGCONT=restore complete)"
-        )
-
-        try:
-            event = await self._wait_for_watcher_signal()
-            if event == "restore":
-                logger.info("Restore signal detected (SIGCONT)")
-                logger.info("Resuming model after restore")
-                await quiesce_controller.resume()
-                quiesce_controller.mark_resumed()
-                return True
-
-            logger.info("Checkpoint completion signal detected (SIGUSR1)")
-            return False
-        finally:
-            self._remove_signal_handlers()
-            try:
-                os.unlink(self.ready_file)
-            except OSError:
-                pass
-
-    def _install_signal_handlers(self) -> None:
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGUSR1, self._checkpoint_done.set)
-        loop.add_signal_handler(signal.SIGCONT, self._restore_done.set)
-
-    def _remove_signal_handlers(self) -> None:
-        loop = asyncio.get_running_loop()
-        loop.remove_signal_handler(signal.SIGUSR1)
-        loop.remove_signal_handler(signal.SIGCONT)
-
-    async def _wait_for_watcher_signal(self) -> str:
-        waiters = {
-            asyncio.create_task(self._checkpoint_done.wait()): "checkpoint",
-            asyncio.create_task(self._restore_done.wait()): "restore",
-        }
-        try:
-            done, pending = await asyncio.wait(
-                waiters.keys(), return_when=asyncio.FIRST_COMPLETED
+            logger.info(
+                "Ready for checkpoint. Polling for sentinel in %s "
+                "(snapshot-complete or restore-complete)",
+                self.control_dir,
             )
-            for task in pending:
-                task.cancel()
-            winner = done.pop()
-            await winner
-            return waiters[winner]
+
+            event = await self._wait_for_sentinel()
         finally:
-            for task in waiters:
-                if not task.done():
-                    task.cancel()
+            self._cleanup_ready_and_sentinels()
+
+        if event == "restore":
+            logger.info("Restore sentinel detected")
+            logger.info("Resuming model after restore")
+            await quiesce_controller.resume()
+            quiesce_controller.mark_resumed()
+            return True
+
+        logger.info("Snapshot completion sentinel detected")
+        return False
+
+    async def _wait_for_sentinel(self) -> str:
+        snapshot_path = Path(self.control_dir) / SNAPSHOT_COMPLETE_FILE
+        restore_path = Path(self.control_dir) / RESTORE_COMPLETE_FILE
+        while True:
+            if snapshot_path.exists():
+                return "checkpoint"
+            if restore_path.exists():
+                return "restore"
+            await asyncio.sleep(_SENTINEL_POLL_INTERVAL_SEC)
+
+    def _cleanup_ready_and_sentinels(self) -> None:
+        for name in (
+            READY_FOR_CHECKPOINT_FILE,
+            SNAPSHOT_COMPLETE_FILE,
+            RESTORE_COMPLETE_FILE,
+        ):
+            path = os.path.join(self.control_dir, name)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception("Failed to clean up %s at %s", name, path)
 
 
 def configure_checkpoint_transport_env() -> None:

@@ -73,6 +73,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
@@ -94,12 +102,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - '*'
-  resources:
-  - '*'
-  verbs:
-  - '*'
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -139,6 +141,15 @@ rules:
 - apiGroups:
   - grove.io
   resources:
+  - podcliques
+  - podcliquescalinggroups
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - grove.io
+  resources:
   - podcliques/scale
   - podcliquescalinggroups/scale
   verbs:
@@ -158,33 +169,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - apps
-  resources:
-  - statefulsets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - autoscaling
   resources:
   - horizontalpodautoscalers
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - cronjobs
   verbs:
   - create
   - delete
@@ -220,18 +207,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - configmaps
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - events
   verbs:
   - create
@@ -244,51 +219,11 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
   - pods
   verbs:
   - create
   - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - create
-  - delete
+  - deletecollection
   - get
   - list
   - patch
@@ -306,10 +241,11 @@ rules:
   - patch
   - update
   - watch
-{{- if .Values.istioVirtualServiceEnabled }}
+{{- if or .Values.istioVirtualServiceEnabled (and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled) }}
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create
@@ -345,18 +281,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - networking.k8s.io
-  resources:
-  - networkpolicies
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - resource.k8s.io
   resources:
   - resourceclaimtemplates
@@ -381,6 +305,16 @@ rules:
   - update
   - watch
 - apiGroups:
+  - inference.networking.x-k8s.io
+  resources:
+  - inferencepools
+  - inferenceobjectives
+  - inferencemodelrewrites
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - nvidia.com
   resources:
   - dynamocheckpoints
@@ -389,6 +323,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - dynamoworkermetadatas
   verbs:
   - create
   - delete
@@ -416,6 +351,14 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentscalingadapters/scale
   verbs:
   - get
   - patch
@@ -491,6 +434,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  verbs:
+  - get
+  - list
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1

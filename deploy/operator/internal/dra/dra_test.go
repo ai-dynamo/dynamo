@@ -100,7 +100,7 @@ func TestGenerateResourceClaimTemplate_Enabled(t *testing.T) {
 	assert.Equal(t, "myapp-worker-gpu", tmpl.Name)
 	require.Len(t, tmpl.Spec.Spec.Devices.Requests, 1)
 	req := tmpl.Spec.Spec.Devices.Requests[0]
-	assert.Equal(t, defaultDeviceClassName, req.Exactly.DeviceClassName)
+	assert.Equal(t, DefaultDeviceClassName, req.Exactly.DeviceClassName)
 	assert.Equal(t, int64(4), req.Exactly.Count)
 }
 

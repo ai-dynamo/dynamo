@@ -234,15 +234,11 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                request.token_seq.as_deref(),
-                request.isl_tokens,
-                request.overlaps.clone(),
-                request.track_prefill_tokens,
-                decay_now,
-            );
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            request.token_seq.as_deref(),
+            &request.prefill_token_deltas(),
+            decay_now,
+        );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
@@ -263,7 +259,8 @@ impl<
 
         request.respond(Ok(SchedulingResponse {
             best_worker: selection.worker,
-            overlap_blocks: selection.overlap_blocks,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
         }));
 
         if !request.update_states {
@@ -277,7 +274,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.overlap_blocks,
+            selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -285,15 +282,13 @@ impl<
             SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: request.token_seq,
-                isl: request.isl_tokens,
-                overlap: selection.overlap_blocks,
                 track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
                 prefill_load_hint,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             },
-            decay_now,
+            Instant::now(),
         ) {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
@@ -302,37 +297,38 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;
         }
 
-        let Some(estimator) = &self.prefill_load_estimator else {
-            return None;
+        let expected_prefill_duration = match &self.prefill_load_estimator {
+            Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+                Ok(expected_prefill_duration) => Some(expected_prefill_duration),
+                Err(error) => {
+                    tracing::warn!(
+                        effective_isl,
+                        prefix,
+                        "failed to predict prefill duration for active load tracking: {error}"
+                    );
+                    None
+                }
+            },
+            None => None,
         };
 
-        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
-            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
-                initial_effective_prefill_tokens: effective_isl,
-                expected_prefill_duration: Some(expected_prefill_duration),
-            }),
-            Err(error) => {
-                tracing::warn!(
-                    effective_isl,
-                    prefix,
-                    "failed to predict prefill duration for active load tracking: {error}"
-                );
-                None
-            }
-        }
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: effective_isl,
+            expected_prefill_duration,
+        })
     }
 
     /// Number of requests currently parked in the pending queue (lock-free).
@@ -409,7 +405,7 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::{OverlapScores, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::{WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -483,11 +479,7 @@ mod tests {
                 })
                 .min_by_key(|worker| {
                     (
-                        request
-                            .prefill_tokens
-                            .get(worker)
-                            .copied()
-                            .unwrap_or(request.isl_tokens),
+                        request.prefill_tokens_for(*worker),
                         request.decode_blocks.get(worker).copied().unwrap_or(0),
                         worker.worker_id,
                         worker.dp_rank,
@@ -499,8 +491,9 @@ mod tests {
 
             Ok(WorkerSelectionResult {
                 worker,
-                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
-                overlap_blocks: request.overlaps.scores.get(&worker).copied().unwrap_or(0),
+                required_blocks: request.request_blocks(block_size),
+                effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+                cached_tokens: request.effective_cached_tokens_for(worker),
             })
         }
     }
@@ -629,7 +622,9 @@ mod tests {
             maybe_request_id: Some(request_id.to_string()),
             token_seq: None,
             isl_tokens,
-            overlaps: OverlapScores::default(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -640,6 +635,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -1020,7 +1016,9 @@ mod tests {
             maybe_request_id: Some("filter-0".to_string()),
             token_seq: None,
             isl_tokens: isl,
-            overlaps: OverlapScores::default(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -1031,6 +1029,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;

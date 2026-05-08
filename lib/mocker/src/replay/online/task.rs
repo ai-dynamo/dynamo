@@ -6,15 +6,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 
 use super::ReplayRouter;
 use super::state::{
-    LiveReplayMode, RequestRegistry, RequestState, SharedLiveRuntimeStats, WorkloadDispatchState,
-    now_ms, request_uuid,
+    RequestRegistry, RequestState, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,
+    request_uuid,
 };
 
 #[derive(Clone)]
@@ -26,42 +27,58 @@ pub(super) struct RequestTaskContext {
     pub(super) workload: Option<Arc<WorkloadDispatchState>>,
 }
 
+/// Releases a `WorkloadDriver` cap slot on drop if `mark_completed` was not called.
+/// Preserves the drop-safety of the old `OwnedSemaphorePermit` so a cancelled or
+/// panicking request task can't leak capacity.
+pub(super) struct InFlightGuard {
+    dispatch: Arc<WorkloadDispatchState>,
+    uuid: Uuid,
+    completed: bool,
+}
+
+impl InFlightGuard {
+    pub(super) fn new(dispatch: Arc<WorkloadDispatchState>, uuid: Uuid) -> Self {
+        Self {
+            dispatch,
+            uuid,
+            completed: false,
+        }
+    }
+
+    pub(super) fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Ok(mut driver) = self.dispatch.driver.lock() {
+            driver.release_cap_slot(self.uuid);
+        }
+        self.dispatch.wakeup.notify_waiters();
+    }
+}
+
 pub(super) async fn wait_for_workload_progress<F>(
-    mode: LiveReplayMode,
-    semaphore: Option<&Semaphore>,
     next_ready_ms: Option<f64>,
     start: Instant,
     mut wake: Pin<&mut F>,
 ) where
     F: Future<Output = ()>,
 {
-    match (mode, semaphore, next_ready_ms) {
-        (LiveReplayMode::Trace, _, Some(next_ready_ms)) => {
+    match next_ready_ms {
+        Some(next_ready_ms) => {
             let deadline = start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {}
                 _ = wake.as_mut() => {}
             }
         }
-        (LiveReplayMode::Trace, _, None) => {
+        None => {
             wake.as_mut().await;
-        }
-        (LiveReplayMode::Concurrency { .. }, Some(semaphore), Some(next_ready_ms)) => {
-            if semaphore.available_permits() == 0 {
-                wake.as_mut().await;
-            } else {
-                let deadline = start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => {}
-                    _ = wake.as_mut() => {}
-                }
-            }
-        }
-        (LiveReplayMode::Concurrency { .. }, Some(_semaphore), None) => {
-            wake.as_mut().await;
-        }
-        (LiveReplayMode::Concurrency { .. }, None, _) => {
-            unreachable!("concurrency mode must have a semaphore");
         }
     }
 }
@@ -69,7 +86,7 @@ pub(super) async fn wait_for_workload_progress<F>(
 pub(super) async fn run_request_task(
     ctx: RequestTaskContext,
     request: DirectRequest,
-    permit: Option<OwnedSemaphorePermit>,
+    mut guard: Option<InFlightGuard>,
 ) -> Result<()> {
     let uuid = request_uuid(&request)?;
 
@@ -102,7 +119,9 @@ pub(super) async fn run_request_task(
             .unwrap()
             .on_complete(uuid, completion_ms)?;
         workload.wakeup.notify_waiters();
+        if let Some(guard) = guard.as_mut() {
+            guard.mark_completed();
+        }
     }
-    drop(permit);
     Ok(())
 }

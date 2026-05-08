@@ -52,7 +52,7 @@ def _make_config(
         request_rates=request_rates,
         concurrencies=None,
         osl=10,
-        request_count=5,
+        conversation_num=1,
         warmup_count=1,
         port=8000,
         timeout=60,

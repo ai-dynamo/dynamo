@@ -322,19 +322,13 @@ where
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    // Get threshold value and wrap monitor for PushRouter
-    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
-    let threshold_value = worker_monitor
-        .as_ref()
-        .map(|m| m.active_decode_blocks_threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
-        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
             router_client,
             router_mode,
-            threshold_value,
             monitor_arc,
         )
         .await?;

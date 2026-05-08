@@ -58,7 +58,11 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     aic_moe_ep_size = None
     aic_attention_dp_size = None
     if getattr(args, "aic_perf_model", False):
-        aic_backend = getattr(args, "engine_type", None) or "vllm"
+        aic_backend = (
+            getattr(args, "aic_backend", None)
+            or getattr(args, "engine_type", None)
+            or "vllm"
+        )
         aic_system = getattr(args, "aic_system", None)
         aic_backend_version = getattr(args, "aic_backend_version", None)
         aic_tp_size = getattr(args, "aic_tp_size", None)

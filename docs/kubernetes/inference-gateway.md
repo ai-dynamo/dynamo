@@ -169,7 +169,7 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 ```yaml
 frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
   args:
     - --router-mode
     - direct
@@ -268,6 +268,58 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
+
+**Service Mesh Integration (Istio)**
+
+When running under a service mesh such as Istio, the mesh sidecar proxy may conflict with the EPP's own TLS serving, causing connection failures (double-TLS). To avoid this, the mesh must be told how to connect to the EPP service via an Istio `DestinationRule`.
+
+The Dynamo operator can generate this DestinationRule automatically. Enable it by setting the `dynamo.serviceMesh` parameters when installing or upgrading the Dynamo platform Helm chart:
+
+```bash
+helm install dynamo deploy/helm/charts/platform \
+  --set dynamo.serviceMesh.enabled=true
+```
+
+Or equivalently in a custom values file:
+
+```yaml
+dynamo:
+  serviceMesh:
+    enabled: true
+    provider: "istio"
+    istio:
+      tlsMode: "SIMPLE"
+      insecureSkipVerify: true
+```
+
+**Helm Parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `dynamo.serviceMesh.enabled` | bool | `false` | Enable automatic DestinationRule generation for EPP services. |
+| `dynamo.serviceMesh.provider` | string | `"istio"` | Service mesh provider. Only `"istio"` is supported. |
+| `dynamo.serviceMesh.istio.tlsMode` | string | `"SIMPLE"` | TLS mode for the DestinationRule. Supported values: `DISABLE`, `SIMPLE`, `MUTUAL`, `ISTIO_MUTUAL`. |
+| `dynamo.serviceMesh.istio.insecureSkipVerify` | bool | `true` | Skip TLS certificate verification. Set to `true` when EPP uses self-signed certificates (the default). |
+
+> [!NOTE]
+> The Istio CRDs (`networking.istio.io`) must be installed on the cluster before enabling this feature. The operator detects Istio availability at startup — if the CRDs are not present, DestinationRule reconciliation is skipped even when `serviceMesh.enabled` is `true`.
+
+When enabled, the operator produces a `DestinationRule` for each EPP service equivalent to:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: <epp-service-name>
+spec:
+  host: <epp-service-name>.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+```
+
+If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
 
 ### 6. Verify Installation ###
 
@@ -454,7 +506,7 @@ helm uninstall kgateway --namespace kgateway-system
 kubectl delete namespace kgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs
-IGW_LATEST_RELEASE=v1.2.1
+IGW_LATEST_RELEASE=v1.5.0-rc.2
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
 # 5. Delete the Gateway API CRDs
@@ -464,7 +516,7 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 
 ## Gateway API Inference Extension Integration
 
-This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.5.0-rc.2**.
 
 ### Router bookkeeping operations
 
@@ -473,8 +525,9 @@ EPP performs Dynamo router book keeping operations so the FrontEnd's Router does
 
 ### Header Routing Hints
 
-Since v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
-The plugins set HTTP headers that are forwarded to the backend workers.
+Since v1.5.0-rc.1, the EPP uses **headers and body mutations** for communicating routing decisions.
+The plugins set HTTP headers for worker targeting and inject pre-computed token IDs
+into the request body (`nvext.token_data`) so the frontend sidecar can skip redundant tokenization.
 
 #### Headers Set by Dynamo Plugins
 

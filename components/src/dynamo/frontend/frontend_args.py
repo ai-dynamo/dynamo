@@ -16,6 +16,10 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
+from dynamo.common.configuration.groups.router_args import (
+    RouterArgGroup,
+    RouterConfigBase,
+)
 from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
@@ -45,7 +49,7 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
+class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -55,17 +59,11 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
 
-    router_mode: str
-    min_initial_workers: int
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
-    enforce_disagg: bool
 
     migration_limit: int
     migration_max_seq_len: Optional[int]
-    active_decode_blocks_threshold: Optional[float]
-    active_prefill_tokens_threshold: Optional[int]
-    active_prefill_tokens_threshold_frac: Optional[float]
     model_name: Optional[str]
     model_path: Optional[str]
     metrics_prefix: Optional[str] = None
@@ -76,7 +74,7 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
@@ -86,6 +84,7 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
+    trust_remote_code: bool
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
@@ -234,41 +233,8 @@ class FrontendArgGroup(ArgGroup):
             arg_type=pathlib.Path,
         )
 
-        add_argument(
-            g,
-            flag_name="--router-mode",
-            env_var="DYN_ROUTER_MODE",
-            default="round-robin",
-            help="How to route the request. power-of-two picks 2 random workers and "
-            "routes to the one with fewer in-flight requests. least-loaded routes to "
-            "the worker with the fewest active requests. device-aware-weighted routes "
-            "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
-            "both power-of-two and least-loaded skip bootstrap optimization and fall "
-            "back to the synchronous prefill path.",
-            choices=[
-                "round-robin",
-                "random",
-                "power-of-two",
-                "kv",
-                "direct",
-                "least-loaded",
-                "device-aware-weighted",
-            ],
-        )
-        add_argument(
-            g,
-            flag_name="--router-min-initial-workers",
-            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
-            default=0,
-            help=(
-                "Minimum number of workers required before router startup continues. "
-                "This is exported as DYN_ROUTER_MIN_INITIAL_WORKERS so the generic "
-                "push-router path and the KV router's config-ready worker gate share "
-                "the same startup threshold. Set to 0 to disable the startup wait."
-            ),
-            arg_type=int,
-            dest="min_initial_workers",
-        )
+        # Router options (shared with dynamo.router)
+        RouterArgGroup().add_arguments(parser)
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
@@ -283,20 +249,6 @@ class FrontendArgGroup(ArgGroup):
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
                 "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
                 "'ns-def456'). Takes precedence over --namespace if both are specified."
-            ),
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--enforce-disagg",
-            env_var="DYN_ENFORCE_DISAGG",
-            default=False,
-            dest="enforce_disagg",
-            help=(
-                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
-                "has not activated yet (e.g., prefill workers still registering). This is stricter "
-                "than the default: without this flag, requests arriving before prefill workers are "
-                "discovered fall through to aggregated decode-only routing."
             ),
         )
 
@@ -326,41 +278,6 @@ class FrontendArgGroup(ArgGroup):
             arg_type=int,
         )
 
-        add_argument(
-            g,
-            flag_name="--active-decode-blocks-threshold",
-            env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-            default=None,
-            help=(
-                "Threshold percentage (0.0-1.0) for determining when a worker is considered busy "
-                "based on KV cache block utilization. If not set, blocks-based busy detection is disabled."
-            ),
-            arg_type=float,
-        )
-        add_argument(
-            g,
-            flag_name="--active-prefill-tokens-threshold",
-            env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=None,
-            help=(
-                "Literal token count threshold for determining when a worker is considered busy "
-                "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled."
-            ),
-            arg_type=int,
-        )
-        add_argument(
-            g,
-            flag_name="--active-prefill-tokens-threshold-frac",
-            env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=None,
-            help=(
-                "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). "
-                "Uses OR logic with --active-prefill-tokens-threshold."
-            ),
-            arg_type=float,
-        )
         add_argument(
             g,
             flag_name="--model-name",
@@ -441,8 +358,10 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
-            default="nats",
-            help="Determines how events are published [nats|zmq]",
+            default=None,
+            help="Determines how events are published [nats|zmq]. If unset, "
+            "auto-detected from --discovery-backend (zmq for file/mem, nats "
+            "for etcd/kubernetes).",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(
@@ -561,4 +480,15 @@ class FrontendArgGroup(ArgGroup):
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
             choices=["default", "fastokens"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--trust-remote-code",
+            env_var="DYN_TRUST_REMOTE_CODE",
+            default=False,
+            help=(
+                "Trust remote code when loading the tokenizer. Required for models "
+                "that ship custom tokenizer code (e.g. Qwen, Falcon)."
+            ),
         )
