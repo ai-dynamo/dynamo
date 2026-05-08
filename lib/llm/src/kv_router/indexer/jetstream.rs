@@ -432,6 +432,38 @@ pub(crate) async fn start_kv_router_background(
     Ok(())
 }
 
+/// Returns the list of NATS consumer names that should be deleted as orphans.
+///
+/// A consumer is orphaned when it exists in NATS but has no corresponding active
+/// router instance in discovery. The caller's own consumer (`own_consumer_id`)
+/// is always excluded.
+///
+/// When `active_instance_ids` is empty we conservatively return nothing: an
+/// empty active set means either (a) no peer routers have registered yet
+/// (simultaneous-startup race) or (b) discovery is unavailable / using a
+/// different key for this deployment. In both cases deleting peers is wrong —
+/// NATS `inactive_threshold` (configured in NatsQueue) cleans up genuine
+/// orphans automatically.
+fn select_orphaned_consumers(
+    consumers: &[String],
+    active_instance_ids: &HashSet<String>,
+    own_consumer_id: &str,
+) -> Vec<String> {
+    if active_instance_ids.is_empty() {
+        tracing::debug!(
+            "No active router instances found in discovery; skipping orphan \
+             consumer cleanup to avoid simultaneous-startup race"
+        );
+        return Vec::new();
+    }
+
+    consumers
+        .iter()
+        .filter(|c| c.as_str() != own_consumer_id && !active_instance_ids.contains(*c))
+        .cloned()
+        .collect()
+}
+
 /// Cleanup orphaned NATS consumers that no longer have corresponding router entries
 async fn cleanup_orphaned_consumers(
     nats_queue: &mut NatsQueue,
@@ -461,14 +493,55 @@ async fn cleanup_orphaned_consumers(
         .map(|instance| instance.instance_id().to_string())
         .collect();
 
-    for consumer in consumers {
-        if consumer == consumer_id {
-            // Never delete myself (extra/redundant safeguard)
-            continue;
-        }
-        if !active_instance_ids.contains(&consumer) {
-            tracing::info!("Cleaning up orphaned consumer: {consumer}");
-            let _ = nats_queue.shutdown(Some(consumer)).await;
-        }
+    for consumer in select_orphaned_consumers(&consumers, &active_instance_ids, consumer_id) {
+        tracing::info!("Cleaning up orphaned consumer: {consumer}");
+        let _ = nats_queue.shutdown(Some(consumer)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn empty_active_set_skips_cleanup() {
+        // Simultaneous-startup race: peers haven't registered yet, so the
+        // active set is empty. Must NOT delete anything — would wipe peers.
+        let consumers = vec![s("self"), s("peer-a"), s("peer-b")];
+        let active: HashSet<String> = HashSet::new();
+        let orphans = select_orphaned_consumers(&consumers, &active, "self");
+        assert!(
+            orphans.is_empty(),
+            "empty active set must skip cleanup (regression for #8015), got: {orphans:?}"
+        );
+    }
+
+    #[test]
+    fn own_consumer_never_returned() {
+        // Own ID is excluded even when not in the active set.
+        let consumers = vec![s("self"), s("peer-a")];
+        let active: HashSet<String> = ["peer-a".to_string()].into_iter().collect();
+        let orphans = select_orphaned_consumers(&consumers, &active, "self");
+        assert_eq!(orphans, Vec::<String>::new());
+    }
+
+    #[test]
+    fn active_peers_not_orphaned() {
+        let consumers = vec![s("self"), s("peer-a"), s("peer-b")];
+        let active: HashSet<String> = ["peer-a", "peer-b"].iter().map(|s| s.to_string()).collect();
+        let orphans = select_orphaned_consumers(&consumers, &active, "self");
+        assert!(orphans.is_empty());
+    }
+
+    #[test]
+    fn inactive_peers_returned() {
+        let consumers = vec![s("self"), s("peer-a"), s("ghost")];
+        let active: HashSet<String> = ["self", "peer-a"].iter().map(|s| s.to_string()).collect();
+        let orphans = select_orphaned_consumers(&consumers, &active, "self");
+        assert_eq!(orphans, vec![s("ghost")]);
     }
 }

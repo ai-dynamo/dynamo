@@ -267,10 +267,9 @@ class DiffusionEngine:
         # guidance_scale_2, boundary_ratio) are owned by TRT-LLM rather
         # than hardcoded here.
         from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
+        from tensorrt_llm.visual_gen.params import VisualGenParams
 
-        req = DiffusionRequest(
-            request_id=0,
-            prompt=[prompt],
+        params = VisualGenParams(
             negative_prompt=negative_prompt,
             height=height,
             width=width,
@@ -281,17 +280,25 @@ class DiffusionEngine:
             seed=seed if seed is not None else random.randint(0, 2**32 - 1),
         )
 
-        # The executor normally fills None fields with pipeline defaults via
-        # _merge_defaults; we call infer() directly so we replicate that here.
+        req = DiffusionRequest(
+            request_id=0,
+            prompt=[prompt],
+            params=params,
+        )
+
+        # Replicate the TRTLLM's visual_gen executor's _merge_defaults: fill None fields in
+        # req.params with pipeline-specific defaults (universal + extra_param
+        # specs), since we call pipeline.infer() directly instead of going
+        # through DiffusionExecutor.
         for name, default in self._pipeline.default_generation_params.items():
-            if hasattr(req, name) and getattr(req, name) is None:
-                setattr(req, name, default)
+            if hasattr(req.params, name) and getattr(req.params, name) is None:
+                setattr(req.params, name, default)
         specs = self._pipeline.extra_param_specs
         if specs:
-            if req.extra_params is None:
-                req.extra_params = {}
+            if req.params.extra_params is None:
+                req.params.extra_params = {}
             for key, spec in specs.items():
-                req.extra_params.setdefault(key, spec.default)
+                req.params.extra_params.setdefault(key, spec.default)
 
         # Run the pipeline — infer() wraps forward() with torch.no_grad()
         output = self._pipeline.infer(req)

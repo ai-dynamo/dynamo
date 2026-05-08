@@ -681,6 +681,18 @@ pub mod kvrouter {
 pub mod kv_publisher {
     /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
+
+    /// Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    pub const ZMQ_EVENTS_TOTAL: &str = "kv_publisher_zmq_events_total";
+
+    /// Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    pub const ZMQ_FILTERED_EVENTS_TOTAL: &str = "kv_publisher_zmq_filtered_events_total";
+
+    /// Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    pub const ZMQ_CONVERSION_ISSUES_TOTAL: &str = "kv_publisher_zmq_conversion_issues_total";
+
+    /// Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.
