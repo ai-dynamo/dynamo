@@ -201,14 +201,7 @@ impl Router {
         }
 
         self.prefill_router
-            .query_prefill_worker(
-                tokens,
-                None,
-                false,
-                None,
-                priority_jump,
-                allowed_worker_ids,
-            )
+            .query_prefill_worker(tokens, None, false, None, priority_jump, allowed_worker_ids)
             .await
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))
     }
@@ -764,12 +757,7 @@ impl EndpointPicker for Router {
         let is_disaggregated = prefill_result.is_ok();
 
         let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
-                is_disaggregated,
-                priority_jump,
-                allowed_worker_ids,
-            )
+            .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -894,8 +882,9 @@ impl EndpointPicker for Router {
 mod tests {
     use super::*;
 
-    fn parse(json: &str) -> dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest
-    {
+    fn parse(
+        json: &str,
+    ) -> dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest {
         serde_json::from_str(json).expect("test request must parse as chat completion")
     }
 
