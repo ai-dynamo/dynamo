@@ -472,6 +472,9 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.pre_merge,
+            pytest.mark.skip(
+                reason="Temporary: video stream load failure for local media URI in CI"
+            ),
             pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -658,6 +661,7 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
+@pytest.mark.multimodal
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
