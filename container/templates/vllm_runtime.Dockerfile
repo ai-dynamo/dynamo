@@ -345,7 +345,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
-        --requirement /tmp/requirements.benchmark.txt
+        --requirement /tmp/requirements.benchmark.txt \
+        cupy-cuda13x
 
 # Copy tests, deploy, lib, and the vllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
