@@ -1141,7 +1141,9 @@ func restoreDGDRAlphaOnlyStatus(restored *DynamoGraphDeploymentRequestStatus, ds
 	}
 	dst.Backend = restored.Backend
 	dst.ProfilingResults = restored.ProfilingResults
-	if restored.State != "" && dgdrAlphaStatusMatchesHubPhase(restored.State, restored.Deployment, src.Phase) {
+	if restored.State != "" &&
+		dgdrAlphaStatusMatchesHubPhase(restored.State, restored.Deployment, src.Phase) &&
+		dgdrAlphaRestoredStateMatchesLiveDGD(restored.State, restored.Deployment, src.DGDName) {
 		dst.State = restored.State
 	}
 	if restored.Deployment != nil &&
@@ -1214,6 +1216,19 @@ func dgdrAlphaStatusMatchesHubPhase(state DGDRState, deployment *DeploymentStatu
 		return true
 	}
 	return phase == v1beta1.DGDRPhaseDeployed && state == DGDRStateReady
+}
+
+func dgdrAlphaRestoredStateMatchesLiveDGD(state DGDRState, deployment *DeploymentStatus, dgdName string) bool {
+	if state != DGDRStateDeploymentDeleted {
+		return true
+	}
+
+	// DeploymentDeleted is an alpha-only state for the specific DGD recorded in status.deployment.
+	// If the live hub status now points at another DGD, the preserved state is stale.
+	if deployment == nil {
+		return dgdName == ""
+	}
+	return deployment.Name == dgdName
 }
 
 // restoreDGDRDeploymentStatus ignores stale deployment-status overlays after hub-side status edits.

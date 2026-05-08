@@ -123,11 +123,58 @@ func TestBugDGDRStaleHubDeploymentInfoRequiresDGDNameMatch(t *testing.T) {
 	}
 }
 
+func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				annDGDRStatus: mustDGDRAlphaStatusAnnotation(t, DynamoGraphDeploymentRequestStatus{
+					State: DGDRStateDeploymentDeleted,
+					Deployment: &DeploymentStatus{
+						Name:    "old-dgd",
+						Created: true,
+					},
+				}),
+			},
+		},
+		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
+			Phase:   v1beta1.DGDRPhaseReady,
+			DGDName: "new-dgd",
+		},
+	}
+
+	dst := &DynamoGraphDeploymentRequest{}
+	if err := dst.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	if dst.Status.State != DGDRStateReady {
+		t.Fatalf("state = %q, want %q", dst.Status.State, DGDRStateReady)
+	}
+	if dst.Status.Deployment == nil {
+		t.Fatal("deployment = nil, want minimal live deployment")
+	}
+	if dst.Status.Deployment.Name != "new-dgd" {
+		t.Fatalf("deployment.name = %q, want %q", dst.Status.Deployment.Name, "new-dgd")
+	}
+	if dst.Status.Deployment.Created {
+		t.Fatal("deployment.created = true, want false")
+	}
+}
+
 func mustDGDRHubStatusAnnotation(t *testing.T, status v1beta1.DynamoGraphDeploymentRequestStatus) string {
 	t.Helper()
 	data, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("marshal DGDR hub status annotation: %v", err)
+	}
+	return string(data)
+}
+
+func mustDGDRAlphaStatusAnnotation(t *testing.T, status DynamoGraphDeploymentRequestStatus) string {
+	t.Helper()
+	data, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal DGDR alpha status annotation: %v", err)
 	}
 	return string(data)
 }
