@@ -437,7 +437,14 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
-        let model_type = parse_endpoint_types(&self.config.endpoint_types)?;
+        // An engine that wants to register as a prefill worker (or any
+        // other non-default ModelType) sets EngineConfig.model_type in
+        // start(). When unset, fall back to the worker-config's
+        // endpoint_types string, preserving legacy behavior.
+        let model_type = match engine_config.model_type {
+            Some(t) => t,
+            None => parse_endpoint_types(&self.config.endpoint_types)?,
+        };
 
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
@@ -697,7 +704,15 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
-        enable_local_indexer: config.enable_local_indexer,
+        // EngineConfig.enable_local_indexer overrides the worker-level
+        // flag when set (e.g. prefill workers force it off because the
+        // local indexer tracks blocks that immediately leave for decode).
+        enable_local_indexer: engine_config
+            .enable_local_indexer
+            .unwrap_or(config.enable_local_indexer),
+        // Bootstrap endpoint propagation for router-resolved disagg.
+        // Decode/aggregated workers leave this None.
+        disaggregated_endpoint: engine_config.disaggregated_endpoint.clone(),
         ..ModelRuntimeConfig::default()
     };
 

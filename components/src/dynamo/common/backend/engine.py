@@ -6,9 +6,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
+from typing import TYPE_CHECKING, Any, Optional, Required, Tuple, TypedDict
 
 from dynamo._core import Context
+from dynamo.llm import ModelType
 
 if TYPE_CHECKING:
     from dynamo.runtime import Endpoint
@@ -31,12 +32,20 @@ class GenerateRequest(TypedDict, total=False):
     ``token_ids`` is always present (set by the Rust preprocessor).
     The remaining groups are optional — engines should access them
     defensively with ``.get(key, {})``.
+
+    ``disaggregated_state`` is the opaque per-request state carried between
+    prefill and decode workers in disaggregated serving. The schema is
+    backend-defined; the abstraction only guarantees that whatever a prefill
+    worker emits in ``GenerateChunk.disaggregated_state`` (or whatever the
+    runtime synthesizes for router-resolved bootstrap mode) reaches the
+    decode worker through this field.
     """
 
     token_ids: Required[list[int]]
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
+    disaggregated_state: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -45,16 +54,43 @@ class GenerateChunk(TypedDict, total=False):
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
     additionally include ``finish_reason`` and ``completion_usage``.
+
+    ``disaggregated_state`` is the opaque state a prefill worker emits for
+    the synchronous-fallback disagg path; the runtime extracts it and
+    threads it into the decode request's ``disaggregated_state``. Backends
+    using router-resolved bootstrap mode (advertised via
+    ``EngineConfig.disaggregated_endpoint``) do not set this field.
     """
 
     token_ids: Required[list[int]]
     index: Required[int]
     finish_reason: str
     completion_usage: dict[str, int]
+    disaggregated_state: dict[str, Any]
 
 
 @dataclass
 class EngineConfig:
+    """Registration metadata returned by ``LLMEngine.start()``.
+
+    Disaggregated serving fields:
+
+    * ``model_type`` — when not ``None``, OR'd into the registered model
+      type. A prefill worker sets this to ``ModelType.Prefill`` so Dynamo's
+      discovery promotes it to a prefill instance.
+    * ``disaggregated_endpoint`` — when set, ``Worker`` calls
+      ``runtime_config.set_disaggregated_endpoint(host, port)`` so the
+      Rust ``PrefillRouter`` can synthesize a ``disaggregated_state``
+      payload (host/port/room) into each decode request. Used by the
+      router-resolved bootstrap path (SGLang, TokenSpeed). Backends that
+      use the synchronous-fallback path (vLLM, TRT-LLM) leave this ``None``
+      and emit state from prefill ``generate()`` chunks instead.
+    * ``enable_local_indexer`` — engine override for the worker-level
+      flag of the same name. ``None`` (default) respects ``WorkerConfig``;
+      a value forces the runtime config. Prefill-only workers typically
+      want ``False`` since they ship KV out immediately.
+    """
+
     model: str
     served_model_name: Optional[str] = None
     context_length: Optional[int] = None
@@ -62,6 +98,9 @@ class EngineConfig:
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    model_type: Optional[ModelType] = None
+    disaggregated_endpoint: Optional[Tuple[str, int]] = None
+    enable_local_indexer: Optional[bool] = None
 
 
 class LLMEngine(ABC):

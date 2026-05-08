@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, DynamoError, EngineConfig as RsEngineConfig, ErrorType,
-    LLMEngine, LLMEngineOutput, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
-    Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+    AsyncEngineContext, BackendError, DisaggregatedEndpoint, DynamoError,
+    EngineConfig as RsEngineConfig, ErrorType, LLMEngine, LLMEngineOutput, PreprocessedRequest,
+    RuntimeConfig as RsRuntimeConfig, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
@@ -34,6 +34,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::Endpoint;
 use crate::ModelInput;
+use crate::ModelType as PyModelType;
 use crate::context::Context as PyContext;
 use crate::errors::py_exception_to_backend_error;
 use crate::to_pyerr;
@@ -79,7 +80,11 @@ impl EngineConfig {
         total_kv_blocks = None,
         max_num_seqs = None,
         max_num_batched_tokens = None,
+        model_type = None,
+        disaggregated_endpoint = None,
+        enable_local_indexer = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         model: String,
         served_model_name: Option<String>,
@@ -88,6 +93,9 @@ impl EngineConfig {
         total_kv_blocks: Option<u64>,
         max_num_seqs: Option<u64>,
         max_num_batched_tokens: Option<u64>,
+        model_type: Option<PyModelType>,
+        disaggregated_endpoint: Option<(String, u16)>,
+        enable_local_indexer: Option<bool>,
     ) -> Self {
         Self {
             inner: RsEngineConfig {
@@ -98,6 +106,13 @@ impl EngineConfig {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                model_type: model_type.map(|m| m.inner),
+                disaggregated_endpoint: disaggregated_endpoint
+                    .map(|(host, port)| DisaggregatedEndpoint {
+                        bootstrap_host: Some(host),
+                        bootstrap_port: Some(port),
+                    }),
+                enable_local_indexer,
             },
         }
     }
@@ -129,6 +144,23 @@ impl EngineConfig {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn model_type(&self) -> Option<PyModelType> {
+        self.inner.model_type.map(|m| PyModelType { inner: m })
+    }
+    #[getter]
+    fn disaggregated_endpoint(&self) -> Option<(String, u16)> {
+        self.inner.disaggregated_endpoint.as_ref().and_then(|de| {
+            match (de.bootstrap_host.as_ref(), de.bootstrap_port) {
+                (Some(host), Some(port)) => Some((host.clone(), port)),
+                _ => None,
+            }
+        })
+    }
+    #[getter]
+    fn enable_local_indexer(&self) -> Option<bool> {
+        self.inner.enable_local_indexer
     }
 }
 
@@ -434,6 +466,16 @@ impl LLMEngine for PyLLMEngine {
             if let Ok(cfg) = bound.extract::<EngineConfig>() {
                 return Ok(cfg.inner);
             }
+            // Disagg fields: optional on the Python dataclass; engines that
+            // don't set them stay on the legacy aggregated path.
+            let model_type = opt_attr::<PyModelType>(bound, "model_type")?.map(|m| m.inner);
+            let disaggregated_endpoint =
+                opt_attr::<(String, u16)>(bound, "disaggregated_endpoint")?.map(|(host, port)| {
+                    DisaggregatedEndpoint {
+                        bootstrap_host: Some(host),
+                        bootstrap_port: Some(port),
+                    }
+                });
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
@@ -442,6 +484,9 @@ impl LLMEngine for PyLLMEngine {
                 total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks")?,
                 max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
                 max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
+                model_type,
+                disaggregated_endpoint,
+                enable_local_indexer: opt_attr::<bool>(bound, "enable_local_indexer")?,
             })
         })
         .map_err(py_err_to_dynamo)
