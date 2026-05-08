@@ -89,6 +89,12 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         mainContainer:
           command:
             - bash
@@ -175,6 +181,12 @@ spec:
       sharedMemory:
         size: 200Gi
       extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
         mainContainer:
           command:
             - bash
