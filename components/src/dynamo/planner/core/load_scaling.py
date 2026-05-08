@@ -396,17 +396,33 @@ class LoadScalingMixin:
 
         kv_hit_rate = self._last_kv_hit_rate
         sensitivity = self._config.load_scaling_down_sensitivity / 100.0
-        consolidation = (
-            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
-        )
+        consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
+
+        # Own-compute baseline TTFT (queue=0): the new request's avg_isl chunks
+        # alone. This portion does not change with consolidation, so we apply
+        # sensitivity only to the queue-side budget ``SLA - T_own``.
+        t_own_s: Optional[float] = None
+        if num_workers > 1:
+            t_own_s = self._prefill_regression.estimate_next_ttft(
+                queued_prefill_tokens=0,
+                max_num_batched_tokens=max_tokens,
+                kv_hit_rate=kv_hit_rate,
+            )
 
         estimates: list[float] = []
         # Consolidation-aware scale-down: re-predict TTFT with the queue
-        # scaled by N/(N-1). The regression's internal ``avg_isl`` (the new
-        # request's own compute) stays put, so only the *queue* part of TTFT
-        # is inflated -- per Shang-Pin's observation that the prefill
-        # forward-pass time itself does not shrink with more workers.
-        can_scale_down = num_workers > 1
+        # scaled by N/(N-1) and check the *queue-induced* portion against
+        # ``(SLA - T_own) * sensitivity``. The new request's own forward-pass
+        # time (``T_own``) does not shrink with more workers, so it is
+        # excluded from the safety-margin budget.
+        can_scale_down = num_workers > 1 and t_own_s is not None
+        if can_scale_down:
+            t_own_ms = t_own_s * 1000  # type: ignore[operator]
+            queue_budget_ms = (self._config.ttft - t_own_ms) * sensitivity
+            if queue_budget_ms <= 0:
+                # Own compute alone already exceeds SLA -- never safe to lose
+                # a worker (would only make queue contention worse).
+                can_scale_down = False
         for (wid, dp), fpm in fpm_stats.items():
             queued = fpm.queued_requests.sum_prefill_tokens
             est = self._prefill_regression.estimate_next_ttft(
@@ -431,11 +447,12 @@ class LoadScalingMixin:
                     max_num_batched_tokens=max_tokens,
                     kv_hit_rate=kv_hit_rate,
                 )
-                if (
-                    post_est is None
-                    or post_est * 1000 >= self._config.ttft * sensitivity
-                ):
+                if post_est is None:
                     can_scale_down = False
+                else:
+                    queue_induced_ms = post_est * 1000 - t_own_ms
+                    if queue_induced_ms >= queue_budget_ms:
+                        can_scale_down = False
 
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)
@@ -463,9 +480,7 @@ class LoadScalingMixin:
             return None
 
         sensitivity = self._config.load_scaling_down_sensitivity / 100.0
-        consolidation = (
-            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
-        )
+        consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
 
@@ -475,9 +490,7 @@ class LoadScalingMixin:
         # Survivors absorb the killed worker's in-flight KV, so post-survival
         # util ≈ current × N/(N-1). Refuse scale-down if any survivor would
         # exceed ``sensitivity`` (default 0.8) of full KV cache after merge.
-        can_scale_down = (
-            num_workers > 1 and max_kv is not None and max_kv > 0
-        )
+        can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
         for (wid, dp), fpm in fpm_stats.items():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
             queued_kv = fpm.queued_requests.sum_decode_kv_tokens
@@ -518,15 +531,14 @@ class LoadScalingMixin:
     ) -> Optional[int]:
         kv_hit_rate = self._last_kv_hit_rate
         sensitivity = self._config.load_scaling_down_sensitivity / 100.0
-        consolidation = (
-            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
-        )
+        consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
 
         estimates: list[float] = []
-        # Agg-prefill consolidation: both queued prefill and current decode KV
-        # are state that the surviving worker would absorb -- scale both by
-        # N/(N-1) when re-predicting TTFT. ``avg_isl`` (next-request compute)
-        # is unchanged inside the regression.
+        # Agg-prefill consolidation: queued prefill and decode KV are both
+        # absorbed by the survivor (scale both by N/(N-1)). Sensitivity is
+        # applied only to the queue-induced portion of TTFT -- ``T_own`` (a
+        # zero-queue prefill at the post-consolidation decode_kv) is treated
+        # as the fixed cost the new request must pay regardless of N.
         can_scale_down = num_workers > 1
         for fpm in fpm_stats.values():
             queued = fpm.queued_requests.sum_prefill_tokens
@@ -543,17 +555,26 @@ class LoadScalingMixin:
             if can_scale_down:
                 post_queued = int(queued * consolidation)
                 post_decode_kv = int(sched_decode_kv * consolidation)
+                t_own_post = self._agg_regression.estimate_next_ttft(
+                    queued_prefill_tokens=0,
+                    max_num_batched_tokens=max_tokens,
+                    current_decode_kv=post_decode_kv,
+                    kv_hit_rate=kv_hit_rate,
+                )
                 post_est = self._agg_regression.estimate_next_ttft(
                     queued_prefill_tokens=post_queued,
                     max_num_batched_tokens=max_tokens,
                     current_decode_kv=post_decode_kv,
                     kv_hit_rate=kv_hit_rate,
                 )
-                if (
-                    post_est is None
-                    or post_est * 1000 >= self._config.ttft * sensitivity
-                ):
+                if t_own_post is None or post_est is None:
                     can_scale_down = False
+                else:
+                    t_own_ms = t_own_post * 1000
+                    queue_budget_ms = (self._config.ttft - t_own_ms) * sensitivity
+                    queue_induced_ms = post_est * 1000 - t_own_ms
+                    if queue_budget_ms <= 0 or queue_induced_ms >= queue_budget_ms:
+                        can_scale_down = False
 
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)
@@ -572,9 +593,7 @@ class LoadScalingMixin:
         num_workers: int,
     ) -> Optional[int]:
         sensitivity = self._config.load_scaling_down_sensitivity / 100.0
-        consolidation = (
-            num_workers / (num_workers - 1) if num_workers > 1 else 1.0
-        )
+        consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
 
@@ -582,9 +601,7 @@ class LoadScalingMixin:
         # Agg-decode consolidation: combined cache pressure (sched + queued
         # decode KV + queued prefill) scaled by N/(N-1). Mirrors the easy-mode
         # agg utilisation but with the consolidation-aware threshold.
-        can_scale_down = (
-            num_workers > 1 and max_kv is not None and max_kv > 0
-        )
+        can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
         for fpm in fpm_stats.values():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
             queued_kv = fpm.queued_requests.sum_decode_kv_tokens

@@ -364,16 +364,17 @@ class TestDecodeConsolidationAwareScaleDown:
         _train_decode_regression(core)
         return core
 
-    def _tick(
-        self, *, num_workers: int, sched_kv_per_worker: int
-    ) -> TickInput:
+    def _tick(self, *, num_workers: int, sched_kv_per_worker: int) -> TickInput:
         decode = {}
         for i in range(num_workers):
             decode[(f"w{i}", 0)] = _make_fpm(
                 worker_id=f"w{i}",
                 sum_decode_kv_tokens=sched_kv_per_worker,
                 num_decode_requests=max(1, sched_kv_per_worker // 1000),
-                wall_time=0.005,
+                # Match _train_decode_regression's wall_time formula so the
+                # post-bootstrap refit on each tick stays monotone in kv;
+                # otherwise the regression rejects the fit and decisions skip.
+                wall_time=0.00001 * sched_kv_per_worker + 0.001,
             )
         return TickInput(
             now_s=5.0,
@@ -435,14 +436,17 @@ class TestDecodeConsolidationAwareScaleDown:
 
 
 def _train_slow_prefill_regression(core: PlannerStateMachine) -> None:
-    """Trains a regression with low slope so chunked TTFTs stay tractable."""
+    """Trains a regression with low slope so chunked TTFTs stay tractable.
+
+    Slope 1e-5 (not 1e-6) is the floor where np.linalg keeps the coefficient
+    reliably positive across small fits -- 1e-6 sometimes computes as
+    slightly negative from floating-point noise and the fit gets rejected.
+    """
     fpms = [
         _make_fpm(
             sum_prefill_tokens=t,
             num_prefill_requests=1,
-            # wall_time_s = 1e-6 * t + 1e-3 -> chunk(2048) ≈ 3 ms,
-            # whole-trace TTFTs stay in the tens of ms.
-            wall_time=1e-6 * t + 1e-3,
+            wall_time=1e-5 * t + 1e-3,
         )
         for t in [500, 1000, 1500, 2000, 2500]
     ]
@@ -466,9 +470,7 @@ class TestPrefillConsolidationAwareScaleDown:
         _train_slow_prefill_regression(core)
         return core
 
-    def _tick(
-        self, *, num_workers: int, queued_per_worker: int
-    ) -> TickInput:
+    def _tick(self, *, num_workers: int, queued_per_worker: int) -> TickInput:
         prefill = {}
         for i in range(num_workers):
             prefill[(f"w{i}", 0)] = _make_fpm(
@@ -476,7 +478,9 @@ class TestPrefillConsolidationAwareScaleDown:
                 queued_prefill_tokens=queued_per_worker,
                 sum_prefill_tokens=500,
                 num_prefill_requests=1,
-                wall_time=0.005,
+                # Match _train_slow_prefill_regression to keep the per-tick
+                # refit monotone (1e-5 * 500 + 1e-3 = 0.006).
+                wall_time=1e-5 * 500 + 1e-3,
             )
         return TickInput(
             now_s=5.0,
@@ -520,6 +524,87 @@ class TestPrefillConsolidationAwareScaleDown:
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is not None
         assert effects.scale_to.num_prefill == 9
+
+
+def _train_prefill_regression_high_own_compute(core: PlannerStateMachine) -> None:
+    """Trains a steeper regression so own-compute is a sizeable fraction of SLA.
+
+    With wall_time = 1e-5*t + 1e-3 and ISLs in [1500..2500] (avg_isl=2000),
+    a single chunk at MBT=2048 is ≈ 21.5 ms and T_own (queue=0) is ≈ 21 ms.
+    """
+    fpms = [
+        _make_fpm(
+            sum_prefill_tokens=t,
+            num_prefill_requests=1,
+            wall_time=1e-5 * t + 1e-3,
+        )
+        for t in [1500, 1750, 2000, 2250, 2500]
+    ]
+    core.load_benchmark_fpms(prefill_fpms=fpms)
+
+
+class TestPrefillQueueBudgetRefinement:
+    """Sensitivity applies to the queue-induced TTFT, not the full TTFT.
+
+    When ``T_own`` (own-compute, fixed cost) is a meaningful fraction of SLA,
+    the old `TTFT(post_queue) < SLA × sensitivity` check over-penalises the
+    queue budget by spending sensitivity on the unavoidable own-compute.
+    The corrected check allows scale-down when the queue-induced TTFT after
+    consolidation fits within ``(SLA - T_own) × sensitivity``.
+    """
+
+    def _setup(self, ttft: float = 50.0):
+        core = _make_core(
+            mode="prefill",
+            ttft=ttft,
+            load_scaling_down_sensitivity=80,
+        )
+        _train_prefill_regression_high_own_compute(core)
+        return core
+
+    def _tick(self, *, num_workers: int, queued_per_worker: int) -> TickInput:
+        prefill = {}
+        for i in range(num_workers):
+            prefill[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                queued_prefill_tokens=queued_per_worker,
+                sum_prefill_tokens=2000,
+                num_prefill_requests=1,
+                wall_time=0.021,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill=prefill),
+            worker_counts=WorkerCounts(ready_num_prefill=num_workers),
+        )
+
+    def test_high_own_compute_permits_scale_down(self):
+        """Old check would have refused; new queue-budget check allows.
+
+        N=2, queue=1000, SLA=50ms, T_own≈21ms.
+        Post-consolidation TTFT ≈ 42ms → exceeds old SLA*0.8 = 40ms (refuse).
+        Queue-induced post ≈ 21ms < (50-21)*0.8 = 23.2ms (allow).
+        """
+        core = self._setup(ttft=50.0)
+        tick = self._tick(num_workers=2, queued_per_worker=1_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 1
+
+    def test_t_own_above_sla_blocks_scale_down(self):
+        """When T_own alone exceeds SLA, queue_budget ≤ 0 → refuse.
+
+        SLA=15ms but T_own≈21ms → new request can't even meet SLA empty;
+        scaling down would only worsen contention.
+        """
+        core = self._setup(ttft=15.0)
+        tick = self._tick(num_workers=2, queued_per_worker=0)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_prefill is None
+            or effects.scale_to.num_prefill >= 2
+        )
 
 
 class TestDisaggLoadScaling:
