@@ -40,7 +40,8 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
 def _chat_additional_information(request: dict) -> dict[str, Any]:
     """Build Omni prompt metadata from chat/audio request fields."""
     additional_information: dict[str, Any] = {}
-    audio = request.get("audio") if isinstance(request.get("audio"), dict) else {}
+    raw_audio = request.get("audio")
+    audio: dict[str, Any] = raw_audio if isinstance(raw_audio, dict) else {}
 
     speaker = (
         request.get("voice")

@@ -10,7 +10,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, cast
 
 import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
@@ -211,7 +211,7 @@ class OmniStageWorker:
                 connector_result
             )
             if self._native_async:
-                out: dict = {
+                native_out: dict = {
                     "original_prompt": original_prompt,
                     "stage_connector_refs": {
                         **{str(k): v for k, v in stage_connector_refs.items()},
@@ -222,10 +222,10 @@ class OmniStageWorker:
                     "finished": True,
                 }
                 if stage_text_output:
-                    out["stage_text_output"] = stage_text_output
+                    native_out["stage_text_output"] = stage_text_output
                 if sampling_params_list_override is not None:
-                    out["sampling_params_list"] = sampling_params_list_override
-                yield out
+                    native_out["sampling_params_list"] = sampling_params_list_override
+                yield native_out
                 return
 
             try:
@@ -248,7 +248,7 @@ class OmniStageWorker:
             if not ok:
                 yield {"error": "connector.put() failed", "finished": True}
                 return
-            out: dict = {
+            connector_out: dict = {
                 "original_prompt": original_prompt,
                 "stage_connector_refs": {
                     **{str(k): v for k, v in stage_connector_refs.items()},
@@ -257,10 +257,10 @@ class OmniStageWorker:
                 "finished": True,
             }
             if stage_text_output:
-                out["stage_text_output"] = stage_text_output
+                connector_out["stage_text_output"] = stage_text_output
             if sampling_params_list_override is not None:
-                out["sampling_params_list"] = sampling_params_list_override
-            yield out
+                connector_out["sampling_params_list"] = sampling_params_list_override
+            yield connector_out
             return
 
         # Final stage → router: write output to shared memory and return the SHM handle.
@@ -645,7 +645,9 @@ def _attach_pipeline_final_stage(prompt: Any, final_stage_id: int | None) -> Any
 
 def _patch_omni_final_stage_metadata() -> None:
     """Preserve Dynamo's pipeline final stage in vLLM-Omni request metadata."""
-    async_omni_engine = importlib.import_module("vllm_omni.engine.async_omni_engine")
+    async_omni_engine = cast(
+        Any, importlib.import_module("vllm_omni.engine.async_omni_engine")
+    )
 
     if getattr(async_omni_engine, "_dynamo_final_stage_patch", False):
         return

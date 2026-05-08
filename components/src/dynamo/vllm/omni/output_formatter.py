@@ -426,7 +426,7 @@ class AudioFormatter:
 def _audio_chat_chunk(
     request_id: str, model_name: str, audio_url: str, *, text: str | None = None
 ) -> Dict[str, Any]:
-    content_parts = []
+    content_parts: list[dict[str, Any]] = []
     if text:
         content_parts.append({"type": "text", "text": text})
     content_parts.append(
