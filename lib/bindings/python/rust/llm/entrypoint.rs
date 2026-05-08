@@ -12,7 +12,7 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    overlap_score_credit_error_message,
+    apply_overlap_score_weight_alias,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
@@ -37,20 +37,8 @@ use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
 
-fn validate_overlap_score_credit(value: f64) -> PyResult<()> {
-    if let Some(message) = overlap_score_credit_error_message(value) {
-        return Err(PyValueError::new_err(message));
-    }
-    Ok(())
-}
-
-fn validate_prefill_load_scale(value: f64) -> PyResult<()> {
-    if value < 0.0 {
-        return Err(PyValueError::new_err(
-            "prefill_load_scale must be non-negative",
-        ));
-    }
-    Ok(())
+fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
+    config.validate_config().map_err(PyValueError::new_err)
 }
 
 fn warn_overlap_score_weight_deprecated() {
@@ -63,10 +51,7 @@ fn apply_deprecated_overlap_score_weight(
     prefill_load_scale: &mut f64,
 ) {
     warn_overlap_score_weight_deprecated();
-    *prefill_load_scale = value;
-    if value == 0.0 {
-        *overlap_score_credit = 0.0;
-    }
+    apply_overlap_score_weight_alias(value, overlap_score_credit, prefill_load_scale);
 }
 
 #[pyclass(eq, eq_int)]
@@ -194,45 +179,37 @@ impl KvRouterConfig {
                 &mut prefill_load_scale,
             );
         }
-        validate_overlap_score_credit(overlap_score_credit)?;
-        validate_prefill_load_scale(prefill_load_scale)?;
 
-        Ok(KvRouterConfig {
-            inner: RsKvRouterConfig {
-                overlap_score_credit,
-                prefill_load_scale,
-                host_cache_hit_weight,
-                disk_cache_hit_weight,
-                router_temperature,
-                use_kv_events,
-                durable_kv_events,
-                router_replica_sync,
-                router_track_active_blocks,
-                router_track_output_blocks,
-                router_assume_kv_reuse,
-                router_track_prefill_tokens,
-                router_prefill_load_model: router_prefill_load_model
-                    .parse::<RsRouterPrefillLoadModel>()
-                    .unwrap_or_else(|_| {
-                        panic!("invalid router_prefill_load_model: {router_prefill_load_model:?}")
-                    }),
-                router_snapshot_threshold,
-                router_reset_states,
-                router_ttl_secs,
-                router_queue_threshold,
-                router_event_threads,
-                skip_initial_worker_wait: false,
-                router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
-                    panic!("invalid router_queue_policy: {router_queue_policy:?}")
-                }),
-                use_remote_indexer,
-                serve_indexer,
-                shared_cache_multiplier,
-                shared_cache_type: shared_cache_type
-                    .parse()
-                    .unwrap_or_else(|_| panic!("invalid shared_cache_type: {shared_cache_type:?}")),
-            },
-        })
+        let inner = RsKvRouterConfig {
+            overlap_score_credit,
+            prefill_load_scale,
+            host_cache_hit_weight,
+            disk_cache_hit_weight,
+            router_temperature,
+            use_kv_events,
+            durable_kv_events,
+            router_replica_sync,
+            router_track_active_blocks,
+            router_track_output_blocks,
+            router_assume_kv_reuse,
+            router_track_prefill_tokens,
+            router_prefill_load_model: router_prefill_load_model
+                .parse::<RsRouterPrefillLoadModel>()
+                .map_err(PyValueError::new_err)?,
+            router_snapshot_threshold,
+            router_reset_states,
+            router_ttl_secs,
+            router_queue_threshold,
+            router_event_threads,
+            skip_initial_worker_wait: false,
+            router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
+            use_remote_indexer,
+            serve_indexer,
+            shared_cache_multiplier,
+            shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
+        };
+        validate_kv_router_config(&inner)?;
+        Ok(KvRouterConfig { inner })
     }
 
     #[staticmethod]
@@ -240,8 +217,6 @@ impl KvRouterConfig {
         let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
-        validate_overlap_score_credit(inner.overlap_score_credit)?;
-        validate_prefill_load_scale(inner.prefill_load_scale)?;
         Ok(KvRouterConfig { inner })
     }
 
@@ -261,8 +236,10 @@ impl KvRouterConfig {
 
     #[setter]
     fn set_overlap_score_credit(&mut self, value: f64) -> PyResult<()> {
-        validate_overlap_score_credit(value)?;
-        self.inner.overlap_score_credit = value;
+        let mut inner = self.inner.clone();
+        inner.overlap_score_credit = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
         Ok(())
     }
 
@@ -273,12 +250,14 @@ impl KvRouterConfig {
 
     #[setter]
     fn set_overlap_score_weight(&mut self, value: f64) -> PyResult<()> {
-        validate_prefill_load_scale(value)?;
+        let mut inner = self.inner.clone();
         apply_deprecated_overlap_score_weight(
             value,
-            &mut self.inner.overlap_score_credit,
-            &mut self.inner.prefill_load_scale,
+            &mut inner.overlap_score_credit,
+            &mut inner.prefill_load_scale,
         );
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
         Ok(())
     }
 
@@ -289,35 +268,35 @@ impl KvRouterConfig {
 
     #[setter]
     fn set_prefill_load_scale(&mut self, value: f64) -> PyResult<()> {
-        validate_prefill_load_scale(value)?;
-        self.inner.prefill_load_scale = value;
+        let mut inner = self.inner.clone();
+        inner.prefill_load_scale = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_credit=None, prefill_load_scale=None, *, overlap_score_weight=None))]
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, prefill_load_scale=None))]
     fn with_overrides(
         &self,
+        overlap_score_weight: Option<f64>,
         overlap_score_credit: Option<f64>,
         prefill_load_scale: Option<f64>,
-        overlap_score_weight: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
-        if let Some(credit) = overlap_score_credit {
-            validate_overlap_score_credit(credit)?;
-            inner.overlap_score_credit = credit;
-        }
         if let Some(weight) = overlap_score_weight {
-            validate_prefill_load_scale(weight)?;
             apply_deprecated_overlap_score_weight(
                 weight,
                 &mut inner.overlap_score_credit,
                 &mut inner.prefill_load_scale,
             );
         }
+        if let Some(credit) = overlap_score_credit {
+            inner.overlap_score_credit = credit;
+        }
         if let Some(scale) = prefill_load_scale {
-            validate_prefill_load_scale(scale)?;
             inner.prefill_load_scale = scale;
         }
+        validate_kv_router_config(&inner)?;
         Ok(Self { inner })
     }
 }

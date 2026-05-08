@@ -1373,10 +1373,10 @@ class KvRouterConfig:
 
     def with_overrides(
         self,
+        overlap_score_weight: Optional[float] = None,
+        *,
         overlap_score_credit: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
-        *,
-        overlap_score_weight: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:

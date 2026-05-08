@@ -1041,6 +1041,26 @@ def test_kv_router_config_positional_zero_preserves_no_overlap_behavior() -> Non
     assert config.overlap_score_weight == 0.0
 
 
+def test_kv_router_config_with_overrides_preserves_positional_weight_alias() -> None:
+    config = KvRouterConfig(overlap_score_credit=0.5, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(2.0)
+
+    assert updated.overlap_score_credit == 0.5
+    assert updated.prefill_load_scale == 2.0
+    assert updated.overlap_score_weight == 2.0
+
+
+def test_kv_router_config_with_overrides_zero_preserves_no_overlap_behavior() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(0.0)
+
+    assert updated.overlap_score_credit == 0.0
+    assert updated.prefill_load_scale == 0.0
+    assert updated.overlap_score_weight == 0.0
+
+
 @pytest.mark.timeout(30)
 def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
     pytest.importorskip("aiconfigurator")
