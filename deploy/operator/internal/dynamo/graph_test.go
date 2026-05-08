@@ -7751,24 +7751,32 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{
+		MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "mpi-ssh-secret"},
+	}
 
 	envFromSecret := "hf-token-secret"
 
 	tests := []struct {
-		name               string
-		component          *v1alpha1.DynamoComponentDeploymentSharedSpec
-		parentDGDName      string
-		namespace          string
-		wantSidecarCount   int
-		wantSidecarName    string
-		wantSidecarImage   string
-		wantSidecarArgs    []string
-		wantSidecarEnvVars map[string]string
-		wantSidecarEnvFrom int
-		wantSidecarProbes  bool
-		wantSidecarPorts   bool
-		wantErr            bool
+		name                    string
+		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentDGDName           string
+		namespace               string
+		backendFramework        BackendFramework
+		numberOfNodes           int32
+		wantSidecarCount        int
+		wantSidecarName         string
+		wantSidecarImage        string
+		wantSidecarArgs         []string
+		wantSidecarEnvVars      map[string]string
+		wantSidecarEnvFrom      int
+		wantSidecarProbes       bool
+		wantSidecarPorts        bool
+		wantSidecarMounts       []corev1.VolumeMount
+		wantSidecarMountsAbsent []string
+		wantWorkerMounts        []corev1.VolumeMount
+		wantUniqueVolumes       map[string]int
+		wantErr                 bool
 	}{
 		{
 			name: "worker without frontendSidecar has no sidecar",
@@ -7846,18 +7854,115 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,
 		},
+		{
+			name: "frontendSidecar inherits worker PVC volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+				},
+				SharedMemory: &v1alpha1.SharedMemorySpec{Disabled: true},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+			},
+			wantUniqueVolumes: map[string]int{"model-cache": 1},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar inherits user PVC mounts but not shared memory",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+					{Name: "extra-data", MountPoint: "/mnt/data"},
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+				{Name: "extra-data", MountPath: "/mnt/data"},
+			},
+			wantSidecarMountsAbsent: []string{commonconsts.KubeValueNameSharedMemory},
+			wantUniqueVolumes: map[string]int{
+				"model-cache":                          1,
+				"extra-data":                           1,
+				commonconsts.KubeValueNameSharedMemory: 1,
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			// TRT-LLM multinode injects the /ssh-pk MPI secret onto the worker.
+			// The sidecar must not inherit it; only user-declared mounts propagate.
+			name: "frontendSidecar does not inherit TRT-LLM multinode SSH mount",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			backendFramework: BackendFrameworkTRTLLM,
+			numberOfNodes:    2,
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+			},
+			wantSidecarMountsAbsent: []string{"mpi-ssh-secret", commonconsts.KubeValueNameSharedMemory},
+			wantWorkerMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+				{Name: "mpi-ssh-secret", MountPath: "/ssh-pk"},
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			backendFramework := tt.backendFramework
+			if backendFramework == "" {
+				backendFramework = BackendFrameworkVLLM
+			}
+			numberOfNodes := tt.numberOfNodes
+			if numberOfNodes == 0 {
+				numberOfNodes = 1
+			}
+			role := RoleMain
+			if numberOfNodes > 1 {
+				role = RoleLeader
+			}
 			podSpec, err := GenerateBasePodSpec(
 				tt.component,
-				BackendFrameworkVLLM,
+				backendFramework,
 				secretsRetriever,
 				tt.parentDGDName,
 				tt.namespace,
-				RoleMain,
-				1,
+				role,
+				numberOfNodes,
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
@@ -7928,6 +8033,48 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			}
 			for name, found := range hasDownwardAPI {
 				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			}
+
+			// Verify the sidecar's volume mounts match the expected set exactly.
+			// The frontend base container ships with no mounts, so sidecar.VolumeMounts
+			// should equal wantSidecarMounts element-for-element.
+			if tt.wantSidecarMounts != nil {
+				assert.ElementsMatch(t, tt.wantSidecarMounts, sidecar.VolumeMounts, "sidecar volume mounts")
+			}
+
+			// Verify the sidecar did NOT inherit mounts that belong only to the worker
+			// (shared memory, backend-injected secrets like TRT-LLM's /ssh-pk, etc.).
+			for _, absentName := range tt.wantSidecarMountsAbsent {
+				for _, got := range sidecar.VolumeMounts {
+					assert.NotEqual(t, absentName, got.Name,
+						"sidecar must not inherit worker-only mount %s", absentName)
+				}
+			}
+
+			// Verify the worker container still has its expected mounts — propagation
+			// must not strip anything off the worker.
+			if len(tt.wantWorkerMounts) > 0 {
+				worker := podSpec.Containers[0]
+				for _, want := range tt.wantWorkerMounts {
+					found := false
+					for _, got := range worker.VolumeMounts {
+						if got.Name == want.Name && got.MountPath == want.MountPath {
+							found = true
+							break
+						}
+					}
+					assert.True(t, found, "worker should have volume mount %s at %s", want.Name, want.MountPath)
+				}
+			}
+
+			// Verify pod-level volume counts exactly match the expected set
+			// (catches duplicates as well as unexpected extra volumes).
+			if tt.wantUniqueVolumes != nil {
+				counts := make(map[string]int)
+				for _, v := range podSpec.Volumes {
+					counts[v.Name]++
+				}
+				assert.Equal(t, tt.wantUniqueVolumes, counts, "pod volume counts")
 			}
 		})
 	}

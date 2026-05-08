@@ -100,16 +100,23 @@ func scrubReservedAnnotations(m map[string]string) map[string]string {
 	return m
 }
 
-// TODO: fix this conversion bug: DGDR conversion re-emits internal annotations during direct round-trips.
-// Example:
-//
-//	spec:
-//	  sla:
-//	    ttft: 2000
-//
-// round-trips with metadata.annotations["nvidia.com/dgdr-profiling-config"].
-var ignoreDGDRInternalAnnotationTODO = cmpopts.AcyclicTransformer(
-	"ignoreDGDRInternalAnnotationTODO",
+// DGDR still writes legacy nvidia.com/dgdr-* annotations for downgrade
+// compatibility with Dynamo 1.1. Direct round-trip fuzzing compares live API
+// fields and ignores those intentionally re-emitted compatibility annotations.
+var legacyDGDRCompatibilityAnnotations = []string{
+	"nvidia.com/dgdr-config-map-ref",
+	"nvidia.com/dgdr-output-pvc",
+	"nvidia.com/dgdr-enable-gpu-discovery",
+	"nvidia.com/dgdr-deployment-overrides",
+	"nvidia.com/dgdr-profiling-config",
+	"nvidia.com/dgdr-status-backend",
+	"nvidia.com/dgdr-profiling-results",
+	"nvidia.com/dgdr-deployment-status",
+	"nvidia.com/dgdr-profiling-job-name",
+}
+
+var ignoreDGDRCompatibilityAnnotations = cmpopts.AcyclicTransformer(
+	"ignoreDGDRCompatibilityAnnotations",
 	func(m metav1.ObjectMeta) metav1.ObjectMeta {
 		if len(m.Annotations) == 0 {
 			return m
@@ -118,10 +125,8 @@ var ignoreDGDRInternalAnnotationTODO = cmpopts.AcyclicTransformer(
 		for k, v := range m.Annotations {
 			annotations[k] = v
 		}
-		for k := range annotations {
-			if strings.HasPrefix(k, "nvidia.com/dgdr-") {
-				delete(annotations, k)
-			}
+		for _, k := range legacyDGDRCompatibilityAnnotations {
+			delete(annotations, k)
 		}
 		if len(annotations) == 0 {
 			m.Annotations = nil
@@ -234,18 +239,10 @@ func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.
 	// Empty resources do not survive the alpha resources to beta profiling job projection.
 	if s.ProfilingConfig.Resources != nil &&
 		len(s.ProfilingConfig.Resources.Requests) == 0 &&
-		len(s.ProfilingConfig.Resources.Limits) == 0 {
+		len(s.ProfilingConfig.Resources.Limits) == 0 &&
+		len(s.ProfilingConfig.Resources.Claims) == 0 {
 		s.ProfilingConfig.Resources = nil
 	}
-
-	// TODO: fix this conversion bug: NodeSelector is not mapped into the v1beta1 profiling job override.
-	// Example:
-	//   spec:
-	//     profilingConfig:
-	//       nodeSelector:
-	//         accelerator: h100
-	// round-trips without nodeSelector.
-	s.ProfilingConfig.NodeSelector = nil
 
 	// Only true EnableGPUDiscovery is annotation-preserved; false is dropped.
 	if s.EnableGPUDiscovery != nil {
@@ -269,14 +266,15 @@ func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.
 func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
 
-	// TODO: fix this conversion bug: Initializing and DeploymentDeleted are lossy through the v1beta1 phase enum.
-	// Example:
-	//   status:
-	//     state: DeploymentDeleted
-	//     deployment:
-	//       created: true
-	// round-trips as Ready with created=false.
-	s.State = oneOf(c, v1alpha1.DGDRStatePending, v1alpha1.DGDRStateProfiling, v1alpha1.DGDRStateReady, v1alpha1.DGDRStateDeploying, v1alpha1.DGDRStateFailed)
+	s.State = oneOf(c,
+		v1alpha1.DGDRStateInitializing,
+		v1alpha1.DGDRStatePending,
+		v1alpha1.DGDRStateProfiling,
+		v1alpha1.DGDRStateReady,
+		v1alpha1.DGDRStateDeploying,
+		v1alpha1.DGDRStateDeploymentDeleted,
+		v1alpha1.DGDRStateFailed,
+	)
 }
 
 func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
@@ -284,32 +282,17 @@ func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Co
 
 	s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
 
-	// TODO: fix this conversion bug: Hardware is not annotation-preserved through v1alpha1.
-	// Example:
-	//   spec:
-	//     hardware:
-	//       gpuSku: h100_sxm
-	//       totalGpus: 8
-	// round-trips without hardware.
-	s.Hardware = nil
-
-	// Concurrency and RequestRate have no v1alpha1 DGDR fields.
-	if s.Workload != nil {
-		s.Workload.Concurrency = nil
-		s.Workload.RequestRate = nil
-
-		// Empty Workload is not reconstructed from the alpha profiling config blob.
-		if s.Workload.ISL == nil && s.Workload.OSL == nil {
-			s.Workload = nil
-		} else if s.SLA == nil {
-			// Workload-only blob reconstruction creates an empty SLA shell.
-			s.SLA = &v1beta1.SLASpec{}
-		}
+	if s.Workload != nil && s.SLA == nil && (s.Workload.ISL != nil || s.Workload.OSL != nil) {
+		// ISL/OSL live under the alpha profiling config's "sla" object, whose
+		// reconstruction creates an empty v1beta1 SLA shell.
+		s.SLA = &v1beta1.SLASpec{}
 	}
-
-	// E2ELatency has no v1alpha1 DGDR field.
-	if s.SLA != nil {
-		s.SLA.E2ELatency = nil
+	if s.Workload != nil &&
+		s.Workload.ISL == nil &&
+		s.Workload.OSL == nil &&
+		s.Workload.Concurrency == nil &&
+		s.Workload.RequestRate == nil {
+		s.Workload = nil
 	}
 
 	// Empty ModelCache is not reconstructed from the alpha profiling config blob.
@@ -320,33 +303,12 @@ func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Co
 		s.ModelCache = nil
 	}
 
-	// TODO: fix this conversion bug: Overrides beyond alpha resources/tolerations are not annotation-preserved.
-	// Example:
-	//   spec:
-	//     overrides:
-	//       profilingJob:
-	//         activeDeadlineSeconds: 3600
-	// round-trips without overrides.profilingJob.
-	s.Overrides = nil
-
 	if s.Features != nil {
-		// False Mocker is not reconstructed because alpha only records enabled mocker.
-		if s.Features.Mocker != nil {
-			s.Features.Mocker.Enabled = true
-		}
-
-		// Empty Features is not reconstructed without Planner or enabled Mocker.
+		// Empty Features is not reconstructed without Planner or Mocker.
 		if s.Features.Planner == nil && s.Features.Mocker == nil {
 			s.Features = nil
 		}
 	}
-
-	// TODO: fix this conversion bug: SearchStrategy is not annotation-preserved through v1alpha1.
-	// Example:
-	//   spec:
-	//     searchStrategy: thorough
-	// round-trips without searchStrategy.
-	s.SearchStrategy = ""
 
 	// Nil AutoApply round-trips as the v1beta1 default true.
 	if s.AutoApply == nil {
@@ -358,46 +320,20 @@ func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Co
 func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
 
-	// TODO: fix this conversion bug: Deployed is not preserved through the alpha deployment state.
-	// Example:
-	//   status:
-	//     phase: Deployed
-	// round-trips as Ready.
-	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseFailed)
+	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseDeployed, v1beta1.DGDRPhaseFailed)
 
-	// TODO: fix this conversion bug: ProfilingPhase is not annotation-preserved through v1alpha1.
-	// Example:
-	//   status:
-	//     phase: Profiling
-	//     profilingPhase: SweepingDecode
-	// round-trips without profilingPhase.
-	s.ProfilingPhase = ""
+	// Profiling substatus is only valid while the request is profiling.
+	if s.Phase != v1beta1.DGDRPhaseProfiling {
+		s.ProfilingPhase = ""
+		s.ProfilingJobName = ""
+	}
 
 	if s.ProfilingResults != nil {
-		// TODO: fix this conversion bug: Pareto is not annotation-preserved through v1alpha1.
-		// Example:
-		//   status:
-		//     profilingResults:
-		//       pareto:
-		//       - config:
-		//           spec: {}
-		// round-trips without pareto.
-		s.ProfilingResults.Pareto = nil
-
-		// Empty ProfilingResults is not reconstructed without SelectedConfig.
-		if s.ProfilingResults.SelectedConfig == nil {
+		// Empty ProfilingResults is not reconstructed without SelectedConfig or Pareto.
+		if s.ProfilingResults.SelectedConfig == nil && len(s.ProfilingResults.Pareto) == 0 {
 			s.ProfilingResults = nil
 		}
 	}
-
-	// TODO: fix this conversion bug: DeploymentInfo is not annotation-preserved through v1alpha1.
-	// Example:
-	//   status:
-	//     deploymentInfo:
-	//       replicas: 2
-	//       availableReplicas: 1
-	// round-trips without deploymentInfo.
-	s.DeploymentInfo = nil
 }
 
 func newRoundTripFiller(seed int64) *randfill.Filler {
@@ -579,14 +515,14 @@ func TestFuzzRoundTrip_DCD_SpokeHubSpoke(t *testing.T) {
 func TestFuzzRoundTrip_DGDR_HubSpokeHub(t *testing.T) {
 	fuzzHubSpokeHub[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
 		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
-		ignoreDGDRInternalAnnotationTODO,
+		ignoreDGDRCompatibilityAnnotations,
 	)
 }
 
 func TestFuzzRoundTrip_DGDR_SpokeHubSpoke(t *testing.T) {
 	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
 		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
-		ignoreDGDRInternalAnnotationTODO,
+		ignoreDGDRCompatibilityAnnotations,
 	)
 }
 

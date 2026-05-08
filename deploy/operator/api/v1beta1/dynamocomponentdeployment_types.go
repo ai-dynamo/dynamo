@@ -292,6 +292,36 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	return 1
 }
 
+// IsInterPodGMSEnabled reports whether the inter-pod GMS layout is requested.
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
+	return s.Experimental != nil &&
+		s.Experimental.GPUMemoryService != nil &&
+		s.Experimental.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
+	return s.Experimental != nil &&
+		s.Experimental.Failover != nil &&
+		s.Experimental.Failover.Mode == GMSModeInterPod
+}
+
+// GetNumShadows returns the configured number of inter-pod failover shadow engines.
+func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
+	if !s.IsInterPodFailoverEnabled() {
+		return 0
+	}
+	if s.Experimental.Failover.NumShadows < 1 {
+		return 1
+	}
+	return s.Experimental.Failover.NumShadows
+}
+
+// GetTotalEnginePods returns the primary engine plus any configured shadows.
+func (s *DynamoComponentDeploymentSharedSpec) GetTotalEnginePods() int32 {
+	return s.GetNumShadows() + 1
+}
+
 // IsFrontendComponent reports whether this DCD is the Dynamo frontend component.
 func (s *DynamoComponentDeployment) IsFrontendComponent() bool {
 	return s.Spec.ComponentType == ComponentTypeFrontend
@@ -350,7 +380,11 @@ func (s *DynamoComponentDeployment) GetComponentStatuses() map[string]ComponentR
 	if s.Status.Component == nil {
 		return map[string]ComponentReplicaStatus{}
 	}
-	return map[string]ComponentReplicaStatus{s.GetName(): *s.Status.Component}
+	componentName := s.Spec.ComponentName
+	if componentName == "" {
+		componentName = s.GetName()
+	}
+	return map[string]ComponentReplicaStatus{componentName: *s.Status.Component}
 }
 
 // GetState returns "ready" or "not_ready" based on status conditions.

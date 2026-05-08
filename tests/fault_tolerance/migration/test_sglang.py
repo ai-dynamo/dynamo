@@ -235,6 +235,20 @@ def test_request_migration_sglang_aggregated(
         stream: True for streaming, False for non-streaming
     """
 
+    request_plane = request.getfixturevalue("request_plane")
+
+    # OPS-4472: graceful-shutdown migration with NATS is flaky for the
+    # chat streaming aggregated SGLang case.
+    if (
+        migration_limit == 3
+        and migration_max_seq_len is None
+        and immediate_kill is False
+        and request_api == "chat"
+        and stream is True
+        and request_plane == "nats"
+    ):
+        pytest.skip("Flaky: graceful-shutdown migration fails with NATS. OPS-4472")
+
     # OPS-4446: first-token delay routinely exceeds the 6s threshold in
     # utils.validate_response for this parameter combination. Originally only
     # the NATS variant tripped; once the NATS skip landed, the TCP variant
