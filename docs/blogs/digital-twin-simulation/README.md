@@ -12,21 +12,28 @@ SPDX-License-Identifier: Apache-2.0
 > Draft status: unpublished working draft. Keep this file out of `docs/index.yml`
 > and `docs/blogs/index.mdx` until the post is ready to publish.
 
-Modern LLM serving is much more than loading model weights onto GPUs. At the
-bottom, kernels execute the attention and MLP work. Above them, engines such as
-vLLM, SGLang, and TensorRT-LLM schedule forward passes, batch requests, manage KV
-blocks, and decide how prefill and decode work share the device. Above that,
-Dynamo adds the system layer: a router decides which engine should receive each
-request based on prefix affinity and active load, a planner decides when to scale
-workers up or down based on dynamic service goals, and the KV Block Manager
-controls how cached blocks are offloaded and distributed.
+Modern LLM serving at scale is a complex distributed system problem with an
+enormous number of tunable configurations. A deployment has to choose the model
+backend, tensor-parallel shape, prefill/decode split, worker counts, scheduler
+settings, routing policy, KV reuse and offload behavior, autoscaling thresholds,
+and hardware target. None of those choices is independent.
+
+At the bottom, kernels execute the attention and MLP work. Above them, engines
+such as vLLM, SGLang, and TensorRT-LLM schedule forward passes, batch requests,
+manage KV blocks, and decide how prefill and decode work share the device. Above
+that, Dynamo adds the system layer: a router decides which engine should receive
+each request based on prefix affinity and active load, autoscaling decisions
+adjust capacity to dynamic service goals, and the KV Block Manager controls how
+cached blocks are offloaded and distributed.
 
 That stack is powerful, but it is also hard to optimize. A routing policy can
-change cache reuse and downstream decode pressure. A planner decision can change
-future queueing after a startup delay. A block movement policy can change whether
-a request pays recompute, transfer, or offload cost. For larger models, even
-running a single realistic experiment can require many GPUs or nodes before we
-learn whether the idea was worth testing.
+improve cache reuse while increasing downstream queueing. An autoscaling decision
+can change future capacity only after a startup or specialization delay. A block
+movement policy can change whether a request pays recompute, transfer, or
+offload cost. Future hardware can change the engine speeds and feeds enough that
+the right system layout changes with it. For larger models, even running a
+single realistic experiment can require many GPUs or nodes before we learn
+whether the idea was worth testing.
 
 That is the motivation for a Dynamo digital twin.
 
@@ -34,33 +41,49 @@ That is the motivation for a Dynamo digital twin.
 
 In this post, a digital twin means a replayable discrete-event simulation of the
 Dynamo serving stack: engine schedulers, forward-pass timing, KV and cache
-behavior, routers, planners, and workload traces. The goal is not a purely
+behavior, routers, autoscaling, and workload traces. The goal is not a purely
 analytical estimate and not a bit-exact hardware emulator. The goal is a faithful
 serving simulation at the atomic level of forward passes, with the Dynamo
 components above the engine included in the same event timeline.
 
-That makes simulation the inner loop: cheap enough to run many design
-experiments, realistic enough to decide which ones deserve hardware time. Because
-the simulator is implemented in Rust, it can also run at a scale that is useful
-for systems exploration; it is practical to simulate thousands of workers on a
+That puts Dynamo's simulation in the middle ground between spreadsheet estimates
+and full cluster experiments. It preserves component boundaries while studying
+their interactions on one replayed timeline, and it is cheap enough to screen
+many design candidates before spending hardware time. Because the simulator is
+implemented in Rust, it is also practical to simulate thousands of workers on a
 developer laptop.
 
-The useful middle ground is to preserve component boundaries while still studying
-their interactions. We can compare router policies, planner policies, and
-KV/cache policies under the same replayed traffic, then validate the strongest
-candidates on hardware instead of starting every idea as a full cluster
-experiment.
+## Why Simulate LLM Serving?
 
-Every result from this kind of optimizer is workload-relative. That is a feature,
-not a caveat: the point is to replay the traffic shape we care about, compare
-system designs under that same workload, and reduce a large search space to a few
-strong candidates for real cluster validation.
+Simulation gives Dynamo a practical loop for research, engineering scoping, and
+customer-facing sizing.
+
+For research, replay makes it cheaper to test new serving algorithms before
+spending cluster time. Fixed traces can compare routing, autoscaling,
+prefill/decode allocation, and KV/cache ideas; hardware-forward inputs can ask
+how future GPUs or backends would change the best layout and policy.
+
+For engineering, the twin turns vague opportunity costs into measurable system
+effects. If specializing capacity from one decode worker to N prefill workers
+takes X seconds, replay can show whether that delay still meets a contractual
+SLA, what value of X becomes too high, and what target X would make the
+engineering work worth prioritizing. The same loop can scope whether a team
+should invest in faster worker startup, smarter scale-up thresholds, better
+prefill/decode rebalancing, or a more cache-aware router.
+
+For customer-facing sizing, simulation can turn a workload and an SLA into a
+sizing conversation. A field team can compare GPU counts, worker layouts,
+backend choices, and future hardware assumptions before procurement, then take a
+workload-specific shortlist to hardware validation.
 
 ## 1. Architecture And DES: Composing Dynamo As Events
 
 The key design choice is composition. Dynamo's simulation story is not one
 monolithic model. It is a set of components that mirror serving-system concepts
 and interact through a simulated timeline.
+
+One of those components is the Planner: Dynamo's autoscaling component. It
+computes scaling targets from live metrics, profiles, and SLA goals.
 
 [placeholder: architecture Mermaid diagram polish or replacement with production graphic]
 
@@ -74,7 +97,7 @@ flowchart TD
 
     KV[KV Transfer + Offloading Simulation]
     KR[KV Router Simulation]
-    P[Planner Simulation]
+    P[Planner Autoscaling Simulation]
 
     SES[Single Engine Simulation]
     MES[Multi Engine Simulation]
@@ -101,7 +124,7 @@ multiple engines, routing, KV movement, queueing, and imbalance become part of
 the system behavior.
 
 Around those engines, Dynamo can simulate serving components such as KV transfer,
-offloading hooks, the KV router, and the planner. KVBM and distributed cache
+offloading hooks, the KV router, and the Planner. KVBM and distributed cache
 simulation are treated as near-future component work in this draft rather than
 as a fully hooked-up claim today.
 
@@ -110,7 +133,7 @@ as a fully hooked-up claim today.
 Discrete-event simulation, or DES, is a simple idea with a lot of leverage. The
 simulator has a virtual clock and an event queue. Components do not wait in real
 time. Instead, they schedule future events: a request arrives, a forward pass
-finishes, a KV handoff completes, a worker becomes available, or the planner
+finishes, a KV handoff completes, a worker becomes available, or the Planner
 takes an action. The runtime jumps to the next event, updates system state, and
 lets components schedule more events.
 
@@ -138,7 +161,7 @@ One request makes the DES model concrete:
 7. The trace collector records request-level and system-level metrics.
 
 The important part is that every component decision changes the same global
-timeline. A router decision affects the worker's future queue. A planner scaling
+timeline. A router decision affects the worker's future queue. A Planner scaling
 decision has a delay before capacity appears. A KV movement decision can change
 when decode begins. DES gives those interactions a concrete place to happen.
 
@@ -175,7 +198,7 @@ cache reuse, and feasibility.
 
 The architecture and DES overview above explain the mechanism. The
 Dynamo-specific value comes from which components are placed into that mechanism:
-engine schedulers, forward-pass timing, routers, planner decisions, and KV/cache
+engine schedulers, forward-pass timing, routers, Planner decisions, and KV/cache
 behavior. This is the meaty part of the twin. Each component observes simulated
 state, makes decisions, and changes the future event stream for the rest of the
 system.
@@ -238,14 +261,14 @@ Router framing:
 | System effect | Cache reuse, load balance, TTFT, throughput, and downstream decode pressure |
 
 Because the router decision enters the same DES event queue as engine completion
-and planner actions, it affects future state. A route that improves prefix reuse
+and Planner actions, it affects future state. A route that improves prefix reuse
 may increase queueing somewhere else. A route that balances load may give up a
 cache hit. A good simulation lets us study those tradeoffs without deploying a
 new router policy first.
 
 ### 2.4 Planner As A Feedback-Driven Component
 
-Like the router, the planner makes decisions from feedback produced by the rest
+Like the router, the Planner makes decisions from feedback produced by the rest
 of the system. Dynamo components are not isolated knobs: they observe engine
 metrics, traffic, cache state, and worker state, then make decisions that affect
 other components later in the same simulated timeline.
@@ -270,7 +293,7 @@ changing load.
 KVBM manages KV blocks across the serving memory hierarchy: local HBM, host
 memory, SSD, and distributed or remote cache. In the digital twin, the goal is
 to model those block movements as events that affect the same timeline as engine
-scheduling, routing, and planning: offload completion, swap-in completion,
+scheduling, routing, and autoscaling: offload completion, swap-in completion,
 remote-cache availability, and eviction.
 
 There are two complementary parts to that plan.
@@ -359,7 +382,7 @@ Router discovery examples:
 - Add optional AIC-backed decode-load estimates so router decisions can better
   account for downstream decode pressure.
 
-[placeholder: planner discovery experiment examples and owners]
+[placeholder: Planner discovery experiment examples and owners]
 
 Planner discovery examples:
 
@@ -367,7 +390,7 @@ Planner discovery examples:
 - Study delayed scaling behavior.
 - Search prefill/decode pool allocation policies.
 - Balance responsiveness against oscillation risk.
-- Feed router-aware or cache-aware signals into planner decisions.
+- Feed router-aware or cache-aware signals into Planner decisions.
 
 [placeholder: KV/cache discovery experiment examples and owners]
 
@@ -378,7 +401,7 @@ KV and cache discovery examples:
 - Evaluate future KVBM policies.
 - Study distributed cache and CMX movement strategies.
 - Compare move-vs-recompute decisions.
-- Couple cache-aware routing with cache-aware planning.
+- Couple cache-aware routing with cache-aware autoscaling.
 
 These are painful questions to answer on hardware first. They are natural
 questions for a replayable digital twin: hold the workload fixed, change one
@@ -390,7 +413,7 @@ Today, this kind of algorithm discovery is still mostly human-driven: engineers
 choose a policy change, implement it, run replay, inspect the metrics, and decide
 what to try next. A natural next step is to hook agentic harnesses into the same
 replay loop. In that workflow, agents could propose nontrivial exploratory code
-changes to router policies, planner heuristics, or cache/offload strategies, run
+changes to router policies, Planner heuristics, or cache/offload strategies, run
 the replay harness, compare against baselines, and surface promising candidates
 for human review.
 
@@ -406,11 +429,13 @@ validation more focused.
 
 Simulation becomes the inner loop for design exploration. Hardware remains the
 outer loop for validation. Between those loops, Dynamo can test serving algorithms
-as a system: scheduler behavior, routing policy, planner control, KV/cache
+as a system: scheduler behavior, routing policy, Planner control, KV/cache
 movement, workload shape, and hardware-informed timing.
 
-The payoff is not just a faster benchmark. It is a place where Dynamo's serving
-algorithms can be designed, stressed, and improved together.
+The payoff is not just a faster benchmark. It is a shared loop for algorithm
+research, engineering prioritization, and deployment sizing: use simulation to
+narrow the space, then spend hardware time on the candidates most likely to
+matter.
 
 [placeholder: external review for claims about hardware validation vs simulation]
 
