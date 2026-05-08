@@ -549,9 +549,7 @@ def run_parallel(
         # path wins over any --basetemp that a caller stuffs into
         # extra_pytest_args (pytest uses argparse semantics: last value wins).
         if parent_basetemp:
-            child_basetemp = os.path.join(
-                parent_basetemp, f"w{test.w_id}-{safe_name}"
-            )
+            child_basetemp = os.path.join(parent_basetemp, f"w{test.w_id}-{safe_name}")
             cmd.extend(["--basetemp", child_basetemp])
 
         proc = subprocess.Popen(
