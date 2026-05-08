@@ -188,7 +188,7 @@ pub struct OpenAIPreprocessor {
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
     #[cfg(feature = "lightseek-mm")]
-    image_token_counter: Option<Arc<lightseek_mm::LightseekMmCounter>>,
+    image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
     /// Image-placeholder token id resolved from the model's HF JSON configs.
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
@@ -254,14 +254,14 @@ impl OpenAIPreprocessor {
                 // upstream PR (registry miss) or a non-standard placeholder
                 // location (resolver miss).
                 let (counter, counter_err): (
-                    Option<Arc<lightseek_mm::LightseekMmCounter>>,
+                    Option<lightseek_mm::LightseekMmCounter>,
                     Option<String>,
                 ) = match lightseek_mm::LightseekMmCounter::try_new(
                     &model_id,
                     Some(&model_type),
                     &model_dir,
                 ) {
-                    Ok(c) => (Some(Arc::new(c)), None),
+                    Ok(c) => (Some(c), None),
                     Err(e) => (None, Some(e.to_string())),
                 };
                 let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
@@ -657,7 +657,9 @@ impl OpenAIPreprocessor {
                             ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
                                 p.image_url.url.as_str()
                             }
-                            _ => "",
+                            _ => unreachable!(
+                                "rdma image_url descriptor only originates from ImageUrl content parts"
+                            ),
                         };
                         // Frontend-decode path: hash the decoded RGB bytes so
                         // the same image reached via different (signed) URLs
@@ -775,11 +777,15 @@ impl OpenAIPreprocessor {
             // end-to-end without forcing frontend image decoding.
             #[cfg(feature = "lightseek-mm")]
             if !mm_image_entries.is_empty() {
+                // 48 trailing zeros — paired with the {:016x} prefix this gives
+                // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
+                // expects (reads u64 from the first 16 chars).
+                const HEX_PAD: &str =
+                    "000000000000000000000000000000000000000000000000";
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
                     .map(|e| {
-                        // 16 hex chars (u64) + 48 zeros = 64 chars total
-                        serde_json::Value::String(format!("{:016x}{}", e.mm_hash, "0".repeat(48)))
+                        serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD))
                     })
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
@@ -889,16 +895,15 @@ impl OpenAIPreprocessor {
             }
         }
 
-        // Pad/truncate to a whole multiple of kv_cache_block_size. The router's
+        // Pad to a whole multiple of kv_cache_block_size. The router's
         // compute_block_hash_for_seq only hashes whole blocks, so the partial
         // tail block doesn't influence routing either way; aligning the length
         // keeps our routing_token_ids and `block_mm_infos` agreeing on count.
+        // `div_ceil` guarantees `total_tokens >= expanded.len()`, so resize
+        // only ever grows.
         let total_tokens = expanded.len().div_ceil(block_size) * block_size;
         if expanded.len() < total_tokens {
             expanded.resize(total_tokens, 0);
-        } else if expanded.len() > total_tokens {
-            // Should not happen given div_ceil, but be defensive.
-            expanded.truncate(total_tokens);
         }
 
         // Build request-level MM info, then derive per-block info.
