@@ -6,18 +6,44 @@ explicitly document why conversion is unaffected.
 
 ## Structure
 
-Top-level `ConvertTo` / `ConvertFrom` methods:
+Top-level API objects implement `sigs.k8s.io/controller-runtime/pkg/conversion.Convertible`:
+
+```go
+type Convertible interface {
+	runtime.Object
+	ConvertTo(dst Hub) error
+	ConvertFrom(src Hub) error
+}
+```
+
+Top-level methods have only the `Convertible` parameters:
+
+```go
+func (src *DynamoWidget) ConvertTo(dstRaw conversion.Hub) error
+func (dst *DynamoWidget) ConvertFrom(srcRaw conversion.Hub) error
+```
+
+Their call stack is:
 
 1. Copy Kubernetes metadata from `src` to `dst`.
 2. Decode sparse spec/status payloads into typed `restored` values.
 3. Scrub private conversion annotations from `dst`.
-4. Convert live spec/status fields from `src` to `dst`.
+4. Call typed conversion functions for spec/status.
 5. Restore destination-only fields from `restored`.
 6. Collect source-only fields in typed `save` values.
 7. Encode non-empty `save` values into sparse spec/status payloads on `dst`.
 
-Conversion functions follow the same semantic order even when their local
-control flow differs.
+Example:
+
+```text
+(*DynamoWidget).ConvertTo(dstRaw)
+  ConvertFromDynamoWidgetSpec(&src.Spec, &dst.Spec, restored.Spec, &save.Spec, ctx)
+    ConvertFromDynamoWidgetNestedSpec(&src.Spec.Nested, &dst.Spec.Nested, restoredNested, saveNested, ctx)
+  ConvertFromDynamoWidgetStatus(&src.Status, &dst.Status, restored.Status, &save.Status)
+  saveDynamoWidgetAnnotations(save, dst)
+```
+
+The conversion algorithm follows the API Go types inductively:
 
 - Export conversion functions from `v1alpha1`.
 - Name conversion functions after the v1alpha1 type:
@@ -55,7 +81,7 @@ func ConvertToDynamoWidgetSpec(
 - Converters do not accept `**T`.
 - Converters do not encode absence by assigning `dst` to nil.
 - Converters perform only their own API struct's conversion.
-- Every nested API struct that needs conversion gets its own
+- Every nested API struct gets its own systematic
   `ConvertFrom<SubStruct>` / `ConvertTo<SubStruct>` conversion function pair.
 - Parent converters call those nested converters instead of inlining nested
   struct conversion.
@@ -184,22 +210,6 @@ listed v1beta1 roots:
   or otherwise mutating data that came from `src`.
 - Mutating through `dst` after assigning shared data from `src` still violates
   this rule.
-
-## Generics
-
-Allowed generic helpers:
-
-- Decode/encode typed spec/status payloads.
-- Test typed save payload emptiness.
-- Convert list-maps to keyed maps.
-- Convert keyed maps to deterministic sorted lists.
-- Match restored/save child objects by key.
-
-Do not use generics for:
-
-- representability policy;
-- sparse save/restore policy;
-- pod template or main-container decomposition policy.
 
 ## Tests
 
