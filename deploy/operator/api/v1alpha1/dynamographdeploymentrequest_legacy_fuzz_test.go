@@ -88,6 +88,57 @@ func TestDGDRFuzzLegacyAndStructuralConvertFromHubEquivalent(t *testing.T) {
 	}
 }
 
+func TestDGDRFuzzLegacyHubStorageRoundTripsThroughStructural(t *testing.T) {
+	f := newDGDRLegacyComparisonFiller(*dgdrLegacyFuzzSeed)
+	for i := 0; i < *dgdrLegacyFuzzIters; i++ {
+		src := &DynamoGraphDeploymentRequest{}
+		f.Fill(src)
+		normalizeAlphaDGDRForLegacyComparison(src)
+
+		oldStored, err := legacyDGDRConvertToHubForTest(src)
+		if err != nil {
+			t.Fatalf("iter %d legacy convert to hub: %v\ninput=%s", i, err, mustDGDRLegacyJSON(src))
+		}
+		spoke := &DynamoGraphDeploymentRequest{}
+		if err := spoke.ConvertFrom(oldStored); err != nil {
+			t.Fatalf("iter %d structural ConvertFrom old hub: %v\ninput=%s", i, err, mustDGDRLegacyJSON(oldStored))
+		}
+		got := &v1beta1.DynamoGraphDeploymentRequest{}
+		if err := spoke.ConvertTo(got); err != nil {
+			t.Fatalf("iter %d structural ConvertTo old hub roundtrip: %v\ninput=%s", i, err, mustDGDRLegacyJSON(oldStored))
+		}
+		stripDGDRSparseAnnotationsForLegacyComparison(&got.ObjectMeta)
+
+		if diff := cmp.Diff(oldStored, got, cmpopts.EquateEmpty()); diff != "" {
+			t.Fatalf("iter %d legacy hub storage roundtrip mismatch (-old +got):\n%s\ninput=%s", i, diff, mustDGDRLegacyJSON(oldStored))
+		}
+	}
+}
+
+func TestDGDRFuzzLegacySpokeStorageRoundTripsThroughStructural(t *testing.T) {
+	f := newDGDRLegacyComparisonFiller(*dgdrLegacyFuzzSeed)
+	for i := 0; i < *dgdrLegacyFuzzIters; i++ {
+		src := &v1beta1.DynamoGraphDeploymentRequest{}
+		f.Fill(src)
+		normalizeHubDGDRForLegacyComparison(src)
+
+		oldStored := legacyDGDRConvertFromHubForTest(src)
+		hub := &v1beta1.DynamoGraphDeploymentRequest{}
+		if err := oldStored.ConvertTo(hub); err != nil {
+			t.Fatalf("iter %d structural ConvertTo old spoke: %v\ninput=%s", i, err, mustDGDRLegacyJSON(oldStored))
+		}
+		got := &DynamoGraphDeploymentRequest{}
+		if err := got.ConvertFrom(hub); err != nil {
+			t.Fatalf("iter %d structural ConvertFrom old spoke roundtrip: %v\ninput=%s", i, err, mustDGDRLegacyJSON(oldStored))
+		}
+		stripDGDRSparseAnnotationsForLegacyComparison(&got.ObjectMeta)
+
+		if diff := cmp.Diff(oldStored, got, cmpopts.EquateEmpty()); diff != "" {
+			t.Fatalf("iter %d legacy spoke storage roundtrip mismatch (-old +got):\n%s\ninput=%s", i, diff, mustDGDRLegacyJSON(oldStored))
+		}
+	}
+}
+
 func newDGDRLegacyComparisonFiller(seed int64) *randfill.Filler {
 	dgdrLegacyFuzzerFuncs := func(_ runtimeserializer.CodecFactory) []interface{} {
 		return []interface{}{
@@ -144,6 +195,18 @@ func newDGDRLegacyComparisonFiller(seed int64) *randfill.Filler {
 				c.FillNoCustom(s)
 				s.Backend = oneOfDGDRLegacy(c, "auto", "vllm", "sglang", "trtllm")
 			},
+			func(s *DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+				c.FillNoCustom(s)
+				s.State = oneOfDGDRLegacy(c,
+					DGDRStateInitializing,
+					DGDRStatePending,
+					DGDRStateProfiling,
+					DGDRStateReady,
+					DGDRStateDeploying,
+					DGDRStateDeploymentDeleted,
+					DGDRStateFailed,
+				)
+			},
 			func(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
 				c.FillNoCustom(s)
 				s.Backend = oneOfDGDRLegacy(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
@@ -166,6 +229,16 @@ func normalizeAlphaDGDRForLegacyComparison(obj *DynamoGraphDeploymentRequest) {
 	// the visible legacy-compatible shape and compares the extra sparse payload
 	// separately by stripping annDGDRSpec/annDGDRStatus from the structural result.
 	obj.Spec.ProfilingConfig.NodeSelector = nil
+	if obj.Spec.ProfilingConfig.Resources != nil {
+		obj.Spec.ProfilingConfig.Resources.Claims = nil
+		if len(obj.Spec.ProfilingConfig.Resources.Requests) == 0 &&
+			len(obj.Spec.ProfilingConfig.Resources.Limits) == 0 {
+			obj.Spec.ProfilingConfig.Resources = nil
+		}
+	}
+	if obj.Status.Deployment != nil && obj.Status.Deployment.Name == "" {
+		obj.Status.Deployment = nil
+	}
 }
 
 func normalizeHubDGDRForLegacyComparison(obj *v1beta1.DynamoGraphDeploymentRequest) {
