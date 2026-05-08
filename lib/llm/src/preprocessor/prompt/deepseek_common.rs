@@ -185,11 +185,13 @@ pub(crate) fn render_tools(template: &str, tools: &[JsonValue]) -> String {
         .map(to_json)
         .collect();
 
+    // Always do the tool_schemas last because they are user controlled.
+    // See test_render_tools_preserves_placeholder_text_inside_tool_schema.
     template
-        .replace("{tool_schemas}", &tools_json.join("\n"))
         .replace("{dsml_token}", tokens::DSML_TOKEN)
         .replace("{thinking_start_token}", tokens::THINKING_START)
         .replace("{thinking_end_token}", tokens::THINKING_END)
+        .replace("{tool_schemas}", &tools_json.join("\n"))
 }
 
 pub(crate) fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
@@ -583,5 +585,31 @@ mod tests {
             {"type": "text", "text": "you?"}
         ]);
         assert_eq!(extract_visible_text(&content), "who are you?");
+    }
+
+    #[test]
+    fn test_render_tools_preserves_placeholder_text_inside_tool_schema() {
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "placeholder_tool",
+                "description": "literal {dsml_token} {thinking_start_token} {thinking_end_token}",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }]);
+        let rendered = render_tools(
+            "static {dsml_token} {thinking_start_token} {thinking_end_token}\n{tool_schemas}",
+            tools.as_array().unwrap(),
+        );
+
+        assert!(rendered.starts_with(&format!(
+            "static {} {} {}\n",
+            tokens::DSML_TOKEN,
+            tokens::THINKING_START,
+            tokens::THINKING_END
+        )));
+        assert!(
+            rendered.contains("literal {dsml_token} {thinking_start_token} {thinking_end_token}")
+        );
     }
 }
