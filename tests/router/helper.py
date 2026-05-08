@@ -561,7 +561,7 @@ async def send_request_via_python_kv_router(
     kv_python_router: KvRouter,
     model_name: str,
     token_ids: list,
-    initial_wait: float = 1.0,
+    initial_wait: float = 0.25,
     max_retries: int = 8,
     stop_conditions: Optional[dict] = None,
     sampling_options: Optional[dict] = None,
