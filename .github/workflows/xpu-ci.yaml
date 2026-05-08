@@ -193,6 +193,7 @@ jobs:
           device: 'xpu'
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          start_minio: 'false'
 
       - name: Cleanup Pytest Containers
         if: always()
