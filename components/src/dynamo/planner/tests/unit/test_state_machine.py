@@ -348,16 +348,22 @@ def _decode_caps_with_max_kv(max_kv_tokens: int) -> WorkerCapabilities:
 
 
 class TestDecodeConsolidationAwareScaleDown:
-    """Decode scale-down uses ``util * N/(N-1) < sensitivity`` (input-side).
+    """Decode scale-down uses two checks at the survivor's post-consolidation
+    KV (current sched+queued scaled by N/(N-1)):
 
-    Tests use a deliberately permissive ITL SLA so the regression-driven
-    scale-up branch never fires; we're isolating the new scale-down logic.
+    1. **Cache feasibility** -- post_kv must fit within ``max_kv_tokens``;
+       crossing it forces block eviction / queueing, a non-linear regime
+       outside the regression's domain.
+    2. **SLA check** -- regression-predicted ITL at post_kv must stay
+       within ``SLA * sensitivity``.
+
+    Either failure refuses the scale-down.
     """
 
-    def _setup(self, max_kv_tokens: int = 100_000):
+    def _setup(self, *, itl_sla: float = 100.0, max_kv_tokens: int = 100_000):
         core = _make_core(
             mode="decode",
-            itl=10_000.0,  # huge SLA so no scale-up regardless of regression
+            itl=itl_sla,
             load_scaling_down_sensitivity=80,
         )
         core._capabilities = _decode_caps_with_max_kv(max_kv_tokens)
@@ -382,57 +388,64 @@ class TestDecodeConsolidationAwareScaleDown:
             worker_counts=WorkerCounts(ready_num_decode=num_workers),
         )
 
-    def test_low_n_blocks_oscillating_scale_down(self):
-        """N=2 at 50% util refuses scale-down.
+    def test_post_consolidation_within_sla_permits(self):
+        """Light load: post_kv well under cache and SLA -> ALLOW.
 
-        Reproduces the production oscillation: per-worker util 0.5 looks
-        comfortable, but post-consolidation util on the survivor would be
-        1.0 -- well above the 0.8 sensitivity threshold. Flat 80% would
-        have allowed this scale-down; consolidation-aware rejects it.
+        N=2, sched_kv=1500. post_kv = 3000. Predicted ITL ~= 0.001 +
+        0.00001 * 4000 ~= 41 ms (with internal avg_decode_len), under
+        the 80 ms threshold. No scale-up either (under 100 ms SLA).
         """
-        core = self._setup()
-        tick = self._tick(num_workers=2, sched_kv_per_worker=50_000)
-        effects = core.on_tick(_tick_for(tick), tick)
-        assert effects.scale_to is None or effects.scale_to.num_decode == 2
-
-    def test_low_n_allows_safe_scale_down(self):
-        """N=2 at 30% util permits scale-down: post-util 0.6 < 0.8."""
-        core = self._setup()
-        tick = self._tick(num_workers=2, sched_kv_per_worker=30_000)
+        core = self._setup(itl_sla=100.0)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_500)
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode == 1
 
-    def test_high_n_permits_scale_down_at_high_util(self):
-        """N=10 at 70% util permits scale-down: post 0.7*10/9~=0.778 < 0.8."""
-        core = self._setup()
-        tick = self._tick(num_workers=10, sched_kv_per_worker=70_000)
-        effects = core.on_tick(_tick_for(tick), tick)
-        assert effects.scale_to is not None
-        assert effects.scale_to.num_decode == 9
+    def test_post_consolidation_breaches_sla_refuses(self):
+        """Cache fine but predicted ITL > SLA*sensitivity -> SLA check refuses.
 
-    def test_high_n_blocks_when_post_util_overshoots(self):
-        """N=10 at 78% util refuses (post 0.78*10/9~=0.866 > 0.8)."""
-        core = self._setup()
-        tick = self._tick(num_workers=10, sched_kv_per_worker=78_000)
-        effects = core.on_tick(_tick_for(tick), tick)
-        assert effects.scale_to is None or effects.scale_to.num_decode == 10
-
-    def test_no_max_kv_disables_scale_down(self):
-        """Without max_kv_tokens, scale-down is refused even with low util.
-
-        The check is input-side; without a denominator we can't compute
-        utilization, so we conservatively keep the worker count.
+        N=2, sched_kv=8000. post_kv=16000 (well below 100K cache). Predicted
+        ITL ~= 0.001 + 0.00001 * 17000 ~= 171 ms, above the 80 ms threshold.
         """
-        core = self._setup()
-        # Erase max_kv to force the fallback branch.
+        core = self._setup(itl_sla=100.0)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=8_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_post_consolidation_exceeds_max_kv_refuses(self):
+        """Hard cache fail-safe: post_kv >= max_kv -> refuse outright.
+
+        N=2, sched_kv=60_000. post_kv=120_000 >= max_kv 100_000. SLA is
+        effectively off (10s) so only the cache check can refuse.
+        """
+        core = self._setup(itl_sla=10_000.0, max_kv_tokens=100_000)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=60_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_no_max_kv_falls_through_to_sla_check(self):
+        """Without max_kv_tokens, only the SLA check governs.
+
+        Cache check is skipped (no denominator); the regression still gates
+        scale-down by predicted ITL. Light load passes -> ALLOW.
+        """
+        core = self._setup(itl_sla=100.0)
+        # Erase max_kv: cache check becomes a no-op.
         core._capabilities = WorkerCapabilities(
             decode=EngineCapabilities(num_gpu=1, max_num_batched_tokens=2048),
         )
-        tick = self._tick(num_workers=2, sched_kv_per_worker=10_000)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_500)
         effects = core.on_tick(_tick_for(tick), tick)
-        # Even at very low util we don't scale down.
-        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
 
 
 def _train_slow_prefill_regression(core: PlannerStateMachine) -> None:

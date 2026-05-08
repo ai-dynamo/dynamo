@@ -502,12 +502,15 @@ class LoadScalingMixin:
         max_kv = d_caps.max_kv_tokens if d_caps else None
 
         estimates: list[float] = []
-        # Consolidation-aware scale-down: per-worker KV utilisation
-        # (sched + queued) / max_kv, scaled by the consolidation factor.
-        # Survivors absorb the killed worker's in-flight KV, so post-survival
-        # util ~= current * N/(N-1). Refuse scale-down if any survivor would
-        # exceed ``sensitivity`` (default 0.8) of full KV cache after merge.
-        can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
+        # Consolidation-aware scale-down. Two safety checks per worker:
+        #  1. Hard cache-feasibility: post-consolidation KV must fit within
+        #     ``max_kv_tokens``. Exceeding the cache forces request queueing
+        #     / block eviction, a non-linear regime the regression cannot
+        #     model, so refuse outright when crossed.
+        #  2. SLA check: predicted ITL at the survivor's post-consolidation KV
+        #     must stay within ``SLA * sensitivity``. Decouples from cache
+        #     size -- engines often saturate latency well before cache.
+        can_scale_down = num_workers > 1
         consolidation_refused = False
         for (wid, dp), fpm in fpm_stats.items():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
@@ -525,9 +528,20 @@ class LoadScalingMixin:
                 )
 
             if can_scale_down:
-                # max_kv is non-None here per the can_scale_down guard above.
-                util = (sched_kv + queued_kv) / max_kv  # type: ignore[operator]
-                if util * consolidation >= sensitivity:
+                post_sched_kv = int((sched_kv + queued_kv) * consolidation)
+                # (1) cache feasibility
+                if max_kv is not None and max_kv > 0 and post_sched_kv >= max_kv:
+                    can_scale_down = False
+                    consolidation_refused = True
+                    continue
+                # (2) SLA check via regression at post-consolidation kv
+                post_itl = self._decode_regression.estimate_next_itl(
+                    scheduled_decode_kv=post_sched_kv,
+                    queued_decode_kv=0,
+                )
+                if post_itl is None:
+                    can_scale_down = False
+                elif post_itl * 1000 >= self._config.itl * sensitivity:
                     can_scale_down = False
                     consolidation_refused = True
 
@@ -629,10 +643,14 @@ class LoadScalingMixin:
         max_kv = d_caps.max_kv_tokens if d_caps else None
 
         estimates: list[float] = []
-        # Agg-decode consolidation: combined cache pressure (sched + queued
-        # decode KV + queued prefill) scaled by N/(N-1). Mirrors the easy-mode
-        # agg utilisation but with the consolidation-aware threshold.
-        can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
+        # Agg-decode consolidation. Combined cache pressure (sched_decode_kv
+        # + queued_decode_kv + queued_prefill_tokens, since queued prefill
+        # eventually becomes decode KV) scaled by N/(N-1). Two safety checks:
+        #  1. Hard cache-feasibility against ``max_kv_tokens`` (regression
+        #     can't model block eviction past the cache).
+        #  2. SLA check via ``agg_regression.estimate_next_itl`` at the
+        #     post-consolidation combined kv.
+        can_scale_down = num_workers > 1
         consolidation_refused = False
         for fpm in fpm_stats.values():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
@@ -646,8 +664,22 @@ class LoadScalingMixin:
                 estimates.append(est * 1000)
 
             if can_scale_down:
-                util = (sched_kv + queued_kv + queued_prefill) / max_kv  # type: ignore[operator]
-                if util * consolidation >= sensitivity:
+                post_combined_kv = int(
+                    (sched_kv + queued_kv + queued_prefill) * consolidation
+                )
+                # (1) cache feasibility
+                if max_kv is not None and max_kv > 0 and post_combined_kv >= max_kv:
+                    can_scale_down = False
+                    consolidation_refused = True
+                    continue
+                # (2) SLA check via regression at post-consolidation combined kv
+                post_itl = self._agg_regression.estimate_next_itl(
+                    scheduled_decode_kv=post_combined_kv,
+                    queued_decode_kv=0,
+                )
+                if post_itl is None:
+                    can_scale_down = False
+                elif post_itl * 1000 >= self._config.itl * sensitivity:
                     can_scale_down = False
                     consolidation_refused = True
 
