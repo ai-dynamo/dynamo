@@ -31,6 +31,7 @@ pub enum DisaggregationRole {
 /// {
 ///   "hub_url": "http://127.0.0.1:1337",
 ///   "role": "prefill",
+///   "engine_url": "http://10.0.0.42:8000",
 ///   "max_inflight_remote_prefill_tokens": 1048576
 /// }
 /// ```
@@ -45,6 +46,15 @@ pub struct DisaggConfig {
 
     /// Role this instance plays in the disagg topology.
     pub role: DisaggregationRole,
+
+    /// Base URL of this peer's inference engine (e.g. `http://10.0.0.42:8000`).
+    ///
+    /// Required for `Prefill` peers — the hub's prefill dispatcher POSTs
+    /// here to drive remote prefill, and a prefill peer that registers
+    /// without an `engine_url` is rejected by the hub. Decode peers don't
+    /// need one and may leave it `None`.
+    #[serde(default)]
+    pub engine_url: Option<String>,
 
     /// Maximum number of decode-side remote-prefill tokens accepted but not
     /// yet materialized. Defaults to unlimited to preserve existing behavior
@@ -95,6 +105,7 @@ mod tests {
         let cfg = DisaggConfig {
             hub_url: "http://example.com:1337".to_string(),
             role: DisaggregationRole::Decode,
+            engine_url: None,
             max_inflight_remote_prefill_tokens: 4096,
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -105,6 +116,7 @@ mod tests {
         let roundtrip: DisaggConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip.hub_url, cfg.hub_url);
         assert_eq!(roundtrip.role, cfg.role);
+        assert_eq!(roundtrip.engine_url, cfg.engine_url);
         assert_eq!(
             roundtrip.max_inflight_remote_prefill_tokens,
             cfg.max_inflight_remote_prefill_tokens
@@ -116,9 +128,29 @@ mod tests {
         let cfg = DisaggConfig {
             hub_url: default_hub_url(),
             role: DisaggregationRole::Prefill,
+            engine_url: Some("http://localhost:8000".to_string()),
             max_inflight_remote_prefill_tokens: default_max_inflight_remote_prefill_tokens(),
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_engine_url_optional_in_json() {
+        // Existing payloads without engine_url still parse — backward compat.
+        let json = r#"{"hub_url": "http://127.0.0.1:1337", "role": "prefill"}"#;
+        let cfg: DisaggConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.engine_url.is_none());
+    }
+
+    #[test]
+    fn test_engine_url_round_trip() {
+        let json = r#"{
+            "hub_url": "http://127.0.0.1:1337",
+            "role": "prefill",
+            "engine_url": "http://10.0.0.42:8000"
+        }"#;
+        let cfg: DisaggConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.engine_url.as_deref(), Some("http://10.0.0.42:8000"));
     }
 
     #[test]

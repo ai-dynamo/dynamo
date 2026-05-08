@@ -3,31 +3,42 @@
 
 //! Hub-side manager for the ConditionalDisagg feature.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::get};
 use futures::future::BoxFuture;
-use parking_lot::RwLock;
 use tokio::task::JoinHandle;
 use velo::queue::NextOptions;
 use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
 use velo_common::InstanceId;
 
 use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
+use super::registry::CdPeerRegistry;
+use super::selector::{PrefillPeerSource, PrefillWorkerSelector};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{
     self, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, Feature, FeatureKey,
     PrefillRequest,
 };
 
-/// Tracks which instances participate in ConditionalDisagg and under what role.
+/// Orchestrates the ConditionalDisagg feature: holds per-peer state
+/// (delegated to [`CdPeerRegistry`]), the velo-backed prefill queue, and the
+/// drainer task that selects + dispatches each dequeued request.
 ///
-/// State is kept behind a single `RwLock` — lookups are O(1) via the
-/// `by_instance` map, and role-filtered listings iterate the matching set.
+/// Per-peer state (role membership, engine URLs) lives in
+/// [`Self::cd_registry`] — both this manager and the prefill drainer hold
+/// an `Arc` to the same registry, keeping the manager
+/// orchestration-focused and avoiding reference cycles between the manager
+/// and any selector / drainer.
+///
+/// Mirrors dynamo's split between `Client` (discovery) and `PushRouter`
+/// (policy) at `lib/runtime/src/pipeline/network/egress/push_router.rs`:
+/// state and orchestration in separate types.
 pub struct ConditionalDisaggManager {
-    inner: RwLock<CdInner>,
+    /// Per-peer CD state. Written by `on_register` / `on_unregister`,
+    /// read by the prefill drainer via [`PrefillPeerSource`].
+    cd_registry: Arc<CdPeerRegistry>,
     velo: OnceLock<Arc<velo::Velo>>,
     /// Hub-local queue backend owning the CD prefill queue. Lazily created
     /// during [`FeatureManager::attach`] when the hub has a Velo instance —
@@ -35,76 +46,76 @@ pub struct ConditionalDisaggManager {
     queue_backend: OnceLock<Arc<MessengerQueueBackend>>,
     /// Optional bound on the prefill queue depth. `None` = unbounded.
     queue_capacity: Option<usize>,
-    /// Optional dispatcher for the prefill queue. When set,
-    /// [`FeatureManager::attach`] spawns a background worker that
-    /// drains the queue and hands each request to this dispatcher.
+    /// Dispatcher and selector are set together via
+    /// [`Self::with_dispatch_pipeline`]. When `Some`,
+    /// [`FeatureManager::attach`] spawns a drainer that selects a worker
+    /// per request and ships it via the dispatcher.
     dispatcher: Option<Arc<dyn PrefillRequestDispatcher>>,
+    /// Selection policy used by the prefill drainer. Must be `Some`
+    /// whenever `dispatcher` is.
+    selector: Option<Arc<dyn PrefillWorkerSelector>>,
     /// Worker task handle (set once spawned during `attach`).
     dispatcher_task: OnceLock<JoinHandle<()>>,
 }
 
-struct CdInner {
-    prefill: HashSet<InstanceId>,
-    decode: HashSet<InstanceId>,
-    by_instance: HashMap<InstanceId, ConditionalDisaggRole>,
-}
-
 impl std::fmt::Debug for ConditionalDisaggManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.read();
+        let snap = self.cd_registry.snapshot();
         f.debug_struct("ConditionalDisaggManager")
-            .field("prefill_count", &inner.prefill.len())
-            .field("decode_count", &inner.decode.len())
+            .field("prefill_count", &snap.prefill.len())
+            .field("decode_count", &snap.decode.len())
             .field("velo_attached", &self.velo.get().is_some())
+            .field("dispatch_pipeline", &self.dispatcher.is_some())
             .finish()
     }
 }
 
-impl Default for ConditionalDisaggManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ConditionalDisaggManager {
-    /// Create an empty manager with no attached Velo and an unbounded
-    /// prefill queue.
-    pub fn new() -> Self {
-        Self::with_queue_capacity(None)
+    /// Create an empty manager wired to the given registry, with no attached
+    /// Velo and an unbounded prefill queue.
+    pub fn new(cd_registry: Arc<CdPeerRegistry>) -> Self {
+        Self::with_queue_capacity(cd_registry, None)
     }
 
     /// Create a manager with an explicit capacity bound on the prefill queue.
-    pub fn with_queue_capacity(capacity: Option<usize>) -> Self {
+    pub fn with_queue_capacity(
+        cd_registry: Arc<CdPeerRegistry>,
+        capacity: Option<usize>,
+    ) -> Self {
         Self {
-            inner: RwLock::new(CdInner {
-                prefill: HashSet::new(),
-                decode: HashSet::new(),
-                by_instance: HashMap::new(),
-            }),
+            cd_registry,
             velo: OnceLock::new(),
             queue_backend: OnceLock::new(),
             queue_capacity: capacity,
             dispatcher: None,
+            selector: None,
             dispatcher_task: OnceLock::new(),
         }
     }
 
-    /// Builder: install a [`PrefillRequestDispatcher`]. When set, the
-    /// hub spawns a background worker (in [`FeatureManager::attach`])
-    /// that drains the prefill queue and hands each item to the
-    /// dispatcher.
-    pub fn with_dispatcher(mut self, dispatcher: Arc<dyn PrefillRequestDispatcher>) -> Self {
+    /// Builder: install the prefill dispatch pipeline. Both must be set
+    /// together — the drainer needs a selector to pick a worker and a
+    /// dispatcher to ship the request.
+    pub fn with_dispatch_pipeline(
+        mut self,
+        dispatcher: Arc<dyn PrefillRequestDispatcher>,
+        selector: Arc<dyn PrefillWorkerSelector>,
+    ) -> Self {
         self.dispatcher = Some(dispatcher);
+        self.selector = Some(selector);
         self
     }
 
-    /// Current snapshot of the role split, sorted deterministically.
+    /// Read-only handle to the CD peer registry — useful for binaries that
+    /// need to wire other components (e.g. a metrics exporter) against the
+    /// same registry the manager uses.
+    pub fn cd_registry(&self) -> &Arc<CdPeerRegistry> {
+        &self.cd_registry
+    }
+
+    /// Current snapshot of the role split. Delegates to the registry.
     pub fn snapshot(&self) -> ConditionalDisaggInstancesResponse {
-        let inner = self.inner.read();
-        ConditionalDisaggInstancesResponse {
-            prefill: inner.prefill.iter().copied().collect(),
-            decode: inner.decode.iter().copied().collect(),
-        }
+        self.cd_registry.snapshot()
     }
 
     /// Hub Velo handle stashed during [`FeatureManager::attach`], if any.
@@ -116,28 +127,6 @@ impl ConditionalDisaggManager {
     /// configured with a Velo instance.
     pub fn queue_backend(&self) -> Option<&Arc<MessengerQueueBackend>> {
         self.queue_backend.get()
-    }
-}
-
-fn insert_role(inner: &mut CdInner, id: InstanceId, role: ConditionalDisaggRole) {
-    match role {
-        ConditionalDisaggRole::Prefill => {
-            inner.prefill.insert(id);
-        }
-        ConditionalDisaggRole::Decode => {
-            inner.decode.insert(id);
-        }
-    }
-}
-
-fn remove_role(inner: &mut CdInner, id: InstanceId, role: ConditionalDisaggRole) {
-    match role {
-        ConditionalDisaggRole::Prefill => {
-            inner.prefill.remove(&id);
-        }
-        ConditionalDisaggRole::Decode => {
-            inner.decode.remove(&id);
-        }
     }
 }
 
@@ -177,10 +166,21 @@ impl FeatureManager for ConditionalDisaggManager {
             let _ = self.queue_backend.set(Arc::clone(&backend));
             let _ = self.velo.set(velo);
 
-            // Spawn the dispatcher worker if one is configured.
-            if let Some(dispatcher) = self.dispatcher.clone() {
-                let task =
-                    tokio::spawn(prefill_dispatcher_loop(Arc::clone(&backend), dispatcher));
+            // Spawn the dispatcher worker if the dispatch pipeline is
+            // configured. The drainer captures an `Arc<dyn PrefillPeerSource>`
+            // cloned from the registry, so it can fetch a fresh peer list
+            // each iteration without holding any reference back to the
+            // manager.
+            if let (Some(dispatcher), Some(selector)) =
+                (self.dispatcher.clone(), self.selector.clone())
+            {
+                let peer_source: Arc<dyn PrefillPeerSource> = self.cd_registry.clone();
+                let task = tokio::spawn(prefill_dispatcher_loop(
+                    Arc::clone(&backend),
+                    dispatcher,
+                    selector,
+                    peer_source,
+                ));
                 let _ = self.dispatcher_task.set(task);
                 tracing::info!("CD prefill dispatcher worker started");
             }
@@ -200,30 +200,27 @@ impl FeatureManager for ConditionalDisaggManager {
                     "ConditionalDisagg requires a config with a role".to_string(),
                 )
             })?;
-            let role = cfg.role;
 
-            let mut inner = self.inner.write();
-            if let Some(prior) = inner.by_instance.get(&instance_id).copied() {
-                if prior != role {
-                    return Err(FeatureError::InvalidConfig(format!(
-                        "instance {instance_id} already registered as {:?}, cannot switch to {:?}",
-                        prior, role
-                    )));
-                }
-                // Same role re-registration is idempotent.
-                return Ok(());
+            // Manager-side invariant: a Prefill peer must advertise an
+            // engine_url at registration. The registry would otherwise just
+            // filter URL-less prefills out of `prefill_peers()` silently;
+            // rejecting at register time is louder and matches the prior
+            // behavior.
+            if cfg.role == ConditionalDisaggRole::Prefill && cfg.engine_url.is_none() {
+                return Err(FeatureError::InvalidConfig(
+                    "ConditionalDisagg Prefill requires an engine_url".to_string(),
+                ));
             }
-            inner.by_instance.insert(instance_id, role);
-            insert_role(&mut inner, instance_id, role);
+
+            self.cd_registry
+                .insert(instance_id, cfg.role, cfg.engine_url.clone())
+                .map_err(|e| FeatureError::InvalidConfig(e.to_string()))?;
             Ok(())
         })
     }
 
     fn on_unregister(&self, instance_id: InstanceId) {
-        let mut inner = self.inner.write();
-        if let Some(role) = inner.by_instance.remove(&instance_id) {
-            remove_role(&mut inner, instance_id, role);
-        }
+        self.cd_registry.remove(instance_id);
     }
 
     fn control_router(self: Arc<Self>) -> Router {
@@ -258,6 +255,8 @@ async fn list_instances(
 async fn prefill_dispatcher_loop(
     backend: Arc<MessengerQueueBackend>,
     dispatcher: Arc<dyn PrefillRequestDispatcher>,
+    selector: Arc<dyn PrefillWorkerSelector>,
+    peer_source: Arc<dyn PrefillPeerSource>,
 ) {
     // Long-poll window. The receiver returns as soon as it has a full
     // batch OR the timeout fires — for the dispatcher's purposes we
@@ -270,19 +269,25 @@ async fn prefill_dispatcher_loop(
     loop {
         // Re-create the receiver each iteration. The backend caches the
         // underlying handler; this is cheap.
-        let receiver =
-            match velo::queue::receiver::<Vec<u8>>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
-                .await
-            {
-                Ok(r) => r,
-                Err(err) => {
-                    tracing::error!(error = %err, "CD dispatcher: receiver build failed; shutting down loop");
-                    return;
-                }
-            };
+        let receiver = match velo::queue::receiver::<Vec<u8>>(
+            backend.as_ref(),
+            protocol::CD_PREFILL_QUEUE,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::error!(error = %err, "CD dispatcher: receiver build failed; shutting down loop");
+                return;
+            }
+        };
 
         let batch = match receiver
-            .next_with_options(NextOptions::new().batch_size(BATCH_SIZE).timeout(POLL_TIMEOUT))
+            .next_with_options(
+                NextOptions::new()
+                    .batch_size(BATCH_SIZE)
+                    .timeout(POLL_TIMEOUT),
+            )
             .await
         {
             Ok(b) => b,
@@ -316,7 +321,19 @@ async fn prefill_dispatcher_loop(
                 initiator = %req.initiator_instance_id,
                 "CD dispatcher: dispatching PrefillRequest"
             );
-            match dispatcher.dispatch(req).await {
+            // Snapshot the live prefill peers and ask the selector to pick
+            // one. Selector errors (e.g. no peers registered) skip this
+            // request — never tear down the loop.
+            let peers = peer_source.prefill_peers();
+            let selected = match selector.select(&req, &peers).await {
+                Ok(s) => s,
+                Err(err) => {
+                    tracing::warn!(request_id, error = %err, "CD dispatcher: select failed");
+                    continue;
+                }
+            };
+            let engine_url = selected.engine_url.clone();
+            match dispatcher.dispatch(req, engine_url).await {
                 Ok(DispatchOutcome::Accepted) => {
                     tracing::info!(request_id, "CD dispatcher: accepted");
                 }
@@ -327,6 +344,9 @@ async fn prefill_dispatcher_loop(
                     tracing::error!(request_id, error = %err, "CD dispatcher: error");
                 }
             }
+            // `selected` drops here at end of iteration → its `permit` drops
+            // → the worker's in-flight count decrements (for load-aware
+            // selectors; no-op for round-robin).
         }
     }
 }
@@ -336,13 +356,19 @@ mod tests {
     use super::*;
     use crate::protocol::ConditionalDisaggConfig;
 
+    /// Build a CD `Feature` for the given role. Prefill peers get a stub
+    /// `engine_url` (manager rejects URL-less prefills); decode gets `None`.
     fn cd(role: ConditionalDisaggRole) -> Feature {
-        Feature::ConditionalDisagg(Some(ConditionalDisaggConfig { role }))
+        let engine_url = match role {
+            ConditionalDisaggRole::Prefill => Some("http://test:8000".to_string()),
+            ConditionalDisaggRole::Decode => None,
+        };
+        Feature::ConditionalDisagg(Some(ConditionalDisaggConfig { role, engine_url }))
     }
 
     #[tokio::test]
     async fn register_prefill_appears_in_snapshot() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         let id = InstanceId::new_v4();
         mgr.on_register(id, &cd(ConditionalDisaggRole::Prefill))
             .await
@@ -354,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_decode_appears_in_snapshot() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         let id = InstanceId::new_v4();
         mgr.on_register(id, &cd(ConditionalDisaggRole::Decode))
             .await
@@ -366,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_without_config_is_invalid() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         let err = mgr
             .on_register(InstanceId::new_v4(), &Feature::ConditionalDisagg(None))
             .await
@@ -375,8 +401,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_prefill_without_engine_url_is_invalid() {
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
+        let f = Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            role: ConditionalDisaggRole::Prefill,
+            engine_url: None,
+        }));
+        let err = mgr
+            .on_register(InstanceId::new_v4(), &f)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FeatureError::InvalidConfig(_)));
+    }
+
+    #[tokio::test]
     async fn reregister_same_role_is_idempotent() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         let id = InstanceId::new_v4();
         mgr.on_register(id, &cd(ConditionalDisaggRole::Prefill))
             .await
@@ -389,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn reregister_different_role_rejected() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         let id = InstanceId::new_v4();
         mgr.on_register(id, &cd(ConditionalDisaggRole::Prefill))
             .await
@@ -403,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_removes_from_snapshot() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         let id = InstanceId::new_v4();
         mgr.on_register(id, &cd(ConditionalDisaggRole::Prefill))
             .await
@@ -414,7 +454,7 @@ mod tests {
 
     #[test]
     fn unregister_unknown_is_noop() {
-        let mgr = ConditionalDisaggManager::new();
+        let mgr = ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new()));
         mgr.on_unregister(InstanceId::new_v4());
     }
 }

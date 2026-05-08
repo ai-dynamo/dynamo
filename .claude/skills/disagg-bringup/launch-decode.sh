@@ -5,7 +5,7 @@ set -eu
 export CUDA_VISIBLE_DEVICES=0
 export DYN_KVBM_CPU_CACHE_GB=2
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-exec /home/ryan/.venvs/dynamo-kvbm/bin/python3 -m vllm.entrypoints.openai.api_server \
+exec ${KVBM_VENV:-/home/ryan/.venvs/dynamo-kvbm}/bin/python3 -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen3-0.6B \
   --max-model-len 1024 \
   --max-num-seqs 8 \

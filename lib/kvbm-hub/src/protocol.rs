@@ -135,10 +135,14 @@ impl Feature {
 }
 
 /// Configuration payload for the ConditionalDisagg feature.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConditionalDisaggConfig {
     /// The role this instance is taking inside the ConditionalDisagg split.
     pub role: ConditionalDisaggRole,
+    /// Base URL of this peer's inference engine (e.g. `http://10.0.0.42:8000`).
+    /// The hub-side prefill dispatcher appends the engine-specific path
+    /// (e.g. `/v1/completions`) at request time.
+    pub engine_url: Option<String>,
 }
 
 /// Role a ConditionalDisagg participant takes on.
@@ -285,6 +289,7 @@ mod tests {
             peer_info: peer_info.clone(),
             features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
                 role: ConditionalDisaggRole::Prefill,
+                engine_url: None,
             }))],
         };
         let json = serde_json::to_string(&orig).unwrap();
@@ -309,6 +314,7 @@ mod tests {
     fn feature_cd_with_config_serde_round_trip() {
         let f = Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Decode,
+            engine_url: None,
         }));
         let json = serde_json::to_string(&f).unwrap();
         // Adjacently-tagged: {"kind":"conditional_disagg","config":{"role":"decode"}}

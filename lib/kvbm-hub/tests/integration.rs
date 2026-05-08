@@ -14,7 +14,10 @@ use kvbm_hub::protocol::{
     RegisterResponse, instance_by_id, instance_heartbeat, instance_probe, paths, peers_by_instance,
     peers_by_worker,
 };
-use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
+use kvbm_hub::{
+    CdPeerRegistry, ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer,
+    PrefillRequestDispatcher, PrefillWorkerSelector, RoundRobinSelector,
+};
 use velo::discovery::PeerDiscovery;
 use velo_common::{InstanceId, PeerInfo, WorkerAddress};
 use velo_transports::Transport;
@@ -750,7 +753,7 @@ async fn start_server_with_cd() -> (
     Arc<ConditionalDisaggManager>,
 ) {
     let transport = new_velo_transport();
-    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new())));
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
@@ -768,7 +771,7 @@ async fn start_server_with_cd() -> (
 /// registration on the hub side — the hub's `velo.register_peer` call
 /// would otherwise reject the opaque addresses produced by `make_peer()`.
 async fn start_server_with_cd_no_velo() -> (HubServer, Arc<ConditionalDisaggManager>) {
-    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new())));
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
@@ -788,6 +791,7 @@ async fn feature_register_without_manager_rejects() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            engine_url: Some("http://test:8000".to_string()),
         }))],
     };
     let resp = http()
@@ -880,10 +884,15 @@ async fn feature_cd_role_conflict_on_reregister() {
     let peer = make_peer();
 
     let post = |role: ConditionalDisaggRole| {
+        let engine_url = match role {
+            ConditionalDisaggRole::Prefill => Some("http://test:8000".to_string()),
+            ConditionalDisaggRole::Decode => None,
+        };
         let req = RegisterRequest {
             peer_info: peer.clone(),
             features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
                 role,
+                engine_url,
             }))],
         };
         http()
@@ -908,6 +917,7 @@ async fn feature_cd_unregister_removes_from_lists() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            engine_url: Some("http://test:8000".to_string()),
         }))],
     };
     http()
@@ -931,7 +941,7 @@ async fn feature_cd_unregister_removes_from_lists() {
 async fn feature_cd_reaper_evicts_from_lists() {
     // No transport — the reaper runs off the in-memory registry ticker and
     // the eviction callback fires into the CD manager regardless of velo.
-    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new())));
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
@@ -948,6 +958,7 @@ async fn feature_cd_reaper_evicts_from_lists() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            engine_url: Some("http://test:8000".to_string()),
         }))],
     };
     http()
@@ -985,11 +996,13 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
         Arc::clone(&p_hub),
         Arc::clone(&p_velo),
         ConditionalDisaggRole::Prefill,
+        Some("http://test:8000".to_string()),
     );
     let d_cd = ConditionalDisaggClient::new(
         Arc::clone(&d_hub),
         Arc::clone(&d_velo),
         ConditionalDisaggRole::Decode,
+        None,
     );
 
     let p_hub_id = p_cd
@@ -1149,9 +1162,12 @@ async fn start_server_with_cd_dispatcher() -> (
 ) {
     let transport = new_velo_transport();
     let dispatcher = kvbm_hub::RecordingDispatcher::new();
+    let selector: Arc<dyn PrefillWorkerSelector> = Arc::new(RoundRobinSelector::new());
     let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(
-        ConditionalDisaggManager::new()
-            .with_dispatcher(Arc::clone(&dispatcher) as Arc<dyn kvbm_hub::PrefillRequestDispatcher>),
+        ConditionalDisaggManager::new(Arc::new(CdPeerRegistry::new())).with_dispatch_pipeline(
+            Arc::clone(&dispatcher) as Arc<dyn PrefillRequestDispatcher>,
+            selector,
+        ),
     );
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
@@ -1181,6 +1197,7 @@ async fn dispatcher_worker_drains_queue_and_invokes_dispatcher() {
         Arc::clone(&d_hub),
         Arc::clone(&d_velo),
         ConditionalDisaggRole::Decode,
+        None,
     );
     let d_hub_id = d_cd
         .register(d_velo.peer_info())
@@ -1242,6 +1259,7 @@ async fn no_dispatcher_does_not_spawn_worker() {
         Arc::clone(&d_hub),
         Arc::clone(&d_velo),
         ConditionalDisaggRole::Decode,
+        None,
     );
     let d_hub_id = d_cd
         .register(d_velo.peer_info())
@@ -1274,6 +1292,7 @@ async fn no_dispatcher_does_not_spawn_worker() {
         Arc::clone(&p_hub),
         Arc::clone(&p_velo),
         ConditionalDisaggRole::Prefill,
+        Some("http://test:8000".to_string()),
     );
     let p_hub_id = p_cd
         .register(p_velo.peer_info())

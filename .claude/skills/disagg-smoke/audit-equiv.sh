@@ -9,7 +9,7 @@
 # Usage: bash audit-equiv.sh
 set -eu
 
-DYNAMO=/home/ryan/repos/dynamo
+DYNAMO=${KVBM_REPO:-/home/ryan/repos/dynamo}
 SKILL=$DYNAMO/.claude/skills/disagg-smoke
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 DIFF=$DYNAMO/target/debug/audit_diff

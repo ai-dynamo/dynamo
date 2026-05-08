@@ -44,7 +44,11 @@ pub enum DispatchOutcome {
 /// dispatcher task, but the trait is shaped to allow scaling out without
 /// changing call sites).
 pub trait PrefillRequestDispatcher: Send + Sync {
-    fn dispatch(&self, request: PrefillRequest) -> BoxFuture<'_, Result<DispatchOutcome>>;
+    fn dispatch(
+        &self,
+        request: PrefillRequest,
+        engine_url: String,
+    ) -> BoxFuture<'_, Result<DispatchOutcome>>;
 }
 
 /// Test-only dispatcher that records every received [`PrefillRequest`]
@@ -90,7 +94,11 @@ impl Default for RecordingDispatcher {
 }
 
 impl PrefillRequestDispatcher for RecordingDispatcher {
-    fn dispatch(&self, request: PrefillRequest) -> BoxFuture<'_, Result<DispatchOutcome>> {
+    fn dispatch(
+        &self,
+        request: PrefillRequest,
+        _engine_url: String,
+    ) -> BoxFuture<'_, Result<DispatchOutcome>> {
         Box::pin(async move {
             self.received.lock().push_back(request);
             Ok(DispatchOutcome::Accepted)
@@ -98,10 +106,17 @@ impl PrefillRequestDispatcher for RecordingDispatcher {
     }
 }
 
-/// Production dispatcher: POSTs each [`PrefillRequest`] to a prefill
-/// instance's vLLM `/v1/completions` HTTP frontend with the
+/// Production dispatcher: POSTs each [`PrefillRequest`] to the inference
+/// engine at the supplied `engine_url` (e.g. `http://10.0.0.42:8000`),
+/// targeting the `/v1/completions` HTTP frontend with the
 /// `kv_transfer_params` blob attached so the prefill connector wrapper
 /// picks it up via `slot_transfer_params`.
+///
+/// The URL is passed per-call rather than stored on the dispatcher, so
+/// this transport is independent of any particular routing policy — the
+/// caller (typically the CD manager's queue drainer) decides which worker
+/// handles each request via a `PrefillWorkerSelector` and supplies the URL
+/// here.
 ///
 /// The request body shape:
 ///
@@ -120,40 +135,34 @@ impl PrefillRequestDispatcher for RecordingDispatcher {
 /// [`kvbm_disagg_protocol::TransferParams`] so the prefill connector's
 /// `slot.transfer_params()` (which `serde_json::from_value::<TransferParams>`)
 /// round-trips it without translation.
-///
-/// The `model` field is configured at construction; multi-prefill load
-/// balancing is out of scope for this impl (single prefill URL +
-/// model). When that becomes interesting, swap in a router-aware
-/// dispatcher that holds a registry-backed list of prefill peers.
 pub struct HttpVllmDispatcher {
     client: reqwest::Client,
-    /// Base URL of the prefill vLLM server (e.g.
-    /// `http://127.0.0.1:8000`). The dispatcher appends
-    /// `/v1/completions`.
-    base_url: String,
     /// Model name passed in the request body; must match what the
-    /// prefill vLLM was started with.
+    /// prefill engine was started with.
     model: String,
 }
 
 impl HttpVllmDispatcher {
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Result<Arc<Self>> {
+    pub fn new(model: impl Into<String>) -> Result<Arc<Self>> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .context("build reqwest client for HttpVllmDispatcher")?;
         Ok(Arc::new(Self {
             client,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
             model: model.into(),
         }))
     }
 }
 
 impl PrefillRequestDispatcher for HttpVllmDispatcher {
-    fn dispatch(&self, request: PrefillRequest) -> BoxFuture<'_, Result<DispatchOutcome>> {
+    fn dispatch(
+        &self,
+        request: PrefillRequest,
+        engine_url: String,
+    ) -> BoxFuture<'_, Result<DispatchOutcome>> {
         Box::pin(async move {
-            let url = format!("{}/v1/completions", self.base_url);
+            let url = format!("{}/v1/completions", engine_url.trim_end_matches('/'));
             let transfer_params = kvbm_disagg_protocol::TransferParams::remote_prefill(
                 request.remote_prefill_params(),
             );
@@ -171,13 +180,7 @@ impl PrefillRequestDispatcher for HttpVllmDispatcher {
                 "kv_transfer_params": transfer_params,
             });
 
-            let resp = match self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-            {
+            let resp = match self.client.post(&url).json(&body).send().await {
                 Ok(r) => r,
                 Err(err) => {
                     return Ok(DispatchOutcome::Rejected {
@@ -223,7 +226,7 @@ mod tests {
     async fn recording_dispatcher_accepts_and_records() {
         let d = RecordingDispatcher::new();
         let req = make_request("req-1");
-        let outcome = d.dispatch(req.clone()).await.unwrap();
+        let outcome = d.dispatch(req.clone(), String::new()).await.unwrap();
         assert_eq!(outcome, DispatchOutcome::Accepted);
         assert_eq!(d.len(), 1);
         assert_eq!(d.recorded()[0].request_id, "req-1");
@@ -234,7 +237,7 @@ mod tests {
         let d = RecordingDispatcher::new();
         for n in 0..5 {
             let req = make_request(&format!("req-{n}"));
-            d.dispatch(req).await.unwrap();
+            d.dispatch(req, String::new()).await.unwrap();
         }
         let recorded = d.recorded();
         assert_eq!(recorded.len(), 5);
@@ -246,8 +249,8 @@ mod tests {
     #[tokio::test]
     async fn recording_dispatcher_pop_drains() {
         let d = RecordingDispatcher::new();
-        d.dispatch(make_request("a")).await.unwrap();
-        d.dispatch(make_request("b")).await.unwrap();
+        d.dispatch(make_request("a"), String::new()).await.unwrap();
+        d.dispatch(make_request("b"), String::new()).await.unwrap();
         assert_eq!(d.pop().unwrap().request_id, "a");
         assert_eq!(d.pop().unwrap().request_id, "b");
         assert!(d.pop().is_none());
@@ -306,9 +309,9 @@ mod tests {
     #[tokio::test]
     async fn http_dispatcher_posts_to_vllm_completions() {
         let (base, bodies, count, _server) = spawn_stub_vllm(AxumStatus::OK).await;
-        let dispatcher = HttpVllmDispatcher::new(base, "Qwen/Qwen3-0.6B").unwrap();
+        let dispatcher = HttpVllmDispatcher::new("Qwen/Qwen3-0.6B").unwrap();
         let req = make_request("http-test-1");
-        let outcome = dispatcher.dispatch(req).await.unwrap();
+        let outcome = dispatcher.dispatch(req, base).await.unwrap();
         assert_eq!(outcome, DispatchOutcome::Accepted);
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
@@ -344,11 +347,17 @@ mod tests {
     async fn http_dispatcher_marks_5xx_as_rejected() {
         let (base, _bodies, _count, _server) =
             spawn_stub_vllm(AxumStatus::INTERNAL_SERVER_ERROR).await;
-        let dispatcher = HttpVllmDispatcher::new(base, "test-model").unwrap();
-        let outcome = dispatcher.dispatch(make_request("err-1")).await.unwrap();
+        let dispatcher = HttpVllmDispatcher::new("test-model").unwrap();
+        let outcome = dispatcher
+            .dispatch(make_request("err-1"), base)
+            .await
+            .unwrap();
         match outcome {
             DispatchOutcome::Rejected { reason } => {
-                assert!(reason.contains("500"), "reason should mention status: {reason}");
+                assert!(
+                    reason.contains("500"),
+                    "reason should mention status: {reason}"
+                );
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
@@ -361,8 +370,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let dispatcher = HttpVllmDispatcher::new(format!("http://{}", addr), "x").unwrap();
-        let outcome = dispatcher.dispatch(make_request("unreachable")).await.unwrap();
+        let dispatcher = HttpVllmDispatcher::new("x").unwrap();
+        let outcome = dispatcher
+            .dispatch(make_request("unreachable"), format!("http://{}", addr))
+            .await
+            .unwrap();
         match outcome {
             DispatchOutcome::Rejected { reason } => {
                 assert!(

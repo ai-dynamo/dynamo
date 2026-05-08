@@ -58,8 +58,10 @@ pub mod server;
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
 pub use config::HubConfig;
 pub use features::conditional_disagg::{
-    ConditionalDisaggClient, ConditionalDisaggManager, DispatchOutcome, HttpVllmDispatcher,
-    PrefillRequestDispatcher, RecordingDispatcher,
+    CdPeerRegistry, CdRegistryError, ConditionalDisaggClient, ConditionalDisaggManager,
+    DispatchOutcome, HttpVllmDispatcher, LeastLoadedSelector, LoadPermit, PrefillPeerEntry,
+    PrefillPeerSource, PrefillRequestDispatcher, PrefillWorkerSelector, RecordingDispatcher,
+    RoundRobinSelector, SelectedWorker,
 };
 pub use features::connector_control::ConnectorControlManager;
 pub use features::{FeatureError, FeatureManager, HubContext};

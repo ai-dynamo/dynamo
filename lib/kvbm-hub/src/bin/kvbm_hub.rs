@@ -6,9 +6,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use kvbm_hub::config::HubConfig;
 use velo::backend::tcp::TcpTransportBuilder;
+
+/// Selection policy used by the hub's prefill dispatcher to pick a
+/// prefill peer for each dequeued request.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum RouterMode {
+    /// Cycle through registered prefill peers in registration order.
+    /// Stateless; ignores per-peer load.
+    RoundRobin,
+    /// Pick the prefill peer with the fewest in-flight requests.
+    /// Tracks load via per-peer atomic counters with RAII permits.
+    LeastLoaded,
+}
 
 #[derive(Parser)]
 #[command(name = "kvbm-hub", about = "KVBM coordination hub server")]
@@ -68,6 +81,12 @@ struct Cli {
     /// `--prefill-vllm-url` is set.
     #[arg(long)]
     prefill_vllm_model: Option<String>,
+
+    /// Selection policy for the prefill dispatcher. Defaults to
+    /// `round-robin`. Ignored when the dispatch pipeline isn't enabled
+    /// (i.e. `--prefill-vllm-model` not set).
+    #[arg(long, value_enum, default_value_t = RouterMode::RoundRobin)]
+    prefill_router_mode: RouterMode,
 }
 
 fn build_config(cli: &Cli) -> anyhow::Result<HubConfig> {
@@ -116,29 +135,41 @@ async fn main() -> anyhow::Result<()> {
         "starting kvbm-hub"
     );
 
-    // Build the CD manager, optionally with the HTTP dispatcher.
+    // Build the CD peer registry. Shared between the manager (writes via
+    // on_register/on_unregister) and the prefill drainer (reads via the
+    // PrefillPeerSource trait).
+    let cd_registry = Arc::new(kvbm_hub::CdPeerRegistry::new());
+
+    // Build the CD manager, optionally with the HTTP dispatch pipeline.
     let cd_manager = match (&cli.prefill_vllm_url, &cli.prefill_vllm_model) {
         (Some(url), Some(model)) => {
-            let dispatcher =
-                kvbm_hub::HttpVllmDispatcher::new(url.clone(), model.clone())?;
+            // TODO(piece-9): drop the --prefill-vllm-url CLI flag entirely.
+            // After piece-8 (connector advertises engine_url at registration),
+            // the dispatcher gets per-call URLs from the selector — no need
+            // for a hub-side default. `url` is still logged below for now.
+            let dispatcher: Arc<dyn kvbm_hub::PrefillRequestDispatcher> =
+                kvbm_hub::HttpVllmDispatcher::new(model.clone())?;
+            let selector: Arc<dyn kvbm_hub::PrefillWorkerSelector> = match cli.prefill_router_mode {
+                RouterMode::RoundRobin => Arc::new(kvbm_hub::RoundRobinSelector::new()),
+                RouterMode::LeastLoaded => Arc::new(kvbm_hub::LeastLoadedSelector::new()),
+            };
             tracing::info!(
                 prefill_url = %url,
                 prefill_model = %model,
-                "CD prefill dispatcher enabled (HTTP → vLLM frontend)"
+                router_mode = ?cli.prefill_router_mode,
+                "CD prefill dispatcher enabled (HTTP → engine frontend)"
             );
-            kvbm_hub::ConditionalDisaggManager::new()
-                .with_dispatcher(dispatcher as Arc<dyn kvbm_hub::PrefillRequestDispatcher>)
+            kvbm_hub::ConditionalDisaggManager::new(Arc::clone(&cd_registry))
+                .with_dispatch_pipeline(dispatcher, selector)
         }
         (Some(_), None) | (None, Some(_)) => {
-            anyhow::bail!(
-                "--prefill-vllm-url and --prefill-vllm-model must be specified together"
-            );
+            anyhow::bail!("--prefill-vllm-url and --prefill-vllm-model must be specified together");
         }
         (None, None) => {
             tracing::info!(
                 "CD prefill dispatcher disabled (set --prefill-vllm-url + --prefill-vllm-model to enable)"
             );
-            kvbm_hub::ConditionalDisaggManager::new()
+            kvbm_hub::ConditionalDisaggManager::new(Arc::clone(&cd_registry))
         }
     };
 

@@ -18,7 +18,7 @@
 #   If logs_dir not given, mints /tmp/kvbm-experiments/<ts>-<label>/.
 set -eu
 
-DYNAMO=/home/ryan/repos/dynamo
+DYNAMO=${KVBM_REPO:-/home/ryan/repos/dynamo}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
 LABEL=${KVBM_EXPERIMENT_LABEL:-two-request}

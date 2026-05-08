@@ -464,8 +464,12 @@ pub async fn register_with_hub(
         .context("installing hub velo handlers on leader messenger")?;
 
     let cd_role = role_to_hub(config.role);
-    let client =
-        ConditionalDisaggClient::with_messenger(Arc::clone(&hub), messenger.clone(), cd_role);
+    let client = ConditionalDisaggClient::with_messenger(
+        Arc::clone(&hub),
+        messenger.clone(),
+        cd_role,
+        config.engine_url.clone(),
+    );
 
     let peer_info = messenger.peer_info();
     let hub_velo_id = client

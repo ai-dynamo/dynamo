@@ -19,4 +19,4 @@ export KVBM_REQUIRE_CUDA=1
 
 # Needed by `maturin develop`; the bash tool's env doesn't source the venv
 # activator, so set VIRTUAL_ENV explicitly.
-export VIRTUAL_ENV=/home/ryan/.venvs/dynamo-kvbm
+export VIRTUAL_ENV=${KVBM_VENV:-/home/ryan/.venvs/dynamo-kvbm}

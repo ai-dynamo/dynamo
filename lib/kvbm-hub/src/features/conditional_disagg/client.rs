@@ -33,6 +33,11 @@ pub struct ConditionalDisaggClient {
     hub: Arc<HubClient>,
     messenger: Arc<Messenger>,
     role: ConditionalDisaggRole,
+    /// Base URL of this peer's inference engine, advertised at registration
+    /// so the hub's prefill dispatcher knows where to POST. Required for
+    /// `Prefill` peers (the hub rejects registrations without one); ignored
+    /// for `Decode` peers.
+    engine_url: Option<String>,
     /// Hub's velo `InstanceId`, learned on `register()`. Queue RPCs need
     /// this to address the hub-side queue service.
     hub_velo_id: OnceLock<InstanceId>,
@@ -56,8 +61,9 @@ impl ConditionalDisaggClient {
         hub: Arc<HubClient>,
         velo: Arc<velo::Velo>,
         role: ConditionalDisaggRole,
+        engine_url: Option<String>,
     ) -> Arc<Self> {
-        Self::with_messenger(hub, velo.messenger().clone(), role)
+        Self::with_messenger(hub, velo.messenger().clone(), role, engine_url)
     }
 
     /// Wrap a [`HubClient`] + [`Arc<Messenger>`] and declare a role.
@@ -70,11 +76,13 @@ impl ConditionalDisaggClient {
         hub: Arc<HubClient>,
         messenger: Arc<Messenger>,
         role: ConditionalDisaggRole,
+        engine_url: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             hub,
             messenger,
             role,
+            engine_url,
             hub_velo_id: OnceLock::new(),
             queue_backend: OnceCell::new(),
         })
@@ -103,6 +111,7 @@ impl ConditionalDisaggClient {
                 peer_info,
                 vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
                     role: self.role,
+                    engine_url: self.engine_url.clone(),
                 }))],
             )
             .await?;
