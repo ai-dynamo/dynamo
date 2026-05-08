@@ -161,12 +161,12 @@ impl Router {
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
     /// Lock-free read from the in-memory reflector store — no K8s API calls.
+    /// Port is read from the pod's first container port spec.
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
         for pod in self.pod_store.state() {
             let pod_name = pod.metadata.name.as_deref()?;
             if hash_pod_name(pod_name) == worker_id {
-                let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
-                return Some(format!("{ip}:8000"));
+                return pod_endpoint_address(&pod);
             }
         }
         None
@@ -175,10 +175,10 @@ impl Router {
     /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
-        self.pod_store.state().iter().find_map(|pod| {
-            let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
-            Some(format!("{ip}:8000"))
-        })
+        self.pod_store
+            .state()
+            .iter()
+            .find_map(|pod| pod_endpoint_address(pod))
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -449,6 +449,22 @@ async fn fetch_preprocessor_from_discovery(
     })
 }
 
+/// Extract "ip:port" from a pod by reading its IP from status and its serving
+/// port from the container spec. Falls back to port 8000 if no container port
+/// is defined.
+fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String> {
+    let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
+    let port = pod
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.containers.first())
+        .and_then(|c| c.ports.as_ref())
+        .and_then(|ports| ports.first())
+        .map(|p| p.container_port)
+        .unwrap_or(8000);
+    Some(format!("{ip}:{port}"))
+}
+
 /// Start a background pod reflector that watches worker pods matching the
 /// InferencePool selector. The returned `Store` provides lock-free reads
 /// of the current pod state — no K8s API calls on the hot path.
@@ -461,13 +477,13 @@ async fn spawn_pod_reflector(
 
     let client = Client::try_default().await?;
 
-    let k8s_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| {
-        dynamo_namespace
-            .split('-')
-            .next()
-            .unwrap_or(dynamo_namespace)
-            .to_string()
-    });
+    let k8s_namespace = std::env::var("POD_NAMESPACE").map_err(|_| {
+        anyhow::anyhow!(
+            "POD_NAMESPACE environment variable is not set. \
+             The operator injects this via the downward API — \
+             ensure the EPP pod spec includes fieldRef metadata.namespace."
+        )
+    })?;
 
     let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
 
