@@ -122,4 +122,7 @@ knob while keeping the same internal polynomial model.
 
 ## KV router / sharded indexer benchmarks
 
-See [lib/kv-router/src/indexer/INDEXER_BENCH.md](../kv-router/src/indexer/INDEXER_BENCH.md) for trace acquisition, benchmark commands, and results for the `mooncake_bench` suite (`concurrent-radix-tree-compressed` baseline vs `branch-sharded-crtc`).
+See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace
+acquisition, benchmark commands, and results for the `mooncake_bench` suite:
+`concurrent-radix-tree-compressed`, `branch-sharded-crtc`, and
+`anchor-aware-branch-sharded-crtc`.

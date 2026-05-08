@@ -62,6 +62,9 @@ spec:
               value: nixl-write
             - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
               value: "10"
+            # Permit the COCO http:// image URLs in the multimodal benchmark dataset.
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
           workingDir: /workspace
       replicas: 1
       resources:

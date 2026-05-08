@@ -16,8 +16,8 @@ Open the output JSON in [Perfetto UI](https://ui.perfetto.dev/).
 Inputs may be `.jsonl`, `.jsonl.gz`, a directory containing trace shards, or a
 glob pattern. The converter emits Chrome Trace Event JSON:
 
-- one workflow per Perfetto process
-- one program lane per Perfetto thread
+- one session per Perfetto process
+- one trajectory lane per Perfetto thread
 - one LLM request slice per Dynamo `request_end`
 - prefill wait, prefill, and decode stage slices stacked under the request by
   default
@@ -55,7 +55,7 @@ during conversion.
 For what replay covers today and what remains on the roadmap (cache movement
 fidelity, output token reconstruction, causal tool/turn dependencies, end-to-end
 agent re-run), see
-[Replay Scope and Follow-ups](../../docs/agents/agent-context.md#replay-scope-and-follow-ups).
+[Replay Scope and Follow-ups](../../docs/agents/agent-tracing.md#replay-scope-and-follow-ups).
 
 Replay the output with the same trace block size used when the trace was
 captured. The converter prints this value after writing the Mooncake JSONL.

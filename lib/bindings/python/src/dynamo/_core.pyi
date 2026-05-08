@@ -32,6 +32,31 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+async def parse_tool_call(
+    parser_name: str,
+    message: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse tool calls from a model output string using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
+        message:     Model output text to parse.
+        tools_json:  Optional JSON-serialized list of tool definitions in the form
+                     `[{"name": "...", "parameters": {...}}, ...]` (or OpenAI shape
+                     with `{"function": {...}}` wrapper). Used by parsers that need
+                     schema-aware coercion (e.g. XML family).
+
+    Returns:
+        JSON-serialized string `{"calls": [...], "normal_text": str | None}`.
+        Each entry in `calls` is `{"id", "type", "function": {"name", "arguments"}}`
+        with `arguments` itself a JSON-serialized string.
+
+    Raises:
+        ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
@@ -2256,3 +2281,75 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+# ---------------------------------------------------------------------------
+# `dynamo._core.backend` submodule.
+#
+# Registered at import time by the pyo3 bindings via `sys.modules`, so it has
+# no filesystem layout that mypy can discover. Declaring it as a typed
+# namespace class lets `from dynamo._core import backend as _backend` resolve
+# and preserves attribute typing for the pyclasses it exposes.
+# ---------------------------------------------------------------------------
+
+class backend:
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            context_length: Optional[int] = None,
+            kv_cache_block_size: Optional[int] = None,
+            total_kv_blocks: Optional[int] = None,
+            max_num_seqs: Optional[int] = None,
+            max_num_batched_tokens: Optional[int] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
+        @property
+        def context_length(self) -> Optional[int]: ...
+        @property
+        def kv_cache_block_size(self) -> Optional[int]: ...
+        @property
+        def total_kv_blocks(self) -> Optional[int]: ...
+        @property
+        def max_num_seqs(self) -> Optional[int]: ...
+        @property
+        def max_num_batched_tokens(self) -> Optional[int]: ...
+
+    class RuntimeConfig:
+        def __init__(
+            self,
+            discovery_backend: Optional[str] = None,
+            request_plane: Optional[str] = None,
+            event_plane: Optional[str] = None,
+        ) -> None: ...
+
+    class WorkerConfig:
+        def __init__(
+            self,
+            namespace: str,
+            component: str = ...,
+            endpoint: str = ...,
+            model_name: str = ...,
+            served_model_name: Optional[str] = None,
+            model_input: ModelInput = ...,
+            endpoint_types: str = ...,
+            custom_jinja_template: Optional[str] = None,
+            tool_call_parser: Optional[str] = None,
+            reasoning_parser: Optional[str] = None,
+            exclude_tools_when_tool_choice_none: bool = ...,
+            enable_local_indexer: bool = ...,
+            metrics_labels: List[Tuple[str, str]] = ...,
+            runtime: Optional["backend.RuntimeConfig"] = None,
+        ) -> None: ...
+
+    class Worker:
+        def __init__(
+            self,
+            engine: Any,
+            config: "backend.WorkerConfig",
+            event_loop: Any,
+        ) -> None: ...
+        def run(self) -> Awaitable[None]: ...
