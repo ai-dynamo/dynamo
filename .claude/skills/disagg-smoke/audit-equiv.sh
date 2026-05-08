@@ -6,10 +6,13 @@
 # Used to prove the UnifiedDisaggLeader is behaviorally equivalent
 # to the role-dispatching ConditionalDisaggLeader under live traffic.
 #
+# Honors:
+#   KVBM_REPO  (default: /home/ryan/repos/dynamo)
+#
 # Usage: bash audit-equiv.sh
 set -eu
 
-DYNAMO=/home/ryan/repos/dynamo
+DYNAMO=${KVBM_REPO:-/home/ryan/repos/dynamo}
 SKILL=$DYNAMO/.claude/skills/disagg-smoke
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 DIFF=$DYNAMO/target/debug/audit_diff

@@ -1,9 +1,10 @@
 #!/bin/bash
 # Two-request CD smoke (R1 cold-cache + R2 warm-decode/cleared-prefill).
-# Self-contained — references /home/ryan/repos/dynamo/.claude/skills/
-# scripts only.  Wraps disagg-bringup's launchers + start-hub.
+# Self-contained — references the four bringup helpers in disagg-bringup/.
+# Wraps disagg-bringup's launchers + start-hub.
 #
 # Honors:
+#   KVBM_REPO           (default: /home/ryan/repos/dynamo)  → repo root
 #   KVBM_DISAGG_LEADER  (legacy | unified ; default legacy)  → exported into launches
 #   KVBM_EXPERIMENT_LABEL (default: two-request)             → folded into experiment dir name
 #
@@ -15,10 +16,11 @@
 #     forward-passes the net-new blocks, observer publishes back.
 #
 # Usage: bash two-request-smoke.sh [logs_dir]
-#   If logs_dir not given, mints /tmp/kvbm-experiments/<ts>-<label>/.
+#   If logs_dir not given, mints $KVBM_EXPERIMENTS_DIR/<ts>-<label>/
+#   (KVBM_EXPERIMENTS_DIR defaults to /tmp/kvbm-experiments — see new-experiment.sh).
 set -eu
 
-DYNAMO=/home/ryan/repos/dynamo
+DYNAMO=${KVBM_REPO:-/home/ryan/repos/dynamo}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
 LABEL=${KVBM_EXPERIMENT_LABEL:-two-request}
