@@ -270,6 +270,19 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == pick.num_gpus
         assert cfg.decode_engine_num_gpu == pick.num_gpus
 
+    def test_num_gpu_injection_ignores_attention_dp_overcount(self):
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _dgdr(planner=planner)
+        pick = PickedParallelConfig(tp=8, pp=1, dp=8, moe_tp=1, moe_ep=1)
+        cfg = _build_planner_config(dgdr, pick, pick, aic_spec=None)
+        assert cfg.prefill_engine_num_gpu == 8
+        assert cfg.decode_engine_num_gpu == 8
+
     def test_no_spec_leaves_aic_interpolation_none(self):
         planner = PlannerConfig(
             enable_throughput_scaling=False,

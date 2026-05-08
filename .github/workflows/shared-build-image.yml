@@ -87,6 +87,11 @@ on:
         required: false
         type: string
         default: ''
+      source_ref:
+        description: 'Git ref/SHA to checkout and tag images with. Empty = caller SHA (github.sha).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -121,6 +126,7 @@ jobs:
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
@@ -128,6 +134,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -151,8 +158,9 @@ jobs:
             CUDA_MAJOR=${CUDA_VERSION%%.*}
             TAG_BUILDER+="-cuda${CUDA_MAJOR}"
           fi
-          IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}
-          TEST_IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}-test
+          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}
+          TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}-test
 
           IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
@@ -223,7 +231,7 @@ jobs:
           set -x
           EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
           EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
-          EPP_IMAGE_TAG="${{ github.sha }}"
+          EPP_IMAGE_TAG="${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}"
           EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
@@ -290,7 +298,7 @@ jobs:
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
+            DYNAMO_COMMIT_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ${{ inputs.extra_build_args }}
       - name: Refresh BuildKit builder
@@ -303,24 +311,28 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
-        uses: ./.github/actions/docker-remote-build
-        with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
-          framework: ${{ inputs.framework }}
-          target: ${{ inputs.target }}
-          build_target: ${{ inputs.target }}_test
-          tag_suffix: test
-          platform: ${{ inputs.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          no_cache: ${{ inputs.no_cache }}
-          push_image: ${{ inputs.push_image }}
-          no_load: ${{ inputs.no_load }}
-          extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
-            ${{ inputs.extra_build_args }}
+        shell: bash
+        run: |
+          PUSH_ARGS=""
+          if [ "${{ inputs.push_image }}" == "true" ]; then
+            PUSH_ARGS="--push"
+          elif [ "${{ inputs.no_load }}" == "false" ]; then
+            PUSH_ARGS="--load"
+          fi
+
+          NO_CACHE_ARG=""
+          if [ "${{ inputs.no_cache }}" == "true" ]; then
+            NO_CACHE_ARG="--no-cache"
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            ${PUSH_ARGS} \
+            ${NO_CACHE_ARG} \
+            --platform ${{ inputs.platform }} \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
+            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}

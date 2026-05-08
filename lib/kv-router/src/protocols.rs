@@ -243,6 +243,17 @@ impl StorageTier {
             .unwrap_or(Self::Device)
     }
 
+    /// Canonical wire-format medium string. `None` for the default GPU tier so
+    /// existing consumers that omit the field continue to round-trip.
+    pub fn to_kv_medium(self) -> Option<&'static str> {
+        match self {
+            Self::Device => None,
+            Self::HostPinned => Some("CPU_PINNED"),
+            Self::Disk => Some("DISK"),
+            Self::External => Some("EXTERNAL"),
+        }
+    }
+
     pub fn is_gpu(self) -> bool {
         matches!(self, Self::Device)
     }

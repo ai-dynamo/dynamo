@@ -46,6 +46,7 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
 mod kv_indexer;
 mod local;
 mod lower_tier;
+mod lower_tier_indexers;
 mod metrics;
 mod thread_pool;
 mod traits;
@@ -66,6 +67,7 @@ pub use branch_sharded::*;
 pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
+pub use lower_tier_indexers::*;
 pub use metrics::*;
 pub use thread_pool::*;
 pub use traits::*;

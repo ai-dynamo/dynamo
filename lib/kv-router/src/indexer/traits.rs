@@ -142,7 +142,7 @@ pub trait KvIndexerInterface {
     /// that don't override this) return an empty `Vec`.
     ///
     /// See [`ShardSizeSnapshot`] for the fields exposed per shard.
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         vec![]
     }
 
@@ -217,16 +217,6 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// state and must dump via the worker channel.
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
         None
-    }
-
-    /// Number of distinct workers registered in this backend.
-    fn worker_count(&self) -> usize {
-        0
-    }
-
-    /// Total cached blocks across all workers.
-    fn block_count(&self) -> usize {
-        0
     }
 
     /// Return a human-readable backend-specific timing or instrumentation report.

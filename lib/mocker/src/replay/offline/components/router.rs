@@ -99,6 +99,10 @@ impl SyncReplayIndexer {
     }
 
     fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
+        // TODO: support lower tier events in replay indexer
+        if !event.storage_tier.is_gpu() {
+            return Ok(());
+        }
         self.tree.apply_event(event).map_err(Into::into)
     }
 
@@ -666,9 +670,13 @@ mod tests {
 
     use dynamo_kv_router::PrefillLoadEstimator;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+    };
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, WorkerAdmission};
+    use super::{OfflineReplayRouter, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
 
@@ -730,6 +738,46 @@ mod tests {
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
         }
+    }
+
+    fn store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        tokens_hash: u64,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(tokens_hash),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    #[test]
+    fn lower_tier_events_do_not_enter_offline_primary_index() {
+        let mut indexer = SyncReplayIndexer::new(64);
+
+        indexer
+            .apply_event(store_event(7, 1, 101, StorageTier::HostPinned))
+            .unwrap();
+        assert_eq!(indexer.debug_snapshot().total_cached_blocks, 0);
+
+        indexer
+            .apply_event(store_event(7, 2, 101, StorageTier::Device))
+            .unwrap();
+        assert_eq!(indexer.debug_snapshot().total_cached_blocks, 1);
     }
 
     #[test]

@@ -1,15 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[path = "common/mod.rs"]
-mod common;
-use common::*;
-
 #[path = "active_sequences_shared.rs"]
 mod active_sequences_shared;
 
 use active_sequences_shared::{generate_sequence_events, run_benchmark};
 use clap::Parser;
+use dynamo_bench::kv_router_common::args::CommonArgs;
+use dynamo_bench::kv_router_common::replay::process_mooncake_trace;
+use dynamo_bench::kv_router_common::results::BenchmarkResults;
+use dynamo_bench::kv_router_common::sweep::{compute_sweep_durations, print_sweep_summary};
+use tracing_subscriber::EnvFilter;
+
+fn init_sequence_logging(enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(
+            "error,dynamo_kv_router::sequences=warn,dynamo_mocker=warn",
+        ))
+        .with_writer(std::io::stderr)
+        .try_init();
+}
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -19,10 +33,6 @@ use clap::Parser;
 struct Args {
     #[clap(flatten)]
     common: CommonArgs,
-
-    /// Output path for the sweep plot SVG.
-    #[clap(long, default_value = "active_seq_sweep_plot.svg")]
-    sweep_output: String,
 }
 
 #[tokio::main]
@@ -86,9 +96,6 @@ async fn main() -> anyhow::Result<()> {
         }
 
         print_sweep_summary("active-sequences", &results);
-
-        let all_results = vec![("active-sequences", results)];
-        plot_sweep(&all_results, &args.sweep_output)?;
     } else {
         let run = run_benchmark(
             &seq_traces,

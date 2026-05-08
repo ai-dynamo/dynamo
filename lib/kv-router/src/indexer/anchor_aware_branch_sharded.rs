@@ -790,17 +790,21 @@ impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
         total
     }
 
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
-        self.shards
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, shard)| {
-                shard.shard_sizes().into_iter().map(move |mut snapshot| {
-                    snapshot.shard_idx = idx;
-                    snapshot
-                })
-            })
-            .collect()
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        let mut sizes = Vec::new();
+        for (idx, shard) in self.shards.iter().enumerate() {
+            sizes.extend(
+                shard
+                    .shard_sizes()
+                    .await
+                    .into_iter()
+                    .map(move |mut snapshot| {
+                        snapshot.shard_idx = idx;
+                        snapshot
+                    }),
+            );
+        }
+        sizes
     }
 
     fn node_edge_lengths(&self) -> Vec<usize> {
@@ -1119,9 +1123,10 @@ mod tests {
 
         let scores = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
         let backend_blocks: usize = index
-            .shards
+            .shard_sizes()
+            .await
             .iter()
-            .map(|shard| shard.backend().block_count())
+            .map(|snapshot| snapshot.block_count)
             .sum();
 
         assert_eq!(score(&scores, worker(0)), Some(3));
