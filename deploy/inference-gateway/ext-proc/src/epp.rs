@@ -7,7 +7,7 @@
 //! `lib/bindings/c/src/lib.rs`. Instead of crossing a C FFI boundary, the
 //! ext_proc server calls these types directly as async Rust.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,7 +49,7 @@ pub struct Router {
     runtime: Runtime,
     #[allow(dead_code)]
     drt: DistributedRuntime,
-    target_namespace: String,
+    pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
 }
 
 impl Router {
@@ -132,6 +132,8 @@ impl Router {
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
 
+        let pod_store = spawn_pod_reflector(actual_namespace).await?;
+
         Ok(Self {
             prefill_router,
             decode_router,
@@ -139,7 +141,7 @@ impl Router {
             preprocessor: bootstrap.preprocessor,
             runtime,
             drt,
-            target_namespace: actual_namespace.to_string(),
+            pod_store,
         })
     }
 
@@ -157,86 +159,26 @@ impl Router {
         Ok(encoding.token_ids().to_vec())
     }
 
-    /// Resolve a worker_id to a pod endpoint address (ip:port) by querying
-    /// K8s pods with the InferencePool selector labels. Matches pods by
-    /// `hash_pod_name(pod.name) == worker_id`.
-    pub async fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
-        let pod_map = self.build_worker_pod_map().await;
-        pod_map.get(&worker_id).cloned()
+    /// Resolve a worker_id to a pod endpoint address (ip:port).
+    /// Lock-free read from the in-memory reflector store — no K8s API calls.
+    pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
+        for pod in self.pod_store.state() {
+            let pod_name = pod.metadata.name.as_deref()?;
+            if hash_pod_name(pod_name) == worker_id {
+                let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
+                return Some(format!("{ip}:8000"));
+            }
+        }
+        None
     }
 
     /// Resolve any available worker to its endpoint address (ip:port).
-    /// Used for body-less requests (GET /v1/models) where we just need any
-    /// backend to forward to.
-    pub async fn resolve_any_worker_endpoint(&self) -> Option<String> {
-        let pod_map = self.build_worker_pod_map().await;
-        pod_map.values().next().cloned()
-    }
-
-    /// Build a mapping of worker_id → "ip:port" from K8s pods in the EPP's
-    /// namespace. Uses `hash_pod_name` (same as Dynamo discovery) for the
-    /// worker_id and reads pod IPs directly from the K8s API.
-    async fn build_worker_pod_map(&self) -> HashMap<u64, String> {
-        use k8s_openapi::api::core::v1::Pod;
-        use kube::{Api, Client, api::ListParams};
-
-        let client = match Client::try_default().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create kube client");
-                return HashMap::new();
-            }
-        };
-
-        // The EPP namespace (e.g., "atchernych") contains the worker pods.
-        // target_namespace is the Dynamo namespace (e.g., "atchernych-qwen-9f792849"),
-        // the K8s namespace is the first segment before the first hyphen that starts
-        // the Dynamo suffix. Use the POD_NAMESPACE env var if available.
-        let k8s_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| {
-            self.target_namespace
-                .split('-')
-                .next()
-                .unwrap_or(&self.target_namespace)
-                .to_string()
-        });
-
-        let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
-        let pod_list = match pods.list(&ListParams::default()).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, namespace = k8s_namespace, "Failed to list pods");
-                return HashMap::new();
-            }
-        };
-
-        let mut map = HashMap::new();
-        for pod in &pod_list.items {
-            let pod_name = match &pod.metadata.name {
-                Some(n) => n,
-                None => continue,
-            };
-            let pod_ip = match pod.status.as_ref().and_then(|s| s.pod_ip.as_ref()) {
-                Some(ip) => ip,
-                None => continue,
-            };
-
-            let worker_id = hash_pod_name(pod_name);
-            tracing::info!(
-                pod_name = %pod_name,
-                pod_ip = %pod_ip,
-                worker_id,
-                worker_id_hex = format!("{:x}", worker_id),
-                "Pod → worker_id mapping"
-            );
-            map.insert(worker_id, format!("{pod_ip}:8000"));
-        }
-
-        tracing::info!(
-            worker_count = map.len(),
-            namespace = k8s_namespace,
-            "Built worker pod map"
-        );
-        map
+    /// Used for body-less requests (GET /v1/models) where we just need any backend.
+    pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
+        self.pod_store.state().iter().find_map(|pod| {
+            let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
+            Some(format!("{ip}:8000"))
+        })
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -507,6 +449,53 @@ async fn fetch_preprocessor_from_discovery(
     })
 }
 
+/// Start a background pod reflector that watches worker pods matching the
+/// InferencePool selector. The returned `Store` provides lock-free reads
+/// of the current pod state — no K8s API calls on the hot path.
+async fn spawn_pod_reflector(
+    dynamo_namespace: &str,
+) -> Result<kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>> {
+    use futures::StreamExt;
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::{Api, Client, runtime::reflector, runtime::watcher};
+
+    let client = Client::try_default().await?;
+
+    let k8s_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| {
+        dynamo_namespace
+            .split('-')
+            .next()
+            .unwrap_or(dynamo_namespace)
+            .to_string()
+    });
+
+    let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
+
+    let selector = format!(
+        "nvidia.com/dynamo-namespace={},nvidia.com/dynamo-component-type=worker",
+        dynamo_namespace
+    );
+
+    let writer = reflector::store::Writer::default();
+    let store = writer.as_reader();
+    let watcher_config = watcher::Config::default().labels(&selector);
+    let reflect = reflector::reflector(writer, watcher(pods, watcher_config));
+
+    tracing::info!(
+        namespace = k8s_namespace,
+        selector = selector,
+        "Starting pod reflector for worker endpoint resolution"
+    );
+
+    tokio::spawn(async move {
+        tokio::pin!(reflect);
+        while reflect.next().await.is_some() {}
+        tracing::warn!("Pod reflector stream ended unexpectedly");
+    });
+
+    Ok(store)
+}
+
 fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
@@ -690,7 +679,6 @@ impl EndpointPicker for Router {
             // resolve any worker via discovery and forward to it.
             let endpoint = self
                 .resolve_any_worker_endpoint()
-                .await
                 .ok_or(PickError::NoEndpoints)?;
             return Ok(PickResult {
                 endpoint,
@@ -721,7 +709,6 @@ impl EndpointPicker for Router {
 
         let endpoint = if worker_map.is_empty() {
             self.resolve_worker_endpoint(decode_worker.worker_id)
-                .await
                 .unwrap_or_else(|| format!("worker-{}", decode_worker.worker_id))
         } else {
             worker_map
@@ -805,7 +792,7 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
-            token_ids: Some(tokens),
+            token_ids: None, // TEMPORARY: force double tokenization for benchmarking
         })
     }
 
