@@ -309,7 +309,7 @@ def _send_request_get_overlap(
 
 
 @pytest.mark.timeout(300)
-def test_vllm_text_only_overlap_repeated_prompt(
+def _check_text_only_overlap_repeated_prompt(
     start_vllm_mm_services, predownload_models
 ):
     """Text-only routing should increase overlap on repeat and then stabilize."""
@@ -354,7 +354,7 @@ def test_vllm_text_only_overlap_repeated_prompt(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_repeated_three_images(
+def _check_mm_overlap_repeated_three_images(
     start_vllm_mm_services, predownload_models
 ):
     """For repeated same 3-image request: low first overlap, then increase, then stable."""
@@ -394,7 +394,7 @@ def test_vllm_mm_overlap_repeated_three_images(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_repeated_single_image(
+def _check_mm_overlap_repeated_single_image(
     start_vllm_mm_services, predownload_models
 ):
     """For repeated same single-image request: low first overlap, then increase, then stable."""
@@ -434,7 +434,7 @@ def test_vllm_mm_overlap_repeated_single_image(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_repeated_two_identical_images(
+def _check_mm_overlap_repeated_two_identical_images(
     start_vllm_mm_services, predownload_models
 ):
     """For repeated same two-identical-image request: low first overlap, then increase, then stable."""
@@ -470,7 +470,7 @@ def test_vllm_mm_overlap_repeated_two_identical_images(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
+def _check_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     start_vllm_mm_services, predownload_models
 ):
     """Single->double->triple identical image requests follow prefix-overlap semantics."""
@@ -525,7 +525,7 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_diff_images_less_than_same(
+def _check_mm_overlap_diff_images_less_than_same(
     start_vllm_mm_services, predownload_models
 ):
     """Different images should produce lower overlap than repeated identical images."""
@@ -579,7 +579,7 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
+def _check_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     start_vllm_mm_services, predownload_models
 ):
     """Same images but different prompt should produce lower overlap than repeated same prompt."""
@@ -639,7 +639,7 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_swapped_order_less_than_same_order(
+def _check_mm_overlap_swapped_order_less_than_same_order(
     start_vllm_mm_services, predownload_models
 ):
     """Swapping order of three distinct images should result in near-zero overlap."""
@@ -733,7 +733,7 @@ def http_image_server() -> Generator[list[str], None, None]:
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_repeated_http_images(
+def _check_mm_overlap_repeated_http_images(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
     """For repeated same 3-HTTP-image request: low first overlap, then increase, then stable."""
@@ -774,7 +774,7 @@ def test_vllm_mm_overlap_repeated_http_images(
 
 
 @pytest.mark.timeout(600)
-def test_vllm_mm_overlap_http_vs_data_uri_same_image(
+def _check_mm_overlap_http_vs_data_uri_same_image(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
     """HTTP URL and data URI for the same image should produce identical KV cache hashes."""
@@ -838,34 +838,34 @@ def test_vllm_mm_overlap_all(
     the 7.6 GiB allocation across the 10 scenarios per fixture parameter
     (shm/nixl/disabled) instead of paying it 30 times.
     """
-    test_vllm_text_only_overlap_repeated_prompt(
+    _check_text_only_overlap_repeated_prompt(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_repeated_three_images(
+    _check_mm_overlap_repeated_three_images(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_repeated_single_image(
+    _check_mm_overlap_repeated_single_image(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_repeated_two_identical_images(
+    _check_mm_overlap_repeated_two_identical_images(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
+    _check_mm_overlap_staircase_single_to_double_to_triple_identical_image(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_diff_images_less_than_same(
+    _check_mm_overlap_diff_images_less_than_same(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
+    _check_mm_overlap_same_images_different_prompt_less_than_same_prompt(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_swapped_order_less_than_same_order(
+    _check_mm_overlap_swapped_order_less_than_same_order(
         start_vllm_mm_services, predownload_models
     )
-    test_vllm_mm_overlap_repeated_http_images(
+    _check_mm_overlap_repeated_http_images(
         start_vllm_mm_services, predownload_models, http_image_server
     )
-    test_vllm_mm_overlap_http_vs_data_uri_same_image(
+    _check_mm_overlap_http_vs_data_uri_same_image(
         start_vllm_mm_services, predownload_models, http_image_server
     )
 
