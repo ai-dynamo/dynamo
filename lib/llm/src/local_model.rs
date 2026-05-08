@@ -57,6 +57,7 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
+    rl_port: Option<u16>,
     http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
@@ -80,6 +81,7 @@ impl Default for LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
+            rl_port: None,
             http_metrics_port: None,
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
@@ -149,6 +151,11 @@ impl LocalModelBuilder {
 
     pub fn http_port(&mut self, port: u16) -> &mut Self {
         self.http_port = port;
+        self
+    }
+
+    pub fn rl_port(&mut self, port: Option<u16>) -> &mut Self {
+        self.rl_port = port;
         self
     }
 
@@ -282,6 +289,7 @@ impl LocalModelBuilder {
                 template,
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
+                rl_port: self.rl_port,
                 http_metrics_port: self.http_metrics_port,
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
@@ -339,6 +347,7 @@ impl LocalModelBuilder {
             template,
             http_host: self.http_host.take(),
             http_port: self.http_port,
+            rl_port: self.rl_port,
             http_metrics_port: self.http_metrics_port,
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
@@ -362,6 +371,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_host: Option<String>,
     http_port: u16,
+    rl_port: Option<u16>,
     http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
@@ -416,6 +426,10 @@ impl LocalModel {
 
     pub fn http_port(&self) -> u16 {
         self.http_port
+    }
+
+    pub fn rl_port(&self) -> Option<u16> {
+        self.rl_port
     }
 
     pub fn http_metrics_port(&self) -> Option<u16> {

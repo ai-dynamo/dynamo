@@ -56,6 +56,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     kv_cache_block_size: Optional[int]
     http_host: str
     http_port: int
+    rl_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
 
@@ -97,6 +98,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
             )
+        if self.rl_port < 0 or self.rl_port > 65535:
+            raise ValueError("--rl-port must be between 0 and 65535")
         if self.migration_max_seq_len is not None and (
             self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
         ):
@@ -206,6 +209,14 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_HTTP_PORT",
             default=8000,
             help="HTTP port for the engine (u16).",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--rl-port",
+            env_var="DYN_RL_PORT",
+            default=8002,
+            help="Dedicated HTTP port for RL admin endpoints (u16).",
             arg_type=int,
         )
         add_negatable_bool_argument(

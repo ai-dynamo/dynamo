@@ -1429,16 +1429,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.exception(f"[RL] weight_transport_update failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    async def describe_rl(self, body: dict | None = None) -> dict:
+        """Return lightweight RL worker metadata for SDK topology probes."""
+        mode = getattr(self.config, "disaggregation_mode", None)
+        if hasattr(mode, "value"):
+            mode = mode.value
+        return {
+            "status": "ok",
+            "namespace": getattr(self.config, "namespace", None),
+            "component": getattr(self.config, "component", None),
+            "endpoint": "rl",
+            "worker_role": mode,
+            "details": {
+                "model": getattr(self.config, "model", None),
+                "served_model_name": (
+                    getattr(self.config, "served_model_name", None)
+                    or getattr(self.config, "model", None)
+                ),
+                "weight_version": getattr(self, "_weight_version", "initial"),
+                "lora_count": len(self.loaded_loras),
+            },
+        }
+
     # ── PR B: unified `rl` request-plane endpoint ─────────────────────
     #
     # Worker registers ``dyn://<namespace>.<component>.rl`` and serves this
     # dispatcher. The frontend (dynamo-rl crate) discovers live `rl`
-    # instances via the standard discovery plane and dispatches via
-    # ``PushRouter::direct`` over NATS / shared TCP — no system-port HTTP
+    # instances via the standard discovery plane and dispatches via strict
+    # request-plane direct calls over NATS / shared TCP — no system-port HTTP
     # fan-out, no static `DYN_RL_WORKER_SYSTEM_URLS` list.
     #
     # Wire shape: ``{"op": str, "body": dict}`` where `op` is one of
-    # ``pause | resume | init_transport | update_weights``. The dispatcher
+    # ``describe | pause | resume | init_transport | update_weights``. The dispatcher
     # routes to the existing per-op handlers and yields a single response
     # dict (matching the serve_endpoint async-generator contract used by
     # ``generate``, ``load_lora``, etc.).
@@ -1462,7 +1484,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
             return
         try:
-            if op == "pause":
+            if op == "describe":
+                yield await self.describe_rl(body)
+            elif op == "pause":
                 yield await self.pause_generation(body)
             elif op == "resume":
                 yield await self.resume_generation(body)
@@ -1475,7 +1499,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "status": "error",
                     "message": (
                         f"rl_dispatch: unknown op {op!r}; expected one of "
-                        "pause|resume|init_transport|update_weights"
+                        "describe|pause|resume|init_transport|update_weights"
                     ),
                 }
         except Exception as e:

@@ -237,6 +237,7 @@ async def async_main():
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
+        "rl_port": config.rl_port,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,

@@ -1159,6 +1159,49 @@ impl Client {
             Ok(AsyncResponseStream::new(rx, annotated))
         })
     }
+
+    /// Directly send a request to a specific endpoint without fallback re-selection.
+    #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    fn direct_strict<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+        instance_id: u64,
+        annotated: Option<bool>,
+        context: Option<context::Context>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
+        let annotated = annotated.unwrap_or(false);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let client = self.router.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream = match context {
+                Some(context) => {
+                    let span = get_span_for_direct_context(
+                        &context,
+                        "direct_strict",
+                        &instance_id.to_string(),
+                    );
+                    client
+                        .direct_strict(request_ctx, instance_id)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
+                }
+                _ => client
+                    .direct_strict(request_ctx, instance_id)
+                    .await
+                    .map_err(to_pyerr)?,
+            };
+
+            tokio::spawn(process_stream(stream, tx));
+
+            Ok(AsyncResponseStream::new(rx, annotated))
+        })
+    }
 }
 
 async fn process_stream(

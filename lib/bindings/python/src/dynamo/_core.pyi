@@ -246,6 +246,18 @@ class Client:
         """
         ...
 
+    async def direct_strict(
+            self,
+            request: JsonLike,
+            instance_id: int,
+            annotated: bool | None = True,
+            context: Context | None = None,
+        ) -> AsyncIterator[JsonLike]:
+        """
+        Pick a specific instance of the endpoint without fallback re-selection.
+        """
+        ...
+
     async def generate(
             self,
             request: JsonLike,
@@ -2114,6 +2126,7 @@ class EntrypointArgs:
         kv_cache_block_size: Optional[int] = None,
         http_host: Optional[str] = None,
         http_port: Optional[int] = None,
+        rl_port: Optional[int] = None,
         http_metrics_port: Optional[int] = None,
         tls_cert_path: Optional[str] = None,
         tls_key_path: Optional[str] = None,
@@ -2141,6 +2154,7 @@ class EntrypointArgs:
             kv_cache_block_size: Optional KV cache block size
             http_host: HTTP host to bind to
             http_port: HTTP port to bind to
+            rl_port: Dedicated RL admin HTTP port to bind to
             http_metrics_port: HTTP metrics port (for gRPC service)
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)

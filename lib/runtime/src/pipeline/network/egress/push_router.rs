@@ -452,6 +452,27 @@ where
             .await
     }
 
+    /// Issue a request to a specific endpoint without fallback re-selection.
+    ///
+    /// This is intended for admin/control-plane operations where the caller has
+    /// already selected a concrete membership snapshot and routing the request
+    /// to any other instance would be incorrect.
+    pub async fn direct_strict(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> anyhow::Result<ManyOut<U>> {
+        if !self.client.instance_ids().contains(&instance_id) {
+            return Err(anyhow::anyhow!(
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
+            ));
+        }
+
+        self.generate_with_fault_detection_options(instance_id, request, false)
+            .await
+    }
+
     /// Issue a request using device-aware weighted routing.
     ///
     /// Instances are partitioned by device type (CPU vs non-CPU), then the router
@@ -651,8 +672,18 @@ where
 
     async fn generate_with_fault_detection(
         &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_options(instance_id, request, true)
+            .await
+    }
+
+    async fn generate_with_fault_detection_options(
+        &self,
         mut instance_id: u64,
         request: SingleIn<T>,
+        allow_fallback: bool,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -734,6 +765,12 @@ where
 
             if let Some(result) = resolve_transport(instance_id) {
                 result
+            } else if !allow_fallback {
+                return Err(anyhow::anyhow!(
+                    "Instance {} not found for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ));
             } else {
                 // Instance vanished — pick a different one from the current
                 // availability list and retry the lookup once.

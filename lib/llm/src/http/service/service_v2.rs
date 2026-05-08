@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::env::var;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -204,6 +205,8 @@ pub struct HttpService {
 
     router: axum::Router,
     port: u16,
+    rl_router: Option<axum::Router>,
+    rl_port: u16,
     host: String,
     enable_tls: bool,
     tls_cert_path: Option<PathBuf>,
@@ -216,6 +219,9 @@ pub struct HttpService {
 pub struct HttpServiceConfig {
     #[builder(default = "8787")]
     port: u16,
+
+    #[builder(default = "default_rl_port()")]
+    rl_port: u16,
 
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     host: String,
@@ -246,9 +252,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_anthropic_endpoints: bool,
 
-    /// When true, expose the RL admin routes at `/v1/rl/*` (pause, resume,
-    /// update_weights, weight_version, ready). Worker system URLs are read
-    /// from `DYN_RL_WORKER_SYSTEM_URLS` (comma-separated, default `http://localhost:8081`).
+    /// When true, expose the RL admin routes at `/v1/rl/*` on the dedicated
+    /// `rl_port` listener. Fan-out uses dynamo-rl over the discovery and
+    /// request planes; worker system ports are not part of this contract.
     #[builder(default = "false")]
     enable_rl: bool,
 
@@ -301,103 +307,57 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
-        let address = format!("{}:{}", self.host, self.port);
-        let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
-        tracing::info!(protocol, address, "Starting HTTP(S) service");
+        let mut handles = vec![spawn_http_listener(HttpListenerConfig {
+            name: "openai",
+            router: self.router.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            port_arg: "--http-port",
+            enable_tls: self.enable_tls,
+            tls_cert_path: self.tls_cert_path.clone(),
+            tls_key_path: self.tls_key_path.clone(),
+            cancel_token: cancel_token.clone(),
+            state_cancel: self.state.cancel_token().clone(),
+        })];
 
-        let router = self.router.clone();
-        let observer = cancel_token.child_token();
-
-        let state_cancel = self.state.cancel_token().clone();
-
-        let addr: SocketAddr = address
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-
-        if self.enable_tls {
-            let cert_path = self
-                .tls_cert_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?;
-            let key_path = self
-                .tls_key_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
-
-            // aws_lc_rs is the default but other crates pull in `ring` also,
-            // so rustls doesn't know which one to use. Tell it.
-            if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
-                tracing::debug!("TLS crypto provider already installed: {e:?}");
-            }
-
-            let config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create TLS config: {}", e))?;
-
-            let handle = axum_server::Handle::new();
-            let server = axum_server::bind_rustls(addr, config)
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            tokio::select! {
-                result = server => {
-                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
-                    cancel_token.cancel();
-                    result?;
-                }
-                _ = observer.cancelled() => {
-                    state_cancel.cancel();
-                    tracing::info!("HTTPS server shutdown requested");
-                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
-                    // no longer accepting requests, draining all existing connections
-                }
-            }
-        } else {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                tracing::error!(
-                    protocol = %protocol,
-                    address = %address,
-                    error = %e,
-                    "Failed to bind server to address"
-                );
-                match e.kind() {
-                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                        protocol,
-                        self.port
-                    ),
-                    _ => anyhow::anyhow!(
-                        "Failed to start {} server on {}: {}",
-                        protocol,
-                        address,
-                        e
-                    ),
-                }
-            })?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    observer.cancelled_owned().await;
-                    state_cancel.cancel();
-                    tracing::info!("HTTP server shutdown requested");
-                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64))
-                        .await;
-                    // no longer accepting requests, draining all existing connections
-                })
-                .await
-                .inspect_err(|_| cancel_token.cancel())?;
-            cancel_token.cancel();
+        if let Some(router) = self.rl_router.clone() {
+            handles.push(spawn_http_listener(HttpListenerConfig {
+                name: "rl",
+                router,
+                host: self.host.clone(),
+                port: self.rl_port,
+                port_arg: "--rl-port",
+                enable_tls: self.enable_tls,
+                tls_cert_path: self.tls_cert_path.clone(),
+                tls_key_path: self.tls_key_path.clone(),
+                cancel_token: cancel_token.clone(),
+                state_cancel: self.state.cancel_token().clone(),
+            }));
         }
 
-        Ok(())
+        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
+        let (first_result, _idx, remaining) = futures::future::select_all(handles).await;
+        cancel_token.cancel();
+
+        let mut result = match first_result {
+            Ok(result) => result,
+            Err(err) => Err(anyhow::anyhow!("HTTP listener task failed: {err}")),
+        };
+
+        for handle in remaining {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) if result.is_ok() => result = Err(err),
+                Ok(Err(_)) => {}
+                Err(err) if result.is_ok() => {
+                    result = Err(anyhow::anyhow!("HTTP listener task failed: {err}"));
+                }
+                Err(_) => {}
+            }
+        }
+
+        result
     }
 
     /// Documentation of exposed HTTP endpoints
@@ -415,11 +375,165 @@ impl HttpService {
     }
 }
 
+struct HttpListenerConfig {
+    name: &'static str,
+    router: axum::Router,
+    host: String,
+    port: u16,
+    port_arg: &'static str,
+    enable_tls: bool,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
+    cancel_token: CancellationToken,
+    state_cancel: CancellationToken,
+}
+
+fn spawn_http_listener(config: HttpListenerConfig) -> JoinHandle<Result<()>> {
+    tokio::spawn(run_http_listener(config))
+}
+
+async fn run_http_listener(config: HttpListenerConfig) -> Result<()> {
+    let address = format!("{}:{}", config.host, config.port);
+    let protocol = if config.enable_tls { "HTTPS" } else { "HTTP" };
+    tracing::info!(
+        listener = config.name,
+        protocol,
+        address,
+        "Starting HTTP listener"
+    );
+
+    let addr: SocketAddr = address
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+
+    if config.enable_tls {
+        run_tls_listener(config, addr, protocol, address).await
+    } else {
+        run_plain_listener(config, addr, protocol, address).await
+    }
+}
+
+async fn run_tls_listener(
+    config: HttpListenerConfig,
+    addr: SocketAddr,
+    protocol: &'static str,
+    address: String,
+) -> Result<()> {
+    let cert_path = config
+        .tls_cert_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?;
+    let key_path = config
+        .tls_key_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
+
+    // aws_lc_rs is the default but other crates pull in `ring` also,
+    // so rustls doesn't know which one to use. Tell it.
+    if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        tracing::debug!("TLS crypto provider already installed: {e:?}");
+    }
+
+    let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create TLS config: {}", e))?;
+
+    let handle = axum_server::Handle::new();
+    let observer = config.cancel_token.child_token();
+    let state_cancel = config.state_cancel.clone();
+    let listener_name = config.name;
+    let server = axum_server::bind_rustls(addr, tls_config)
+        .handle(handle.clone())
+        .serve(config.router.into_make_service());
+
+    tokio::select! {
+        result = server => {
+            result.map_err(|e| {
+                tracing::error!(
+                    listener = listener_name,
+                    protocol = %protocol,
+                    address = %address,
+                    error = %e,
+                    "HTTP listener failed"
+                );
+                anyhow::anyhow!("{} listener '{}' error: {}", protocol, listener_name, e)
+            })?;
+        }
+        _ = observer.cancelled_owned() => {
+            state_cancel.cancel();
+            tracing::info!(listener = listener_name, "HTTP listener shutdown requested");
+            // accepting requests for a short window allows incorrectly routed
+            // requests already in flight to arrive before draining connections.
+            handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_plain_listener(
+    config: HttpListenerConfig,
+    addr: SocketAddr,
+    protocol: &'static str,
+    address: String,
+) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        tracing::error!(
+            listener = config.name,
+            protocol = %protocol,
+            address = %address,
+            error = %e,
+            "Failed to bind HTTP listener to address"
+        );
+        match e.kind() {
+            ErrorKind::AddrInUse => anyhow::anyhow!(
+                "Failed to start {} listener '{}': port {} already in use. Use {} to specify a different port.",
+                protocol,
+                config.name,
+                config.port,
+                config.port_arg
+            ),
+            _ => anyhow::anyhow!(
+                "Failed to start {} listener '{}' on {}: {}",
+                protocol,
+                config.name,
+                address,
+                e
+            ),
+        }
+    })?;
+
+    let observer = config.cancel_token.child_token();
+    let state_cancel = config.state_cancel.clone();
+    let listener_name = config.name;
+
+    axum::serve(listener, config.router)
+        .with_graceful_shutdown(async move {
+            observer.cancelled_owned().await;
+            state_cancel.cancel();
+            tracing::info!(listener = listener_name, "HTTP listener shutdown requested");
+            tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64)).await;
+        })
+        .await?;
+
+    Ok(())
+}
+
 fn get_graceful_shutdown_timeout() -> usize {
     std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(5)
+}
+
+const DEFAULT_RL_PORT: u16 = 8002;
+const DYN_RL_PORT_ENV: &str = "DYN_RL_PORT";
+
+fn default_rl_port() -> u16 {
+    std::env::var(DYN_RL_PORT_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_RL_PORT)
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -530,7 +644,7 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let mut system_routes = vec![
+        let system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
@@ -548,20 +662,29 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
-        // RL admin routes: gated by `DYN_ENABLE_RL_ENDPOINTS` (frontend-only).
-        // `DYN_ENABLE_RL` is preserved as a fallback alias for the previous
-        // single-flag deployment shape until clients migrate. The
-        // builder-time `enable_rl` flag forces routes on regardless of env.
-        // PR C of `rl-crate.md`: split inference-plane (DYN_ENABLE_RL) from
-        // admin-plane (DYN_ENABLE_RL_ENDPOINTS).
-        if config.enable_rl
-            || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS")
-            || env_is_truthy("DYN_ENABLE_RL")
-        {
+        // RL admin routes: gated by `DYN_ENABLE_RL_ENDPOINTS` (frontend-only)
+        // and served on a separate listener (`DYN_RL_PORT`, default 8002).
+        // `DYN_ENABLE_RL` remains the inference-plane flag and no longer
+        // mounts admin routes on the OpenAI listener.
+        let rl_router = if config.enable_rl || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS") {
             match config.runtime.as_ref() {
                 Some(drt) => {
-                    tracing::info!("RL admin routes enabled at /v1/rl/* (request-plane fan-out)");
-                    system_routes.push(super::openai::rl_router(drt.clone())?);
+                    tracing::info!(
+                        rl_port = config.rl_port,
+                        "RL admin routes enabled at /v1/rl/* on dedicated listener"
+                    );
+                    let (rl_docs, router) = super::openai::rl_router(drt.clone())?;
+                    let (_openapi_docs, openapi_route) =
+                        super::openapi_docs::openapi_router(rl_docs, None);
+                    let router = router
+                        .merge(openapi_route)
+                        .layer(
+                            TraceLayer::new_for_http()
+                                .make_span_with(make_system_request_span)
+                                .on_response(on_response),
+                        )
+                        .layer(axum::middleware::from_fn(echo_request_id_header));
+                    Some(router)
                 }
                 None => {
                     tracing::warn!(
@@ -569,9 +692,12 @@ impl HttpServiceConfigBuilder {
                          HttpServiceConfigBuilder.runtime is None — skipping mount. \
                          The frontend caller must supply the DistributedRuntime."
                     );
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);
@@ -612,6 +738,8 @@ impl HttpServiceConfigBuilder {
             state,
             router,
             port: config.port,
+            rl_router,
+            rl_port: config.rl_port,
             host: config.host,
             enable_tls: config.enable_tls,
             tls_cert_path: config.tls_cert_path,

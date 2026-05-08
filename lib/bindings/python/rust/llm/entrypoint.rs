@@ -320,6 +320,7 @@ pub(crate) struct EntrypointArgs {
     kv_cache_block_size: Option<u32>,
     http_host: Option<String>,
     http_port: u16,
+    rl_port: Option<u16>,
     http_metrics_port: Option<u16>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
@@ -339,7 +340,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, rl_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -352,6 +353,7 @@ impl EntrypointArgs {
         kv_cache_block_size: Option<u32>,
         http_host: Option<String>,
         http_port: Option<u16>,
+        rl_port: Option<u16>,
         http_metrics_port: Option<u16>,
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
@@ -402,6 +404,7 @@ impl EntrypointArgs {
             kv_cache_block_size,
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
+            rl_port,
             http_metrics_port,
             tls_cert_path,
             tls_key_path,
@@ -450,6 +453,7 @@ pub fn make_engine<'p>(
         .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
+        .rl_port(args.rl_port)
         .http_metrics_port(args.http_metrics_port)
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())

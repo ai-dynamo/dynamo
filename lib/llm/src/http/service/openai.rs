@@ -2977,12 +2977,25 @@ fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
 /// `smart_json_error_middleware` so 422s are coerced to 400s consistently
 /// with the OpenAI-compat surface.
 ///
-/// Exposed only when `DYN_ENABLE_RL=true` or `HttpServiceConfig.enable_rl`
-/// is set. Mounted by `service_v2.rs`.
+/// Exposed only on the dedicated RL listener when
+/// `DYN_ENABLE_RL_ENDPOINTS=true` or `HttpServiceConfig.enable_rl` is set.
 pub fn rl_router(
     drt: std::sync::Arc<dynamo_runtime::DistributedRuntime>,
 ) -> anyhow::Result<(Vec<RouteDoc>, Router)> {
-    let (rl_docs, router) = dynamo_rl::rl_router(drt)?;
+    let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".into());
+    let mut policy = dynamo_rl::FanoutPolicy::default_admin();
+    if let Ok(component) = std::env::var("DYN_RL_COMPONENT") {
+        policy = policy.with_component_filter(vec![component]);
+    }
+
+    let client = dynamo_rl::RlClient::new(dynamo_rl::RlClientConfig {
+        runtime: drt,
+        namespace,
+        rl_endpoint: dynamo_rl::DEFAULT_RL_ENDPOINT.to_string(),
+        policy,
+    })?;
+
+    let (rl_docs, router) = dynamo_rl::rl_router(dynamo_rl::RlHttpDeps { client })?;
     let docs = rl_docs
         .into_iter()
         .map(|d| RouteDoc::new(d.method, d.path))

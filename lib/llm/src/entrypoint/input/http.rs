@@ -49,6 +49,9 @@ pub async fn run(
     if let Some(http_host) = local_model.http_host() {
         http_service_builder = http_service_builder.host(http_host);
     }
+    if let Some(rl_port) = local_model.rl_port() {
+        http_service_builder = http_service_builder.rl_port(rl_port);
+    }
     http_service_builder =
         http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
     http_service_builder =
