@@ -560,7 +560,7 @@ impl LocalModel {
         let registry = drt.metadata_artifacts();
 
         let mut rewritten = 0usize;
-        for cf in self.card.iter_metadata_files_mut() {
+        for (cf, _) in self.card.iter_metadata_files_mut() {
             let Some(local_path) = cf.path().map(Path::to_path_buf) else {
                 continue;
             };

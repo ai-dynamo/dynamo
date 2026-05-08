@@ -336,24 +336,22 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// Trust-boundary clamp on a worker's declared `CheckedFile.size`.
-/// Realistic metadata files top out near 20 MiB; 1 GiB bounds disk
-/// exhaustion from a compromised worker advertising `u64::MAX`. Also
-/// the fallback cap when `CheckedFile.size` is absent (legacy MDCs).
+/// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
+/// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
+/// the fallback when `size` is absent (legacy MDCs).
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Stage `uri` into `dest`, verifying staged bytes against `expected`
-/// before publishing. Schemes: `http(s)`, `file`, `hf`. Concurrent-safe
-/// via `BlobLock` + atomic rename.
+/// before publishing. Schemes: `http(s)`, `file`, `hf`. For `hf://`,
+/// `hf_snapshots` must already contain the resolved repo path —
+/// caller is expected to pre-resolve once per repo.
 async fn resolve_uri(
     client: &reqwest::Client,
     uri: &str,
     expected: &CheckedFile,
     dest: &Path,
+    hf_snapshots: &std::collections::HashMap<String, PathBuf>,
 ) -> anyhow::Result<()> {
-    // Tighten cap to declared size if present; otherwise the absolute
-    // ceiling. Either way `cap` is enforced uniformly across schemes
-    // so transport choice can't bypass the bound.
     let cap = expected
         .size()
         .unwrap_or(ABSOLUTE_MAX_METADATA_BYTES)
@@ -363,14 +361,10 @@ async fn resolve_uri(
 
     let _blob_guard = BlobLock::acquire(dest).await?;
 
-    // Cache hit: trust the content-addressed blob. We verify on write
-    // (below, via `from_disk` against `expected.checksum()` before the
-    // atomic rename), so a blob at `blobs/<expected_hash>` was either
-    // written by us under that lock or doesn't exist. We don't
-    // re-verify on read for the same reason HF / Git / Nix / Docker
-    // / OCI don't: the cache root is owned by the frontend process
-    // (`$HOME` is in the trust boundary) and verifying every cache
-    // hit costs blake3 on the hot path of every MDC discovery.
+    // Verify-on-write only — a blob at `blobs/<expected_hash>` was
+    // blake3-checked before its atomic rename (below), so its presence
+    // is sufficient. `$HOME` is inside the trust boundary; matches
+    // HF / Git / Nix / Docker / OCI cache semantics.
     if dest.exists() {
         return Ok(());
     }
@@ -386,9 +380,9 @@ async fn resolve_uri(
             }
             "hf" => {
                 let (repo, filename) = parse_hf_uri(uri)?;
-                let snapshot = crate::hub::from_hf(&repo, /* ignore_weights = */ true)
-                    .await
-                    .with_context(|| format!("hub::from_hf({repo})"))?;
+                let snapshot = hf_snapshots
+                    .get(&repo)
+                    .with_context(|| format!("hf snapshot not pre-resolved for {repo}"))?;
                 copy_to_tmp(&snapshot.join(&filename), &tmp, cap).await?;
             }
             scheme => anyhow::bail!("unsupported artifact uri scheme: {scheme} (uri: {uri})"),
@@ -501,7 +495,9 @@ fn checked_file_uri(
     let url: Cow<url::Url> = if let Some(u) = cf.url() {
         Cow::Borrowed(u)
     } else {
-        let p = cf.path().expect("path or url");
+        let Some(p) = cf.path() else {
+            anyhow::bail!("CheckedFile has neither path nor url");
+        };
         let abs = std::path::absolute(p)?;
         Cow::Owned(
             url::Url::from_file_path(&abs)
@@ -559,19 +555,6 @@ fn uri_basename(uri: &str) -> anyhow::Result<String> {
         .and_then(|mut s| s.rfind(|s| !s.is_empty()))
         .map(String::from)
         .with_context(|| format!("no basename in uri: {uri}"))
-}
-
-fn is_custom_chat_template(p: &PromptFormatterArtifact) -> bool {
-    matches!(
-        p,
-        PromptFormatterArtifact::HfChatTemplateJinja {
-            is_custom: true,
-            ..
-        } | PromptFormatterArtifact::HfChatTemplateJson {
-            is_custom: true,
-            ..
-        }
-    )
 }
 
 fn pf_checked_file(p: &PromptFormatterArtifact) -> &CheckedFile {
@@ -918,9 +901,11 @@ impl ModelDeploymentCard {
         matches!(self.model_input, ModelInput::Tokens)
     }
 
-    /// Walk populated metadata `CheckedFile` slots in deterministic
-    /// order: model_info, tokenizer, prompt_formatter,
-    /// chat_template_file, gen_config.
+    /// Iterate populated metadata slots in deterministic order:
+    /// model_info, tokenizer, prompt_formatter, chat_template_file,
+    /// gen_config. Each entry is `(file, is_custom)` — `is_custom` is
+    /// only ever true for operator-supplied chat templates, which
+    /// can't fall back to HF.
     ///
     /// TODO(gh-8749): external preprocessors (vllm/sglang) read
     /// `from_pretrained(slug_dir)` and may expect siblings outside the
@@ -928,90 +913,49 @@ impl ModelDeploymentCard {
     /// `added_tokens.json`, etc. Add an `extra_files: Vec<CheckedFile>`
     /// MDC field so the worker can advertise everything in its model dir
     /// minus weights. Frontend pipeline is already generic over slot count.
-    pub fn iter_metadata_files(&self) -> Vec<&CheckedFile> {
-        let mut out: Vec<&CheckedFile> = Vec::with_capacity(5);
-        if let Some(m) = self.model_info.as_ref() {
-            match m {
-                ModelInfoType::HfConfigJson(cf) => out.push(cf),
-            }
+    pub fn iter_metadata_files(&self) -> Vec<(&CheckedFile, bool)> {
+        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5);
+        if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
+            out.push((cf, false));
         }
-        if let Some(t) = self.tokenizer.as_ref() {
-            match t {
-                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
-                    out.push(cf)
-                }
-            }
+        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
+            self.tokenizer.as_ref()
+        {
+            out.push((cf, false));
         }
         if let Some(p) = self.prompt_formatter.as_ref() {
-            out.push(pf_checked_file(p));
+            out.push((pf_checked_file(p), p.is_custom()));
         }
         if let Some(c) = self.chat_template_file.as_ref() {
-            out.push(pf_checked_file(c));
+            out.push((pf_checked_file(c), c.is_custom()));
         }
-        if let Some(g) = self.gen_config.as_ref() {
-            match g {
-                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
-            }
+        if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_ref() {
+            out.push((cf, false));
         }
         out
     }
 
-    /// Mutable variant of [`Self::iter_metadata_files`].
-    pub fn iter_metadata_files_mut(&mut self) -> Vec<&mut CheckedFile> {
-        let mut out: Vec<&mut CheckedFile> = Vec::with_capacity(5);
-        if let Some(m) = self.model_info.as_mut() {
-            match m {
-                ModelInfoType::HfConfigJson(cf) => out.push(cf),
-            }
+    /// Mutable mirror of [`Self::iter_metadata_files`].
+    pub fn iter_metadata_files_mut(&mut self) -> Vec<(&mut CheckedFile, bool)> {
+        let mut out: Vec<(&mut CheckedFile, bool)> = Vec::with_capacity(5);
+        if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_mut() {
+            out.push((cf, false));
         }
-        if let Some(t) = self.tokenizer.as_mut() {
-            match t {
-                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
-                    out.push(cf)
-                }
-            }
+        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
+            self.tokenizer.as_mut()
+        {
+            out.push((cf, false));
         }
         if let Some(p) = self.prompt_formatter.as_mut() {
-            out.push(pf_checked_file_mut(p));
+            let is_custom = p.is_custom();
+            out.push((pf_checked_file_mut(p), is_custom));
         }
         if let Some(c) = self.chat_template_file.as_mut() {
-            out.push(pf_checked_file_mut(c));
+            let is_custom = c.is_custom();
+            out.push((pf_checked_file_mut(c), is_custom));
         }
-        if let Some(g) = self.gen_config.as_mut() {
-            match g {
-                GenerationConfig::HfGenerationConfigJson(cf) => out.push(cf),
-            }
-        }
-        out
-    }
-
-    /// Per-slot iteration for URI synthesis. Returns `(cf, is_custom)`.
-    /// Today only the chat template can be `is_custom = true` — operator
-    /// supplied via `--chat-template`, not published on HF.
-    fn iter_metadata_entries(&self) -> Vec<(&CheckedFile, bool)> {
-        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5);
-        if let Some(m) = self.model_info.as_ref() {
-            match m {
-                ModelInfoType::HfConfigJson(cf) => out.push((cf, false)),
-            }
-        }
-        if let Some(t) = self.tokenizer.as_ref() {
-            match t {
-                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
-                    out.push((cf, false))
-                }
-            }
-        }
-        if let Some(p) = self.prompt_formatter.as_ref() {
-            out.push((pf_checked_file(p), false));
-        }
-        if let Some(c) = self.chat_template_file.as_ref() {
-            out.push((pf_checked_file(c), is_custom_chat_template(c)));
-        }
-        if let Some(g) = self.gen_config.as_ref() {
-            match g {
-                GenerationConfig::HfGenerationConfigJson(cf) => out.push((cf, false)),
-            }
+        if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_mut() {
+            out.push((cf, false));
         }
         out
     }
@@ -1026,7 +970,7 @@ impl ModelDeploymentCard {
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
         let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_entries()
+            .iter_metadata_files()
             .into_iter()
             .map(|(cf, is_custom)| {
                 Ok((
@@ -1035,6 +979,23 @@ impl ModelDeploymentCard {
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
+
+        // Pre-resolve hf:// repos once per unique repo; otherwise the
+        // resolve loop would call hub::from_hf N times for one model.
+        let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
+        for (uri, _) in &entries {
+            if uri.starts_with("hf://") {
+                let (repo, _) = parse_hf_uri(uri)?;
+                if let std::collections::hash_map::Entry::Vacant(e) = hf_snapshots.entry(repo) {
+                    let repo_name = e.key().clone();
+                    let snap = crate::hub::from_hf(&repo_name, /* ignore_weights = */ true)
+                        .await
+                        .with_context(|| format!("hub::from_hf({repo_name})"))?;
+                    e.insert(snap);
+                }
+            }
+        }
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -1047,9 +1008,7 @@ impl ModelDeploymentCard {
             let blake3_hex = expected.checksum().hash();
             let blob = blobs.join(blake3_hex);
             tracing::debug!(filename = %filename, uri = %uri, blake3 = %blake3_hex, "resolving");
-            // Always go through resolve_uri — it verifies existing
-            // blobs under the lock (peer race + poisoned cache).
-            resolve_uri(&client, uri, expected, &blob).await?;
+            resolve_uri(&client, uri, expected, &blob, &hf_snapshots).await?;
             symlink_force(&blob, &slug_dir.join(&filename))?;
         }
         tracing::debug!(
@@ -1061,7 +1020,7 @@ impl ModelDeploymentCard {
 
         // Pass 3: rewrite cf.path to the cache symlink so downstream
         // tokenizer/config loaders read from a verified location.
-        for cf in self.iter_metadata_files_mut() {
+        for (cf, _) in self.iter_metadata_files_mut() {
             cf.update_dir(&slug_dir);
         }
         Ok(())
@@ -1788,6 +1747,7 @@ mod tests {
             &url,
             &test_cf(&url, declared_size),
             &dest,
+            &std::collections::HashMap::new(),
         )
         .await;
         let msg = result.expect_err("expected error").to_string();
@@ -1871,7 +1831,7 @@ mod tests {
             assert!(snap.join("tokenizer.json").exists());
             assert!(snap.join("generation_config.json").exists());
 
-            for cf in mdc.iter_metadata_files() {
+            for (cf, _) in mdc.iter_metadata_files() {
                 let path = cf.path().expect("post-download local path");
                 assert!(path.starts_with(&snap));
                 assert!(std::fs::canonicalize(path)?.starts_with(&blobs));
