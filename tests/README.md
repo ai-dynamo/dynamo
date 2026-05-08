@@ -208,7 +208,7 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
 2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
 3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
    - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_vllm_gpu_mem_args` in `gpu_utils.sh`.
-   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Non-text workloads may use `requested_sglang_vram_gib` for scheduler admission only.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens N --mem-fraction-static 0.9` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Non-text workloads may use `requested_sglang_vram_gib` for scheduler admission only.
    - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 ```bash
@@ -676,9 +676,9 @@ Env vars control engine allocation during profiling and parallel test execution:
 
 **`_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`** (integer) — SGLang only:
 
-| Engine  | Returned CLI flag                | Notes |
-|---------|----------------------------------|-------|
-| SGLang  | `--max-total-tokens N`           | Token-based KV cache cap |
+| Engine  | Returned CLI flag                                  | Notes |
+|---------|----------------------------------------------------|-------|
+| SGLang  | `--max-total-tokens N --mem-fraction-static 0.9`   | Token-based KV cache cap; `--mem-fraction-static 0.9` keeps the pool-creation gate open on small GPUs (see PR #9238) |
 
 **`_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`** (integer) — TRT-LLM text models:
 
