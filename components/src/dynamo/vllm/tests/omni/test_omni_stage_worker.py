@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 """Unit tests for OmniStageWorker.
 
-No GPU, no vllm_omni — uses mock StageEngine matching AsyncOmni.generate() signature.
+Uses mock StageEngine instances matching AsyncOmni.generate() signature.
 """
 
 from types import SimpleNamespace
@@ -11,16 +12,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-try:
-    from dynamo.vllm.omni.stage_worker import (
-        OmniStageWorker,
-        _prepare_connector_payload,
-        _Proxy,
-        _stage_config_to_dict,
-    )
-    from dynamo.vllm.omni.utils import _build_sampling_params
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
+
+from dynamo.vllm.omni.stage_worker import (
+    OmniStageWorker,
+    _prepare_connector_payload,
+    _Proxy,
+    _stage_config_to_dict,
+)
+from dynamo.vllm.omni.utils import _build_sampling_params
 
 pytestmark = [
     pytest.mark.unit,
@@ -380,6 +380,43 @@ async def test_requested_final_stage_writes_shm_instead_of_connector():
     serialize_obj.assert_called_once_with({"result": "done"})
     shm_write_bytes.assert_called_once_with(b"serialized", name="req-final")
     assert chunks == [{"shm_meta": {"name": "req-final", "size": 10}, "finished": True}]
+
+
+@pytest.mark.asyncio
+async def test_final_stage_extracts_text_output_for_chat_audio():
+    """Final stages carry generated text back to the router for chat audio responses."""
+    result = SimpleNamespace(outputs=[SimpleNamespace(text="spoken text")])
+    worker = _make_worker(engine=_MockEngine(output=result))
+    request = {"request_id": "req-final-text", "prompt": "hello", "final_stage_id": 0}
+
+    with (
+        patch(
+            "dynamo.vllm.omni.stage_worker.parse_omni_request",
+            new_callable=AsyncMock,
+        ) as parse_request,
+        patch(
+            "dynamo.vllm.omni.stage_worker.serialize_obj",
+            return_value=b"serialized",
+        ),
+        patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "req-final-text", "size": 10},
+        ),
+    ):
+        parse_request.return_value = {
+            "engine_inputs": "hello",
+            "original_prompt": {"prompt": "hello"},
+            "sampling_params_list": None,
+        }
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert chunks == [
+        {
+            "shm_meta": {"name": "req-final-text", "size": 10},
+            "stage_text_output": "spoken text",
+            "finished": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 """Unit tests for omni/types.py Protocol definitions.
 
-No GPU, no vllm_omni — pure structural typing checks.
+Pure structural typing checks.
 """
 
 import json
 
 import pytest
 
-try:
-    from dynamo.vllm.omni.types import OmniInterStageRequest, StageEngine, StageOutput
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
+
+from dynamo.vllm.omni.types import OmniInterStageRequest, StageEngine, StageOutput
 
 pytestmark = [
     pytest.mark.unit,

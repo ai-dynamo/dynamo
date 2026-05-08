@@ -1,24 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-try:
-    from PIL import Image
-    from vllm.sampling_params import SamplingParams
-    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+pytest.importorskip("PIL", reason="Pillow dependency not available")
+pytest.importorskip("vllm", reason="vLLM dependency not available")
+pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
 
-    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
-    from dynamo.common.protocols.image_protocol import NvCreateImageRequest
-    from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-    from dynamo.common.utils.output_modalities import RequestType
-    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
-    from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
-    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+from PIL import Image
+from vllm.sampling_params import SamplingParams
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+
+from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
+from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
+from dynamo.common.utils.output_modalities import RequestType
+from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
+from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 
 pytestmark = [
     pytest.mark.unit,

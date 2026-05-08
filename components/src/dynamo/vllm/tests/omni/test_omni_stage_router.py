@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 """Unit tests for OmniStageRouter."""
 
@@ -11,10 +12,9 @@ import pytest
 
 from dynamo.common.utils.output_modalities import RequestType
 
-try:
-    from dynamo.vllm.omni import stage_router
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
+
+from dynamo.vllm.omni import stage_router
 
 pytestmark = [
     pytest.mark.unit,
@@ -510,7 +510,11 @@ class TestStageRouterContextNormalization:
         mock_formatter.format = fake_format
 
         async def stage0_handler(request):
-            return {"shm_meta": {"x": 1}, "finished": True}
+            return {
+                "shm_meta": {"x": 1},
+                "stage_text_output": "spoken text",
+                "finished": True,
+            }
 
         router = _make_router(
             stage_configs=[_make_stage_cfg(0)],

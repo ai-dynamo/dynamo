@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 """Unit tests for OmniConfig validation."""
 
@@ -8,14 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-try:
-    from dynamo.vllm.omni.args import (
-        OmniConfig,
-        OmniDiffusionKwargs,
-        OmniParallelKwargs,
-    )
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
+
+from dynamo.vllm.omni.args import OmniConfig, OmniDiffusionKwargs, OmniParallelKwargs
 
 pytestmark = [
     pytest.mark.unit,

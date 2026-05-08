@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 """Tests that every DiffusionParallelConfig field is either exposed in Dynamo or intentionally skipped."""
 
@@ -9,14 +10,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-try:
-    from vllm_omni.diffusion.data import DiffusionParallelConfig
-    from vllm_omni.engine.arg_utils import OmniEngineArgs
+pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
 
-    from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
-    from dynamo.vllm.omni.base_handler import BaseOmniHandler
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
+from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
 pytestmark = [
     pytest.mark.unit,

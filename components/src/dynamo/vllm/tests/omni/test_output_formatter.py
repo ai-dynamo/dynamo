@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 """Tests for output_formatter.py — modality-specific formatters."""
 
@@ -7,15 +8,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-try:
-    from dynamo.vllm.omni.output_formatter import (
-        DiffusionFormatter,
-        TextFormatter,
-        _build_completion_usage,
-        _error_chunk,
-    )
-except ImportError:
-    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
+pytest.importorskip("diffusers", reason="Diffusers dependency not available")
+pytest.importorskip("numpy", reason="NumPy dependency not available")
+pytest.importorskip("soundfile", reason="SoundFile dependency not available")
+pytest.importorskip("torch", reason="PyTorch dependency not available")
+
+from dynamo.vllm.omni.output_formatter import (
+    DiffusionFormatter,
+    TextFormatter,
+    _build_completion_usage,
+    _error_chunk,
+)
 
 pytestmark = [
     pytest.mark.unit,

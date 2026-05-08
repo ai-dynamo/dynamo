@@ -270,6 +270,7 @@ class OmniStageWorker:
         # worker and the router to reside on the same machine. A proper multi-node
         # solution would use a connector edge (like inter-stage connectors) instead.
         # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
+        stage_text_output = stage_text_output or _extract_text_output(last_result)
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
         out = {"shm_meta": shm_meta, "finished": True}
         if stage_text_output:
