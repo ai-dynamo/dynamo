@@ -132,14 +132,6 @@ jobs:
             build-xpu-test.log
           retention-days: 7
 
-      - name: Cleanup Build Cache
-        if: always()
-        shell: bash
-        run: |
-          echo "🧹 Cleaning up docker build cache..."
-          docker builder prune -f 2>/dev/null || true
-          echo "✓ Build cache cleanup finished"
-
   # ============================================================================
   # XPU TESTS
   # ============================================================================
