@@ -84,10 +84,10 @@ impl LightseekMmCounter {
 
 /// Resolve the image-placeholder token id by delegating to lightseek's
 /// per-model `ModelProcessorSpec`. Each registered model (Qwen3-VL,
-/// Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5) reads
-/// the right field of `config.json` (`image_token_id`, `image_token_index`,
-/// `media_placeholder_token_id`) and falls back to the tokenizer's
-/// vocab when only the placeholder string is known.
+/// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4)
+/// reads the right field of `config.json` (`image_token_id`,
+/// `image_token_index`, `media_placeholder_token_id`) and falls back to the
+/// tokenizer's vocab when only the placeholder string is known.
 ///
 /// `model_id` is the HF id or local path; `model_dir` is the directory
 /// containing `tokenizer.json` and `config.json`.
@@ -188,6 +188,52 @@ mod tests {
             REGISTRY
                 .find("/models/my-finetune", Some("qwen3_vl"))
                 .is_some()
+        );
+    }
+
+    /// Coverage table for the VLM families we claim to support. Each row is
+    /// a `(family_label, hf_id, model_type)` triple. A row "passes" when the
+    /// upstream registry can match it via either the HF id substring OR the
+    /// `model_type` config field. A failure here means either:
+    ///   - the documented family lost coverage in a smg release (need to
+    ///     pin or pick up the fix upstream), or
+    ///   - we should remove that family from our supported-list claim.
+    /// Update this list whenever we add a new supported family in docs.
+    #[test]
+    fn image_processor_registry_covers_documented_families() {
+        // (family, hf_id, model_type)
+        const FAMILIES: &[(&str, &str, &str)] = &[
+            ("Qwen3-VL", "Qwen/Qwen3-VL-2B-Instruct", "qwen3_vl"),
+            ("Qwen2-VL", "Qwen/Qwen2-VL-7B-Instruct", "qwen2_vl"),
+            ("Qwen2.5-VL", "Qwen/Qwen2.5-VL-7B-Instruct", "qwen2_5_vl"),
+            (
+                "LLaVA-NeXT",
+                "llava-hf/llava-v1.6-mistral-7b-hf",
+                "llava_next",
+            ),
+            ("LLaVA-1.5", "llava-hf/llava-1.5-7b-hf", "llava"),
+            (
+                "Phi-3-vision",
+                "microsoft/Phi-3-vision-128k-instruct",
+                "phi3_v",
+            ),
+            ("Llama-4", "meta-llama/Llama-4-Scout-17B-16E", "llama4"),
+        ];
+
+        let mut missing: Vec<&str> = Vec::new();
+        for (family, hf_id, model_type) in FAMILIES {
+            let by_id = REGISTRY.find(hf_id, None).is_some();
+            let by_type = REGISTRY.find("/local/finetune", Some(model_type)).is_some();
+            if !(by_id || by_type) {
+                missing.push(family);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "lightseek registry has no processor for: {:?}. \
+             Either pick up an smg release that registers these, or trim \
+             the supported-families list in docs.",
+            missing
         );
     }
 }
