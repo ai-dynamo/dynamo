@@ -2081,9 +2081,11 @@ fn resolve_tokenizer_model_name(
         }
         return Err(ErrorMessage::model_not_found());
     }
-    let served_models = state.manager().model_display_names();
+    let mut served_models = state.manager().model_display_names();
     if served_models.len() == 1 {
-        return Ok(served_models.into_iter().next().unwrap());
+        if let Some(only) = served_models.drain().next() {
+            return Ok(only);
+        }
     }
     Err(bad_request(
         "Model must be specified when more than one model is served.",
@@ -3124,7 +3126,7 @@ struct RlState {
 }
 
 impl RlState {
-    fn from_env() -> Self {
+    fn from_env() -> anyhow::Result<Self> {
         let worker_system_urls = std::env::var(DYN_RL_WORKER_SYSTEM_URLS_ENV)
             .unwrap_or_else(|_| "http://localhost:8081".to_string())
             .split(',')
@@ -3132,17 +3134,18 @@ impl RlState {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         tracing::info!(
-            "RL admin router configured with {} worker(s): {:?}",
-            worker_system_urls.len(),
-            worker_system_urls
+            worker_count = worker_system_urls.len(),
+            ?worker_system_urls,
+            "RL admin router configured"
         );
-        Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build RL router HTTP client: {e}"))?;
+        Ok(Self {
             worker_system_urls,
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(600))
-                .build()
-                .expect("Failed to create RL router HTTP client"),
-        }
+            http_client,
+        })
     }
 
     /// Call a single engine route on one worker. Returns the JSON body.
@@ -3266,8 +3269,10 @@ async fn rl_pause(
         .await;
     if RlState::all_ok(&results) {
         tracing::info!(
-            "RL pause: all {} worker(s) paused (mode={mode}, clear_cache={clear_cache})",
-            results.len()
+            worker_count = results.len(),
+            mode = %mode,
+            clear_cache,
+            "RL pause: all workers paused"
         );
         (
             StatusCode::OK,
@@ -3279,7 +3284,7 @@ async fn rl_pause(
             })),
         )
     } else {
-        tracing::warn!("RL pause: some workers failed: {:?}", results);
+        tracing::warn!(?results, "RL pause: some workers failed");
         (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"status": "error", "workers": results})),
@@ -3293,13 +3298,13 @@ async fn rl_resume(State(state): State<Arc<RlState>>) -> impl IntoResponse {
         .fan_out("resume_generation", serde_json::json!({}))
         .await;
     if RlState::all_ok(&results) {
-        tracing::info!("RL resume: all {} worker(s) resumed", results.len());
+        tracing::info!(worker_count = results.len(), "RL resume: all workers resumed");
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "workers": results})),
         )
     } else {
-        tracing::warn!("RL resume: some workers failed: {:?}", results);
+        tracing::warn!(?results, "RL resume: some workers failed");
         (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"status": "error", "workers": results})),
@@ -3341,10 +3346,9 @@ async fn rl_update_weights(
     State(state): State<Arc<RlState>>,
     body: axum::extract::Json<RlUpdateWeightsBody>,
 ) -> impl IntoResponse {
-    let weight_dir = body.weight_dir.clone();
     let reset_prefix_cache = body.reset_prefix_cache;
 
-    if weight_dir.is_none() {
+    let Some(weight_dir) = body.weight_dir.clone() else {
         tracing::info!("RL update_weights: weight_dir=null (NCCL mode, no-op on Dynamo side)");
         return (
             StatusCode::OK,
@@ -3353,9 +3357,8 @@ async fn rl_update_weights(
                 "message": "NCCL mode, no-op on Dynamo side"
             })),
         );
-    }
+    };
 
-    let weight_dir = weight_dir.unwrap();
     let version = body.weight_version.clone().unwrap_or_else(|| {
         std::path::Path::new(&weight_dir)
             .file_name()
@@ -3364,14 +3367,17 @@ async fn rl_update_weights(
             .to_string()
     });
     tracing::info!(
-        "RL update_weights: weight_dir={weight_dir} version={version} reset_prefix_cache={reset_prefix_cache}"
+        weight_dir = %weight_dir,
+        version = %version,
+        reset_prefix_cache,
+        "RL update_weights"
     );
 
     // Step 1 (optional): flush_cache across all workers.
     if reset_prefix_cache {
         let flush_results = state.fan_out("flush_cache", serde_json::json!({})).await;
         if !RlState::all_ok(&flush_results) {
-            tracing::warn!("RL update_weights: flush_cache failed: {:?}", flush_results);
+            tracing::warn!(?flush_results, "RL update_weights: flush_cache failed");
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -3384,12 +3390,13 @@ async fn rl_update_weights(
     }
 
     // Step 2: update_weights_from_path across all workers.
-    let load_body = serde_json::json!({"path": weight_dir, "version": version});
+    let load_body = serde_json::json!({"path": &weight_dir, "version": version});
     let load_results = state.fan_out("update_weights_from_path", load_body).await;
     if RlState::all_ok(&load_results) {
         tracing::info!(
-            "RL update_weights: all {} worker(s) updated weights to {weight_dir}",
-            load_results.len()
+            worker_count = load_results.len(),
+            weight_dir = %weight_dir,
+            "RL update_weights: all workers updated"
         );
         (
             StatusCode::OK,
@@ -3401,8 +3408,8 @@ async fn rl_update_weights(
         )
     } else {
         tracing::warn!(
-            "RL update_weights: update_weights_from_path failed: {:?}",
-            load_results
+            ?load_results,
+            "RL update_weights: update_weights_from_path failed"
         );
         (
             StatusCode::BAD_GATEWAY,
@@ -3449,25 +3456,27 @@ async fn rl_load_lora_adapter(
         }
     };
 
-    tracing::info!("RL load_lora_adapter: lora_name={lora_name} lora_path={lora_path}");
+    tracing::info!(%lora_name, %lora_path, "RL load_lora_adapter");
     let results = state
         .fan_out(
             "load_lora_adapter",
-            serde_json::json!({"lora_name": lora_name, "lora_path": lora_path}),
+            serde_json::json!({"lora_name": &lora_name, "lora_path": &lora_path}),
         )
         .await;
 
     if RlState::all_ok(&results) {
         tracing::info!(
-            "RL load_lora_adapter: all {} worker(s) loaded LoRA '{lora_name}' from {lora_path}",
-            results.len()
+            worker_count = results.len(),
+            %lora_name,
+            %lora_path,
+            "RL load_lora_adapter: all workers loaded"
         );
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "workers": results})),
         )
     } else {
-        tracing::warn!("RL load_lora_adapter: some workers failed: {:?}", results);
+        tracing::warn!(?results, %lora_name, "RL load_lora_adapter: some workers failed");
         (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"status": "error", "workers": results})),
@@ -3503,25 +3512,26 @@ async fn rl_unload_lora_adapter(
         }
     };
 
-    tracing::info!("RL unload_lora_adapter: lora_name={lora_name}");
+    tracing::info!(%lora_name, "RL unload_lora_adapter");
     let results = state
         .fan_out(
             "unload_lora_adapter",
-            serde_json::json!({"lora_name": lora_name}),
+            serde_json::json!({"lora_name": &lora_name}),
         )
         .await;
 
     if RlState::all_ok(&results) {
         tracing::info!(
-            "RL unload_lora_adapter: all {} worker(s) unloaded LoRA '{lora_name}'",
-            results.len()
+            worker_count = results.len(),
+            %lora_name,
+            "RL unload_lora_adapter: all workers unloaded"
         );
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "workers": results})),
         )
     } else {
-        tracing::warn!("RL unload_lora_adapter: some workers failed: {:?}", results);
+        tracing::warn!(?results, %lora_name, "RL unload_lora_adapter: some workers failed");
         (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"status": "error", "workers": results})),
@@ -3861,8 +3871,8 @@ async fn rl_state(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 /// Prime-RL usage: set `admin_base_url = ["http://dynamo-frontend:8000/v1/rl"]`
 /// in the orchestrator config. Prime-RL strips the trailing `/v1` suffix only
 /// if present, so `/v1/rl` is preserved and all routes resolve correctly.
-pub fn rl_router() -> (Vec<RouteDoc>, Router) {
-    let rl_state_arc = Arc::new(RlState::from_env());
+pub fn rl_router() -> anyhow::Result<(Vec<RouteDoc>, Router)> {
+    let rl_state_arc = Arc::new(RlState::from_env()?);
     let docs = vec![
         // Phase 1: composite endpoints.
         RouteDoc::new(axum::http::Method::GET, "/v1/rl/state"),
@@ -3897,7 +3907,7 @@ pub fn rl_router() -> (Vec<RouteDoc>, Router) {
         .route("/v1/rl/unload_lora_adapter", post(rl_unload_lora_adapter))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state(rl_state_arc);
-    (docs, router)
+    Ok((docs, router))
 }
 
 #[cfg(test)]

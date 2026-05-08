@@ -552,7 +552,7 @@ impl HttpServiceConfigBuilder {
         // RL admin routes: enabled when builder flag is set OR when DYN_ENABLE_RL env var is truthy.
         if config.enable_rl || env_is_truthy("DYN_ENABLE_RL") {
             tracing::info!("RL admin routes enabled at /v1/rl/*");
-            system_routes.push(super::openai::rl_router());
+            system_routes.push(super::openai::rl_router()?);
         }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
