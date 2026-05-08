@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::http::service::{realtime, service_v2::HttpService};
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
@@ -56,10 +57,37 @@ async fn spawn_test_service() -> (u16, CancellationToken, JoinHandle<Result<()>>
     ensure_echo_engine_installed();
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
+    service.enable_model_endpoint(EndpointType::Realtime, true);
     let token = CancellationToken::new();
     let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
     (port, token, handle)
+}
+
+async fn spawn_test_service_realtime_disabled() -> (u16, CancellationToken, JoinHandle<Result<()>>)
+{
+    ensure_echo_engine_installed();
+    let port = get_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    let token = CancellationToken::new();
+    let handle = service.spawn(token.clone()).await;
+    wait_for_health(port).await;
+    (port, token, handle)
+}
+
+#[tokio::test]
+async fn realtime_websocket_route_gated_by_endpoint_flag() {
+    let (port, token, handle) = spawn_test_service_realtime_disabled().await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        result.is_err(),
+        "/v1/realtime upgrade must fail when EndpointType::Realtime is disabled"
+    );
+
+    token.cancel();
+    let _ = handle.await;
 }
 
 /// Read one Text frame off the socket and parse it as JSON, asserting the
