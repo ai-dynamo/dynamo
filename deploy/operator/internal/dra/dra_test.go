@@ -7,10 +7,8 @@ package dra
 
 import (
 	"context"
-	"strconv"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
@@ -155,24 +153,4 @@ func TestGenerateResourceClaimTemplate_DisabledReturnsDelete(t *testing.T) {
 func TestResourceClaimTemplateName(t *testing.T) {
 	assert.Equal(t, "myapp-worker-gpu", ResourceClaimTemplateName("myapp", "Worker"))
 	assert.Equal(t, "app-vllmdecodeworker-gpu", ResourceClaimTemplateName("app", "VllmDecodeWorker"))
-}
-
-func TestExtractGPUParams(t *testing.T) {
-	count, dc := ExtractGPUParams(nil, nil)
-	assert.Equal(t, 0, count)
-	assert.Equal(t, "", dc)
-
-	count, dc = ExtractGPUParams(
-		&v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		&v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: strconv.Itoa(4)}},
-	)
-	assert.Equal(t, 4, count)
-	assert.Equal(t, "", dc)
-
-	count, dc = ExtractGPUParams(
-		&v1alpha1.GPUMemoryServiceSpec{Enabled: true, DeviceClassName: "gpu.intel.com/xe"},
-		&v1alpha1.Resources{Requests: &v1alpha1.ResourceItem{GPU: "2"}},
-	)
-	assert.Equal(t, 2, count)
-	assert.Equal(t, "gpu.intel.com/xe", dc)
 }

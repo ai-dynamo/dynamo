@@ -8,10 +8,8 @@ package dra
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -78,27 +76,6 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 // ResourceClaimTemplate associated with a component.
 func ResourceClaimTemplateName(parentName, componentName string) string {
 	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(componentName))
-}
-
-// ExtractGPUParams extracts the GPU count and device class name from API types
-// shared by DGD components and DynamoCheckpoint specs. Returns gpuCount=0 when
-// GMS is not enabled, which tells GenerateResourceClaimTemplate to delete.
-func ExtractGPUParams(gmsSpec *v1alpha1.GPUMemoryServiceSpec, resources *v1alpha1.Resources) (gpuCount int, deviceClassName string) {
-	if gmsSpec == nil || !gmsSpec.Enabled {
-		return 0, ""
-	}
-	deviceClassName = gmsSpec.DeviceClassName
-	if resources != nil {
-		gpuStr := ""
-		if resources.Limits != nil {
-			gpuStr = resources.Limits.GPU
-		}
-		if gpuStr == "" && resources.Requests != nil {
-			gpuStr = resources.Requests.GPU
-		}
-		gpuCount, _ = strconv.Atoi(gpuStr)
-	}
-	return gpuCount, deviceClassName
 }
 
 func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements) (gpuCount int, deviceClassName string) {

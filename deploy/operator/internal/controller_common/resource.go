@@ -26,13 +26,10 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -521,117 +518,6 @@ func firstKey(m map[string]interface{}) string {
 	}
 	sort.Strings(keys)
 	return keys[0]
-}
-
-func GetResourcesConfig(resources *v1alpha1.Resources) (*corev1.ResourceRequirements, error) {
-
-	if resources == nil {
-		return nil, nil
-	}
-
-	currentResources := &corev1.ResourceRequirements{}
-
-	if resources.Limits != nil {
-		if resources.Limits.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.CPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits cpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceCPU] = q
-		}
-		if resources.Limits.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Limits.Memory)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits memory quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceMemory] = q
-		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits gpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[getGPUResourceName(resources.Limits)] = q
-		}
-		for k, v := range resources.Limits.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits %s quantity: %w", k, err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Requests != nil {
-		if resources.Requests.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.CPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests cpu quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceCPU] = q
-		}
-		if resources.Requests.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Requests.Memory)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests memory quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceMemory] = q
-		}
-		if resources.Requests.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.GPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests gpu quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[getGPUResourceName(resources.Requests)] = q
-		}
-		for k, v := range resources.Requests.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests %s quantity: %w", k, err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Claims != nil {
-		if currentResources.Claims == nil {
-			currentResources.Claims = make([]corev1.ResourceClaim, 0)
-		}
-		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
-	}
-	return currentResources, nil
-}
-
-func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName {
-	if resourceItem == nil {
-		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
-	}
-	if resourceItem.GPUType != "" {
-		return corev1.ResourceName(resourceItem.GPUType)
-	}
-	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 }
 
 // AppendUniqueImagePullSecrets appends secrets to existing, skipping any that already exist by name.
