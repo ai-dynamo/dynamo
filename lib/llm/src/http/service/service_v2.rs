@@ -542,8 +542,16 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
-        // RL admin routes: enabled when builder flag is set OR when DYN_ENABLE_RL env var is truthy.
-        if config.enable_rl || env_is_truthy("DYN_ENABLE_RL") {
+        // RL admin routes: gated by `DYN_ENABLE_RL_ENDPOINTS` (frontend-only).
+        // `DYN_ENABLE_RL` is preserved as a fallback alias for the previous
+        // single-flag deployment shape until clients migrate. The
+        // builder-time `enable_rl` flag forces routes on regardless of env.
+        // PR C of `rl-crate.md`: split inference-plane (DYN_ENABLE_RL) from
+        // admin-plane (DYN_ENABLE_RL_ENDPOINTS).
+        if config.enable_rl
+            || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS")
+            || env_is_truthy("DYN_ENABLE_RL")
+        {
             tracing::info!("RL admin routes enabled at /v1/rl/*");
             system_routes.push(super::openai::rl_router()?);
         }
