@@ -984,6 +984,128 @@ class TestFpmReconciliation:
 # ── Agg planner core ──────────────────────────────────────────────────
 
 
+def _agg_caps_with_max_kv(max_kv_tokens: int) -> WorkerCapabilities:
+    """Agg capabilities advertising max_num_batched_tokens AND max_kv_tokens."""
+    return WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=max_kv_tokens,
+        ),
+    )
+
+
+class TestAggConsolidationAwareScaleDown:
+    """Agg dispatcher must respect consolidation refusal from either sub-decision.
+
+    Regression test for the dispatcher bug where ``_agg_prefill_scaling``
+    returning ``None`` because of an active safety refusal was conflated with
+    "no prefill signal", letting ``_advance_load_agg`` fall through to
+    decode-only scale-down via its line-327 fallback. Post-fix, the sub-
+    decisions return ``num_workers`` on refusal so the dispatcher distinguishes
+    "stay at current count" from "no signal at all".
+    """
+
+    def _train_agg_high_decode_kv_cost(self, core: PlannerStateMachine) -> None:
+        """Regression with a strong decode_kv coefficient.
+
+        ``T_own`` of a zero-queue prefill is ``a*avg_isl + b*decode_kv + c``.
+        With ``b=1e-5`` and ``decode_kv=30K`` we get ~0.31s; doubling
+        ``decode_kv`` to 60K (post-consolidation) pushes ``T_own`` to ~0.62s,
+        well past a 500ms TTFT SLA.
+        """
+        fpms = [
+            _make_fpm(
+                sum_prefill_tokens=p,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=d,
+                num_decode_requests=10,
+                wall_time=1e-4 * p + 1e-5 * d + 1e-3,
+            )
+            for p, d in [
+                (100, 5000),
+                (200, 15000),
+                (300, 25000),
+                (400, 35000),
+                (500, 45000),
+            ]
+        ]
+        core.load_benchmark_fpms(agg_fpms=fpms)
+
+    def _tick(self, *, num_workers: int, sched_decode_kv_per_worker: int) -> TickInput:
+        decode = {}
+        for i in range(num_workers):
+            decode[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                sum_prefill_tokens=200,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=sched_decode_kv_per_worker,
+                num_decode_requests=10,
+                queued_prefill_tokens=0,
+                # Match the regression so per-tick refit stays monotone.
+                wall_time=1e-4 * 200 + 1e-5 * sched_decode_kv_per_worker + 1e-3,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(decode=decode),
+            worker_counts=WorkerCounts(ready_num_decode=num_workers),
+        )
+
+    def test_prefill_refusal_blocks_decode_only_scale_down(self):
+        """Agg dispatcher: prefill safety refusal is NOT overridden.
+
+        Setup at N=2:
+          - decode util = 30K / 100K = 0.3, post-consolidation 0.6 < 0.8
+            (sensitivity) -> agg-decode would allow scale-down.
+          - prefill T_own_post at decode_kv=60K is ~620ms > 500ms SLA
+            -> agg-prefill refuses scale-down (queue_budget <= 0).
+
+        Pre-B1-fix the dispatcher would have dropped the prefill veto and
+        scaled down 2 -> 1 anyway. Post-fix we stay at 2.
+        """
+        core = _make_agg_core(
+            ttft=500.0,
+            itl=1000.0,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _agg_caps_with_max_kv(100_000)
+        self._train_agg_high_decode_kv_cost(core)
+
+        tick = self._tick(num_workers=2, sched_decode_kv_per_worker=30_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+
+        # Must NOT scale down to 1.
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_decode is None
+            or effects.scale_to.num_decode >= 2
+        )
+        # Operator-facing reason should distinguish the safety veto from
+        # generic "no_change".
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_both_sides_safe_permits_scale_down(self):
+        """Sanity: when neither side refuses, agg DOES scale down."""
+        core = _make_agg_core(
+            ttft=2000.0,  # generous TTFT so prefill never refuses
+            itl=1000.0,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _agg_caps_with_max_kv(100_000)
+        self._train_agg_high_decode_kv_cost(core)
+
+        # Light load: decode util 0.1 per worker -> post 0.2 < 0.8 (allow)
+        # Prefill T_own_post at decode_kv=20K ~ 0.221s < 2000ms (allow)
+        tick = self._tick(num_workers=2, sched_decode_kv_per_worker=10_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
+
+
 class TestAggPlannerStateMachine:
     def _train_agg(self, core: PlannerStateMachine) -> None:
         fpms = [

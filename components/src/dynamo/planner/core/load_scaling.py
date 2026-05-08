@@ -314,7 +314,13 @@ class LoadScalingMixin:
             p_desired = None
         else:
             p_desired = self._agg_prefill_scaling(fpm_stats, num_workers, max_tokens)
+        # Capture the prefill sub-decision's reason before _agg_decode_scaling
+        # potentially overwrites it. ``scale_down_refused_consolidation`` from
+        # either side must survive into the dispatcher's final diagnostic stamp.
+        p_refused = self._diag_load_reason == "scale_down_refused_consolidation"
         d_desired = self._agg_decode_scaling(fpm_stats, num_workers)
+        d_refused = self._diag_load_reason == "scale_down_refused_consolidation"
+        any_refused = p_refused or d_refused
 
         logger.info(
             f"Agg scaling decisions: prefill={p_desired}, decode={d_desired} (current={num_workers})"
@@ -352,9 +358,14 @@ class LoadScalingMixin:
 
         if desired == num_workers:
             logger.info("Agg scaling: no scaling needed")
-            self._diag_load_reason = (
-                "scale_down_capped_by_throughput" if floor_capped else "no_change"
-            )
+            if any_refused and not floor_capped:
+                # A sub-decision actively vetoed scale-down on consolidation
+                # safety grounds; surface that distinct from "no_change".
+                self._diag_load_reason = "scale_down_refused_consolidation"
+            else:
+                self._diag_load_reason = (
+                    "scale_down_capped_by_throughput" if floor_capped else "no_change"
+                )
             return None
 
         if desired < num_workers:
@@ -416,6 +427,7 @@ class LoadScalingMixin:
         # time (``T_own``) does not shrink with more workers, so it is
         # excluded from the safety-margin budget.
         can_scale_down = num_workers > 1 and t_own_s is not None
+        consolidation_refused = False
         if can_scale_down:
             t_own_ms = t_own_s * 1000  # type: ignore[operator]
             queue_budget_ms = (self._config.ttft - t_own_ms) * sensitivity
@@ -423,6 +435,7 @@ class LoadScalingMixin:
                 # Own compute alone already exceeds SLA -- never safe to lose
                 # a worker (would only make queue contention worse).
                 can_scale_down = False
+                consolidation_refused = True
         for (wid, dp), fpm in fpm_stats.items():
             queued = fpm.queued_requests.sum_prefill_tokens
             est = self._prefill_regression.estimate_next_ttft(
@@ -453,17 +466,21 @@ class LoadScalingMixin:
                     queue_induced_ms = post_est * 1000 - t_own_ms
                     if queue_induced_ms >= queue_budget_ms:
                         can_scale_down = False
+                        consolidation_refused = True
 
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)
 
-        return self._scale_decision(
+        decision = self._scale_decision(
             estimates,
             self._config.ttft,
             num_workers,
             "prefill TTFT",
             can_scale_down=can_scale_down,
         )
+        if decision is None and consolidation_refused:
+            self._diag_load_reason = "scale_down_refused_consolidation"
+        return decision
 
     def _decode_load_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
@@ -491,6 +508,7 @@ class LoadScalingMixin:
         # util ~= current * N/(N-1). Refuse scale-down if any survivor would
         # exceed ``sensitivity`` (default 0.8) of full KV cache after merge.
         can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
+        consolidation_refused = False
         for (wid, dp), fpm in fpm_stats.items():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
             queued_kv = fpm.queued_requests.sum_decode_kv_tokens
@@ -511,17 +529,21 @@ class LoadScalingMixin:
                 util = (sched_kv + queued_kv) / max_kv  # type: ignore[operator]
                 if util * consolidation >= sensitivity:
                     can_scale_down = False
+                    consolidation_refused = True
 
         if estimates:
             self._diag_estimated_itl_ms = max(estimates)
 
-        return self._scale_decision(
+        decision = self._scale_decision(
             estimates,
             self._config.itl,
             num_workers,
             "decode ITL",
             can_scale_down=can_scale_down,
         )
+        if decision is None and consolidation_refused:
+            self._diag_load_reason = "scale_down_refused_consolidation"
+        return decision
 
     def _agg_prefill_scaling(
         self,
@@ -540,6 +562,7 @@ class LoadScalingMixin:
         # zero-queue prefill at the post-consolidation decode_kv) is treated
         # as the fixed cost the new request must pay regardless of N.
         can_scale_down = num_workers > 1
+        consolidation_refused = False
         for fpm in fpm_stats.values():
             queued = fpm.queued_requests.sum_prefill_tokens
             sched_decode_kv = fpm.scheduled_requests.sum_decode_kv_tokens
@@ -575,17 +598,25 @@ class LoadScalingMixin:
                     queue_induced_ms = post_est * 1000 - t_own_ms
                     if queue_budget_ms <= 0 or queue_induced_ms >= queue_budget_ms:
                         can_scale_down = False
+                        consolidation_refused = True
 
         if estimates:
             self._diag_estimated_ttft_ms = max(estimates)
 
-        return self._scale_decision(
+        decision = self._scale_decision(
             estimates,
             self._config.ttft,
             num_workers,
             "agg TTFT",
             can_scale_down=can_scale_down,
         )
+        if decision is None and consolidation_refused:
+            self._diag_load_reason = "scale_down_refused_consolidation"
+            # Return num_workers (not None) so ``_advance_load_agg`` does NOT
+            # mistake the safety refusal for a missing prefill signal and grant
+            # decode-only scale-down via its line 327 fallback.
+            return num_workers
+        return decision
 
     def _agg_decode_scaling(
         self,
@@ -602,6 +633,7 @@ class LoadScalingMixin:
         # decode KV + queued prefill) scaled by N/(N-1). Mirrors the easy-mode
         # agg utilisation but with the consolidation-aware threshold.
         can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
+        consolidation_refused = False
         for fpm in fpm_stats.values():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
             queued_kv = fpm.queued_requests.sum_decode_kv_tokens
@@ -617,17 +649,25 @@ class LoadScalingMixin:
                 util = (sched_kv + queued_kv + queued_prefill) / max_kv  # type: ignore[operator]
                 if util * consolidation >= sensitivity:
                     can_scale_down = False
+                    consolidation_refused = True
 
         if estimates:
             self._diag_estimated_itl_ms = max(estimates)
 
-        return self._scale_decision(
+        decision = self._scale_decision(
             estimates,
             self._config.itl,
             num_workers,
             "agg ITL",
             can_scale_down=can_scale_down,
         )
+        if decision is None and consolidation_refused:
+            self._diag_load_reason = "scale_down_refused_consolidation"
+            # Return num_workers (not None) so ``_advance_load_agg`` does NOT
+            # mistake the safety refusal for a missing decode signal in its
+            # combine logic.
+            return num_workers
+        return decision
 
     # ------------------------------------------------------------------
     # Easy-mode decision methods (optimization_target != "sla")
