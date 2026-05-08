@@ -20,11 +20,6 @@ import pytest
 
 from .common import check_module_available
 
-pytestmark = [
-    pytest.mark.kvbm,
-    pytest.mark.vllm,
-]
-
 HAS_VLLM = check_module_available("vllm")
 
 if HAS_VLLM:

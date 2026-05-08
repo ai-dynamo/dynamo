@@ -33,12 +33,6 @@ from .common import check_module_available
 HAS_VLLM = check_module_available("vllm")
 HAS_TRTLLM = check_module_available("tensorrt_llm")
 
-pytestmark = [
-    pytest.mark.kvbm,
-    pytest.mark.vllm,
-    pytest.mark.trtllm,
-]
-
 # Build list of available engines for parameterization
 AVAILABLE_ENGINES = []
 if HAS_VLLM:
@@ -46,9 +40,10 @@ if HAS_VLLM:
 if HAS_TRTLLM:
     AVAILABLE_ENGINES.append("trtllm")
 
-# Test markers
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.vllm,
+    pytest.mark.trtllm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,

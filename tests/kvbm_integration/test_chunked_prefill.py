@@ -17,11 +17,6 @@ import pytest
 from .common import llm_server_kvbm  # noqa: F401
 from .common import DeterminismTester, fetch_kvbm_metrics
 
-pytestmark = [
-    pytest.mark.kvbm,
-    pytest.mark.vllm,
-]
-
 # Test configuration
 KVBM_TEST_MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16  # Standard vLLM block size in tokens

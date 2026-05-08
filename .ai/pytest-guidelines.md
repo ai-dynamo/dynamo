@@ -350,6 +350,7 @@ Timing comments let AI/automation understand requirements when shuffling test su
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.vllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(300)
 def test_vllm_aggregated(start_serve_deployment):
