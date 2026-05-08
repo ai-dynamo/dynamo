@@ -265,10 +265,10 @@ func convertDCDToAlpha(dcd *v1beta1.DynamoComponentDeployment) (*v1alpha1.Dynamo
 		return nil, nil
 	}
 	alpha := &v1alpha1.DynamoComponentDeployment{}
-	if err := alpha.ConvertFrom(dcd.DeepCopy()); err != nil {
+	if err := alpha.ConvertFrom(dcd); err != nil {
 		return nil, err
 	}
-	return alpha, nil
+	return alpha.DeepCopy(), nil
 }
 
 func mergeLowPriorityMetadata(dst, src map[string]string) map[string]string {

@@ -66,7 +66,10 @@ import (
 type Reason string
 type Message string
 
-const reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
+const (
+	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
+	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
+)
 
 // rbacManager interface for managing RBAC resources
 type rbacManager interface {
@@ -193,6 +196,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 			logger.Error(err, "Failed to initialize worker hash")
 			reason = reasonFailedToInitializeWorkerHash
+			message = Message(err.Error())
 			return ctrl.Result{}, err
 		}
 
@@ -203,7 +207,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			if err != nil {
 				logger.Error(err, "Failed to check rolling update trigger")
 				state = nvidiacomv1beta1.DGDStateFailed
-				reason = Reason("RollingUpdateFailed")
+				reason = reasonRollingUpdateFailed
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
@@ -212,7 +216,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")
 				state = nvidiacomv1beta1.DGDStateFailed
-				reason = Reason("RollingUpdateFailed")
+				reason = reasonRollingUpdateFailed
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
@@ -223,12 +227,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
+				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
 			r.setCurrentWorkerHash(dynamoDeployment, hash)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
+				message = Message(updateErr.Error())
 				return ctrl.Result{}, updateErr
 			}
 		}
@@ -238,7 +244,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if err != nil {
 			logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
 			state = nvidiacomv1beta1.DGDStateFailed
-			reason = Reason("RollingUpdateFailed")
+			reason = reasonRollingUpdateFailed
 			message = Message(err.Error())
 			return ctrl.Result{}, err
 		}
@@ -253,6 +259,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dynamoDeployment)
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+				state = nvidiacomv1beta1.DGDStateFailed
+				reason = reasonRollingUpdateFailed
+				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
 			r.setCurrentWorkerHash(dynamoDeployment, hash)
@@ -1340,26 +1349,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dyna
 	pvc := &corev1.PersistentVolumeClaim{}
 	pvcNamespacedName := types.NamespacedName{Name: pvcName, Namespace: dynamoDeployment.Namespace}
 	err := r.Get(ctx, pvcNamespacedName, pvc)
-	if err != nil && client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Unable to retrieve legacy top-level PVC", "pvcName", pvcName)
-		return nil, err
-	}
-
 	if err != nil {
+		if !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("unable to retrieve legacy top-level PVC %q: %w", pvcName, err)
+		}
 		if pvcConfig.Create == nil || !*pvcConfig.Create {
-			logger.Error(err, "Legacy top-level PVC does not exist and create is not enabled", "pvcName", pvcName)
-			return nil, err
+			return nil, fmt.Errorf("legacy top-level PVC %q does not exist and create is not enabled: %w", pvcName, err)
 		}
 
 		pvc = constructPVC(dynamoDeployment, pvcConfig)
 		if err := controllerutil.SetControllerReference(dynamoDeployment, pvc, r.Client.Scheme()); err != nil {
-			logger.Error(err, "Failed to set controller reference for legacy top-level PVC", "pvcName", pvcName)
-			return nil, err
+			return nil, fmt.Errorf("failed to set controller reference for legacy top-level PVC %q: %w", pvcName, err)
 		}
 
 		if err := r.Create(ctx, pvc); err != nil {
-			logger.Error(err, "Failed to create legacy top-level PVC", "pvcName", pvcName)
-			return nil, err
+			return nil, fmt.Errorf("failed to create legacy top-level PVC %q: %w", pvcName, err)
 		}
 		logger.Info("Legacy top-level PVC created", "pvcName", pvcName, "namespace", dynamoDeployment.Namespace)
 	}

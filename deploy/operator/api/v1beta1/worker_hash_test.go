@@ -31,6 +31,8 @@ func TestComputeDGDWorkersSpecHashNil(t *testing.T) {
 }
 
 func TestComputeDGDWorkersSpecHashDeterministic(t *testing.T) {
+	const goldenDGDWorkerHash = "2bc34b39"
+
 	dgd := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test"},
 		Spec: DynamoGraphDeploymentSpec{
@@ -66,7 +68,7 @@ func TestComputeDGDWorkersSpecHashDeterministic(t *testing.T) {
 	if got1 != got2 {
 		t.Fatalf("ComputeDGDWorkersSpecHash is not deterministic: %q != %q", got1, got2)
 	}
-	if len(got1) != 8 {
-		t.Fatalf("ComputeDGDWorkersSpecHash length = %d, want 8", len(got1))
+	if got1 != goldenDGDWorkerHash {
+		t.Fatalf("ComputeDGDWorkersSpecHash() = %q, want golden %q", got1, goldenDGDWorkerHash)
 	}
 }
