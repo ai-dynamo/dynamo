@@ -116,7 +116,7 @@ impl RequestContext {
                 && let Some(ref common) = hr.response
                 && let Some(ref hm) = common.header_mutation
             {
-                tracing::info!(
+                tracing::debug!(
                     set_headers_count = hm.set_headers.len(),
                     clear_route_cache = common.clear_route_cache,
                     has_dynamic_metadata = resp.dynamic_metadata.is_some(),
@@ -124,7 +124,7 @@ impl RequestContext {
                 );
                 for h in &hm.set_headers {
                     if let Some(ref hv) = h.header {
-                        tracing::info!(
+                        tracing::debug!(
                             key = %hv.key,
                             value = %String::from_utf8_lossy(&hv.raw_value),
                             "[WIRE] set_header"
@@ -139,7 +139,7 @@ impl RequestContext {
         if self.state == StreamState::HeaderRequestResponseComplete
             && !self.req_body_resp.is_empty()
         {
-            tracing::info!(
+            tracing::debug!(
                 count = self.req_body_resp.len(),
                 "[WIRE] Sending req_body_resp to Envoy"
             );
@@ -183,25 +183,17 @@ impl RequestContext {
 /// Takes an `EndpointPicker` for endpoint selection, decoupling the ext-proc
 /// protocol handling from the routing decision — exactly as the Go LW-EPP
 /// separates `StreamingServer` from `EndpointPicker`.
+///
+/// Endpoints are resolved internally by the picker (the `Router` uses a K8s
+/// pod reflector). Pickers receive an empty endpoint slice; this matches the
+/// LW-EPP trait contract while removing the unused `Datastore` plumbing.
 pub struct ExtProcServer<P: EndpointPicker> {
     picker: Arc<P>,
-    /// Endpoints known to the server. In the Go LW-EPP these come from
-    /// the `Datastore` which watches K8s pods. Here they can be populated
-    /// from Dynamo's discovery or set externally.
-    endpoints: Arc<tokio::sync::RwLock<Vec<Endpoint>>>,
 }
 
 impl<P: EndpointPicker> ExtProcServer<P> {
     pub fn new(picker: Arc<P>) -> Self {
-        Self {
-            picker,
-            endpoints: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        }
-    }
-
-    /// Set the available endpoints (equivalent to LW-EPP's `Datastore.ListEndpoints()`).
-    pub async fn set_endpoints(&self, endpoints: Vec<Endpoint>) {
-        *self.endpoints.write().await = endpoints;
+        Self { picker }
     }
 
     /// Create a `tonic` service ready for registration on a gRPC server.
@@ -309,7 +301,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             "Request routed"
         );
         for (k, v) in &result.headers {
-            tracing::info!(key = %k, value = %v, "[MUTATION] Routing header going into ext_proc set_headers");
+            tracing::debug!(key = %k, value = %v, "[MUTATION] Routing header going into ext_proc set_headers");
         }
 
         // Only send NEW headers (routing headers from the picker) in the
@@ -327,7 +319,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         let forwarded_body = if let Some(ref token_ids) = result.token_ids {
             match inject_token_data(raw_body, token_ids) {
                 Ok(modified) => {
-                    tracing::info!(
+                    tracing::debug!(
                         token_count = token_ids.len(),
                         body_size_before = raw_body.len(),
                         body_size_after = modified.len(),
@@ -345,7 +337,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         };
 
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
-        tracing::info!(
+        tracing::debug!(
             has_header_resp = ctx.req_header_resp.is_some(),
             body_resp_count = ctx.req_body_resp.len(),
             "[MUTATION] Responses prepared, waiting for drain"
@@ -412,7 +404,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
     ) -> Result<Response<Self::ProcessStream>, Status> {
         let mut inbound = request.into_inner();
         let picker = self.picker.clone();
-        let endpoints_lock = self.endpoints.clone();
 
         let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
         let output_stream = ReceiverStream::new(rx);
@@ -431,7 +422,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     ctx.request_metadata = envoy_helpers::extract_metadata_values(&req);
 
                     if let Some(ref pc) = req.protocol_config {
-                        tracing::info!(
+                        tracing::debug!(
                             request_body_mode = pc.request_body_mode,
                             response_body_mode = pc.response_body_mode,
                             send_body_without_waiting =
@@ -442,27 +433,27 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
                     match req.request {
                         Some(processing_request::Request::RequestHeaders(ref hdr)) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 eos = hdr.end_of_stream,
                                 "[MSG-ORDER] Received RequestHeaders from Envoy"
                             );
                             ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
-                            if hdr.end_of_stream {
-                                let endpoints = endpoints_lock.read().await;
-                                if let Err(e) = ExtProcServer::handle_header_only_request(
-                                    &*picker, &mut ctx, &endpoints,
+                            if hdr.end_of_stream
+                                && let Err(e) = ExtProcServer::handle_header_only_request(
+                                    &*picker,
+                                    &mut ctx,
+                                    &[],
                                 )
                                 .await
-                                {
-                                    let resp = e.into_processing_response();
-                                    let _ = tx.send(Ok(resp)).await;
-                                    return Ok(());
-                                }
+                            {
+                                let resp = e.into_processing_response();
+                                let _ = tx.send(Ok(resp)).await;
+                                return Ok(());
                             }
                         }
                         Some(processing_request::Request::RequestBody(ref body)) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 eos = body.end_of_stream,
                                 body_len = body.body.len(),
                                 "[MSG-ORDER] Received RequestBody from Envoy"
@@ -471,9 +462,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
                             if body.end_of_stream {
                                 let raw_body = std::mem::take(&mut body_buf);
-                                let endpoints = endpoints_lock.read().await;
                                 if let Err(e) = ExtProcServer::handle_request_body(
-                                    &*picker, &mut ctx, &raw_body, &endpoints,
+                                    &*picker,
+                                    &mut ctx,
+                                    &raw_body,
+                                    &[],
                                 )
                                 .await
                                 {
@@ -676,24 +669,6 @@ impl ExtProcError {
     fn into_processing_response(self) -> ProcessingResponse {
         envoy_helpers::build_error_response(self.status_code, Some(&self.message))
     }
-}
-
-/// Start the ext_proc gRPC server on the given port.
-pub async fn run_ext_proc_server<P: EndpointPicker>(
-    picker: Arc<P>,
-    port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{port}").parse()?;
-    let server = ExtProcServer::new(picker);
-
-    tracing::info!(%addr, "Starting ext_proc gRPC server");
-
-    tonic::transport::Server::builder()
-        .add_service(server.into_service())
-        .serve(addr)
-        .await?;
-
-    Ok(())
 }
 
 #[cfg(test)]

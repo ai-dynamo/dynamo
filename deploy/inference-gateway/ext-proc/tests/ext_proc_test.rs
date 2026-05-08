@@ -3,9 +3,18 @@
 
 //! End-to-end ext_proc protocol test with a mock EndpointPicker.
 //!
-//! Verifies the most critical path: a chat completion request flows through the
-//! ext_proc server and produces correct routing headers, endpoint metadata, and
-//! nvext.token_data injection — without needing Dynamo runtime, NATS, or K8s.
+//! Verifies the wire-level path: a chat completion request flows through the
+//! ext_proc server and the picker's PickResult fields (endpoint, headers,
+//! token_ids) are correctly translated into ProcessingResponse mutations:
+//!
+//! - `x-gateway-destination-endpoint` header + `envoy.lb` dynamic_metadata
+//! - All routing headers (worker IDs, dp ranks, mode) appear in `set_headers`
+//! - `nvext.token_data` is injected into the forwarded request body
+//!
+//! This does NOT exercise the disagg vs aggregated branching logic in
+//! `epp::Router::pick` — that's a Router-level concern; here the mock just
+//! returns a pre-built PickResult labeled "disaggregated" to exercise the
+//! prefill-related header fields end-to-end.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +54,7 @@ impl EndpointPicker for MockPicker {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_ext_proc_disaggregated_routing() {
+async fn test_pick_result_translates_to_ext_proc_mutations() {
     let pick_result = PickResult {
         endpoint: "10.0.1.100:8000".to_string(),
         fallbacks: vec![],

@@ -59,10 +59,6 @@ fn header_overwrite(key: &str, raw_value: &[u8]) -> HeaderValueOption {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Header helpers
-// ---------------------------------------------------------------------------
-
 /// Get the string value from a HeaderValue, preferring `raw_value` over `value`.
 pub fn get_header_value(header: &HeaderValue) -> String {
     if !header.raw_value.is_empty() {
@@ -72,7 +68,6 @@ pub fn get_header_value(header: &HeaderValue) -> String {
     }
 }
 
-/// Case-insensitive header lookup in a HeaderMap.
 pub fn extract_header_value(headers: &HeaderMap, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     headers
@@ -82,7 +77,6 @@ pub fn extract_header_value(headers: &HeaderMap, key: &str) -> Option<String> {
         .map(get_header_value)
 }
 
-/// Extract filter metadata from a ProcessingRequest.
 pub fn extract_metadata_values(req: &ProcessingRequest) -> HashMap<String, prost_types::Struct> {
     req.metadata_context
         .as_ref()
@@ -109,10 +103,6 @@ pub fn find_header<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a
         .find(|(k, _)| k.to_ascii_lowercase() == key_lower)
         .map(|(_, v)| v.as_str())
 }
-
-// ---------------------------------------------------------------------------
-// Response construction
-// ---------------------------------------------------------------------------
 
 /// Build the request-header response that tells Envoy where to route.
 pub fn build_request_header_response(
@@ -149,14 +139,14 @@ pub fn build_request_header_response(
         });
     }
 
-    tracing::info!(
+    tracing::debug!(
         header_mutation_count = set_headers.len(),
         target_endpoint = %target_endpoint,
         "Built request header response — ONLY routing headers, no original request headers"
     );
     for h in &set_headers {
         if let Some(hv) = &h.header {
-            tracing::info!(
+            tracing::debug!(
                 key = %hv.key,
                 value = %String::from_utf8_lossy(&hv.raw_value),
                 append_action = h.append_action,
@@ -284,10 +274,6 @@ pub fn build_eviction_response() -> ProcessingResponse {
         Some("request evicted by flow control"),
     )
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 /// Split body bytes into chunks of BODY_BYTE_LIMIT, wrapping each in a
 /// CommonResponse with StreamedBodyResponse. Mirrors the Go `BuildChunkedBodyResponses`.

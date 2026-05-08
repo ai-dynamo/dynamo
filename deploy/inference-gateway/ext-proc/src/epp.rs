@@ -26,16 +26,6 @@ use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Result of routing a request: which worker(s) to send it to.
-pub struct RoutingResult {
-    pub is_disaggregated: bool,
-    pub prefill_worker_id: Option<u64>,
-    pub prefill_dp_rank: Option<u32>,
-    pub decode_worker_id: u64,
-    pub decode_dp_rank: u32,
-    pub token_ids: Vec<u32>,
-}
-
 /// Holds all router state needed for request routing.
 ///
 /// This is the async-native equivalent of `RouterHandles` from the C bindings,
@@ -132,7 +122,13 @@ impl Router {
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
 
-        let pod_store = spawn_pod_reflector(actual_namespace).await?;
+        // Use the BASE namespace (without rolling-update suffix) for the pod
+        // selector. Workers register in discovery under the suffixed namespace
+        // (e.g. "atchernych-qwen-9f792849"), but the K8s pod label
+        // `nvidia.com/dynamo-namespace` is always set to the base
+        // ("atchernych-qwen") by the operator. Using the suffixed name here
+        // would silently match zero pods during/after a DGD rolling update.
+        let pod_store = spawn_pod_reflector(namespace).await?;
 
         Ok(Self {
             prefill_router,
@@ -317,10 +313,6 @@ impl Router {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Discovery helpers (ported from lib/bindings/c/src/lib.rs)
-// ---------------------------------------------------------------------------
-
 struct DiscoveredModelBootstrap {
     preprocessor: Arc<OpenAIPreprocessor>,
     card: ModelDeploymentCard,
@@ -425,7 +417,7 @@ async fn fetch_preprocessor_from_discovery(
         anyhow::anyhow!(
             "No model found in namespace '{}' via discovery. \
              Found {} instances in namespaces: {:?}. \
-             Set DYNAMO_EPP_NAMESPACE to match your workers' registration namespace.",
+             Set DYN_NAMESPACE_PREFIX (or DYN_NAMESPACE) to match your workers' registration namespace.",
             target_namespace,
             discovered_namespaces.len(),
             discovered_namespaces,
@@ -450,8 +442,8 @@ async fn fetch_preprocessor_from_discovery(
 }
 
 /// Extract "ip:port" from a pod by reading its IP from status and its serving
-/// port from the container spec. Falls back to port 8000 if no container port
-/// is defined.
+/// port from the container spec. Returns `None` if the pod has no IP or no
+/// container port defined — we never silently route to a guessed port.
 fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String> {
     let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
     let port = pod
@@ -460,8 +452,7 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
         .and_then(|spec| spec.containers.first())
         .and_then(|c| c.ports.as_ref())
         .and_then(|ports| ports.first())
-        .map(|p| p.container_port)
-        .unwrap_or(8000);
+        .map(|p| p.container_port)?;
     Some(format!("{ip}:{port}"))
 }
 
@@ -503,11 +494,17 @@ async fn spawn_pod_reflector(
         "Starting pod reflector for worker endpoint resolution"
     );
 
+    let store_for_wait = store.clone();
     tokio::spawn(async move {
         tokio::pin!(reflect);
         while reflect.next().await.is_some() {}
         tracing::warn!("Pod reflector stream ended unexpectedly");
     });
+
+    // Wait for the initial LIST to populate the store so the first inference
+    // request after startup doesn't race against an empty cache. Bounded so
+    // we don't block startup forever if the API server is slow.
+    let _ = tokio::time::timeout(Duration::from_secs(30), store_for_wait.wait_until_ready()).await;
 
     Ok(store)
 }
@@ -801,14 +798,14 @@ impl EndpointPicker for Router {
             "Picked endpoint"
         );
         for (k, v) in &headers {
-            tracing::info!(key = %k, value = %v, "Routing header set in PickResult");
+            tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
         }
 
         Ok(PickResult {
             endpoint,
             fallbacks: vec![],
             headers,
-            token_ids: None, // TEMPORARY: force double tokenization for benchmarking
+            token_ids: Some(tokens),
         })
     }
 

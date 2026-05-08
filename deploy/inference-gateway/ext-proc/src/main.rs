@@ -20,6 +20,10 @@ use tokio_rustls::TlsAcceptor;
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
 const HEALTH_SERVICE_NAME: &str = "inference-extension";
+/// Cap concurrent in-flight TLS handshakes + active gRPC streams. Prevents a
+/// connection flood from exhausting fds / memory. Tuned for an inference EPP
+/// where a single Envoy upstream typically holds <100 concurrent streams.
+const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 
 struct Config {
     namespace: String,
@@ -136,6 +140,10 @@ async fn main() -> Result<()> {
 
     let picker = Arc::new(router);
     let server = ExtProcServer::new(picker);
+    // Default to TLS to match the Go EPP behavior. Verified working with
+    // kGateway (`appProtocol: http2` upstreams negotiate h2 over TLS via ALPN
+    // when the cert is presented). Set DYN_SECURE_SERVING=false to fall back
+    // to plaintext h2c, e.g. for local debugging or non-TLS gateways.
     let secure_serving = parse_env("DYN_SECURE_SERVING", true);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
 
@@ -143,14 +151,23 @@ async fn main() -> Result<()> {
         let tls_acceptor = create_tls_acceptor()?;
         let svc = server.into_service();
         let listener = TcpListener::bind(addr).await?;
-        tracing::info!(%addr, "Listening for ext_proc connections (TLS)");
+        let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+        tracing::info!(
+            %addr,
+            max_connections = MAX_CONCURRENT_CONNECTIONS,
+            "Listening for ext_proc connections (TLS)"
+        );
 
         loop {
+            // Acquire permit before accept() so we backpressure the listener
+            // instead of accepting and immediately dropping connections.
+            let permit = conn_semaphore.clone().acquire_owned().await?;
             let (tcp_stream, remote_addr) = listener.accept().await?;
             let tls_acceptor = tls_acceptor.clone();
             let svc = svc.clone();
 
             tokio::spawn(async move {
+                let _permit = permit; // released when this task exits
                 let tls_stream = match tls_acceptor.accept(tcp_stream).await {
                     Ok(s) => s,
                     Err(e) => {

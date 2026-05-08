@@ -50,11 +50,17 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Copy Cargo workspace manifests, lockfile, and README
+# Copy Cargo workspace manifests, lockfile, and README. Done before the
+# crate sources so a `Cargo.lock` change can re-fetch the registry without
+# invalidating the source layer below (paired with the registry cache mount).
 COPY --from=dynamo .cargo/ .cargo/
 COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
-# Copy workspace crates that dynamo-ext-proc depends on
+# Copy all workspace member crates. The Cargo workspace declares every crate
+# under `members = [...]` and refuses to load if any are missing on disk, so
+# we must copy `lib/` in full. `cargo build -p dynamo-ext-proc` below still
+# only compiles the crates dynamo-ext-proc transitively depends on; the rest
+# are parsed but not built.
 COPY --from=dynamo lib/ lib/
 
 # Copy the ext-proc crate itself
