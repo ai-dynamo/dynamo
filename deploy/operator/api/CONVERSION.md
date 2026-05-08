@@ -4,25 +4,7 @@ These rules apply to API conversion code and tests under `deploy/operator/api`.
 Every API type change in any version must update conversion code/tests, or
 explicitly document why conversion is unaffected.
 
-## Invariants
-
-- `src` live fields are always the source of truth.
-- A represented field always comes from `src`, including nil, empty, false, and
-  zero values.
-- `restored` data is used only for destination fields that `src` cannot
-  represent.
-- `save` data contains only source fields that `dst` cannot represent.
-- Preserve unrepresentable data only through the type's private sparse spec and
-  status payloads.
-- New conversion style allows at most two private conversion annotations per
-  type: one spec payload annotation and one status payload annotation.
-- Do not add per-field, per-list, per-subobject, or other conversion
-  annotations.
-- Do not overlay preserved data onto converted live fields.
-- Do not use preserved data as a fallback for represented fields.
-- Do not mutate `src`.
-
-## Flow
+## Structure
 
 Top-level `ConvertTo` / `ConvertFrom` methods:
 
@@ -34,13 +16,11 @@ Top-level `ConvertTo` / `ConvertFrom` methods:
 6. Collect source-only fields in typed `save` values.
 7. Encode non-empty `save` values into sparse spec/status payloads on `dst`.
 
-Structural helpers follow the same semantic order even when their local control
-flow differs.
+Conversion functions follow the same semantic order even when their local
+control flow differs.
 
-## Helper Shape
-
-- Export conversion helpers from `v1alpha1`.
-- Name helpers after the v1alpha1 type:
+- Export conversion functions from `v1alpha1`.
+- Name conversion functions after the v1alpha1 type:
 
 ```go
 func ConvertFromDynamoWidgetSpec(
@@ -62,13 +42,13 @@ func ConvertToDynamoWidgetSpec(
 
 - `ConvertFrom` means v1alpha1 -> hub.
 - `ConvertTo` means hub -> v1alpha1.
-- Do not include `V1alpha1` in helper names.
-- Do not add wrapper helpers with alternate names.
+- Do not include `V1alpha1` in conversion function names.
+- Do not add wrapper conversion functions with alternate names.
 - Parameter order is fixed: `src`, `dst`, `restored`, `save`, `ctx`.
 - Include `restored`, `save`, `ctx`, and `error` only when needed.
 - Put `ctx` last.
 - Return no value for infallible conversions.
-- Return `error` when the helper parses JSON, validates preserved payloads, or
+- Return `error` when the converter parses JSON, validates preserved payloads, or
   otherwise can reject input.
 - `dst` is caller-owned and non-nil.
 - Callers allocate nested `dst` objects explicitly.
@@ -76,9 +56,9 @@ func ConvertToDynamoWidgetSpec(
 - Converters do not encode absence by assigning `dst` to nil.
 - Converters perform only their own API struct's conversion.
 - Every nested API struct that needs conversion gets its own
-  `ConvertFrom<SubStruct>` / `ConvertTo<SubStruct>` helper pair.
-- Parent converters call those nested helpers instead of inlining nested struct
-  conversion.
+  `ConvertFrom<SubStruct>` / `ConvertTo<SubStruct>` conversion function pair.
+- Parent converters call those nested converters instead of inlining nested
+  struct conversion.
 
 Allowed local helpers:
 
@@ -88,6 +68,24 @@ Allowed local helpers:
 - Side-effect-free predicates.
 - Field-group projections, such as pod template composition/decomposition.
 
+## Invariants
+
+- `src` live fields are always the source of truth.
+- A represented field always comes from `src`, including nil, empty, false, and
+  zero values.
+- `restored` data is used only for destination fields that `src` cannot
+  represent.
+- `save` data contains only source fields that `dst` cannot represent.
+- Preserve unrepresentable data only through the type's private sparse spec and
+  status payloads.
+- New conversion style allows at most two private conversion annotations per
+  type: one spec payload annotation and one status payload annotation.
+- Do not add per-field, per-list, per-subobject, or other conversion
+  annotations.
+- Do not overlay preserved data onto converted live fields.
+- Do not use preserved data as a fallback for represented fields.
+- Do not mutate `src`.
+
 ## Sparse Payloads
 
 - Payloads are typed API structs from the source version.
@@ -96,6 +94,8 @@ Allowed local helpers:
 - Save only the minimal context needed to match preserved fields back to live
   source structure.
 - Skip empty save objects.
+- Do not allocate nested save structs unless they contain at least one saved
+  field.
 - Keep payload annotation constants unexported and local to conversion files.
 - Only API conversion code and conversion tests may know payload annotations or
   payload shapes.

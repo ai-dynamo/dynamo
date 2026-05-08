@@ -103,6 +103,18 @@ func scrubReservedAnnotations(m map[string]string) map[string]string {
 // DGDR still writes legacy nvidia.com/dgdr-* annotations for downgrade
 // compatibility with Dynamo 1.1. Direct round-trip fuzzing compares live API
 // fields and ignores those intentionally re-emitted compatibility annotations.
+var legacyDGDRCompatibilityAnnotations = []string{
+	"nvidia.com/dgdr-config-map-ref",
+	"nvidia.com/dgdr-output-pvc",
+	"nvidia.com/dgdr-enable-gpu-discovery",
+	"nvidia.com/dgdr-deployment-overrides",
+	"nvidia.com/dgdr-profiling-config",
+	"nvidia.com/dgdr-status-backend",
+	"nvidia.com/dgdr-profiling-results",
+	"nvidia.com/dgdr-deployment-status",
+	"nvidia.com/dgdr-profiling-job-name",
+}
+
 var ignoreDGDRCompatibilityAnnotations = cmpopts.AcyclicTransformer(
 	"ignoreDGDRCompatibilityAnnotations",
 	func(m metav1.ObjectMeta) metav1.ObjectMeta {
@@ -113,10 +125,8 @@ var ignoreDGDRCompatibilityAnnotations = cmpopts.AcyclicTransformer(
 		for k, v := range m.Annotations {
 			annotations[k] = v
 		}
-		for k := range annotations {
-			if strings.HasPrefix(k, "nvidia.com/dgdr-") {
-				delete(annotations, k)
-			}
+		for _, k := range legacyDGDRCompatibilityAnnotations {
+			delete(annotations, k)
 		}
 		if len(annotations) == 0 {
 			m.Annotations = nil
@@ -276,6 +286,13 @@ func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Co
 		// ISL/OSL live under the alpha profiling config's "sla" object, whose
 		// reconstruction creates an empty v1beta1 SLA shell.
 		s.SLA = &v1beta1.SLASpec{}
+	}
+	if s.Workload != nil &&
+		s.Workload.ISL == nil &&
+		s.Workload.OSL == nil &&
+		s.Workload.Concurrency == nil &&
+		s.Workload.RequestRate == nil {
+		s.Workload = nil
 	}
 
 	// Empty ModelCache is not reconstructed from the alpha profiling config blob.

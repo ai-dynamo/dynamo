@@ -377,15 +377,16 @@ func saveDGDRAlphaOnlySpec(src *DynamoGraphDeploymentRequestSpec, save *DynamoGr
 }
 
 func saveDGDRAlphaOnlyProfilingConfig(blob dgdrProfilingConfigBlob, save *DynamoGraphDeploymentRequestSpec) {
-	if save == nil || len(blob) == 0 {
-		if save != nil && blob != nil {
-			save.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(`{}`)}
-		}
+	if save == nil || blob == nil {
+		return
+	}
+	if len(blob) == 0 {
+		save.ProfilingConfig.Config = &apiextensionsv1.JSON{Raw: []byte(`{}`)}
 		return
 	}
 	remainder := stripDGDRTypedProfilingConfig(blob)
 	if len(remainder) == 0 {
-		remainder = dgdrProfilingConfigBlob{}
+		return
 	}
 	data, err := json.Marshal(remainder)
 	if err != nil {
@@ -633,22 +634,31 @@ func ConvertToDynamoGraphDeploymentRequestSpec(src *v1beta1.DynamoGraphDeploymen
 		blob = stripDGDRTypedProfilingConfig(blob)
 	}
 	if src.SLA != nil || src.Workload != nil {
-		if blob == nil {
-			blob = make(dgdrProfilingConfigBlob)
+		next := blob
+		if next == nil {
+			next = make(dgdrProfilingConfigBlob)
 		}
-		projectSLAAndWorkloadToProfilingConfigBlob(src, blob)
+		if projectSLAAndWorkloadToProfilingConfigBlob(src, next) {
+			blob = next
+		}
 	}
 	if src.ModelCache != nil {
-		if blob == nil {
-			blob = make(dgdrProfilingConfigBlob)
+		next := blob
+		if next == nil {
+			next = make(dgdrProfilingConfigBlob)
 		}
-		projectModelCacheToProfilingConfigBlob(src.ModelCache, blob)
+		if projectModelCacheToProfilingConfigBlob(src.ModelCache, next) {
+			blob = next
+		}
 	}
 	if src.Features != nil && src.Features.Planner != nil {
-		if blob == nil {
-			blob = make(dgdrProfilingConfigBlob)
+		next := blob
+		if next == nil {
+			next = make(dgdrProfilingConfigBlob)
 		}
-		projectPlannerToProfilingConfigBlob(src.Features.Planner, blob)
+		if projectPlannerToProfilingConfigBlob(src.Features.Planner, next) {
+			blob = next
+		}
 	}
 	if blob != nil {
 		if data, err := json.Marshal(blob); err == nil {
@@ -699,23 +709,21 @@ func saveDGDRHubOnlySpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, save *v1
 	if src.Hardware != nil {
 		save.Hardware = src.Hardware.DeepCopy()
 	}
-	if src.Workload != nil {
-		save.Workload = &v1beta1.WorkloadSpec{}
+	if src.Workload != nil && (src.Workload.Concurrency != nil || src.Workload.RequestRate != nil) {
+		workload := &v1beta1.WorkloadSpec{}
 		if src.Workload.Concurrency != nil {
 			v := *src.Workload.Concurrency
-			save.Workload.Concurrency = &v
+			workload.Concurrency = &v
 		}
 		if src.Workload.RequestRate != nil {
 			v := *src.Workload.RequestRate
-			save.Workload.RequestRate = &v
+			workload.RequestRate = &v
 		}
+		save.Workload = workload
 	}
-	if src.SLA != nil {
-		save.SLA = &v1beta1.SLASpec{}
-		if src.SLA.E2ELatency != nil {
-			v := *src.SLA.E2ELatency
-			save.SLA.E2ELatency = &v
-		}
+	if src.SLA != nil && src.SLA.E2ELatency != nil {
+		v := *src.SLA.E2ELatency
+		save.SLA = &v1beta1.SLASpec{E2ELatency: &v}
 	}
 	if src.Overrides != nil {
 		saveDGDRHubOnlyOverrides(src.Overrides, save)
@@ -864,9 +872,9 @@ func dgdrFirstContainerResources(job *batchv1.JobSpec) (corev1.ResourceRequireme
 	return res, !apiequality.Semantic.DeepEqual(res, corev1.ResourceRequirements{})
 }
 
-// projectSLAAndWorkloadToProfilingConfigBlob writes SLA and Workload structured fields back into the JSON blob,
-// overwriting any existing values for those keys.
-func projectSLAAndWorkloadToProfilingConfigBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
+// projectSLAAndWorkloadToProfilingConfigBlob writes SLA and Workload structured fields back into the JSON blob.
+// It overwrites existing typed values for those keys and reports whether it wrote or retained SLA data.
+func projectSLAAndWorkloadToProfilingConfigBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) bool {
 	slaMap, hadSLA := blob["sla"].(map[string]interface{})
 	if slaMap == nil {
 		slaMap = make(map[string]interface{})
@@ -899,10 +907,11 @@ func projectSLAAndWorkloadToProfilingConfigBlob(src *v1beta1.DynamoGraphDeployme
 	if wroteSLA || hadSLA {
 		blob["sla"] = slaMap
 	}
+	return wroteSLA || hadSLA
 }
 
 // projectModelCacheToProfilingConfigBlob writes ModelCache structured fields back into blob["deployment"]["modelCache"].
-func projectModelCacheToProfilingConfigBlob(mc *v1beta1.ModelCacheSpec, blob map[string]interface{}) {
+func projectModelCacheToProfilingConfigBlob(mc *v1beta1.ModelCacheSpec, blob map[string]interface{}) bool {
 	deployMap, _ := blob["deployment"].(map[string]interface{})
 	if deployMap == nil {
 		deployMap = make(map[string]interface{})
@@ -920,20 +929,23 @@ func projectModelCacheToProfilingConfigBlob(mc *v1beta1.ModelCacheSpec, blob map
 	if len(mcMap) > 0 {
 		deployMap["modelCache"] = mcMap
 		blob["deployment"] = deployMap
+		return true
 	}
+	return false
 }
 
 // projectPlannerToProfilingConfigBlob writes the planner RawExtension into blob["planner"].
 // The RawExtension is the full PlannerConfig JSON blob (opaque to Go).
-func projectPlannerToProfilingConfigBlob(planner *runtime.RawExtension, blob map[string]interface{}) {
+func projectPlannerToProfilingConfigBlob(planner *runtime.RawExtension, blob map[string]interface{}) bool {
 	if planner == nil || planner.Raw == nil {
-		return
+		return false
 	}
 	var plannerMap map[string]interface{}
 	if err := json.Unmarshal(planner.Raw, &plannerMap); err != nil || len(plannerMap) == 0 {
-		return
+		return false
 	}
 	blob["planner"] = plannerMap
+	return true
 }
 
 // projectPlannerFromProfilingConfigBlob extracts blob["planner"] and populates v1beta1 Features.Planner.
@@ -1078,7 +1090,7 @@ func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentReq
 	}
 
 	saveDGDRAlphaOnlyStatus(src, save)
-	restoreDGDRHubOnlyStatus(restored, dst)
+	restoreDGDRHubOnlyStatus(restored, dst, src)
 }
 
 // ConvertToDynamoGraphDeploymentRequestStatus converts the DGDR status from
@@ -1101,7 +1113,7 @@ func ConvertToDynamoGraphDeploymentRequestStatus(src *v1beta1.DynamoGraphDeploym
 		}
 	}
 	restoreDGDRAlphaOnlyStatus(restored, dst, src)
-	saveDGDRHubOnlyStatus(src, save)
+	saveDGDRHubOnlyStatus(src, dst, save)
 }
 
 func saveDGDRAlphaOnlyStatus(src *DynamoGraphDeploymentRequestStatus, save *DynamoGraphDeploymentRequestStatus) {
@@ -1113,10 +1125,20 @@ func saveDGDRAlphaOnlyStatus(src *DynamoGraphDeploymentRequestStatus, save *Dyna
 	if !dgdrAlphaStateHasHubPhase(src.State, src.Deployment) {
 		save.State = src.State
 	}
-	if src.Deployment != nil {
+	if dgdrAlphaDeploymentNeedsSave(src.State, src.Deployment) {
 		save.State = src.State
 		save.Deployment = src.Deployment.DeepCopy()
 	}
+}
+
+func dgdrAlphaDeploymentNeedsSave(state DGDRState, deployment *DeploymentStatus) bool {
+	if deployment == nil {
+		return false
+	}
+	if deployment.Namespace != "" || deployment.State != "" || deployment.Created {
+		return true
+	}
+	return !dgdrAlphaStateHasHubPhase(state, deployment)
 }
 
 func restoreDGDRAlphaOnlyStatus(restored *DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, src *v1beta1.DynamoGraphDeploymentRequestStatus) {
@@ -1135,11 +1157,11 @@ func restoreDGDRAlphaOnlyStatus(restored *DynamoGraphDeploymentRequestStatus, ds
 	}
 }
 
-func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, save *v1beta1.DynamoGraphDeploymentRequestStatus) {
+func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, save *v1beta1.DynamoGraphDeploymentRequestStatus) {
 	if src == nil || save == nil {
 		return
 	}
-	if src.Phase == v1beta1.DGDRPhaseDeployed {
+	if src.Phase == v1beta1.DGDRPhaseDeployed && dgdrStateToPhase(string(dst.State), dst.Deployment) != src.Phase {
 		save.Phase = src.Phase
 	}
 	save.ProfilingPhase = src.ProfilingPhase
@@ -1153,11 +1175,14 @@ func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, save
 	}
 }
 
-func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus) {
+func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, src *DynamoGraphDeploymentRequestStatus) {
 	if restored == nil || dst == nil {
 		return
 	}
-	if restored.Phase == v1beta1.DGDRPhaseDeployed && dst.Phase == v1beta1.DGDRPhaseReady {
+	if restored.Phase == v1beta1.DGDRPhaseDeployed &&
+		dst.Phase == v1beta1.DGDRPhaseReady &&
+		src != nil &&
+		dgdrAlphaStatusMatchesHubPhase(src.State, src.Deployment, restored.Phase) {
 		dst.Phase = v1beta1.DGDRPhaseDeployed
 	}
 	dst.ProfilingPhase = restored.ProfilingPhase
@@ -1184,7 +1209,10 @@ func dgdrAlphaStateHasHubPhase(state DGDRState, deployment *DeploymentStatus) bo
 
 func dgdrAlphaStatusMatchesHubPhase(state DGDRState, deployment *DeploymentStatus, phase v1beta1.DGDRPhase) bool {
 	alphaPhase := dgdrStateToPhase(string(state), deployment)
-	return alphaPhase == phase || phase == v1beta1.DGDRPhaseDeployed && alphaPhase == v1beta1.DGDRPhaseReady
+	if alphaPhase == phase {
+		return true
+	}
+	return phase == v1beta1.DGDRPhaseDeployed && state == DGDRStateReady
 }
 
 // restoreDGDRDeploymentStatus ignores stale deployment-status overlays after hub-side status edits.
