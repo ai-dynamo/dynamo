@@ -765,18 +765,27 @@ async fn tcp_listener(
         let mut control_rx = control_rx;
 
         while let Some(control_msg) = control_rx.recv().await {
-            assert_ne!(
-                control_msg,
-                ControlMessage::Sentinel,
-                "received sentinel message; this should never happen"
-            );
-            let bytes =
-                serde_json::to_vec(&control_msg).expect("failed to serialize control message");
+            // Sentinel is a worker→frontend message; receiving one here means
+            // a producer is buggy. Skip rather than asserting — a stream-level
+            // bug must not panic the worker.
+            if matches!(control_msg, ControlMessage::Sentinel) {
+                tracing::warn!("received sentinel on send-side control channel; dropping");
+                continue;
+            }
+            let bytes = match serde_json::to_vec(&control_msg) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Closed enum of small variants; serialization shouldn't
+                    // fail. If it ever does, log and skip rather than panic.
+                    tracing::warn!(err = ?e, ?control_msg, "failed to serialize control message");
+                    continue;
+                }
+            };
             let message = TwoPartMessage::from_header(bytes.into());
             match socket_tx.send(message).await {
-                Ok(_) => tracing::debug!("issued control message {control_msg:?} to sender"),
-                Err(_) => {
-                    tracing::debug!("failed to send control message {control_msg:?} to sender")
+                Ok(_) => tracing::debug!(?control_msg, "issued control message"),
+                Err(e) => {
+                    tracing::debug!(err = ?e, ?control_msg, "failed to send control message")
                 }
             }
         }
@@ -805,10 +814,10 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
             Ok(ControlAction::Shutdown)
         }
         ControlMessage::Kill | ControlMessage::Stop => {
-            // TODO(#171) - address fatal errors
-            anyhow::bail!(
-                "fatal error - unexpected control message received - this should never happen"
-            );
+            // Worker→frontend control direction only carries Sentinel. Kill/Stop
+            // here is a protocol violation; the caller turns this Err into a
+            // stream-local Kill rather than a process-fatal event.
+            anyhow::bail!("unexpected control message on response stream");
         }
     }
 }
@@ -818,6 +827,8 @@ mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+    use tokio::net::TcpStream;
 
     // Mock resolver that always fails to simulate the fallback scenario
     struct FailingIpResolver;
@@ -1403,17 +1414,6 @@ mod tests {
         assert_eq!(server.cancel_instance_streams(&id_b).await, 1);
     }
 
-    // ===== peer-controlled-bytes panic-replacement coverage =====
-    //
-    // The four tests below stand up a real registered response stream
-    // (handshake + prologue) and feed it bytes that previously triggered
-    // panic!()/assert!() in process_response_stream/network_receive_handler.
-    // Each test asserts the worker (a) does NOT panic and (b) tears down
-    // only the affected stream via ControlMessage::Kill.
-
-    use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
-    use tokio::net::TcpStream;
-
     type TestFramedRead = FramedRead<ReadHalf<TcpStream>, TwoPartCodec>;
     type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
     type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
@@ -1462,12 +1462,8 @@ mod tests {
             .await
             .unwrap();
 
-        // SAFETY (test-only): each `.expect` below describes a condition that
-        // can only fail if the test harness itself is broken; in production,
-        // a connected localhost socket always drives all three layers
-        // (timeout → stream_provider → response stream registration) to a
-        // non-error outcome. A panic in the test thread is the desired
-        // failure mode here.
+        // SAFETY (test-only): healthy localhost handshake always resolves all
+        // three layers; a panic here means the harness is broken.
         let receiver = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
             .await
             .expect("server should establish response stream within timeout")
@@ -1478,9 +1474,8 @@ mod tests {
     }
 
     async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
-        // SAFETY (test-only): a misbehaving server (closing early, sending
-        // garbage, or sending data alongside a control header) is exactly the
-        // kind of harness failure we want surfaced as a test panic.
+        // SAFETY (test-only): a misbehaving server in any of these layers is
+        // exactly the harness failure we want surfaced as a test panic.
         let message = tokio::time::timeout(std::time::Duration::from_secs(1), framed_reader.next())
             .await
             .expect("server should send a control message within timeout")

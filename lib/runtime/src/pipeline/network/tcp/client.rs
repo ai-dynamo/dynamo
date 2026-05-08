@@ -255,7 +255,7 @@ async fn wait_for_server_shutdown(
                 tracing::debug!("server did not close socket within the deadline");
             })?
             .inspect_err(|e| {
-                tracing::debug!("failed to read from stream: {:?}", e);
+                tracing::debug!(err = ?e, "failed to read from stream");
             })?;
         if n == 0 {
             // Server has closed (FIN)
@@ -838,10 +838,7 @@ mod tests {
         );
     }
 
-    /// Stopped contexts also skip the FIN wait. `handle_writer` suppresses
-    /// the closing sentinel on both `killed` and `stopped`, so the server
-    /// has nothing to react to in either case and the read loop would
-    /// otherwise sit idle until the 10s deadline.
+    /// Mirror of test_wait_for_server_shutdown_skips_killed_context for stop.
     #[tokio::test]
     async fn test_wait_for_server_shutdown_skips_stopped_context() {
         let (client, _server) = create_tcp_pair().await;
@@ -1234,12 +1231,8 @@ mod tests {
         );
     }
 
-    /// Real TCP-RST integration test: configures the peer socket with
-    /// SO_LINGER=0 and drops it, forcing the kernel to send RST instead
-    /// of FIN. This produces a `Some(Err(ConnectionReset))` from the
-    /// codec — the canonical "worker crashed mid-stream" trigger.
-    /// Linux-only because abortive-close semantics are reliable there;
-    /// other platforms may interpret SO_LINGER=0 differently.
+    /// Real TCP RST via SO_LINGER=0 + drop; complements the partial-frame
+    /// variant. Linux-only — abortive-close semantics aren't portable.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_handle_reader_handles_tcp_rst() {
