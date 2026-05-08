@@ -5,10 +5,12 @@
 
 import asyncio
 import logging
+import time
 
 from dynamo.planner import KubernetesConnector
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
+from dynamo.planner.monitoring.planner_metrics import GlobalPlannerMetrics
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class ScaleRequestHandler:
         k8s_namespace: str,
         no_operation: bool = False,
         max_total_gpus: int = -1,
+        metrics: "GlobalPlannerMetrics | None" = None,
     ):
         """Initialize the scale request handler.
 
@@ -49,6 +52,11 @@ class ScaleRequestHandler:
             k8s_namespace: Kubernetes namespace where GlobalPlanner is running
             no_operation: If True, log scale requests without executing K8s scaling
             max_total_gpus: Maximum total GPUs across all managed pools (-1 = unlimited)
+            metrics: PR 8 8-4 family-4 metrics. ``None`` disables emission
+                (tests that don't assert metrics); production injects a
+                single ``GlobalPlannerMetrics`` instance constructed in
+                ``global_planner/__main__.py`` alongside the Prometheus
+                HTTP exporter.
         """
         self.runtime = runtime
         # If managed_namespaces is None, accept all namespaces
@@ -62,6 +70,7 @@ class ScaleRequestHandler:
         # Serializes budget-check + scale-execution so concurrent requests from
         # different pools cannot both pass against the same pre-scale state.
         self._scale_lock = asyncio.Lock()
+        self._metrics = metrics
 
         if self.managed_namespaces:
             logger.info(
@@ -192,6 +201,24 @@ class ScaleRequestHandler:
 
         return total_gpus
 
+    def _emit_result(self, result: str, reason: str, start_time: float) -> None:
+        """PR 8 8-4: inc counter + observe latency for one yield point.
+
+        Factored out so every yield branch in ``scale_request`` is a
+        one-liner — easier to audit that every branch is covered.
+        No-op when ``self._metrics is None`` (test path / early
+        deployments that haven't wired metrics yet).
+        """
+        if self._metrics is None:
+            return
+        elapsed = time.monotonic() - start_time
+        self._metrics.global_scale_request_total.labels(
+            result=result, reason=reason
+        ).inc()
+        self._metrics.global_scale_request_latency_seconds.labels(
+            result=result
+        ).observe(elapsed)
+
     @dynamo_endpoint(ScaleRequest, ScaleResponse)
     async def scale_request(self, request: ScaleRequest):
         """Process scaling request from a Planner.
@@ -202,12 +229,16 @@ class ScaleRequestHandler:
         Yields:
             ScaleResponse with status and current replica counts
         """
+        _metrics_start = time.monotonic()
         try:
             # Validate caller namespace (if authorization is enabled)
             if (
                 self.managed_namespaces is not None
                 and request.caller_namespace not in self.managed_namespaces
             ):
+                self._emit_result(
+                    "error", GlobalPlannerMetrics.REASON_NOT_AUTHORIZED, _metrics_start
+                )
                 yield {
                     "status": ScaleStatus.ERROR.value,
                     "message": f"Namespace {request.caller_namespace} not authorized",
@@ -225,6 +256,9 @@ class ScaleRequestHandler:
                     f"[NO-OP] Scale request from {request.caller_namespace} "
                     f"for DGD {request.graph_deployment_name} "
                     f"in K8s namespace {request.k8s_namespace}: {replicas_summary}"
+                )
+                self._emit_result(
+                    "success", GlobalPlannerMetrics.REASON_NO_OPERATION, _metrics_start
                 )
                 yield {
                     "status": ScaleStatus.SUCCESS.value,
@@ -265,6 +299,11 @@ class ScaleRequestHandler:
                             f"Rejecting scale request from {request.caller_namespace}: "
                             f"would use {total_gpus} GPUs, exceeding max of {self.max_total_gpus}"
                         )
+                        self._emit_result(
+                            "error",
+                            GlobalPlannerMetrics.REASON_BUDGET_EXCEEDED,
+                            _metrics_start,
+                        )
                         yield {
                             "status": ScaleStatus.REJECTED.value,
                             "message": (
@@ -296,6 +335,10 @@ class ScaleRequestHandler:
             logger.info(
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"
             )
+            self._emit_result(
+                "success", GlobalPlannerMetrics.REASON_SUCCESS, _metrics_start
+            )
+            self._update_managed_dgd_gpus(request, deployment)
             yield {
                 "status": ScaleStatus.SUCCESS.value,
                 "message": f"Scaled {request.graph_deployment_name} successfully",
@@ -304,8 +347,44 @@ class ScaleRequestHandler:
 
         except Exception as e:
             logger.exception(f"Error processing scale request: {e}")
+            self._emit_result(
+                "error", GlobalPlannerMetrics.REASON_EXCEPTION, _metrics_start
+            )
             yield {
                 "status": ScaleStatus.ERROR.value,
                 "message": str(e),
                 "current_replicas": {},
             }
+
+    def _update_managed_dgd_gpus(self, request: ScaleRequest, deployment: dict) -> None:
+        """PR 8 8-4: refresh ``global_managed_dgd_gpus`` after a
+        successful scale.
+
+        Sums ``spec.services[].replicas × resources.limits.gpu`` over
+        every service with a ``subComponentType`` — mirrors the
+        budget-accounting logic in ``_calculate_total_gpus_after_request``
+        so dashboards and the budget code agree on what counts.
+        """
+        if self._metrics is None:
+            return
+        try:
+            services = deployment.get("spec", {}).get("services", {})
+            total = 0
+            for svc in services.values():
+                if not svc.get("subComponentType"):
+                    continue
+                replicas = int(svc.get("replicas", 0) or 0)
+                gpu_per = int(
+                    svc.get("resources", {}).get("limits", {}).get("gpu", 0) or 0
+                )
+                total += replicas * gpu_per
+            self._metrics.global_managed_dgd_gpus.labels(
+                dgd_name=request.graph_deployment_name
+            ).set(total)
+        except Exception:
+            # Observability emission must not break the scale path;
+            # log-and-continue is fine.
+            logger.debug(
+                "Failed to update global_managed_dgd_gpus gauge",
+                exc_info=True,
+            )

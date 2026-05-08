@@ -90,6 +90,15 @@ dynamo-operator:
     # -- DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated.
     enabled: true
 
+  # -- Planner-specific RBAC. Only required when the plugin registry is configured with the ``k8s_sa`` auth source (DEP-XXXX PR 3.5 K8sSATokenAuth). The default ``static_secret`` source needs no cluster grants.
+  planner:
+    auth:
+      # -- k8s_sa auth: validates plugin Register tokens via the cluster TokenReview API. ``tokenreviews.authentication.k8s.io`` is cluster-scoped, so even namespace-restricted deployments need a cluster-wide binding. Setting enabled=true emits a ClusterRoleBinding from the planner ServiceAccount(s) to the built-in ``system:auth-delegator`` ClusterRole.
+      k8sSA:
+        enabled: false
+        # -- Cluster-wide mode only: list of namespaces in which the operator will create planner ServiceAccounts that need TokenReview access. Each entry produces one Subject in the generated ClusterRoleBinding. Ignored in namespace-restricted mode.
+        namespaces: []
+
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
   discoveryBackend: "kubernetes"
 

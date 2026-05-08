@@ -87,3 +87,50 @@ rules:
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end }}
+
+{{- if .Values.planner.auth.k8sSA.enabled }}
+# DEP-XXXX PR 3.5: cluster-scoped grant for K8sSATokenAuth.
+#
+# tokenreviews.authentication.k8s.io is cluster-scoped, so a Role /
+# RoleBinding (namespace-restricted mode) cannot grant this verb — the
+# binding has to be cluster-wide regardless of operator scope. We bind
+# the planner ServiceAccount(s) to the built-in
+# ``system:auth-delegator`` ClusterRole rather than minting our own;
+# K8s upstream owns that role's rule list and it is the canonical role
+# for callers that proxy to TokenReview / SubjectAccessReview.
+#
+# Subjects:
+#   namespace-restricted: single SA in .Release.Namespace.
+#   cluster-wide:         operator creates planner SAs on demand in
+#                         arbitrary namespaces, so the chart cannot
+#                         enumerate them — caller must populate
+#                         ``planner.auth.k8sSA.namespaces`` with the
+#                         set of namespaces that will host a planner
+#                         using k8s_sa auth.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-planner-tokenreview
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+{{- if .Values.namespaceRestriction.enabled }}
+  - kind: ServiceAccount
+    name: planner-serviceaccount
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+{{- if not .Values.planner.auth.k8sSA.namespaces }}
+{{- fail "planner.auth.k8sSA.enabled=true requires planner.auth.k8sSA.namespaces to list at least one target namespace in cluster-wide mode" }}
+{{- end }}
+{{- range .Values.planner.auth.k8sSA.namespaces }}
+  - kind: ServiceAccount
+    name: planner-serviceaccount
+    namespace: {{ . }}
+{{- end }}
+{{- end }}
+{{- end }}

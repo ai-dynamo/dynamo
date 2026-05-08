@@ -6,7 +6,7 @@
 import logging
 import os
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
@@ -30,6 +30,9 @@ from dynamo.planner.monitoring.worker_info import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
+if TYPE_CHECKING:
+    from dynamo.planner.monitoring.planner_metrics import GlobalPlannerMetrics
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ class GlobalPlannerConnector(PlannerConnector):
         global_planner_namespace: str,
         global_planner_component: str = "GlobalPlanner",
         model_name: Optional[str] = None,
+        metrics: "Optional[GlobalPlannerMetrics]" = None,
     ):
         """
         Initialize GlobalPlannerConnector.
@@ -60,6 +64,9 @@ class GlobalPlannerConnector(PlannerConnector):
             global_planner_namespace: Namespace where GlobalPlanner is deployed
             global_planner_component: Component name of GlobalPlanner (default: "GlobalPlanner")
             model_name: Optional model name (will be managed remotely if not provided)
+            metrics: PR 8 8-4 family-4 metrics. None = emission off
+                (test path); production wires via
+                ``NativePlannerBase.prometheus_metrics`` sibling.
         """
         self.runtime = runtime
         self.dynamo_namespace = dynamo_namespace
@@ -67,6 +74,7 @@ class GlobalPlannerConnector(PlannerConnector):
         self.global_planner_component = global_planner_component
         self.model_name = model_name
         self.remote_client: Optional[RemotePlannerClient] = None
+        self._metrics = metrics
 
         # Cache for predicted load (will be set by planner before scaling)
         self.last_predicted_load: Optional[dict] = None
@@ -159,8 +167,35 @@ class GlobalPlannerConnector(PlannerConnector):
             f"decode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
         )
 
-        # Send request to GlobalPlanner
-        response = await self.remote_client.send_scale_request(request)
+        # Send request to GlobalPlanner (PR 8 8-4: measure RTT for family-4 metrics).
+        rpc_start = time.monotonic()
+        try:
+            response = await self.remote_client.send_scale_request(request)
+        except Exception:
+            if self._metrics is not None:
+                elapsed = time.monotonic() - rpc_start
+                self._metrics.global_scale_request_total.labels(
+                    result="error", reason=self._metrics.REASON_CLIENT
+                ).inc()
+                self._metrics.global_scale_request_latency_seconds.labels(
+                    result="error"
+                ).observe(elapsed)
+            raise
+
+        # Record client-observed metrics regardless of final outcome —
+        # the ``reason=client`` label distinguishes this from the server's
+        # own per-branch emissions.
+        if self._metrics is not None:
+            elapsed = time.monotonic() - rpc_start
+            result_label = (
+                "success" if response.status == ScaleStatus.SUCCESS else "error"
+            )
+            self._metrics.global_scale_request_total.labels(
+                result=result_label, reason=self._metrics.REASON_CLIENT
+            ).inc()
+            self._metrics.global_scale_request_latency_seconds.labels(
+                result=result_label
+            ).observe(elapsed)
 
         # Check response status
         if response.status == ScaleStatus.SUCCESS:

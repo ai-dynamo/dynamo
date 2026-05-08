@@ -77,6 +77,34 @@ controllerManager:
   serviceAccount:
     annotations: {}
 
+# Planner-specific configuration. Currently only governs the optional
+# RBAC needed by the plugin-registry's ``k8s_sa`` auth source
+# (DEP-XXXX PR 3.5 — K8sSATokenAuth). See
+# components/src/dynamo/planner/plugins/registry/README.md for the
+# auth-source decision tree.
+planner:
+  auth:
+    # k8s_sa auth: validates plugin Register tokens via the cluster
+    # TokenReview API. ``tokenreviews.authentication.k8s.io`` is
+    # cluster-scoped, so even namespace-restricted deployments need a
+    # ClusterRoleBinding for this single verb. We bind to the
+    # well-known built-in ``system:auth-delegator`` ClusterRole rather
+    # than minting our own, so the chart stays small and the rule
+    # stays in sync with K8s API versions.
+    #
+    # Leave ``enabled: false`` (the default) when using the default
+    # ``static_secret`` auth source — there's no reason to grant a
+    # cluster-wide capability that won't be used.
+    k8sSA:
+      enabled: false
+      # Cluster-wide mode only: list of namespaces in which the
+      # operator will create planner ServiceAccounts that need
+      # TokenReview access. Each entry produces one Subject in the
+      # generated ClusterRoleBinding. Ignored when
+      # namespaceRestriction.enabled=true (the chart already knows
+      # the single SA's namespace from .Release.Namespace).
+      namespaces: []
+
 dynamo:
   components:
     serviceAccount:

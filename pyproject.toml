@@ -266,6 +266,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
+    "subprocess: marks tests that spawn child Python processes (slower; not auto-included in fast unit runs)",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
     "none: marks tests that do not require a framework-specific runtime",
