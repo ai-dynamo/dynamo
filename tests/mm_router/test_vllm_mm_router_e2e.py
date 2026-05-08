@@ -40,17 +40,18 @@ THREE_IMAGE_TOTAL_BLOCKS_RANGE = (180, 340)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (60, 160)
 
 pytestmark = [
-    pytest.mark.pre_merge,  # all tests take <1 min to run finish on RTX 6000
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
-    pytest.mark.profiled_vram_gib(7.6),  # actual profiled peak with kv-bytes
     pytest.mark.model(VLLM_MM_MODEL),
-    pytest.mark.requested_vllm_kv_cache_bytes(
-        1_719_075_000
-    ),  # KV cache cap (2x safety over min=859_537_408)
 ]
+# pre_merge / profiled_vram_gib / requested_vllm_kv_cache_bytes intentionally
+# live only on `test_vllm_mm_overlap_all` below — that umbrella amortizes the
+# vLLM startup + VRAM allocation across all scenarios per fixture parameter.
+# The individual test_* functions remain so they can still be invoked
+# directly for dev debugging; without `pre_merge` they don't get picked up
+# by the gpu_parallel CI runner.
 
 _COLORS = [
     (255, 0, 0),
@@ -816,6 +817,56 @@ def test_vllm_mm_overlap_http_vs_data_uri_same_image(
         f"(proving image cache hit, not just text overlap), "
         f"got http={overlap_http}/{total_http}, data_uri={overlap_data}/{total_data}.\n"
         f"Recent router logs:\n{segment_http[-4000:]}"
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(7.6)  # actual profiled peak with kv-bytes
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    1_719_075_000
+)  # KV cache cap (2x safety over min=859_537_408)
+@pytest.mark.timeout(1800)
+def test_vllm_mm_overlap_all(
+    start_vllm_mm_services, predownload_models, http_image_server
+):
+    """Run every mm-overlap scenario under one shared module-scoped worker.
+
+    The gpu_parallel CI runner spawns a separate pytest subprocess per
+    test_id and reserves each test's profiled VRAM independently — a
+    module-scoped fixture only shares within a subprocess. Routing all
+    scenarios through this umbrella amortizes the ~60s vLLM startup and
+    the 7.6 GiB allocation across the 10 scenarios per fixture parameter
+    (shm/nixl/disabled) instead of paying it 30 times.
+    """
+    test_vllm_text_only_overlap_repeated_prompt(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_repeated_three_images(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_repeated_single_image(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_repeated_two_identical_images(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_diff_images_less_than_same(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_swapped_order_less_than_same_order(
+        start_vllm_mm_services, predownload_models
+    )
+    test_vllm_mm_overlap_repeated_http_images(
+        start_vllm_mm_services, predownload_models, http_image_server
+    )
+    test_vllm_mm_overlap_http_vs_data_uri_same_image(
+        start_vllm_mm_services, predownload_models, http_image_server
     )
 
 
