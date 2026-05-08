@@ -164,14 +164,6 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    # Append (not prepend) test rootpaths to sys.path. Tests under
-    # components/src/dynamo/<pkg>/tests/ where <pkg> matches an installed
-    # PyPI package (vllm, sglang) cause prepend mode to insert
-    # components/src/dynamo into sys.path[0], shadowing the venv-installed
-    # `vllm`/`sglang` with the local dynamo subpackage and breaking imports
-    # like `from vllm.v1.engine import AsyncLLM`. Append puts the venv path
-    # first so installed packages resolve correctly.
-    "--import-mode=append",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",

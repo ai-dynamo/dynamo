@@ -71,6 +71,9 @@ class _FakeContext:
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def started_engine():
+    # Use vLLM's default spawn for the EngineCore subprocess (set by
+    # VllmLLMEngine.start). Fork would inherit pytest's filterwarnings=error
+    # and crash the child on transitive flashinfer DeprecationWarnings.
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
     engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
