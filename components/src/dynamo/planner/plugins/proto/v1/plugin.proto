@@ -1,0 +1,440 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Plugin contract for Dynamo Planner Plugin Architecture.
+//
+// **Schema evolution policy** (proto3, must-follow):
+//   1. NEVER reuse a field tag — add `reserved` for any deleted tag.
+//   2. NEVER change the type of an existing field.
+//   3. NEVER rename an existing field (clients may key on field names in
+//      reflection / json transcoding).
+//   4. ALL new fields MUST be optional or have safe-zero defaults.
+//   5. Bumping `protocol_version` (RegisterRequest.protocol_version) is
+//      reserved for *additive* contract changes; *breaking* changes
+//      require a new package path (v2/).
+//
+// Layout follows dynamo convention (proto in src tree, generated stubs
+// alongside; see `lib/llm/src/grpc/protos/` for parallel example).
+
+syntax = "proto3";
+
+package dynamo.planner.plugin.v1;
+
+// ============================================================================
+// PluginRegistry service
+// ============================================================================
+
+service PluginRegistry {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Plugin gracefully announces shutdown; orchestrator immediately removes
+  // it from active set and clears its HOLD_LAST cache (without waiting for
+  // missed_heartbeat threshold).
+  rpc Unregister(UnregisterRequest) returns (UnregisterResponse);
+
+
+  // Admin / observability: returns metadata of all registered plugins
+  // (builtin and user) plus runtime state (circuit breaker, cache age,
+  // evaluation counts). Authorization typically gated by an admin RBAC
+  // distinct from plugin Register auth.
+  rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse);
+}
+
+message RegisterRequest {
+  string plugin_id = 1;
+  string plugin_type = 2;            // "predict" | "propose" | "reconcile" | "constrain"
+  uint32 priority = 3;               // lower number = higher priority
+  string endpoint = 4;               // inproc://<id> | unix:///path | grpc://host:port
+  string version = 5;                // plugin's own semver
+  float  execution_interval_seconds = 6;  // 0 = every tick (default)
+  HoldPolicy hold_policy = 7;
+
+  // Capability subscription: dot-paths into PipelineContext that this plugin
+  // actually consumes. Orchestrator fills only these fields (saves wire +
+  // serialization cost). Empty = "no PipelineContext fields needed";
+  // unset (length 0 with default) = "send full context" (backward compatible).
+  repeated string needs = 8;
+
+  // Protocol versioning: orchestrator keeps a supported range
+  // [min_supported, max_supported]. Out-of-range -> reject with reason
+  // "protocol_version_unsupported".
+  string protocol_version = 9;       // e.g. "1.0"
+
+  // Authentication token. Must validate against one of the
+  // configured trusted_sources (k8s SA token / SPIFFE JWT / static secret).
+  // If no source is configured, all Register calls are rejected.
+  string auth_token = 10;
+
+  // Optional: declares preferred FPM payload encoding. 
+  // in the Plugin Discovery section. Default "msgspec" if unset.
+  // Allowed: "msgspec" | "proto" | "json".
+  string fpm_encoding = 11;
+
+  // Per-plugin RPC timeout. Orchestrator wraps each Run/Predict/Propose/...
+  // call in asyncio.wait_for(timeout). Exceeding this triggers the plugin's
+  // circuit breaker and the plugin's output for this tick is treated as ACCEPT.
+  // 0 = use orchestrator default (planner.scheduling.request_timeout_seconds,
+  // default 5s). 
+  float request_timeout_seconds = 12;
+}
+
+enum HoldPolicy {
+  ACCEPT_WHEN_IDLE = 0;  // treat as no opinion between invocations
+  HOLD_LAST        = 1;  // replay last result until next invocation
+}
+
+message RegisterResponse {
+  bool   accepted = 1;
+  string reject_reason = 2;
+  // Echo back the negotiated protocol_version so the plugin can confirm
+  // (relevant when orchestrator supports multiple major versions).
+  string negotiated_protocol_version = 3;
+}
+
+// Plugin pushes heartbeats every `heartbeat_timeout_seconds / 3` (approx 5s
+// by default). 2 consecutive misses -> orchestrator evicts plugin from
+// scheduling and clears its HOLD_LAST cache.
+//
+// HeartbeatMonitor skips checks for transport_type == "in_process"
+// (NOT based on is_builtin) — otherwise in_process user plugin would be
+// evicted immediately for not sending heartbeat.
+message HeartbeatRequest  { string plugin_id = 1; }
+message HeartbeatResponse { bool ok = 1; }
+
+message UnregisterRequest {
+  string plugin_id = 1;
+  string reason    = 2;  // optional; for audit log e.g. "graceful_shutdown" / "version_upgrade"
+}
+message UnregisterResponse { bool ok = 1; }
+
+message ListPluginsRequest {
+  // Optional filters
+  string stage_filter      = 1;  // "" = all; "predict" / "propose" / etc.
+  bool   include_disabled  = 2;  // include enabled=false plugins
+}
+message ListPluginsResponse {
+  repeated PluginInfo plugins = 1;
+}
+
+message PluginInfo {
+  string plugin_id        = 1;
+  string plugin_type      = 2;     // "predict" | "propose" | "reconcile" | "constrain"
+  uint32 priority         = 3;
+  string version          = 4;
+  string protocol_version = 5;
+  bool   enabled          = 6;     // current enabled state (config + runtime overrides)
+  bool   is_builtin       = 7;     // true for builtin-* plugins
+  string transport        = 8;     // "in_process" | "uds" | "grpc"
+  CircuitState circuit_state = 9;
+  uint64 evaluations_total   = 10; // total Run/Predict/Propose/.. RPC count since register
+  double last_call_at_seconds_ago = 11;
+  double cache_age_seconds        = 12;  // 0 if not in HOLD_LAST state
+}
+
+enum CircuitState {
+  CLOSED    = 0;
+  OPEN      = 1;
+  HALF_OPEN = 2;
+}
+
+// ============================================================================
+// Pipeline context (flows through all stages)
+//
+// Observation types are isomorphic to the existing TickInput boundary types
+// in components/src/dynamo/planner/core/types.py. FPM data is passed in its
+// native msgspec encoding to avoid duplicating the ForwardPassMetrics schema.
+// ============================================================================
+
+message PipelineContext {
+  // request_id: per-tick orchestrator trace id. All plugin RPCs in the same
+  // pipeline tick (PREDICT through CONSTRAIN) share the same request_id;
+  // used for stitching audit logs and distributed traces.
+  string request_id  = 1;
+
+  // decision_id: assigned by RECONCILE when it produces a non-empty proposal,
+  // and stays the same through CONSTRAIN and EXECUTE. Different from
+  // request_id because not every tick produces a decision (e.g. all plugins
+  // returned ACCEPT, or REJECT short-circuit). Used to correlate
+  // ScaleRequest / ScaleResponse, EXECUTE outcomes, and rollback audit.
+  string decision_id = 2;
+
+  optional ObservationData observations = 3;  // filled by OBSERVE
+  optional PredictionData  predictions  = 4;  // filled by PREDICT (or built-in fallback)
+  // proposal/constrained are multi-component (one ComponentTarget per
+  // (sub_component_type, component_name)) to align with ScaleRequest and
+  // support the hierarchical planner.
+  optional ScalingProposal proposal     = 5;  // filled by PROPOSE -> RECONCILE
+  optional ScalingProposal constrained  = 6;  // filled by CONSTRAIN
+}
+
+// Mirrors TickInput (types.py)
+message ObservationData {
+  optional TrafficMetrics traffic = 1;
+  optional FpmData        fpm     = 2;
+  optional WorkerState    workers = 3;
+}
+
+// Mirrors TrafficObservation (types.py)
+message TrafficMetrics {
+  float duration_s = 1;  // observation window length (seconds)
+  float num_req    = 2;  // request count in window
+  float isl        = 3;  // avg input sequence length
+  float osl        = 4;  // avg output sequence length
+}
+
+// Mirrors FpmObservations (types.py).
+//
+// Encoding negotiation: orchestrator picks per-plugin payload encoding based
+// on the plugin's RegisterRequest.fpm_encoding ("msgspec" default | "proto" |
+// "json"). All three encodings carry the same logical fields; tests assert
+// round-trip equality across encodings.
+//
+//   * "msgspec" (default): native Python encoding of ForwardPassMetrics
+//     (forward_pass_metrics.py). Zero overhead for in-process and most
+//     uds/Python-sidecar plugins. Carries its own FPM_VERSION.
+//   * "proto" (future): message FpmEnginePayload (defined alongside this
+//     proto, separate file, NOT part of PR 1) with explicit fields. Required
+//     for cross-language plugins (Go/Rust/...).
+//   * "json": same fields, JSON-encoded. Slowest but human-debuggable;
+//     used in development and dashboards.
+//
+// Orchestrator includes the chosen encoding name in PipelineContext metadata
+// so plugins can dispatch decoders. FPM_VERSION (msgspec) and the proto
+// schema version evolve independently; the plugin contract test suite
+// pins the cross-encoding field mapping.
+message FpmData {
+  map<string, bytes> prefill_engines = 1;  // bytes interpretation per fpm_encoding
+  map<string, bytes> decode_engines  = 2;
+}
+
+// Mirrors WorkerCounts (types.py)
+message WorkerState {
+  optional int32 ready_prefill    = 1;
+  optional int32 ready_decode     = 2;
+  optional int32 expected_prefill = 3;
+  optional int32 expected_decode  = 4;
+}
+
+// Prediction data flows through PREDICT chain-augment.
+//
+// **v11 critical**: All three prediction fields MUST be `optional float`.
+// chain-augment partial-merge (PR 4) uses `HasField()` to distinguish:
+//   - field set → plugin actively asserts this value (even if 0.0)
+//   - field unset → plugin has no opinion; preserve previous chain plugin's value
+// Without `optional`, proto3 default 0.0 makes "I assert 0" indistinguishable
+// from "I have no opinion", breaking the layered-predictor pattern documented
+// in DEP main doc line 1320.
+message PredictionData {
+  optional float predicted_num_req = 1;
+  optional float predicted_isl     = 2;
+  optional float predicted_osl     = 3;
+  string source                    = 4;  // plugin_id or "builtin"
+}
+
+// Aligns wire format with existing ScaleRequest.target_replicas
+// (components/src/dynamo/planner/connectors/protocol.py).
+// Used as the output of RECONCILE/CONSTRAIN: each ComponentTarget's
+// `type` field is unused here (only `replicas` matters).
+message ScalingProposal {
+  repeated ComponentTarget targets = 1;
+  string reason                    = 2;
+  string source                    = 3;  // plugin_id or "builtin"
+}
+
+// One scaling target per component instance.
+// `sub_component_type` uses string (NOT proto enum) for parity with the
+// existing ScaleRequest wire format and to allow new engine kinds (e.g.
+// hierarchical pools, AFD) without bumping the proto version.
+//
+// Allowed sub_component_type values evolve with Dynamo; current set:
+//   "prefill"  -- prefill engine
+//   "decode"   -- decode engine (also used in agg mode)
+// `component_name` distinguishes multiple pools of the same kind
+// (e.g. "prefill-pool-A" vs "prefill-pool-B" in the hierarchical planner).
+message ComponentTarget {
+  string sub_component_type     = 1;
+  optional string component_name = 2;
+  optional int32 replicas       = 3;  // unset => "no opinion on this component"
+  OverrideType type             = 4;  // only meaningful inside OverrideResult; ignored in ScalingProposal
+}
+
+message OverrideResult {
+  // Each target carries its own (component, type, replicas). One plugin
+  // can therefore say "prefill SET=10, decode AT_MOST=6" in a single RPC.
+  // Targets that the plugin has no opinion about are simply omitted.
+  repeated ComponentTarget targets = 1;
+  string reason                    = 2;
+}
+
+enum OverrideType {
+  SET      = 0;  // "set replicas to exactly this" (recommendation; priority-resolved)
+  AT_LEAST = 1;  // "need at least this many" (floor; all values participate via max)
+  AT_MOST  = 2;  // "allow at most this many" (ceiling; all values participate via min)
+}
+
+message AcceptResult {}
+message RejectResult { string reason = 1; }
+
+// ============================================================================
+// Stage-specific request/response (each stage receives full PipelineContext)
+// ============================================================================
+
+service PredictPlugin {
+  rpc Predict(PredictStageRequest) returns (PredictStageResponse);
+}
+message PredictStageRequest  { PipelineContext context = 1; }
+message PredictStageResponse {
+  // PREDICT plugins return PredictionData (chain-augment partial merge).
+  // Omitted/unset prediction = ACCEPT (no opinion).
+  PredictionData predictions = 1;
+  string reason = 2;
+  // final=true: stop the PREDICT chain immediately; subsequent plugins
+  // in the chain are NOT called.
+  // **Chain-augment final usage rule (PR 4 v1.1)**:
+  //   final=true plugin MUST be configured with priority = lowest number
+  //   (highest priority). Otherwise the chain breaks at this plugin BEFORE
+  //   higher-priority plugins run — chain_augment emits WARNING log +
+  //   Prometheus predict_chain_final_at_non_lowest_priority_total{plugin_id}.
+  bool final = 3;
+}
+
+service ProposePlugin {
+  rpc Propose(ProposeStageRequest) returns (ProposeStageResponse);
+}
+message ProposeStageRequest  { PipelineContext context = 1; }
+message ProposeStageResponse {
+  oneof result {
+    AcceptResult   accept   = 1;
+    OverrideResult override = 2;
+    RejectResult   reject   = 3;
+  }
+  // final=true: this plugin's OverrideResult is the FINAL output of the
+  // PROPOSE stage—it COMPLETELY OVERRIDES all other plugins' outputs
+  // (including AT_LEAST / AT_MOST). All other plugins are STILL CALLED
+  // (preserving observability / metrics / audit), but their outputs are
+  // discarded for the merge. Multiple plugins with final=true: priority
+  // number smallest wins.
+  // Does NOT skip CONSTRAIN—the CONSTRAIN stage still runs as the safety
+  // net (with builtin-budget-constrain providing min_endpoint / max_gpu_budget).
+  // **REJECT is HIGHER priority than final** (v11 G-2): if any plugin returns
+  // RejectResult, the entire stage short-circuits regardless of final flags.
+  bool final = 4;
+}
+
+service ReconcilePlugin {
+  rpc Reconcile(ReconcileStageRequest) returns (ReconcileStageResponse);
+}
+message ReconcileStageRequest {
+  PipelineContext context = 1;
+  // All propose results from preceding stage. Reconcile plugins see the
+  // full propose set (with priority) and can reweight or filter.
+  repeated ProposeResult proposals = 2;
+}
+message ProposeResult {
+  string plugin_id = 1;
+  oneof result {
+    AcceptResult   accept   = 2;
+    OverrideResult override = 3;
+    RejectResult   reject   = 4;
+  }
+  uint32 priority = 5;
+}
+// RECONCILE plugins return OverrideResult (same shape as ProposePlugin).
+// builtin-reconcile and user reconcile plugins all coexist; orchestrator
+// runs the type-aware merge across all RECONCILE outputs to produce the
+// final ScalingProposal.
+//
+// User reconcile plugins typically reweight or filter the propose results
+// (they see the full propose set), then output their own override-typed
+// recommendation. Priority resolves competing SETs across reconcile plugins.
+message ReconcileStageResponse {
+  oneof result {
+    AcceptResult   accept   = 1;
+    OverrideResult override = 2;
+    RejectResult   reject   = 3;
+  }
+  // Same final semantics as ProposeStageResponse: this plugin's output
+  // completely overrides all other RECONCILE plugins' outputs in the merge,
+  // while still calling them for observability. Multiple final=true:
+  // priority number smallest wins. Does NOT skip CONSTRAIN.
+  bool final = 4;
+}
+
+service ConstrainPlugin {
+  rpc Constrain(ConstrainStageRequest) returns (ConstrainStageResponse);
+}
+message ConstrainStageRequest  { PipelineContext context = 1; }
+// CONSTRAIN plugins return OverrideResult (same shape as ProposePlugin /
+// ReconcilePlugin), but with a hard restriction on `type`:
+//   * AT_LEAST and AT_MOST are valid (they tighten the constraint).
+//   * SET is silently dropped at runtime (v11 决议: register-time static
+//     rejection is infeasible because proto3 has no plugin-self-declared
+//     output-type metadata; orchestrator cannot know in advance whether
+//     a plugin will emit SET):
+//     - At runtime, if a CONSTRAIN plugin produces SET (intentionally
+//       or via version drift), the orchestrator drops the SET entry and
+//       emits audit event plugin_constrain_set_dropped + Prometheus
+//       metric plugin_constrain_set_dropped_total{plugin_id}, but
+//       accepts the rest of the OverrideResult.
+//
+// Orchestrator merges all CONSTRAIN OverrideResults using the type-aware
+// merge algorithm (only AT_LEAST / AT_MOST participate); the resulting
+// floor / ceiling clamp the RECONCILE output per component_key.
+message ConstrainStageResponse {
+  oneof result {
+    AcceptResult   accept   = 1;
+    OverrideResult override = 2;  // SET targets are silently dropped (see message comment above)
+    RejectResult   reject   = 3;
+  }
+  // final is SILENTLY IGNORED in CONSTRAIN stage. CONSTRAIN allows only
+  // AT_LEAST / AT_MOST, which are accumulated via max/min — there is no
+  // SET-priority competition for final to influence. Allowing final to
+  // "completely override" in CONSTRAIN would let a user plugin bypass
+  // builtin-budget-constrain, breaking the safety guarantee. To make
+  // your constrain win, simply tighten the bound (larger AT_LEAST or
+  // smaller AT_MOST) — max/min monotonicity will let you win automatically.
+  bool final = 4;
+}
+
+// ============================================================================
+// PluginLifecycle service (v10 YAGNI: only Bootstrap + Reset)
+// ============================================================================
+//
+// Snapshot/Restore are NOT part of this DEP — current code repo lacks the
+// mechanism, planner restart goes through Bootstrap to re-fit regression
+// (equivalent to cold start). proto3 add new RPC is backward-compatible;
+// future PR may add Snapshot/Restore without breaking clients.
+
+service PluginLifecycle {
+  // Plugin's first-call from orchestrator after Register; one-time priming
+  // (e.g. load benchmark FPM, warm regression model).
+  rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
+
+  // Clear plugin internal state back to pre-Bootstrap; called on config
+  // reload or test setup/teardown. NOT idempotent in semantics (orchestrator
+  // guarantees single-call lifecycle).
+  rpc Reset(ResetRequest) returns (ResetResponse);
+}
+
+message BootstrapRequest {
+  // Generic blob; format defined by plugin itself (e.g. builtin-throughput-
+  // propose may serialize benchmark FPM into bytes).
+  bytes bootstrap_data = 1;
+
+  // Startup hints from orchestrator (e.g. "regression_kind: prefill").
+  // String-typed for flexibility; specific keys evolve with builtin plugins.
+  map<string, string> hints = 2;
+}
+message BootstrapResponse {
+  bool   ok      = 1;
+  string message = 2;  // optional; for audit / debugging
+}
+
+message ResetRequest {
+  string reason = 1;  // optional audit context (e.g. "config_reload" / "test_teardown")
+}
+message ResetResponse {
+  bool   ok      = 1;
+  string message = 2;
+}

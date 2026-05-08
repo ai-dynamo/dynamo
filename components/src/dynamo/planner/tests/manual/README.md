@@ -111,6 +111,7 @@ In this test, we compare performance (goodput and goodput/GPU) on deployments on
 - Config 3 with inefficient parallelization mapping: 1xTP2P_1xTP2D_4GPU
  `./perf_test_configs/disagg_8b_tp2.yaml`
 - Config 4 with sla planner: `./perf_test_configs/disagg_8b_planner.yaml`
+- Config 4b same as Config 4 but using the **plugin-based orchestrator** tick engine (PR 7+ cutover): `./perf_test_configs/disagg_8b_planner_orchestrator.yaml`. Decisions are byte-identical to Config 4 (locked by `tests/integration/test_dual_path_parity.py`); the difference is observability — 19 extra `dynamo_planner_*` Prometheus series and structured `AUDIT` log events. See [orchestrator-rollout.md](../../../../../../docs/components/planner/orchestrator-rollout.md).
 
 To run the test on each configuration, first deploy the corresponding DynamoGraphDeployment by
 

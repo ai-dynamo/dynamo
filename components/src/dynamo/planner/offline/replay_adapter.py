@@ -1,22 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Adapter that drives PlannerStateMachine via the PlannerReplayBridge.
+"""Adapter that drives the planner core via the PlannerReplayBridge.
 
 The bridge (Rust, PyO3) runs the offline simulation step-by-step.
-This adapter sits between the bridge and the planner state machine:
+This adapter sits between the bridge and the planner tick engine:
 
     Bridge.advance_to(tick_ms) -> raw metrics dict
     Adapter._build_tick_input() -> TickInput
-    StateMachine.on_tick() -> PlannerEffects
+    EngineProtocol.tick() -> PlannerEffects
     Adapter -> Bridge.apply_scaling(prefill, decode)
 
-Supports both aggregated and disaggregated topologies. No I/O, no runtime
-dependencies. Fully deterministic when used with offline replay.
+The tick engine is selected by ``config.scheduling.use_orchestrator``:
+
+- ``False`` (default): legacy PSM path — ``PlannerStateMachine`` +
+  ``_PSMEngineAdapter``. Byte-for-byte identical to pre-PR-8 replay.
+- ``True``: orchestrator path — ``OrchestratorEngineAdapter`` wrapping
+  ``LocalPlannerOrchestrator`` + the 5 builtin plugins. Produces the
+  same ``PlannerEffects.scale_to`` / ``next_tick`` as PSM (dual-path
+  parity test lock) with plugin-era observability (Prometheus metrics,
+  audit events, plugin-aware diagnostics).
+
+Replay keeps its sync ``run()`` API on both paths; async calls on the
+orchestrator path (``bootstrap_from_fpms`` / ``tick``) run inside a
+single replay-scoped event loop so callers don't need to change.
+
+Supports both aggregated and disaggregated topologies. No I/O, no
+runtime dependencies. Fully deterministic with offline replay.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -27,6 +42,7 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.engine_protocol import EngineProtocol, _PSMEngineAdapter
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
     FpmObservations,
@@ -125,8 +141,34 @@ class ReplayPlannerAdapter:
     ) -> None:
         self._config = planner_config
         self._bridge = bridge
-        self._sm = PlannerStateMachine(planner_config, capabilities)
+        self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
+
+        # PR 8 8-8: tick engine selected by the feature flag. On PSM path
+        # ``self._sm`` is the actual state machine (reused for helpers
+        # like ``warm_load_predictors``). On orchestrator path it is
+        # ``None``; a throwaway PSM inside ``OrchestratorEngineAdapter.
+        # bootstrap_from_fpms`` handles regression bootstrap instead.
+        use_orchestrator = planner_config.scheduling.use_orchestrator
+        self._use_orchestrator = use_orchestrator
+        self._sm: Optional[PlannerStateMachine] = None
+        self._engine: EngineProtocol
+        if use_orchestrator:
+            from dynamo.planner.plugins.orchestrator.engine_adapter import (
+                OrchestratorEngineAdapter,
+            )
+
+            self._engine = OrchestratorEngineAdapter(
+                planner_config, capabilities or WorkerCapabilities()
+            )
+            # Replay's ``run()`` is synchronous; we own a scoped event
+            # loop to drive the async engine calls without forcing
+            # callers to use ``asyncio.run``.
+            self._loop = asyncio.new_event_loop()
+        else:
+            self._sm = PlannerStateMachine(planner_config, capabilities)
+            self._engine = _PSMEngineAdapter(self._sm)
+            self._loop = None  # type: ignore[assignment]
 
         # Last-seen FPM caches (separate for prefill/decode)
         self._prefill_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
@@ -149,12 +191,34 @@ class ReplayPlannerAdapter:
         self._last_tick_s: float = 0.0
         self._last_traffic: Metrics = Metrics()
 
+        # Warmup path: PSM exposes ``warm_load_predictors`` directly; on
+        # the orchestrator path we route the same list through
+        # ``bootstrap_plugins(historical_traffic=...)`` which primes the
+        # builtin predictor identically.
         if warmup_observations:
-            self._sm.warm_load_predictors(warmup_observations)
+            if self._use_orchestrator:
+                self._run_sync(
+                    self._engine.bootstrap_plugins(  # type: ignore[attr-defined]
+                        historical_traffic=warmup_observations
+                    )
+                )
+            else:
+                assert self._sm is not None
+                self._sm.warm_load_predictors(warmup_observations)
+
+    # ------------------------------------------------------------------
+    # Sync/async bridging
+    # ------------------------------------------------------------------
+
+    def _run_sync(self, coro):
+        """Run a coroutine on the replay-owned event loop. Used to call
+        the orchestrator path's async APIs from replay's sync surface."""
+        assert self._loop is not None, "sync bridge only available on orchestrator path"
+        return self._loop.run_until_complete(coro)
 
     def run(self) -> ReplayPlannerReport:
         """Run the full replay with planner-in-the-loop."""
-        next_tick = self._sm.initial_tick(0.0)
+        next_tick = self._engine.initial_tick(0.0)
         scaling_events: list[ScalingEvent] = []
         diagnostics_log: list[TickDiagnostics] = []
         total_ticks = 0
@@ -167,7 +231,19 @@ class ReplayPlannerAdapter:
                 break
 
             tick_input = self._build_tick_input(next_tick, result)
-            effects: PlannerEffects = self._sm.on_tick(next_tick, tick_input)
+            # PR 8 8-8: ``EngineProtocol.tick`` is async. On PSM path the
+            # ``_PSMEngineAdapter`` wraps PSM's sync ``on_tick`` in an
+            # async-defined-but-never-awaits shim, so ``run_until_complete``
+            # returns synchronously without yielding to the loop. On
+            # orchestrator path it genuinely awaits the pipeline.
+            if self._use_orchestrator:
+                effects: PlannerEffects = self._run_sync(
+                    self._engine.tick(next_tick, tick_input)
+                )
+            else:
+                # Fast path for PSM: skip the event-loop roundtrip.
+                assert self._sm is not None
+                effects = self._sm.on_tick(next_tick, tick_input)
             diagnostics_log.append(effects.diagnostics)
             total_ticks += 1
 
@@ -318,13 +394,22 @@ class ReplayPlannerAdapter:
     ) -> None:
         """Feed accumulated FPM snapshots to regression, excluding the last
         per worker (which will be added by _observe_fpm via fpm_observations).
-        This avoids double-counting the cached snapshot."""
-        if not hasattr(self._sm, "_is_easy") or self._sm._is_easy:
+        This avoids double-counting the cached snapshot.
+
+        PR 8 8-8: works on both paths via ``_get_regression(kind)`` so
+        orchestrator replay and PSM replay share identical snapshot
+        feeding. Returns early on easy mode (no regressions) or when
+        the requested regression slot isn't installed (the install gap
+        is a separate concern — fixed via the empty-regression bootstrap
+        in PR 7 7-4 follow-up).
+        """
+        if self._is_easy_mode():
             return  # easy mode has no regression models
 
-        if self._sm._is_agg:
-            # Exclude the last snapshot per worker (it's in the cache and
-            # will be added by _observe_fpm)
+        if self._config.mode == "agg":
+            agg_reg = self._get_regression("agg")
+            if agg_reg is None:
+                return
             last_idx_per_worker: dict[int, int] = {}
             for i, snap in enumerate(decode_snaps):
                 last_idx_per_worker[snap["worker_id"]] = i
@@ -334,30 +419,62 @@ class ReplayPlannerAdapter:
                     continue
                 fpm = _build_fpm_from_dict(snap)
                 if fpm.wall_time > 0.0:
-                    self._sm._agg_regression.add_observation(fpm)
+                    agg_reg.add_observation(fpm)
         else:
-            if self._sm._has_prefill:
-                last_idx: dict[int, int] = {}
-                for i, snap in enumerate(prefill_snaps):
-                    last_idx[snap["worker_id"]] = i
-                exclude = set(last_idx.values())
-                for i, snap in enumerate(prefill_snaps):
-                    if i in exclude:
-                        continue
-                    fpm = _build_fpm_from_dict(snap)
-                    if fpm.wall_time > 0.0:
-                        self._sm._prefill_regression.add_observation(fpm)
-            if self._sm._has_decode:
-                last_idx = {}
-                for i, snap in enumerate(decode_snaps):
-                    last_idx[snap["worker_id"]] = i
-                exclude = set(last_idx.values())
-                for i, snap in enumerate(decode_snaps):
-                    if i in exclude:
-                        continue
-                    fpm = _build_fpm_from_dict(snap)
-                    if fpm.wall_time > 0.0:
-                        self._sm._decode_regression.add_observation(fpm)
+            has_prefill = self._config.mode in ("prefill", "disagg")
+            has_decode = self._config.mode in ("decode", "disagg")
+            if has_prefill:
+                p_reg = self._get_regression("prefill")
+                if p_reg is not None:
+                    last_idx: dict[int, int] = {}
+                    for i, snap in enumerate(prefill_snaps):
+                        last_idx[snap["worker_id"]] = i
+                    exclude = set(last_idx.values())
+                    for i, snap in enumerate(prefill_snaps):
+                        if i in exclude:
+                            continue
+                        fpm = _build_fpm_from_dict(snap)
+                        if fpm.wall_time > 0.0:
+                            p_reg.add_observation(fpm)
+            if has_decode:
+                d_reg = self._get_regression("decode")
+                if d_reg is not None:
+                    last_idx = {}
+                    for i, snap in enumerate(decode_snaps):
+                        last_idx[snap["worker_id"]] = i
+                    exclude = set(last_idx.values())
+                    for i, snap in enumerate(decode_snaps):
+                        if i in exclude:
+                            continue
+                        fpm = _build_fpm_from_dict(snap)
+                        if fpm.wall_time > 0.0:
+                            d_reg.add_observation(fpm)
+
+    def _is_easy_mode(self) -> bool:
+        """Easy-mode check routed via config — both paths honour this
+        the same way (no regression in non-SLA modes)."""
+        return self._config.optimization_target != "sla"
+
+    def _get_regression(self, kind: str):
+        """Return the regression model for ``kind`` (``"agg"`` /
+        ``"prefill"`` / ``"decode"``) regardless of engine path.
+
+        PSM path: read directly from ``self._sm.{_agg,_prefill,_decode}_regression``.
+        Orchestrator path: read from the orchestrator's shared store
+        (populated by ``bootstrap_from_fpms`` → ``install_regressions``).
+        """
+        if self._use_orchestrator:
+            # The adapter hides the orchestrator; access via its public
+            # bootstrap hook doesn't help — read through the underlying
+            # orchestrator attribute we know is there.
+            orch = getattr(self._engine, "_orchestrator", None)
+            if orch is None:
+                return None
+            return orch.get_regression(kind)
+        if self._sm is None:
+            return None
+        attr = f"_{kind}_regression"
+        return getattr(self._sm, attr, None)
 
     def _build_tick_input(
         self, tick: ScheduledTick, result: dict[str, Any]
