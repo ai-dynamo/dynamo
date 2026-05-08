@@ -47,17 +47,17 @@ navigation:
         path: ../pages-v1.1.0/reference/glossary.md
   # ==================== Blog ====================
   - section: Blog
-    path: ../blogs/index.mdx
+    path: ../digest/index.mdx
     slug: blog
     contents:
       - page: "Multi-Turn Agentic Harnesses"
-        path: ../blogs/agentic-inference/agentic-harnesses.md
+        path: ../digest/agentic-inference/agentic-harnesses.md
         slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
-        path: ../blogs/agentic-inference/agentic-inference.md
+        path: ../digest/agentic-inference/agentic-inference.md
         slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: ../blogs/flash-indexer/flash-indexer.md
+        path: ../digest/flash-indexer/flash-indexer.md
         slug: flash-indexer
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment

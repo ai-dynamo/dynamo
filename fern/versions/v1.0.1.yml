@@ -268,14 +268,14 @@ navigation:
   # ==================== Blog ====================
   - section: Blog
     collapsed: true
-    path: ../blogs/index.mdx
+    path: ../digest/index.mdx
     slug: blog
     contents:
       - page: "Full-Stack Optimizations for Agentic Inference"
-        path: ../blogs/agentic-inference/agentic-inference.md
+        path: ../digest/agentic-inference/agentic-inference.md
         slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: ../blogs/flash-indexer/flash-indexer.md
+        path: ../digest/flash-indexer/flash-indexer.md
         slug: flash-indexer
   # ==================== Documentation ====================
   - section: Documentation
