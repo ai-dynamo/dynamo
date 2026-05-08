@@ -63,7 +63,8 @@ class VllmLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
+        del worker_id  # vLLM's NixlConnector handles its own per-worker IDs
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 

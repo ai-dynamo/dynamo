@@ -18,7 +18,9 @@ use futures::stream::BoxStream;
 use crate::error::DynamoError;
 
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-pub use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+pub use dynamo_llm::protocols::common::preprocessor::{
+    BootstrapInfo, PrefillResult, PreprocessedRequest,
+};
 pub use dynamo_llm::protocols::common::{
     FinishReason, OutputOptions, SamplingOptions, StopConditions,
 };
@@ -52,6 +54,25 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Bootstrap host this prefill worker advertises to decode peers.
+    ///
+    /// Only meaningful for backends with a Dynamo-level host/port
+    /// handshake (today: SGLang). Backends whose KV transport is
+    /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
+    /// `NixlConnector` — should leave this `None`.
+    ///
+    /// Engines that do use it set this in `start()` after the engine
+    /// has resolved its bootstrap address (SGLang reads
+    /// `tokenizer_manager.server_args.disaggregation_bootstrap_port`).
+    /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
+    /// `Worker` publishes them via
+    /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
+    /// `PrefillRouter` can take its optimised "Bootstrap path" (route
+    /// decode concurrent with prefill instead of waiting for prefill
+    /// to drain).
+    pub bootstrap_host: Option<String>,
+    /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
+    pub bootstrap_port: Option<u16>,
 }
 
 /// Inference engine trait.
@@ -70,12 +91,21 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// calls. `Worker` will register the model and begin serving immediately.
     /// Use interior mutability for any state allocated here.
     ///
+    /// `worker_id` is an opaque, runtime-allocated unique identifier for
+    /// this worker. It is stable from `start()` onward for the worker's
+    /// lifetime and unique across replicas in the cluster. Engines that
+    /// need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
+    /// 10-bit `disagg_machine_id` snowflake field) should derive it from
+    /// this value rather than hashing host/pid or asking operators for a
+    /// CLI override. The internal mechanism (discovery instance ID) is
+    /// not part of the contract — engines should treat it as opaque.
+    ///
     /// `start()` is async and may take minutes for real backends (e.g.
     /// compiling a model graph on an accelerator). Emit
     /// `tracing::info!` checkpoints so operators see progress — this
     /// call is otherwise a silent window between process launch and
     /// endpoint serving.
-    async fn start(&self) -> Result<EngineConfig, DynamoError>;
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
 
     /// Yield streaming response chunks for a single request.
     ///

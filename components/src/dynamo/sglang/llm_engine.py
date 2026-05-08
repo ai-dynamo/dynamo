@@ -62,7 +62,8 @@ class SglangLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
+        del worker_id  # SGLang bootstrap uses host/port/room triples
         self.engine = sgl.Engine(server_args=self.server_args)
 
         tokenizer = (

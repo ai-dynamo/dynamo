@@ -102,7 +102,7 @@ impl std::error::Error for ConformanceFailure {}
 pub async fn run_conformance<E: LLMEngine>(engine: E) -> Result<(), ConformanceFailure> {
     // 1. start() returns non-empty model.
     let config = engine
-        .start()
+        .start(0)
         .await
         .map_err(|e| StartFailed(e.to_string()))?;
     if config.model.is_empty() {

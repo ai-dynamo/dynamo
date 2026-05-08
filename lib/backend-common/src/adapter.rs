@@ -165,7 +165,7 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for MockEngine {
-        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
         }
 
@@ -304,7 +304,7 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for TerminalOnCancelEngine {
-        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
         }
         async fn generate(
@@ -380,7 +380,7 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for TypedMidStreamErrEngine {
-        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             Ok(EngineConfig::default())
         }
         async fn generate(

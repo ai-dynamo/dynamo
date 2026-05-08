@@ -2292,6 +2292,15 @@ class StreamIncomplete(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    class DisaggregationMode:
+        # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
+        # this on the WorkerConfig to switch their per-mode protocol behavior;
+        # the Rust Worker reads it for registration (Prefill→ModelType::Prefill,
+        # Decode→disable local indexer).
+        Aggregated: "backend.DisaggregationMode"
+        Prefill: "backend.DisaggregationMode"
+        Decode: "backend.DisaggregationMode"
+
     class EngineConfig:
         def __init__(
             self,
@@ -2302,6 +2311,8 @@ class backend:
             total_kv_blocks: Optional[int] = None,
             max_num_seqs: Optional[int] = None,
             max_num_batched_tokens: Optional[int] = None,
+            bootstrap_host: Optional[str] = None,
+            bootstrap_port: Optional[int] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
@@ -2317,6 +2328,10 @@ class backend:
         def max_num_seqs(self) -> Optional[int]: ...
         @property
         def max_num_batched_tokens(self) -> Optional[int]: ...
+        @property
+        def bootstrap_host(self) -> Optional[str]: ...
+        @property
+        def bootstrap_port(self) -> Optional[int]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -2343,6 +2358,7 @@ class backend:
             enable_local_indexer: bool = ...,
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
+            disaggregation_mode: "backend.DisaggregationMode" = ...,
         ) -> None: ...
 
     class Worker:

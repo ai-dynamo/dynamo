@@ -60,6 +60,19 @@ class EngineConfig:
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    # Bootstrap address advertised to decode peers. Only meaningful for
+    # backends with a Dynamo-level host/port handshake (today: SGLang).
+    # Backends whose KV transport is internal — TRT-LLM, vLLM
+    # NixlConnector — leave these None.
+    #
+    # Engines that do use it populate these from `start()` after the
+    # engine has resolved its KV-transport listening address. When both
+    # are set, the Rust Worker publishes them via
+    # `ModelRuntimeConfig.disaggregated_endpoint` so the frontend's
+    # `PrefillRouter` can take its optimised Bootstrap path (route
+    # decode concurrent with prefill).
+    bootstrap_host: Optional[str] = None
+    bootstrap_port: Optional[int] = None
 
 
 class LLMEngine(ABC):
@@ -92,12 +105,21 @@ class LLMEngine(ABC):
         ...
 
     @abstractmethod
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
         """Start the engine and return registration metadata.
 
         After this returns the engine MUST be ready to accept ``generate()``
         calls.  ``Worker`` will register the model and begin serving
         immediately.
+
+        ``worker_id`` is an opaque, runtime-allocated unique identifier for
+        this worker. It is stable from ``start()`` onward for the worker's
+        lifetime and unique across replicas in the cluster. Engines that
+        need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
+        ``disagg_machine_id`` snowflake field) should derive it from this
+        value rather than hashing host/pid or asking operators for a CLI
+        override. The internal mechanism (discovery instance ID) is not
+        part of the contract — engines should treat it as opaque.
         """
         ...
 

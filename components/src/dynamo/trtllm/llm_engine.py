@@ -132,7 +132,8 @@ class TrtllmLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
+        del worker_id  # TRT-LLM disagg uses LlmDisaggregatedParams handles
         self._engine = TensorRTLLMEngine(self.engine_args)
         await self._engine.initialize()
 
