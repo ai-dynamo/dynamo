@@ -14,7 +14,6 @@ use crate::{StorageError, pinned::StorageBackendOps};
 pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST};
 use level_zero::{self, CommandList, CommandQueue, Context, Device, Driver, EventPool};
 use std::{
-    alloc::{Layout, alloc, dealloc},
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -143,7 +142,7 @@ unsafe impl Sync for ZeCommandQueue {}
 impl ZeCommandQueue {
     fn new(context: Arc<Context>, device: Device) -> Result<Arc<Self>, ZeError> {
         let handle = context
-            .create_command_queue(&device)
+            .create_copy_command_queue(&device)
             .map_err(ZeError::from)?;
         let event_pool = context
             .create_event_pool(&[device.clone()], 1, 0)
@@ -164,7 +163,7 @@ impl ZeCommandQueue {
     /// Create a new command list for this device.
     pub fn create_command_list(&self) -> Result<CommandList, ZeError> {
         self.context
-            .create_command_list(&self.device)
+            .create_copy_command_list(&self.device)
             .map_err(ZeError::from)
     }
 
@@ -188,38 +187,71 @@ impl ZeCommandQueue {
 // Host memory helpers
 // ---------------------------------------------------------------------------
 
-fn ze_host_layout(size: usize) -> Result<Layout, StorageError> {
-    Layout::from_size_align(size.max(1), 64).map_err(|e| {
-        StorageError::AllocationFailed(format!("Invalid ZE host allocation layout: {}", e))
+static ZE_USE_WRITE_COMBINED: OnceLock<bool> = OnceLock::new();
+
+fn ze_use_write_combined(context: &Context) -> bool {
+    *ZE_USE_WRITE_COMBINED.get_or_init(|| {
+        if dynamo_config::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
+            tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; Ze write-combined disabled");
+            return false;
+        }
+        match context.alloc_host_wc(1, 64) {
+            Ok(_buf) => {
+                tracing::debug!("Ze write-combined USM host memory supported");
+                true
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Ze write-combined memory not supported on this system; \
+                     will use regular USM host memory"
+                );
+                false
+            }
+        }
     })
 }
 
 pub(crate) unsafe fn malloc_host_prefer_writecombined_ze(
+    context: &Context,
     size: usize,
 ) -> Result<*mut u8, StorageError> {
-    let layout = ze_host_layout(size)?;
-    // SAFETY: `layout` is validated by `ze_host_layout`.
-    let ptr = unsafe { alloc(layout) };
-    if ptr.is_null() {
-        return Err(StorageError::AllocationFailed(format!(
-            "ZE host allocation failed for {} bytes",
-            size
-        )));
+    let host_buf = if ze_use_write_combined(context) {
+        context.alloc_host_wc(size, 64)
+    } else {
+        context.alloc_host(size, 64)
     }
+    .map_err(|e| {
+        StorageError::AllocationFailed(format!(
+            "ZE USM host allocation failed for {} bytes: {:?}",
+            size, e
+        ))
+    })?;
+
+    let ptr = host_buf.as_mut_ptr() as *mut u8;
+    std::mem::forget(host_buf);
+
     tracing::debug!(
-        "Allocated ZE host memory at 0x{:x} (size={})",
+        "Allocated ZE USM host memory at 0x{:x} (size={})",
         ptr as usize,
         size
     );
     Ok(ptr)
 }
 
-pub(crate) unsafe fn free_host_ze(ptr: *mut u8, size: usize) -> Result<(), StorageError> {
-    let layout = ze_host_layout(size)?;
-    // SAFETY: `layout` is validated by `ze_host_layout`, and caller guarantees
-    // that `ptr` was allocated with this layout.
-    unsafe { dealloc(ptr, layout) };
-    Ok(())
+pub(crate) unsafe fn free_host_ze(
+    context: &Context,
+    ptr: *mut u8,
+) -> Result<(), StorageError> {
+    unsafe {
+        context
+            .free_memory(ptr as *mut std::ffi::c_void)
+            .map_err(|e| {
+                StorageError::OperationFailed(format!(
+                    "ZE host free failed for ptr 0x{:x}: {:?}",
+                    ptr as usize, e
+                ))
+            })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -298,11 +330,11 @@ impl Ze {
 
 impl StorageBackendOps for Arc<ZeContext> {
     unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError> {
-        unsafe { malloc_host_prefer_writecombined_ze(size) }
+        unsafe { malloc_host_prefer_writecombined_ze(&self.context, size) }
     }
 
-    unsafe fn free_pinned(&self, ptr: u64, size: usize) -> Result<(), StorageError> {
-        unsafe { free_host_ze(ptr as *mut u8, size) }
+    unsafe fn free_pinned(&self, ptr: u64, _size: usize) -> Result<(), StorageError> {
+        unsafe { free_host_ze(&self.context, ptr as *mut u8) }
     }
 
     unsafe fn alloc_device(

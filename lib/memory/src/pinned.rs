@@ -215,7 +215,7 @@ impl StorageBackendOps for Arc<CudaContext> {
 /// Pinned host memory supporting CUDA and Ze backends.
 ///
 /// For CUDA: allocated via `cudaHostAlloc` (page-locked, optionally write-combined).
-/// For Ze: allocated via system allocator with 64-byte alignment.
+/// For Ze: allocated via `zeMemAllocHost` (USM pinned host memory, optionally write-combined).
 #[derive(Debug)]
 pub struct PinnedStorage {
     /// Host pointer to the pinned memory.

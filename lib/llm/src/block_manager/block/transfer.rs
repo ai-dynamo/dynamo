@@ -250,6 +250,11 @@ where
         TransferStrategy::AsyncH2D
         | TransferStrategy::AsyncD2H
         | TransferStrategy::AsyncD2D => {
+            tracing::info!(
+                "handle_local_transfer: start, strategy={:?}, num_blocks={}",
+                RB::write_to_strategy(),
+                sources.len()
+            );
             tracing::debug!(
                 "Transfer: Using strategy: {:?}",
                 RB::write_to_strategy()

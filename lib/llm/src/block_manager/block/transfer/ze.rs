@@ -25,7 +25,7 @@ pub struct ZeMemPool;
 pub(super) struct TransferBackendZe {
     queue: Arc<ZeCommandQueue>,
     ze_mem_pool: Option<Arc<ZeMemPool>>,
-    ze_event_tx: mpsc::UnboundedSender<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>)>,
+    ze_event_tx: mpsc::UnboundedSender<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>, std::time::Instant)>,
     ze_event_worker: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
 }
@@ -33,7 +33,7 @@ pub(super) struct TransferBackendZe {
 impl TransferBackendZe {
     pub fn new(queue: Arc<ZeCommandQueue>, _config: Option<&super::context::PoolConfig>) -> Self {
         let (ze_event_tx, ze_event_rx) =
-            mpsc::unbounded_channel::<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>)>();
+            mpsc::unbounded_channel::<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>, std::time::Instant)>();
 
         let cancel_token = CancellationToken::new();
         let ze_event_worker = Self::setup_ze_event_worker(ze_event_rx, cancel_token.clone());
@@ -48,7 +48,7 @@ impl TransferBackendZe {
     }
 
     fn setup_ze_event_worker(
-        mut ze_event_rx: mpsc::UnboundedReceiver<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>)>,
+        mut ze_event_rx: mpsc::UnboundedReceiver<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>, std::time::Instant)>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -60,10 +60,12 @@ impl TransferBackendZe {
             runtime.block_on(async move {
                 loop {
                     tokio::select! {
-                        Some((_pool, event, tx)) = ze_event_rx.recv() => {
+                        Some((_pool, event, tx, start)) = ze_event_rx.recv() => {
                             if let Err(e) = event.host_synchronize(u64::MAX) {
                                 tracing::error!("Error synchronizing Ze event: {:?}", e);
                             }
+                            let elapsed = start.elapsed();
+                            tracing::info!("handle_local_transfer: copy done, elapsed={:.3}ms", elapsed.as_secs_f64() * 1000.0);
                             let _ = tx.send(());
                         }
                         _ = cancel_token.cancelled() => {
@@ -105,7 +107,7 @@ impl TransferBackend for TransferBackendZe {
         })?;
 
         self.ze_event_tx
-            .send((event_pool, event, tx))
+            .send((event_pool, event, tx, std::time::Instant::now()))
             .map_err(|_| TransferError::ExecutionError("Ze event worker exited.".into()))?;
         Ok(())
     }
@@ -224,6 +226,15 @@ where
         ));
     }
 
+    let first_src = sources[0].block_data();
+    tracing::info!(
+        "ZE copy_blocks_with_customized_kernel: sources.len()={}, num_layers={}, num_outer_dims={}, first_layer_view_size={} bytes",
+        sources.len(),
+        first_src.num_layers(),
+        first_src.num_outer_dims(),
+        first_src.layer_view(0, 0).map(|v| v.size()).unwrap_or(0)
+    );
+
     let mut list = queue.create_command_list().map_err(|e| {
         TransferError::ExecutionError(format!(
             "ZE custom batch command list creation failed: {:?}",
@@ -304,6 +315,26 @@ where
             }
         }
     }
+
+    let num_blocks = sources.len();
+    let first = sources[0].block_data();
+    let memcpy_ops = if first.is_fully_contiguous() {
+        num_blocks
+    } else {
+        num_blocks * first.num_layers() * first.num_outer_dims()
+    };
+    let total_bytes = if first.is_fully_contiguous() {
+        num_blocks * first.block_view().map(|v| v.size()).unwrap_or(0)
+    } else {
+        memcpy_ops * first.layer_view(0, 0).map(|v| v.size()).unwrap_or(0)
+    };
+    tracing::info!(
+        "ZE copy_blocks_with_customized_kernel: num_blocks={}, memcpy_ops={}, total_bytes={} ({:.2} MB)",
+        num_blocks,
+        memcpy_ops,
+        total_bytes,
+        total_bytes as f64 / (1024.0 * 1024.0)
+    );
 
     list.close().map_err(|e| {
         TransferError::ExecutionError(format!("ZE custom batch list close failed: {:?}", e))
