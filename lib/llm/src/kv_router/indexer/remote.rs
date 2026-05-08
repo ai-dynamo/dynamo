@@ -235,14 +235,13 @@ impl ServedIndexerMode {
 
 struct ServedIndexerService {
     mode: ServedIndexerMode,
-    _owns_singleton_claim: bool,
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 }
 
 impl ServedIndexerService {
     async fn start(component: Component, mode: ServedIndexerMode) -> Result<Arc<Self>> {
         verify_service_topology(&component, mode).await?;
-        let owns_singleton_claim = claim_served_indexer_singleton(&component, mode).await?;
+        claim_served_indexer_singleton(&component, mode).await?;
 
         let bindings = Arc::new(RwLock::new(HashMap::new()));
         start_query_endpoint(component.clone(), bindings.clone())?;
@@ -250,11 +249,7 @@ impl ServedIndexerService {
             start_record_endpoint(component.clone(), bindings.clone())?;
         }
 
-        Ok(Arc::new(Self {
-            mode,
-            _owns_singleton_claim: owns_singleton_claim,
-            bindings,
-        }))
+        Ok(Arc::new(Self { mode, bindings }))
     }
 }
 
@@ -380,9 +375,9 @@ async fn verify_service_topology(component: &Component, mode: ServedIndexerMode)
 async fn claim_served_indexer_singleton(
     component: &Component,
     mode: ServedIndexerMode,
-) -> Result<bool> {
+) -> Result<()> {
     if mode != ServedIndexerMode::Approximate {
-        return Ok(false);
+        return Ok(());
     }
 
     let namespace = component.namespace().name();
@@ -402,7 +397,7 @@ async fn claim_served_indexer_singleton(
         .try_claim_singleton(&claim_key, payload)
         .await?
     {
-        return Ok(true);
+        return Ok(());
     }
 
     anyhow::bail!(
