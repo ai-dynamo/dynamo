@@ -15,12 +15,13 @@ with "backend 'UCX' not found" (https://github.com/ai-dynamo/dynamo/issues/6671)
 Run from repo root: python3 container/check_nixl_alignment.py
 Exit 0 if aligned, 1 otherwise.
 """
-import re
 import sys
 import tomllib
 from pathlib import Path
 
 import yaml
+from packaging.requirements import Requirement
+from packaging.version import InvalidVersion, Version
 
 # Frameworks where NIXL_REF (build) drives the runtime libnixl.so the
 # container ships. Sglang is intentionally excluded: its runtime image
@@ -30,24 +31,19 @@ import yaml
 RUNTIME_NIXL_FRAMEWORKS = ("vllm", "trtllm")
 
 
-def major_minor(version: str) -> tuple[int, int] | None:
-    m = re.match(r"v?(\d+)\.(\d+)", version)
-    return (int(m.group(1)), int(m.group(2))) if m else None
+def parse_ref_version(ref: str) -> Version | None:
+    """nixl_ref is a git ref (tag/SHA). Strip a leading `v` and parse as PEP 440."""
+    try:
+        return Version(ref.lstrip("v"))
+    except InvalidVersion:
+        return None
 
 
-def parse_nixl_pin(extras_list: list[str]) -> tuple[str, list[tuple[int, int]]] | None:
-    """Return (raw_dep_string, [major.minor bounds]) for the first nixl[cuXX] pin.
-
-    Bounds are extracted from operators like `>=0.10.1`, `<=0.10.1`, `<0.11.0`.
-    Returns None if no nixl pin found.
-    """
+def parse_nixl_pin(extras_list: list[str]) -> tuple[str, Requirement] | None:
+    """Return (raw_dep_string, Requirement) for the first nixl[cuXX] pin, else None."""
     for dep in extras_list:
-        if not dep.lower().startswith("nixl["):
-            continue
-        bounds = [
-            (int(a), int(b)) for a, b in re.findall(r"[<>=]+\s*v?(\d+)\.(\d+)", dep)
-        ]
-        return dep, bounds
+        if dep.lower().startswith("nixl["):
+            return dep, Requirement(dep)
     return None
 
 
@@ -62,7 +58,6 @@ def main() -> int:
     errors: list[str] = []
     for fw in RUNTIME_NIXL_FRAMEWORKS:
         ref = context_yaml.get(fw, {}).get("nixl_ref")
-        ref_mm = major_minor(ref) if ref else None
         pin = parse_nixl_pin(extras.get(fw, []))
 
         if ref is None and pin is None:
@@ -79,20 +74,21 @@ def main() -> int:
             )
             continue
 
-        dep_str, bounds = pin
-        if not bounds:
+        dep_str, requirement = pin
+        ref_version = parse_ref_version(ref)
+        if ref_version is None:
             errors.append(
-                f"{fw}: pyproject nixl pin {dep_str!r} has no parseable version bound"
+                f"{fw}: nixl_ref={ref!r} cannot be parsed as a PEP 440 version "
+                f"(SHA or non-version git ref?); cannot validate against pyproject pin {dep_str!r}"
             )
             continue
-        if ref_mm not in bounds and not any(b == ref_mm for b in bounds):
-            # major.minor of nixl_ref must appear in the pin's listed bounds.
-            # This is a deliberately loose check: patch-level drift is OK,
-            # but an X.Y bump on either side that the other doesn't follow
-            # gets caught.
+        # `Version in SpecifierSet` evaluates the full set of constraints
+        # (e.g. `>=0.10.1,<0.11.0`) per PEP 440 semantics, so a constraint
+        # like `>=0.10.1,<0.12.0` correctly accepts nixl_ref=0.11.3.
+        if ref_version not in requirement.specifier:
             errors.append(
-                f"{fw}: nixl_ref={ref} (major.minor={ref_mm}) does not match any bound "
-                f"in pyproject pin {dep_str!r} (bounds={bounds})"
+                f"{fw}: nixl_ref={ref} ({ref_version}) does not satisfy "
+                f"pyproject pin {dep_str!r}"
             )
 
     if errors:
@@ -100,8 +96,8 @@ def main() -> int:
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         print(
-            "\nFix by aligning major.minor versions of `nixl_ref` in container/context.yaml "
-            "with `nixl[cuXX]` in pyproject.toml [project.optional-dependencies] for each framework.",
+            "\nFix by aligning `nixl_ref` in container/context.yaml with "
+            "`nixl[cuXX]` in pyproject.toml [project.optional-dependencies] for each framework.",
             file=sys.stderr,
         )
         return 1

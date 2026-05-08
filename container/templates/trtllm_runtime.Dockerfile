@@ -211,17 +211,17 @@ COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/pyt
 # Without this fix: NIXL agent init crashes with "backend 'UCX' not found"
 # at TRT-LLM disagg startup. https://github.com/ai-dynamo/dynamo/issues/6671
 RUN TRTLLM_NIXL_BUNDLE=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/tensorrt_llm/libs/nixl && \
-    if [ -d "${TRTLLM_NIXL_BUNDLE}" ] && [ -d "${NIXL_LIB_DIR}" ]; then \
-        for f in libnixl.so libnixl_common.so libnixl_build.so libnixl_test_utils.so; do \
-            if [ -f "${TRTLLM_NIXL_BUNDLE}/${f}" ] && [ -f "${NIXL_LIB_DIR}/${f}" ]; then \
-                ln -sf "${NIXL_LIB_DIR}/${f}" "${TRTLLM_NIXL_BUNDLE}/${f}"; \
-            fi; \
-        done; \
-        if [ -d "${TRTLLM_NIXL_BUNDLE}/plugins" ] && [ -d "${NIXL_PLUGIN_DIR}" ]; then \
-            rm -rf "${TRTLLM_NIXL_BUNDLE}/plugins" && \
-            ln -sfn "${NIXL_PLUGIN_DIR}" "${TRTLLM_NIXL_BUNDLE}/plugins"; \
-        fi; \
-    fi
+    [ -d "${TRTLLM_NIXL_BUNDLE}" ] || { echo "ERROR: missing TRT-LLM NIXL bundle: ${TRTLLM_NIXL_BUNDLE}" >&2; exit 1; } && \
+    [ -d "${NIXL_LIB_DIR}" ] || { echo "ERROR: missing system NIXL lib dir: ${NIXL_LIB_DIR}" >&2; exit 1; } && \
+    [ -d "${NIXL_PLUGIN_DIR}" ] || { echo "ERROR: missing system NIXL plugin dir: ${NIXL_PLUGIN_DIR}" >&2; exit 1; } && \
+    for f in libnixl.so libnixl_common.so libnixl_build.so libnixl_test_utils.so; do \
+        [ -f "${TRTLLM_NIXL_BUNDLE}/${f}" ] || { echo "ERROR: missing bundle lib: ${TRTLLM_NIXL_BUNDLE}/${f}" >&2; exit 1; }; \
+        [ -f "${NIXL_LIB_DIR}/${f}" ] || { echo "ERROR: missing system lib: ${NIXL_LIB_DIR}/${f}" >&2; exit 1; }; \
+        ln -sf "${NIXL_LIB_DIR}/${f}" "${TRTLLM_NIXL_BUNDLE}/${f}"; \
+    done && \
+    [ -d "${TRTLLM_NIXL_BUNDLE}/plugins" ] || { echo "ERROR: missing bundle plugins dir: ${TRTLLM_NIXL_BUNDLE}/plugins" >&2; exit 1; } && \
+    rm -rf "${TRTLLM_NIXL_BUNDLE}/plugins" && \
+    ln -sfn "${NIXL_PLUGIN_DIR}" "${TRTLLM_NIXL_BUNDLE}/plugins"
 
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 # Both arch paths are listed; the non-existent one is silently ignored by the linker.
