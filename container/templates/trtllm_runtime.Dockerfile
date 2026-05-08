@@ -273,6 +273,16 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
         if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
     fi
 
+# Optional: ModelExpress P2P weight transfer support
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress P2P support..."; \
+        export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    fi
+
 # Install runtime dependencies (common + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels

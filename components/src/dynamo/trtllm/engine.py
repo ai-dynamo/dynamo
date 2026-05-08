@@ -3,6 +3,7 @@
 
 import enum
 import logging
+import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ class TensorRTLLMEngine:
         self,
         engine_args: dict[str, Any],
         disaggregation_mode: Optional[DisaggregationMode] = None,
+        model_express_url: Optional[str] = None,
     ) -> None:
         self._llm: Optional[LLM] = None
         self.disaggregation_mode = (
@@ -58,6 +60,7 @@ class TensorRTLLMEngine:
             )
 
         self.engine_args = engine_args
+        self._model_express_url = model_express_url
 
     @property
     def encoder_available(self) -> bool:
@@ -66,6 +69,14 @@ class TensorRTLLMEngine:
 
     async def initialize(self) -> None:
         if not self._llm:
+            if self._model_express_url:
+                self.engine_args["checkpoint_format"] = "MX"
+                os.environ.setdefault("MODEL_EXPRESS_URL", self._model_express_url)
+                logger.info(
+                    "ModelExpress P2P enabled: checkpoint_format=MX, server=%s",
+                    self._model_express_url,
+                )
+
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
                 # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
@@ -170,6 +181,7 @@ async def get_llm_engine(
     engine_args: dict[str, Any],
     disaggregation_mode: Optional[DisaggregationMode] = None,
     component_gauges: Any = None,
+    model_express_url: Optional[str] = None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     """Get TensorRT-LLM engine instance with load time tracking.
 
@@ -177,11 +189,11 @@ async def get_llm_engine(
         engine_args: Engine configuration arguments.
         disaggregation_mode: Optional disaggregation mode configuration.
         component_gauges: Optional LLMBackendGauges instance for recording load time.
+        model_express_url: Optional ModelExpress P2P server URL for RDMA weight transfer.
     """
-    # Time engine initialization
     start_time = time.time()
 
-    engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
+    engine = TensorRTLLMEngine(engine_args, disaggregation_mode, model_express_url)
     try:
         await engine.initialize()
         load_time = time.time() - start_time

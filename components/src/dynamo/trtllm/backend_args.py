@@ -184,6 +184,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--model-express-url",
+            env_var="MODEL_EXPRESS_URL",
+            default=None,
+            help="ModelExpress P2P server URL (e.g., modelexpress-server:8001). "
+            "When set, auto-detects source/target role based on existing sources.",
+        )
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
             default=DisaggregationMode.AGGREGATED.value,
@@ -501,6 +509,8 @@ class DynamoTrtllmConfig(ConfigBase):
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
+
+    model_express_url: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
     modality: Modality

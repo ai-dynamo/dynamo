@@ -458,6 +458,7 @@ async def init_llm_worker(
         engine_args,
         config.disaggregation_mode,
         component_gauges=component_gauges,
+        model_express_url=config.model_express_url,
     ) as engine:
         # Expose engine to the drain callback installed by main.py (#7319).
         # The callback uses this to poll active request count during shutdown.
@@ -585,7 +586,7 @@ async def init_llm_worker(
         logging.debug("DYNAMO_COMPONENT_REGISTRY callback registered successfully")
 
         # publisher will be set later if publishing is enabled.
-        handler_config = RequestHandlerConfig(
+        handler_kwargs = dict(
             engine=engine,
             default_sampling_params=default_sampling_params,
             publisher=None,
@@ -594,7 +595,7 @@ async def init_llm_worker(
             multimodal_processor=multimodal_processor,
             generate_endpoint=endpoint,
             connector=connector,
-            runtime=runtime,  # Pass runtime for graceful shutdown
+            runtime=runtime,
             metrics_collector=metrics_collector,
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
@@ -603,6 +604,7 @@ async def init_llm_worker(
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
+        handler_config = RequestHandlerConfig(**handler_kwargs)
 
         media_decoder = None
         media_fetcher = None
