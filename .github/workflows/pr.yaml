@@ -363,6 +363,24 @@ jobs:
       # kvbm bucket has no profiled_vram_gib tests, so parallel orchestration adds no value.
     secrets: inherit
 
+  vllm-unified-test:
+    name: vllm-runtime # Share UI group with other vllm jobs
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Unified Test
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # Unified tests are GPU-only
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      gpu_test_markers: pre_merge and vllm and gpu_1 and unified
+      gpu_test_timeout_minutes: 30
+    secrets: inherit
+
   vllm-multi-gpu-core:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
@@ -429,24 +447,6 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and kvbm
       gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  vllm-unified-test:
-    name: vllm-runtime # Share UI group with other vllm jobs
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: vllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: pre_merge and vllm and gpu_1 and unified
-      gpu_test_timeout_minutes: 30
     secrets: inherit
 
   sglang-test:
