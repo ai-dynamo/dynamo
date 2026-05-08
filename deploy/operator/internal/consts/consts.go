@@ -176,10 +176,40 @@ const (
 	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
 	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
-	// Rolling update annotations
-	AnnotationCurrentWorkerHash        = "nvidia.com/current-worker-hash"
+	// Worker hash rolling-update annotations are controller-owned annotations on
+	// DynamoGraphDeployment. They record the active worker generation used by
+	// generated worker DynamoComponentDeployments and must not be treated as
+	// user-configurable inputs. During a managed rolling update, the current hash
+	// remains the previously serving worker generation until the new generation is
+	// fully ready and the old generation has been drained.
+
+	// AnnotationCurrentWorkerHash stores the active worker generation hash. On
+	// first reconcile it is initialized from the desired worker spec. During a
+	// rolling update it remains the previous active hash and is only moved to the
+	// new hash when the rolling update completes.
+	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+
+	// AnnotationCurrentWorkerHashVersion identifies the algorithm used to produce
+	// AnnotationCurrentWorkerHash. Missing or unknown versions are legacy state
+	// that must be migrated before the controller can rely on v2-only rollout
+	// comparisons.
 	AnnotationCurrentWorkerHashVersion = "nvidia.com/current-worker-hash-version"
-	CurrentWorkerHashVersionV2         = "v2"
+
+	// AnnotationCurrentWorkerHashEquivalentV1 stores the one-time legacy
+	// v1alpha1 hash equivalent for AnnotationCurrentWorkerHash after the active
+	// hash has been migrated to v2. While present, it is an alias for already
+	// running worker DCDs named/labeled with the old hash, so a v1alpha1 ->
+	// v1beta1 no-op upgrade can reuse those resources. The controller clears it
+	// as soon as the desired v2 hash changes or a rolling update completes.
+	AnnotationCurrentWorkerHashEquivalentV1 = "nvidia.com/current-worker-hash-equivalent-v1"
+
+	// CurrentWorkerHashVersionV1Alpha1 marks an active worker hash computed with
+	// the legacy v1alpha1-compatible worker spec hash algorithm.
+	CurrentWorkerHashVersionV1Alpha1 = "v1alpha1"
+
+	// CurrentWorkerHashVersionV2 marks an active worker hash computed with the
+	// current v1beta1 worker spec hash algorithm.
+	CurrentWorkerHashVersionV2 = "v2"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged

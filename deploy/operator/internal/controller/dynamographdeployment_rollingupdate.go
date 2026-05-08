@@ -36,7 +36,16 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
 
-// shouldTriggerRollingUpdate determines if worker spec changes require a rolling update.
+// shouldTriggerRollingUpdate compares the desired v2 worker hash with the
+// active worker generation recorded on the DGD.
+//
+// Normal state is v2-only: current-worker-hash stores the v2 hash and a
+// mismatch means the worker pod template changed. During the first reconcile of
+// an upgraded v1alpha1 object, current-worker-hash may still contain the old
+// alpha hash. In that narrow pre-migration window, the conversion webhook's
+// preserved alpha hash is the proof that the old hash still represents the
+// current worker spec, so the controller can migrate bookkeeping without
+// starting a rollout.
 func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
@@ -52,15 +61,15 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 		return false, nil
 	}
 
+	if currentHash == computedHash {
+		return false, nil
+	}
+
 	if r.getCurrentWorkerHashVersion(dgd) != consts.CurrentWorkerHashVersionV2 {
-		if currentHash == computedHash {
-			return false, nil
-		}
-		legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-		if err != nil {
-			return false, fmt.Errorf("failed to compute legacy worker hash: %w", err)
-		}
-		if currentHash == legacyHash {
+		// Upgrade path before migration has persisted the v2 hash: only suppress
+		// rollout when conversion preserved the one-time legacy hash proving the
+		// active hash still represents the current spec.
+		if currentHash == dynamo.GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd) {
 			return false, nil
 		}
 	}
@@ -68,9 +77,11 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	return computedHash != currentHash, nil
 }
 
-// initializeWorkerHashIfNeeded sets the current worker hash annotation on first deployment.
-// For existing DGDs being upgraded from a pre-rolling-update operator version, this handles
-// patching the legacy DCDs with the new worker hash label and then triggering a rolling update on the next reconcile.
+// initializeWorkerHashIfNeeded establishes the DGD's active worker generation.
+// New DGDs store the current v2 worker hash immediately. DGDs created before
+// managed rolling updates may already have worker DCDs without a hash label; in
+// that case we label those DCDs with the legacy sentinel and let the normal
+// rolling update path migrate from that sentinel to the desired v2 hash.
 func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -133,6 +144,29 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	return nil
 }
 
+// migrateCurrentWorkerHashIfNeeded moves a DGD from legacy hash bookkeeping to
+// the v2 rollout contract.
+//
+// The migration has three relevant states:
+//
+//  1. New/current DGD:
+//     current-worker-hash=<v2>, current-worker-hash-version=v2.
+//
+//  2. v1alpha1 -> v1beta1 no-op upgrade:
+//     current-worker-hash=<v2>, current-worker-hash-version=v2,
+//     current-worker-hash-equivalent-v1=<old-alpha>.
+//     The v1 alias is history only. It is used to keep generating the same old
+//     DCD names/labels so existing DCDs are not patched or rolled just because
+//     the hash algorithm changed.
+//
+//  3. Real worker spec change after state 2:
+//     the desired v2 hash differs from current-worker-hash, so the controller
+//     clears current-worker-hash-equivalent-v1 before the normal rolling update
+//     path creates a new v2 generation.
+//
+// The alpha hash is computed by conversion while entering state 2. Once state 2
+// is recorded, the controller treats the v1 hash as stored history and does not
+// recompute it for that DGD.
 func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -140,7 +174,7 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	logger := log.FromContext(ctx)
 
 	currentHash := r.getCurrentWorkerHash(dgd)
-	if currentHash == "" || r.getCurrentWorkerHashVersion(dgd) == consts.CurrentWorkerHashVersionV2 {
+	if currentHash == "" {
 		return nil
 	}
 	if currentHash == consts.LegacyWorkerHash {
@@ -151,30 +185,97 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	if err != nil {
 		return fmt.Errorf("failed to compute worker hash: %w", err)
 	}
-	if currentHash != computedHash {
-		legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-		if err != nil {
-			return fmt.Errorf("failed to compute legacy worker hash: %w", err)
-		}
-		if currentHash != legacyHash {
+
+	if r.getCurrentWorkerHashVersion(dgd) == consts.CurrentWorkerHashVersionV2 {
+		if r.getCurrentWorkerHashEquivalentV1(dgd) == "" || currentHash == computedHash {
 			return nil
 		}
+		// A v1 alias is valid only while it describes the same worker spec as the
+		// active v2 hash. Once the desired v2 hash changes, wipe the alias before
+		// rolling so old alpha DCDs are treated as previous generations.
+		r.clearCurrentWorkerHashEquivalentV1(dgd)
+		dynamo.ClearLegacyAlphaDGDWorkersSpecHash(dgd)
+		if err := r.Update(ctx, dgd); err != nil {
+			return fmt.Errorf("failed to clear worker hash compatibility history: %w", err)
+		}
+		logger.Info("Cleared legacy worker hash compatibility after v2 worker spec changed",
+			"currentHash", currentHash,
+			"desiredHash", computedHash)
+		return nil
 	}
 
-	r.setCurrentWorkerHash(dgd, computedHash)
+	if currentHash == computedHash {
+		// The stored hash already matches the current algorithm. Stamp the v2
+		// version so future reconciles can avoid legacy compatibility checks.
+		r.setCurrentWorkerHash(dgd, computedHash)
+		dynamo.ClearLegacyAlphaDGDWorkersSpecHash(dgd)
+		if err := r.Update(ctx, dgd); err != nil {
+			return fmt.Errorf("failed to migrate worker hash annotation: %w", err)
+		}
+
+		logger.Info("Migrated worker hash annotation to current version",
+			"previousHash", currentHash,
+			"currentHash", computedHash,
+			"version", consts.CurrentWorkerHashVersionV2)
+		r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated",
+			"Migrated worker hash annotation to the current hash version without rolling workers")
+		return nil
+	}
+
+	legacyHash := dynamo.GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd)
+	if currentHash != legacyHash {
+		return nil
+	}
+
+	// The converted object still carries the alpha hash that was active before
+	// upgrade, and it matches current-worker-hash. Promote the active hash to v2
+	// now, but remember the alpha value as an alias for the existing DCDs.
+	r.setCurrentWorkerHashWithEquivalentV1(dgd, computedHash, currentHash)
 	dynamo.ClearLegacyAlphaDGDWorkersSpecHash(dgd)
 	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to migrate worker hash annotation: %w", err)
+		return fmt.Errorf("failed to record legacy worker hash compatibility: %w", err)
 	}
-
-	logger.Info("Migrated worker hash annotation to current version",
-		"previousHash", currentHash,
+	logger.Info("Recorded legacy worker hash compatibility",
 		"currentHash", computedHash,
-		"version", consts.CurrentWorkerHashVersionV2)
-	r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated",
-		"Migrated worker hash annotation to the current hash version without rolling workers")
+		"equivalentV1Hash", currentHash)
+	r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashCompatibilityRecorded",
+		"Recorded legacy worker hash compatibility without rolling workers")
 
 	return nil
+}
+
+// activeWorkerHashForDCDGeneration returns the hash used for generated worker
+// DCD names and labels in this reconcile.
+//
+// This is usually the desired v2 hash. The exception is state 2 from
+// migrateCurrentWorkerHashIfNeeded: the DGD's active hash has already been
+// migrated to v2, but existing DCDs are still named/labeled with the old alpha
+// hash. While the v1 alias is present and the v2 hash is unchanged, keep
+// generating the old value so graph reconciliation does not patch those DCDs.
+func (r *DynamoGraphDeploymentReconciler) activeWorkerHashForDCDGeneration(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	computedHash string,
+) string {
+	currentHash := r.getCurrentWorkerHash(dgd)
+	if currentHash == "" || currentHash == consts.LegacyWorkerHash {
+		return computedHash
+	}
+	if currentHash == computedHash {
+		if equivalentV1Hash := r.getCurrentWorkerHashEquivalentV1(dgd); equivalentV1Hash != "" {
+			// No semantic worker-spec change after an alpha-to-v2 migration:
+			// keep generating DCD names and labels from the active legacy alias
+			// so existing DCDs are not patched to the v2 value in place.
+			return equivalentV1Hash
+		}
+		return computedHash
+	}
+	if r.getCurrentWorkerHashVersion(dgd) == consts.CurrentWorkerHashVersionV2 {
+		return computedHash
+	}
+	if currentHash == dynamo.GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd) {
+		return currentHash
+	}
+	return computedHash
 }
 
 // findLegacyWorkerDCDs returns worker DCDs owned by this DGD that lack the worker hash label.
@@ -219,9 +320,10 @@ func (r *DynamoGraphDeploymentReconciler) supportsManagedRollingUpdate(
 	return !r.isGrovePathway(dgd) && !dgd.HasAnyMultinodeComponent()
 }
 
-// getCurrentWorkerHash returns the stored worker hash from DGD annotations.
-// during a rolling update, this is the previous worker hash and is not updated until the rolling update is completed.
-// Returns empty string if no hash has been set (new deployment).
+// getCurrentWorkerHash returns the active worker generation stored on the DGD.
+// During a rolling update this is the previous serving hash; it is not advanced
+// to the desired hash until the new generation is ready and the old generation
+// has drained. Empty means this DGD has not initialized rolling-update state.
 func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) string {
@@ -240,7 +342,19 @@ func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHashVersion(
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion]
 }
 
-// setCurrentWorkerHash stores the worker hash in DGD annotations.
+// getCurrentWorkerHashEquivalentV1 returns the legacy v1alpha1 hash alias for a
+// migrated v2 active worker hash, if one has already been recorded.
+func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHashEquivalentV1(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) string {
+	if dgd.Annotations == nil {
+		return ""
+	}
+	return dgd.Annotations[consts.AnnotationCurrentWorkerHashEquivalentV1]
+}
+
+// setCurrentWorkerHash stores a current-algorithm worker hash as the active
+// generation and clears any legacy equivalence state.
 func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	hash string,
@@ -250,8 +364,37 @@ func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHash(
 	}
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = hash
 	dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion] = consts.CurrentWorkerHashVersionV2
+	delete(dgd.Annotations, consts.AnnotationCurrentWorkerHashEquivalentV1)
 }
 
+// setCurrentWorkerHashWithEquivalentV1 records currentHash as the v2 active
+// generation while keeping equivalentV1Hash as an alias for existing worker DCDs
+// already named/labeled with the old v1alpha1 hash.
+func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHashWithEquivalentV1(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	currentHash string,
+	equivalentV1Hash string,
+) {
+	if dgd.Annotations == nil {
+		dgd.Annotations = make(map[string]string)
+	}
+	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = currentHash
+	dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion] = consts.CurrentWorkerHashVersionV2
+	dgd.Annotations[consts.AnnotationCurrentWorkerHashEquivalentV1] = equivalentV1Hash
+}
+
+func (r *DynamoGraphDeploymentReconciler) clearCurrentWorkerHashEquivalentV1(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) {
+	if dgd.Annotations == nil {
+		return
+	}
+	delete(dgd.Annotations, consts.AnnotationCurrentWorkerHashEquivalentV1)
+}
+
+// setLegacyWorkerHash marks pre-rolling-update worker DCDs as the active
+// generation so the next reconcile can migrate them with the normal rolling
+// update lifecycle.
 func (r *DynamoGraphDeploymentReconciler) setLegacyWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) {
@@ -260,6 +403,7 @@ func (r *DynamoGraphDeploymentReconciler) setLegacyWorkerHash(
 	}
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = consts.LegacyWorkerHash
 	delete(dgd.Annotations, consts.AnnotationCurrentWorkerHashVersion)
+	delete(dgd.Annotations, consts.AnnotationCurrentWorkerHashEquivalentV1)
 }
 
 // getOrCreateRollingUpdateStatus returns the existing rolling update status or creates a new one.
@@ -893,11 +1037,20 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 ) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
-	newWorkerHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	computedHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to compute worker hash: %w", err)
 	}
+	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, computedHash)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
+	if prevWorkerHash == computedHash {
+		if equivalentV1Hash := r.getCurrentWorkerHashEquivalentV1(dgd); equivalentV1Hash != "" {
+			// Treat the alias as the previous generation for context building;
+			// otherwise the no-op-upgrade state would look like prev==new and the
+			// existing alpha-labeled DCDs would disappear from rollout accounting.
+			prevWorkerHash = equivalentV1Hash
+		}
+	}
 
 	if prevWorkerHash == newWorkerHash {
 		return dynamo.RollingUpdateContext{

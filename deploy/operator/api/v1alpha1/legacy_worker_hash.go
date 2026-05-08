@@ -18,6 +18,8 @@ import (
 const (
 	AnnotationDGDLegacyWorkerHash = "nvidia.com/dgd-legacy-worker-hash"
 	annCurrentWorkerHash          = "nvidia.com/current-worker-hash"
+	annCurrentWorkerHashVersion   = "nvidia.com/current-worker-hash-version"
+	currentWorkerHashVersionV2    = "v2"
 )
 
 // GetDGDLegacyWorkerHash returns the preserved v1alpha1 worker hash carried on

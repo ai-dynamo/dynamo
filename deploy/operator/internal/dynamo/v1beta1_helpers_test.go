@@ -143,6 +143,30 @@ func TestDCDAlphaCompatibilityHelpersReadThroughAPIConversion(t *testing.T) {
 	}
 }
 
+func TestGetDCDWorkloadComponentTypePreservesLegacyAlphaWorkerSelector(t *testing.T) {
+	dcd := dcdFromAlpha(t, v1alpha1.DynamoComponentDeploymentSpec{
+		DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType:    commonconsts.ComponentTypeWorker,
+			SubComponentType: commonconsts.ComponentTypeDecode,
+		},
+	})
+	dcd.Labels = map[string]string{
+		commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+		commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+		commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+		commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+	}
+
+	if got := GetDCDWorkloadComponentType(dcd); got != commonconsts.ComponentTypeWorker {
+		t.Fatalf("GetDCDWorkloadComponentType() = %q, want worker", got)
+	}
+
+	dcd.Labels = nil
+	if got := GetDCDWorkloadComponentType(dcd); got != commonconsts.ComponentTypeDecode {
+		t.Fatalf("GetDCDWorkloadComponentType() without legacy labels = %q, want decode", got)
+	}
+}
+
 func TestToAlphaCheckpointConfigSetsNilIdentityThroughConverter(t *testing.T) {
 	got := ToAlphaCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
 		Mode:          v1beta1.CheckpointMode("auto"),

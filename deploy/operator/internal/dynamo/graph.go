@@ -2321,6 +2321,12 @@ func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponen
 	)
 }
 
+type GenerateBasePodSpecForControllerOptions struct {
+	// WorkloadComponentType overrides the component type used for pod workload
+	// defaults and env vars. Empty means use dynComponent.Spec.ComponentType.
+	WorkloadComponentType v1beta1.ComponentType
+}
+
 // GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
 // This preserves the base pod generation while allowing controller-specific enhancements
 func GenerateBasePodSpecForController(
@@ -2330,9 +2336,13 @@ func GenerateBasePodSpecForController(
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
+	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
 	// Convert to our interface
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
+	if options.WorkloadComponentType != "" {
+		componentSpec.ComponentType = options.WorkloadComponentType
+	}
 
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
