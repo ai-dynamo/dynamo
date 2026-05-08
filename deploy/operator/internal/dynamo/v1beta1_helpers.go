@@ -210,6 +210,43 @@ func GetDCDSubComponentType(dcd *v1beta1.DynamoComponentDeployment) string {
 	return ""
 }
 
+// GetDCDWorkloadComponentType returns the component type that existing
+// Kubernetes workloads should be rendered with. Converted v1alpha1 DCDs for
+// disaggregated workers preserve the old selector contract:
+// component-type=worker plus sub-component-type=prefill/decode.
+func GetDCDWorkloadComponentType(dcd *v1beta1.DynamoComponentDeployment) string {
+	if legacyType := legacyAlphaWorkloadComponentType(dcd); legacyType != "" {
+		return legacyType
+	}
+	if dcd == nil {
+		return ""
+	}
+	return string(dcd.Spec.ComponentType)
+}
+
+func legacyAlphaWorkloadComponentType(dcd *v1beta1.DynamoComponentDeployment) string {
+	if dcd == nil || dcd.Labels == nil {
+		return ""
+	}
+	labels := dcd.Labels
+	if labels[commonconsts.KubeLabelDynamoGraphDeploymentName] == "" ||
+		labels[commonconsts.KubeLabelDynamoWorkerHash] == "" {
+		return ""
+	}
+	legacyType := labels[commonconsts.KubeLabelDynamoComponentType]
+	specType := string(dcd.Spec.ComponentType)
+	if legacyType != commonconsts.ComponentTypeWorker {
+		return ""
+	}
+	if specType != commonconsts.ComponentTypePrefill && specType != commonconsts.ComponentTypeDecode {
+		return ""
+	}
+	if subComponentType := labels[commonconsts.KubeLabelDynamoSubComponentType]; subComponentType != "" && subComponentType != specType {
+		return ""
+	}
+	return legacyType
+}
+
 // GetDCDPreservedAlphaAnnotations returns alpha compatibility annotations
 // restored by API conversion.
 func GetDCDPreservedAlphaAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]string {

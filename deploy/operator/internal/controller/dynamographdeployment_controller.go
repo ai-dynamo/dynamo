@@ -1280,11 +1280,12 @@ func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx c
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute worker hash: %w", err)
 	}
+	workerHash := r.activeWorkerHashForDCDGeneration(dgd, computedHash)
 
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {
 		componentName := dgd.Spec.Components[i].ComponentName
-		dcdName := dynamo.GetDCDResourceName(dgd, componentName, computedHash)
+		dcdName := dynamo.GetDCDResourceName(dgd, componentName, workerHash)
 		existingDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 

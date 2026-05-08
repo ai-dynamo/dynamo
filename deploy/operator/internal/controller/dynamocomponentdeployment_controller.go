@@ -47,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -84,6 +85,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -717,7 +719,7 @@ func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoCo
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx context.Context, opt generateResourceOption) (bool, error) {
 	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return r.generateService(opt)
+		return r.generateService(ctx, opt)
 	})
 	if err != nil {
 		return false, err
@@ -856,6 +858,7 @@ func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponent
 		maps.Copy(annotations, dynamo.GetDCDPreservedAlphaAnnotations(dynamoComponentDeployment))
 		maps.Copy(annotations, dynamo.GetPodTemplateAnnotations(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
 		dynamo.AddBaseModelAnnotation(annotations, dynamoComponentDeployment.Spec.ModelRef)
+		delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	}
 	return annotations
 }
@@ -950,6 +953,10 @@ type generateResourceOption struct {
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (*corev1.PodTemplateSpec, error) {
 	dcd := opt.dynamoComponentDeployment
 	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
+	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
+	if err != nil {
+		return nil, err
+	}
 	podLabels := r.getKubeLabels(dcd)
 	podAnnotations := r.getKubeAnnotations(dcd)
 	kubeName := dcd.Name
@@ -968,8 +975,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	} else if parentName := dcd.GetParentGraphDeploymentName(); parentName != "" {
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
 	}
-	if component.ComponentType != "" {
-		podLabels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
+	if componentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = componentType
 	}
 	if componentName := dynamo.GetDCDComponentName(dcd); componentName != "" {
 		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
@@ -994,7 +1001,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		checkpointInfo = info
 	}
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(dcd, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(
+		dcd,
+		r.DockerSecretRetriever,
+		r.Config,
+		role,
+		commonconsts.MultinodeDeploymentTypeLWS,
+		checkpointInfo,
+		dynamo.GenerateBasePodSpecForControllerOptions{
+			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
+		},
+	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
@@ -1052,7 +1069,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
 	dcd := opt.dynamoComponentDeployment
 
 	deleteStub := &corev1.Service{
@@ -1074,10 +1091,15 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
 	}
 
+	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
+	if err != nil {
+		return nil, false, err
+	}
+
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
-		ComponentType:   string(dcd.Spec.ComponentType),
+		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   dynamo.GetDCDComponentName(dcd),
 		Labels:          r.getKubeLabels(dcd),
@@ -1091,6 +1113,105 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		svc.Spec.Selector["role"] = "leader"
 	}
 	return svc, false, nil
+}
+
+// getDCDWorkloadComponentType returns the component type that should be
+// rendered into pod metadata, env, and service selectors for this DCD. It keeps
+// legacy-compatible worker generations as "worker" even when the v1beta1 DCD
+// spec is represented as a more specific prefill/decode worker component.
+func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadComponentType(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (string, error) {
+	componentType := dynamo.GetDCDWorkloadComponentType(dcd)
+	if componentType == commonconsts.ComponentTypeWorker || !dynamo.IsWorkerComponent(componentType) {
+		return componentType, nil
+	}
+	if dcd == nil {
+		return componentType, nil
+	}
+
+	// Decode/prefill are the current v1beta1 workload-facing worker types. When
+	// their DCD hash is still aliased to a legacy-compatible generation, keep
+	// rendering pod labels/env and service selectors as "worker" so a no-op
+	// upgrade keeps matching the already-running v1alpha1 worker pods.
+	labels := dcd.GetLabels()
+	workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]
+	if workerHash == "" {
+		return componentType, nil
+	}
+
+	parentDGD, ok, err := r.getParentDGD(ctx, dcd)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return componentType, nil
+	}
+
+	if dgdHasLegacyCompatibleWorkerHash(parentDGD, workerHash) {
+		return commonconsts.ComponentTypeWorker, nil
+	}
+
+	return componentType, nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) getParentDGD(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (*nvidiacomv1beta1.DynamoGraphDeployment, bool, error) {
+	if dcd == nil || r == nil || r.Client == nil {
+		return nil, false, nil
+	}
+	labels := dcd.GetLabels()
+	parentDGDName := dcd.GetParentGraphDeploymentName()
+	if parentDGDName == "" {
+		parentDGDName = labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+	}
+	if parentDGDName == "" {
+		return nil, false, nil
+	}
+
+	parentDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: parentDGDName, Namespace: dcd.Namespace}, parentDGD); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to get parent DynamoGraphDeployment %s/%s: %w", dcd.Namespace, parentDGDName, err)
+	}
+	return parentDGD, true, nil
+}
+
+// dgdHasLegacyCompatibleWorkerHash reports whether workerHash is an old
+// v1alpha1 worker generation that is still explicitly aliased by the parent DGD.
+// This lets DCD rendering preserve legacy workload selectors without patching
+// existing DCDs to v2 labels in place.
+func dgdHasLegacyCompatibleWorkerHash(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	workerHash string,
+) bool {
+	if dgd == nil || workerHash == "" || dgd.Annotations == nil {
+		return false
+	}
+
+	if dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashVersion] == commonconsts.CurrentWorkerHashVersionV2 {
+		// In migrated state the DGD's active hash is v2. The only old-hash DCDs
+		// that should keep legacy "worker" selectors are those explicitly named
+		// by current-worker-hash-equivalent-v1.
+		return dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashEquivalentV1] == workerHash
+	}
+
+	if dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] != workerHash {
+		return false
+	}
+	if dynamo.GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd) == workerHash {
+		// Pre-migration window: conversion preserved the old alpha hash but the
+		// DGD has not yet been updated to v2 bookkeeping. Honor the old DCD
+		// selector shape until migrateCurrentWorkerHashIfNeeded records the alias.
+		return true
+	}
+
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.

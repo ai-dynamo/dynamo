@@ -36,6 +36,18 @@ func ComputeLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (s
 	return v1alpha1.ComputeDGDWorkersSpecHash(alpha)
 }
 
+// GetPreservedLegacyAlphaDGDWorkersSpecHash returns only the alpha hash value
+// that conversion already preserved on the v1beta1 object. Unlike
+// ComputeLegacyAlphaDGDWorkersSpecHash, it never converts back to v1alpha1 and
+// never recomputes the old algorithm. Use this in controller migration logic
+// when the alpha hash should be treated as immutable history.
+func GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) string {
+	return v1alpha1.GetDGDLegacyWorkerHash(dgd)
+}
+
+// ClearLegacyAlphaDGDWorkersSpecHash removes the transient conversion-only
+// alpha hash after the controller has either recorded the v1 alias or decided
+// not to use legacy compatibility for this DGD.
 func ClearLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) {
 	v1alpha1.ClearDGDLegacyWorkerHash(dgd)
 }

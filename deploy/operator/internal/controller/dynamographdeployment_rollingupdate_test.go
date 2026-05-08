@@ -186,7 +186,10 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 			} else if tt.existingHash == "legacy-compute" {
 				hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
-				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: hash}
+				dgd.Annotations = map[string]string{
+					consts.AnnotationCurrentWorkerHash:              hash,
+					nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash: hash,
+				}
 			} else if tt.existingHash != "" {
 				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: tt.existingHash}
 			}
@@ -257,7 +260,7 @@ func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
 	assert.Equal(t, existingHash, hash, "Hash should not change when already initialized")
 }
 
-func TestInitializeWorkerHashIfNeeded_MigratesLegacyAlphaHash(t *testing.T) {
+func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -288,6 +291,7 @@ func TestInitializeWorkerHashIfNeeded_MigratesLegacyAlphaHash(t *testing.T) {
 		dgd.Annotations = map[string]string{}
 	}
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
+	dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
 	err = r.initializeWorkerHashIfNeeded(context.Background(), dgd)
@@ -295,10 +299,114 @@ func TestInitializeWorkerHashIfNeeded_MigratesLegacyAlphaHash(t *testing.T) {
 
 	assert.Equal(t, v2Hash, r.getCurrentWorkerHash(dgd))
 	assert.Equal(t, consts.CurrentWorkerHashVersionV2, dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion])
-	assert.Empty(t, dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash])
+	assert.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashEquivalentV1])
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
 	assert.False(t, trigger)
+
+	ctx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, legacyHash, ctx.NewWorkerHash)
+	assert.False(t, ctx.InProgress())
+	assert.NotEqual(t, v2Hash, ctx.NewWorkerHash)
+}
+
+func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t *testing.T) {
+	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qwen",
+			Namespace: "default",
+			Annotations: map[string]string{
+				consts.AnnotationCurrentWorkerHash: "old-alpha-hash",
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"VllmDecodeWorker": {
+					ComponentType:    consts.ComponentTypeWorker,
+					SubComponentType: consts.ComponentTypeDecode,
+					Envs:             []corev1.EnvVar{{Name: "MODEL_PATH", Value: "Qwen/Qwen3-0.6B"}},
+					Resources: &nvidiacomv1alpha1.Resources{
+						Requests: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+					},
+				},
+			},
+		},
+	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(dgd))
+	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	require.NotEqual(t, legacyHash, v2Hash)
+	if dgd.Annotations == nil {
+		dgd.Annotations = map[string]string{}
+	}
+	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
+	dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash] = legacyHash
+
+	r := createTestReconcilerWithStatus(dgd)
+	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.False(t, trigger)
+
+	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
+	require.False(t, rollingCtx.InProgress())
+
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, rollingCtx)
+	require.NoError(t, err)
+	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
+	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)
+}
+
+func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+			Resources: &nvidiacomv1alpha1.Resources{
+				Requests: &nvidiacomv1alpha1.ResourceItem{CPU: "1"},
+			},
+		},
+	})
+	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	require.NotEqual(t, legacyHash, v2Hash)
+	if dgd.Annotations == nil {
+		dgd.Annotations = map[string]string{}
+	}
+	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
+	dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash] = legacyHash
+
+	r := createTestReconcilerWithStatus(dgd)
+	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+	require.Equal(t, consts.CurrentWorkerHashVersionV2, dgd.Annotations[consts.AnnotationCurrentWorkerHashVersion])
+	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashEquivalentV1])
+
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = append(
+		dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "NEW_WORKER_SETTING", Value: "true"},
+	)
+	newV2Hash := betaDGDWorkersSpecHash(t, dgd)
+	require.NotEqual(t, v2Hash, newV2Hash)
+
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.Empty(t, dgd.Annotations[consts.AnnotationCurrentWorkerHashEquivalentV1])
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.True(t, trigger)
+
+	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 }
 
 func TestSupportsManagedRollingUpdate(t *testing.T) {

@@ -582,7 +582,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 
 func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t *testing.T) {
 	r := &DynamoComponentDeploymentReconciler{Config: &configv1alpha1.OperatorConfiguration{}}
-	service, toDelete, err := r.generateService(generateResourceOption{
+	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{
 		dynamoComponentDeployment: betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      testDottedDCDName,
@@ -600,6 +600,111 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 	require.NoError(t, err)
 	require.True(t, toDelete)
 	require.Equal(t, testNormalizedDCDName, service.Name)
+}
+
+func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+
+	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qwen-vllmdecodeworker-db6b6891",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeDecode,
+				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+			},
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:      "VllmDecodeWorker",
+				ComponentType:    commonconsts.ComponentTypeWorker,
+				SubComponentType: commonconsts.ComponentTypeDecode,
+				DynamoNamespace:  ptr.To("default"),
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: "test-image:latest",
+					},
+				},
+			},
+		},
+	})
+	require.Equal(t, v1beta1.ComponentTypeDecode, dcd.Spec.ComponentType)
+
+	parentDGD := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qwen",
+			Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.AnnotationCurrentWorkerHash:             "ea91a23f",
+				commonconsts.AnnotationCurrentWorkerHashVersion:      commonconsts.CurrentWorkerHashVersionV2,
+				commonconsts.AnnotationCurrentWorkerHashEquivalentV1: "db6b6891",
+			},
+		},
+	}
+
+	r := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd, parentDGD).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	podTemplate, err := r.generatePodTemplateSpec(
+		context.Background(),
+		generateResourceOption{dynamoComponentDeployment: dcd},
+		dynamo.RoleMain,
+	)
+	require.NoError(t, err)
+	require.Equal(t, commonconsts.ComponentTypeWorker, podTemplate.Labels[commonconsts.KubeLabelDynamoComponentType])
+	require.Equal(t, commonconsts.ComponentTypeDecode, podTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+
+	env := map[string]string{}
+	for _, item := range podTemplate.Spec.Containers[0].Env {
+		env[item.Name] = item.Value
+	}
+	require.Equal(t, commonconsts.ComponentTypeWorker, env[commonconsts.DynamoComponentEnvVar])
+
+	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Equal(t, commonconsts.ComponentTypeWorker, service.Spec.Selector[commonconsts.KubeLabelDynamoComponentType])
+}
+
+func TestDynamoComponentDeploymentReconciler_getKubeAnnotations_DropsOperatorOriginVersion(t *testing.T) {
+	r := &DynamoComponentDeploymentReconciler{}
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.0",
+							commonconsts.KubeAnnotationDynamoDiscoveryBackend:      "kubernetes",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	annotations := r.getKubeAnnotations(dcd)
+
+	require.NotContains(t, annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+	require.Equal(t, "kubernetes", annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend])
 }
 
 type mockDockerSecretRetriever struct {

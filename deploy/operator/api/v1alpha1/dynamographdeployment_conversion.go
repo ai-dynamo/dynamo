@@ -75,7 +75,13 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	hubOrigin := restoredHubSpec != nil
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
-	if hash, ok := getAnnFromObj(&src.ObjectMeta, annCurrentWorkerHash); ok && hash != "" {
+	currentHashVersion := src.ObjectMeta.Annotations[annCurrentWorkerHashVersion]
+	// Preserve the alpha-era worker hash only while the object is still in
+	// legacy hash state. Once the controller has stamped the v2 hash version,
+	// conversion must stop recomputing the alpha hash so the compatibility path
+	// remains a bounded one-time bridge.
+	if hash, ok := getAnnFromObj(&src.ObjectMeta, annCurrentWorkerHash); ok && hash != "" &&
+		currentHashVersion != currentWorkerHashVersionV2 {
 		legacyHash, err := ComputeDGDWorkersSpecHash(src)
 		if err != nil {
 			return fmt.Errorf("compute v1alpha1 DGD worker hash: %w", err)
