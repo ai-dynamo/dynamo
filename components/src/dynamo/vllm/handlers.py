@@ -2235,7 +2235,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "with grid_thw computation support"
                     )
                     logger.error("Request %s: %s", request_id, msg)
-                    yield {"status": "error", "message": msg}
+                    # Yield in BackendOutput format so the Rust postprocessor
+                    # converts to a proper SSE error event (Annotated::from_error)
+                    # instead of letting a status-error dict leak into the
+                    # response stream as malformed JSON (no `object` field →
+                    # aiperf parse failure).
+                    yield {
+                        "finish_reason": f"error: {msg}",
+                        "index": 0,
+                        "token_ids": [],
+                    }
                     return
             else:
                 # Non-qwen model, assume the multi_modal_data has been consumed

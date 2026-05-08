@@ -51,6 +51,29 @@ pub struct RdmaMediaDataDescriptor {
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
+impl RdmaMediaDataDescriptor {
+    /// xxh3-64 of the decoded byte payload (e.g. RGB pixels for an image).
+    /// Returns `None` if the descriptor was deserialized from the wire and
+    /// no longer holds local storage. Used by MM-aware KV routing to
+    /// produce a content-addressed `mm_hash` so the same image reached
+    /// through different (signed) URLs collides on the same routing key.
+    #[cfg(feature = "lightseek-mm")]
+    pub(crate) fn content_hash(&self) -> Option<u64> {
+        use dynamo_memory::MemoryDescriptor;
+        let registered = self.source_storage.as_ref()?;
+        let storage = registered.storage();
+        let len = storage.size();
+        if len == 0 {
+            return None;
+        }
+        // SAFETY: `storage` is borrowed for the duration of this call;
+        // SystemStorage owns the malloc'd buffer of `len` bytes and won't
+        // free or relocate it while the borrow is alive.
+        let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr(), len) };
+        Some(xxhash_rust::xxh3::xxh3_64(bytes))
+    }
+}
+
 impl DecodedMediaData {
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;

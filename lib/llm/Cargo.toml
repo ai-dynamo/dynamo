@@ -79,6 +79,7 @@ futures-util = { workspace = true }
 hf-hub = { workspace = true }
 ipnet = { workspace = true }
 lru = { workspace = true }
+moka = { workspace = true }
 rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }

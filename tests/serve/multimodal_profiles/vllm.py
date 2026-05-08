@@ -39,6 +39,15 @@ _LLAVA_EXPECTED_COLORS = [
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
+    # Aggregated MM-aware router. Default uses the Rust frontend with the
+    # `lightseek-mm` feature; the `_chat_processor` variant uses the vLLM
+    # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
+    # DYNAMO_MM_TRANSFER shm/NIXL pre-rendered mm_kwargs delivery channel.
+    "agg_router": "agg_multimodal_router.sh",
+    "agg_router_chat_processor": "agg_multimodal_router_chat_processor.sh",
+    # Frontend-decode reuses the same script as `agg_router`; the topology
+    # config below toggles `--frontend-decoding` on the worker via env.
+    "agg_router_frontend_decode": "agg_multimodal_router.sh",
     "e_pd": "disagg_multimodal_e_pd.sh",
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
@@ -89,6 +98,56 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+            ),
+            # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
+            # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
+            # Smoke-level on pre_merge so regressions to the script's plumbing
+            # (worker boot order, ZMQ KV events, MM-routing build) surface in
+            # gating CI before they merge. The fine-grained routing-correctness
+            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            # The chat-processor variant of the MM-aware router: same routing
+            # architecture, but the frontend uses --dyn-chat-processor=vllm
+            # (Python preprocessor) instead of the Rust+lightseek path. Kept
+            # on pre_merge alongside the default so both entry points stay
+            # covered by gating CI; the routing assertions are equivalent.
+            # SINGLE_GPU=true packs both workers onto GPU 0 to match the
+            # single-GPU CI environment (the chat-processor script's own
+            # default is false for production multi-GPU usage).
+            "agg_router_chat_processor": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            # Frontend-decode variant: same `agg_multimodal_router.sh` as
+            # `agg_router`, but `VLLM_EXTRA_ARGS=--frontend-decoding` so
+            # the worker registers a `media_decoder` on its model card and
+            # the frontend's MediaLoader runs in-process. mm_hash becomes
+            # content-addressed (xxh3 over decoded RGB), enabling
+            # cross-URL cache reuse. Smoke-level gate so regressions to
+            # the decoded branch in `gather_multi_modal_data` surface in
+            # CI; the content-hash correctness assertion lives in
+            # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
+            "agg_router_frontend_decode": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={
+                    "SINGLE_GPU": "true",
+                    "VLLM_EXTRA_ARGS": "--frontend-decoding",
+                },
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.post_merge],

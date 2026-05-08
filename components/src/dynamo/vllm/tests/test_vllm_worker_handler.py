@@ -517,8 +517,8 @@ class TestDecodeWorkerMultimodalBranching:
             chunks.append(chunk)
 
         assert len(chunks) == 1
-        assert chunks[0]["status"] == "error"
-        assert "without prefill result" in chunks[0]["message"]
+        assert chunks[0]["finish_reason"].startswith("error:")
+        assert "without prefill result" in chunks[0]["finish_reason"]
 
     async def test_decode_only_qwen_missing_embedding_params_errors(self):
         """Decode-only Qwen VL with prefill_result but no embedding_params -> error."""
@@ -545,8 +545,8 @@ class TestDecodeWorkerMultimodalBranching:
             chunks.append(chunk)
 
         assert len(chunks) == 1
-        assert chunks[0]["status"] == "error"
-        assert "embedding metadata" in chunks[0]["message"]
+        assert chunks[0]["finish_reason"].startswith("error:")
+        assert "embedding metadata" in chunks[0]["finish_reason"]
 
     async def test_decode_only_non_qwen_proceeds_without_embedding_params(self):
         """Decode-only non-Qwen with prefill_result but no embedding_params -> proceeds.
