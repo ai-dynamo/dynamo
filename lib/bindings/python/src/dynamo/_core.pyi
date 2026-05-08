@@ -2281,3 +2281,75 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+# ---------------------------------------------------------------------------
+# `dynamo._core.backend` submodule.
+#
+# Registered at import time by the pyo3 bindings via `sys.modules`, so it has
+# no filesystem layout that mypy can discover. Declaring it as a typed
+# namespace class lets `from dynamo._core import backend as _backend` resolve
+# and preserves attribute typing for the pyclasses it exposes.
+# ---------------------------------------------------------------------------
+
+class backend:
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            context_length: Optional[int] = None,
+            kv_cache_block_size: Optional[int] = None,
+            total_kv_blocks: Optional[int] = None,
+            max_num_seqs: Optional[int] = None,
+            max_num_batched_tokens: Optional[int] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
+        @property
+        def context_length(self) -> Optional[int]: ...
+        @property
+        def kv_cache_block_size(self) -> Optional[int]: ...
+        @property
+        def total_kv_blocks(self) -> Optional[int]: ...
+        @property
+        def max_num_seqs(self) -> Optional[int]: ...
+        @property
+        def max_num_batched_tokens(self) -> Optional[int]: ...
+
+    class RuntimeConfig:
+        def __init__(
+            self,
+            discovery_backend: Optional[str] = None,
+            request_plane: Optional[str] = None,
+            event_plane: Optional[str] = None,
+        ) -> None: ...
+
+    class WorkerConfig:
+        def __init__(
+            self,
+            namespace: str,
+            component: str = ...,
+            endpoint: str = ...,
+            model_name: str = ...,
+            served_model_name: Optional[str] = None,
+            model_input: ModelInput = ...,
+            endpoint_types: str = ...,
+            custom_jinja_template: Optional[str] = None,
+            tool_call_parser: Optional[str] = None,
+            reasoning_parser: Optional[str] = None,
+            exclude_tools_when_tool_choice_none: bool = ...,
+            enable_local_indexer: bool = ...,
+            metrics_labels: List[Tuple[str, str]] = ...,
+            runtime: Optional["backend.RuntimeConfig"] = None,
+        ) -> None: ...
+
+    class Worker:
+        def __init__(
+            self,
+            engine: Any,
+            config: "backend.WorkerConfig",
+            event_loop: Any,
+        ) -> None: ...
+        def run(self) -> Awaitable[None]: ...

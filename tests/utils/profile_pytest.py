@@ -92,6 +92,29 @@ _PLATEAU_MIN_SAMPLES = 3
 _EARLY_STOP_RANGE_MIB = 768  # 0.75 GiB
 
 
+def _parse_gpu_list(s: str) -> list[int]:
+    """Parse "0" or "0,1" or "0, 1, 2" into [0], [0, 1], [0, 1, 2].
+
+    Used for --gpus: a single int (single-GPU profile) or a comma-separated
+    list (multi-GPU profile, e.g. disagg tests with separate encode/PD workers).
+    The list becomes the subprocess CUDA_VISIBLE_DEVICES so the test sees only
+    those GPUs, in that order (CUDA index 0 maps to physical index s[0], etc.).
+    """
+    if not s:
+        raise argparse.ArgumentTypeError("expected non-empty GPU list")
+    try:
+        result = [int(x.strip()) for x in s.split(",") if x.strip() != ""]
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"invalid GPU list {s!r}: {e}")
+    if not result:
+        raise argparse.ArgumentTypeError(f"empty GPU list after parsing {s!r}")
+    if any(i < 0 for i in result):
+        raise argparse.ArgumentTypeError(f"GPU indices must be >= 0 (got {s!r})")
+    if len(result) != len(set(result)):
+        raise argparse.ArgumentTypeError(f"duplicate GPU indices in {s!r}")
+    return result
+
+
 def _extract_model_from_markers(pytest_args: list[str]) -> str | None:
     """Extract the model name from @pytest.mark.model(...) via pytest-json-report.
 
@@ -811,7 +834,7 @@ def _find_min_vram(
     recommend: bool = True,
     csv_path: str | None = None,
     kv_bytes_mode: bool = False,
-    gpu_index: int = 0,
+    gpu_indices: list[int] | None = None,
 ) -> int:
     """Binary search to find the minimum VRAM a test needs.
 
@@ -823,24 +846,43 @@ def _find_min_vram(
       TensorRT-LLM: bisects _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS (tokens)
       All use the same _KV_SAFETY_FACTOR (2x) and the same bisect loop.
       The only differences are env var name, units, display, and bounds.
+
+    Multi-GPU profiling: pass gpu_indices=[0,1,...] for disagg tests where
+    workers pin themselves to separate CUDA indices via the launch script.
+    The subprocess sees those host GPUs in order (CUDA index 0 = first
+    selected). The bisection's KV cap is per-process (applies to whichever
+    worker has a KV cache); peak VRAM is reported per-GPU and the marker
+    output uses the max across selected GPUs (status quo single-GPU
+    behavior).
     """
+    if gpu_indices is None:
+        gpu_indices = [0]
     is_sglang = _is_sglang_test(pytest_args)
     is_trtllm = _is_trtllm_test(pytest_args)
 
     gpu_info = _query_gpu_stats()
     if not gpu_info:
         raise RuntimeError("NVML returned no GPU data")
-    if gpu_index >= len(gpu_info):
-        raise RuntimeError(
-            f"GPU {gpu_index} not found (available: 0..{len(gpu_info) - 1})"
-        )
-    used_mib = gpu_info[gpu_index][1]
-    total_mib = gpu_info[gpu_index][2]
-    free_mib = total_mib - used_mib
+    for idx in gpu_indices:
+        if idx >= len(gpu_info):
+            raise RuntimeError(
+                f"GPU {idx} not found (available: 0..{len(gpu_info) - 1})"
+            )
+    # Per-GPU stats for the selected set. For the initial probe we use the
+    # SMALLEST free across selected GPUs so the kv-bytes cap doesn't OOM
+    # the tightest GPU.
+    selected_used_mib = [gpu_info[i][1] for i in gpu_indices]
+    selected_total_mib = [gpu_info[i][2] for i in gpu_indices]
+    selected_free_mib = [t - u for u, t in zip(selected_used_mib, selected_total_mib)]
+    used_mib = max(selected_used_mib)  # for "hogged" warning, pick worst GPU
+    total_mib = min(selected_total_mib)  # report smallest GPU's size
+    free_mib = min(selected_free_mib)
     total_gib = total_mib / 1024
 
-    # Base env: pin subprocess to the selected GPU
-    _gpu_env = {"CUDA_VISIBLE_DEVICES": str(gpu_index)}
+    # Base env: pin subprocess to the selected GPU(s). Multi-GPU is comma-separated;
+    # the launch script's per-worker CUDA_VISIBLE_DEVICES indices remap to the
+    # subprocess's view (e.g. host GPU 5 becomes CUDA index 0 if it's first in the list).
+    _gpu_env = {"CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in gpu_indices)}
 
     model_name = _extract_model_from_markers(pytest_args)
 
@@ -854,11 +896,28 @@ def _find_min_vram(
     else:
         mode_label = "KV TOKENS (SGLang)"
     print(f"\n--- FIND MINIMUM {mode_label} (binary search) ---")
-    print(f"  GPU total : {total_gib:.1f} GiB")
-    print(
-        f"  GPU free  : {free_mib / 1024:.1f} GiB  "
-        f"(in use: {used_mib / 1024:.1f} GiB)"
-    )
+    if len(gpu_indices) == 1:
+        print(f"  GPU total : {total_gib:.1f} GiB")
+        print(
+            f"  GPU free  : {free_mib / 1024:.1f} GiB  "
+            f"(in use: {used_mib / 1024:.1f} GiB)"
+        )
+    else:
+        print(
+            f"  GPUs      : {gpu_indices} (subprocess sees them as CUDA 0..{len(gpu_indices) - 1})"
+        )
+        for i, gi in enumerate(gpu_indices):
+            t = selected_total_mib[i]
+            u = selected_used_mib[i]
+            f = selected_free_mib[i]
+            print(
+                f"  GPU {gi:>2}    : {t / 1024:.1f} GiB total, "
+                f"{f / 1024:.1f} GiB free (in use: {u / 1024:.1f} GiB)"
+            )
+        print(
+            f"  Min free  : {free_mib / 1024:.1f} GiB  "
+            f"(used for KV-bytes initial probe sizing)"
+        )
     print(f"  Test      : {' '.join(pytest_args)}")
     if model_name:
         print(f"  Model     : {model_name}")
@@ -1348,12 +1407,16 @@ def main(argv: list[str] | None = None) -> int:
         "Outputs @pytest.mark.requested_vllm_kv_cache_bytes(N).",
     )
     parser.add_argument(
-        "--gpu",
         "--gpus",
-        type=int,
-        default=0,
-        help="GPU index to profile on (default: 0). "
-        "Sets CUDA_VISIBLE_DEVICES for the subprocess.",
+        "--gpu",
+        dest="gpus",
+        type=_parse_gpu_list,
+        default=[0],
+        metavar="N[,M,...]",
+        help="GPU index or comma-separated list to profile on (default: 0). "
+        "Sets CUDA_VISIBLE_DEVICES for the subprocess. For disagg multi-worker "
+        "tests where the launch script pins workers to separate GPUs, pass all "
+        "indices (e.g. --gpus 0,1) so the subprocess can see them.",
     )
 
     raw = argv if argv is not None else sys.argv[1:]
@@ -1377,25 +1440,29 @@ def main(argv: list[str] | None = None) -> int:
         if looks_like_test_path and not os.path.exists(test_path):
             parser.error(f"Test path does not exist: {test_path}")
 
-    gpu_idx = args.gpu
+    gpu_indices: list[int] = args.gpus
     gpu_info = _query_gpu_stats()
     if not gpu_info:
         raise RuntimeError("NVML returned no GPU data")
-    if gpu_idx >= len(gpu_info):
-        raise RuntimeError(
-            f"GPU {gpu_idx} not found (available: 0..{len(gpu_info) - 1})"
-        )
+    for idx in gpu_indices:
+        if idx >= len(gpu_info):
+            raise RuntimeError(
+                f"GPU {idx} not found (available: 0..{len(gpu_info) - 1})"
+            )
 
-    used_mib = gpu_info[gpu_idx][1]
-    total_mib = gpu_info[gpu_idx][2]
-    hogged_pct = used_mib / total_mib * 100
-    if hogged_pct > 10:
-        print(
-            f"\nWARNING: GPU {gpu_idx}: {used_mib / 1024:.1f} GiB ({hogged_pct:.0f}%) "
-            f"of GPU memory is already in use! Results may be inaccurate.\n"
-        )
+    for idx in gpu_indices:
+        used_mib_i = gpu_info[idx][1]
+        total_mib_i = gpu_info[idx][2]
+        hogged_pct = used_mib_i / total_mib_i * 100
+        if hogged_pct > 10:
+            print(
+                f"\nWARNING: GPU {idx}: {used_mib_i / 1024:.1f} GiB ({hogged_pct:.0f}%) "
+                f"of GPU memory is already in use! Results may be inaccurate.\n"
+            )
 
-    gpu_env = {"CUDA_VISIBLE_DEVICES": str(gpu_idx)}
+    # Multi-GPU: pass comma-separated list so the launch script's per-worker
+    # CUDA_VISIBLE_DEVICES indices map within the subprocess view.
+    gpu_env = {"CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in gpu_indices)}
 
     if not args.no_find_min_vram:
         return _find_min_vram(
@@ -1406,7 +1473,7 @@ def main(argv: list[str] | None = None) -> int:
             recommend=not args.no_recommend,
             csv_path=args.csv,
             kv_bytes_mode=args.kv_bytes,
-            gpu_index=gpu_idx,
+            gpu_indices=gpu_indices,
         )
 
     model_name = _extract_model_from_markers(pytest_args)

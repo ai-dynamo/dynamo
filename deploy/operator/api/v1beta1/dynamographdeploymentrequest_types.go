@@ -59,6 +59,7 @@ const (
 	EventReasonDeploymentReady      = "DeploymentReady"
 	EventReasonDeploymentDegraded   = "DeploymentDegraded"
 	EventReasonDeploymentDeleted    = "DeploymentDeleted"
+	EventReasonImagePullFailed      = "ImagePullFailed"
 
 	// Label keys
 	LabelApp           = "app"

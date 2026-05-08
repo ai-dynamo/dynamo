@@ -17,7 +17,7 @@ coverage[toml]==7.13.1
 datasets==4.4.1
 filelock==3.25.1
 # For faster model downloads
-hf-xet
+hf-xet==1.4.3
 # For Kubernetes operations in deploy tests
 kr8s==0.20.13
 kubernetes_asyncio==32.0.0

@@ -108,7 +108,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | global.etcd.install | bool | `false` | Whether this chart should install the bundled etcd subchart. When true, deploys etcd and auto-configures the operator with its address. When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd. |
-| global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. |
+| global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes). |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
@@ -177,7 +177,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 ### NATS Configuration
 
-For detailed NATS configuration options beyond `nats.enabled`, please refer to the official NATS Helm chart documentation:
+For detailed NATS configuration options beyond `global.nats.install`, please refer to the official NATS Helm chart documentation:
 **[NATS Helm Chart Documentation](https://github.com/nats-io/k8s/tree/main/helm/charts/nats)**
 
 ### etcd Configuration
