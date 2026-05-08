@@ -10,8 +10,12 @@ use async_stream::stream;
 use async_trait::async_trait;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
+use futures::StreamExt;
+
+#[cfg(test)]
+use dynamo_runtime::engine::RequestStream;
 
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -121,6 +125,97 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
     let engine = EchoEngine {};
     let data = EngineDispatcher::new(engine);
     Arc::new(data)
+}
+
+/// Bidirectional echo engine: consumes a stream of `NvCreateChatCompletionRequest`s
+/// and, for each one, emits character-by-character `NvCreateChatCompletionStreamResponse`
+/// chunks followed by a terminal `FinishReason::Stop`. Used by the experimental
+/// `/v1/realtime` WebSocket endpoint to demonstrate end-to-end bidirectional plumbing.
+pub struct EchoBidirectionalEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        ManyIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for EchoBidirectionalEngine
+{
+    async fn generate(
+        &self,
+        mut incoming: ManyIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let ctx = incoming.context();
+        let session_id = ctx.id().to_string();
+        let ctx_for_stream = ctx.clone();
+
+        let output = stream! {
+            let ctx = ctx_for_stream;
+            let mut id: u64 = 1;
+            let mut chunk_index: u64 = 0;
+
+            while let Some(req) = incoming.next().await {
+                if ctx.is_stopped() {
+                    break;
+                }
+                chunk_index += 1;
+
+                let summary = req
+                    .inner
+                    .messages
+                    .iter()
+                    .next_back()
+                    .and_then(|msg| match msg {
+                        dynamo_protocols::types::ChatCompletionRequestMessage::User(user_msg) => {
+                            match &user_msg.content {
+                                dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(prompt) => Some(prompt.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("<chunk {chunk_index}: non-text content>"));
+
+                let mut deltas = req.response_generator(format!("{session_id}-{chunk_index}"));
+
+                for c in summary.chars() {
+                    if ctx.is_stopped() {
+                        break;
+                    }
+                    tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
+                    let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
+                    yield Annotated {
+                        id: Some(id.to_string()),
+                        data: Some(response),
+                        event: None,
+                        comment: None,
+                        error: None,
+                    };
+                    id += 1;
+                }
+
+                if !ctx.is_stopped() {
+                    let response = deltas.create_choice(
+                        0,
+                        None,
+                        Some(dynamo_protocols::types::FinishReason::Stop),
+                        None,
+                        None,
+                    );
+                    yield Annotated {
+                        id: Some(id.to_string()),
+                        data: Some(response),
+                        event: None,
+                        comment: None,
+                        error: None,
+                    };
+                    id += 1;
+                }
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
 }
 
 #[async_trait]
@@ -358,4 +453,85 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         self.0.handle_chat(req).await
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_runtime::pipeline::Context;
+    use futures::stream;
+
+    fn make_user_request(text: &str) -> NvCreateChatCompletionRequest {
+        let body = serde_json::json!({
+            "model": "echo",
+            "messages": [{ "role": "user", "content": text }],
+        });
+        serde_json::from_value(body).expect("valid chat completion request")
+    }
+
+    fn collect_text(
+        annotated_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> String {
+        use dynamo_protocols::types::ChatCompletionMessageContent;
+        annotated_chunks
+            .iter()
+            .filter_map(|chunk| chunk.data.as_ref())
+            .flat_map(|resp| resp.inner.choices.iter())
+            .filter_map(|choice| match choice.delta.content.as_ref()? {
+                ChatCompletionMessageContent::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count_finish_stops(
+        annotated_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> usize {
+        use dynamo_protocols::types::FinishReason;
+        annotated_chunks
+            .iter()
+            .filter_map(|chunk| chunk.data.as_ref())
+            .flat_map(|resp| resp.inner.choices.iter())
+            .filter(|c| matches!(c.finish_reason, Some(FinishReason::Stop)))
+            .count()
+    }
+
+    fn make_input(
+        requests: Vec<NvCreateChatCompletionRequest>,
+    ) -> ManyIn<NvCreateChatCompletionRequest> {
+        RequestStream::new(Box::pin(stream::iter(requests)), Context::new(()).context())
+    }
+
+    /// Drive a fixed sequence of two requests through the bidirectional echo engine
+    /// and assert: every char of every prompt is echoed in order, and each request
+    /// gets its own terminal `FinishReason::Stop`.
+    #[tokio::test]
+    async fn echo_bidirectional_emits_per_char_then_finish() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            // SAFETY: runs at most once, before any worker thread reads the env;
+            // `TOKEN_ECHO_DELAY` captures it via `LazyLock` on first use.
+            unsafe {
+                std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
+            }
+        });
+
+        let engine = EchoBidirectionalEngine {};
+        let input = make_input(vec![make_user_request("hi"), make_user_request("ok")]);
+
+        let mut response_stream = engine.generate(input).await.expect("generate");
+        let mut chunks = Vec::new();
+        while let Some(chunk) = response_stream.next().await {
+            chunks.push(chunk);
+        }
+
+        assert_eq!(collect_text(&chunks), "hiok");
+        assert_eq!(count_finish_stops(&chunks), 2);
+    }
+
+    // Cancellation is verified at the WebSocket integration level rather than here:
+    // `TOKEN_ECHO_DELAY` is a `LazyLock` that captures `DYN_TOKEN_ECHO_DELAY_MS` once
+    // per process, so tests sharing the binary cannot independently dial the per-char
+    // delay. The integration test in lib/llm/tests/http_websocket.rs exercises the
+    // client-disconnect path through the full handler.
 }

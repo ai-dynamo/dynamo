@@ -260,13 +260,15 @@ jobs:
 
   frontend-build:
     name: frontend
+    needs: [changed-files]
+    if: needs.changed-files.outputs.frontend == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: frontend
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
     secrets: inherit
 
@@ -482,7 +484,8 @@ jobs:
 
   frontend-compliance:
     name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build]
+    needs: [changed-files, frontend-build]
+    if: needs.changed-files.outputs.frontend == 'true'
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo

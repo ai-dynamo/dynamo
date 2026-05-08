@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Tracing
-subtitle: Export Dynamo request telemetry and harness tool events
+subtitle: Attach trajectory identity and export Dynamo request and tool-event telemetry
 ---
 
-Dynamo agent tracing writes serving-oriented trace records for agentic requests.
-The trace combines Dynamo-owned LLM request metrics with optional
-harness-published tool lifecycle events. It is best-effort profiling data, not
-durable audit data.
-
-For request identity fields, see [Agent Context](agent-context.md).
+Dynamo agent tracing writes serving-oriented trace records for agentic
+requests. Each LLM call carries passive `nvext.agent_context` identity
+(session and trajectory IDs) that Dynamo records alongside its own request
+metrics, plus optional harness-published tool lifecycle events. Agent context
+does not change routing, scheduling, or cache behavior; trace output is
+best-effort profiling data, not durable audit data.
 
 ```mermaid
 sequenceDiagram
@@ -29,6 +29,84 @@ sequenceDiagram
     Relay->>Bus: tool record
     Bus->>Sink: same trace stream
 ```
+
+## Request Schema
+
+Each harness LLM call should include `nvext.agent_context`:
+
+```json
+{
+    "model": "my-model",
+    "messages": [
+        { "role": "user", "content": "Research Dynamo agent tracing." }
+    ],
+    "nvext": {
+        "agent_context": {
+            "session_type_id": "deep_research",
+            "session_id": "research-run-42",
+            "trajectory_id": "research-run-42:researcher",
+            "parent_trajectory_id": "research-run-42:planner"
+        }
+    }
+}
+```
+
+| Field                  | Required | Meaning                                                                     |
+| ---------------------- | :------: | --------------------------------------------------------------------------- |
+| `session_type_id`      |   Yes    | Reusable workload/profile class, such as `deep_research` or `coding_agent`. |
+| `session_id`           |   Yes    | Top-level agent run/session identifier.                                     |
+| `trajectory_id`        |   Yes    | One reasoning/tool trajectory within the agent run.                         |
+| `parent_trajectory_id` |    No    | Parent trajectory for subagents.                                            |
+
+A single `session_id` can contain multiple parent and child trajectories. The
+field names align with the [Agent Trajectory Interchange Format][atif-rfc] so
+harness trajectory files and Dynamo serving traces join without renaming; see
+the collapsed section at the bottom of this page for details.
+
+[atif-rfc]: https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md
+
+### OpenAI Client Integration
+
+When using the OpenAI Python client, pass Dynamo's extension fields through
+`extra_body` and set `x-request-id` through `extra_headers`:
+
+```python
+import uuid
+
+
+def instrument_llm_request(kwargs, agent_context):
+    body = dict(kwargs.get("extra_body") or {})
+    nvext = dict(body.get("nvext") or {})
+    nvext["agent_context"] = dict(agent_context)
+    body["nvext"] = nvext
+
+    headers = dict(kwargs.get("extra_headers") or {})
+    headers.setdefault("x-request-id", str(uuid.uuid4()))
+
+    out = dict(kwargs)
+    out["extra_body"] = body
+    out["extra_headers"] = headers
+    return out
+```
+
+`x-request-id` is the harness's logical LLM-call ID. Dynamo copies it into
+`request.x_request_id`; it is separate from Dynamo's internal request ID.
+
+### Harness Integration Pattern
+
+An existing harness does not need to import Dynamo packages or link against
+Dynamo runtime APIs. Framework integrations should use this shape:
+
+- Add a small helper module that stores the current `agent_context` in a context
+  variable.
+- Wrap each agent run with that context so LLM calls and tool records share the
+  same `session_id` and `trajectory_id`.
+- Call one helper before each OpenAI-compatible LLM request to merge
+  `extra_body.nvext.agent_context` and set `x-request-id`.
+- Propagate context through thread pools, subprocesses, and subagent launches
+  when those paths can make LLM calls or emit tool records.
+- Include `parent_trajectory_id` when launching a subagent from a known parent
+  trajectory.
 
 ## Enable Trace Output
 
@@ -385,3 +463,30 @@ or if the ZMQ/event-plane path drops a harness event.
 - Dynamo does not expose a separate direct event-plane ingress path for harness
   tool events.
 - Future scheduler/profiler consumers should read the normalized trace bus.
+
+<details>
+<summary>ATIF alignment</summary>
+
+The [Agent Trajectory Interchange Format (ATIF)][atif-rfc] is the JSON format
+maintained as the [Harbor framework][harbor] data schema for complete agent
+trajectories (user inputs, agent steps, tool calls, observations, subagents,
+rewards). Dynamo does not emit ATIF; it emits `dynamo.agent.trace.v1`, a
+serving-oriented trace covering request timing, tokens, cache, queue depth, and
+worker placement. The two formats are complementary and join cleanly because
+identifier names match:
+
+| Dynamo field           | ATIF role                       | Meaning                                                         |
+| ---------------------- | ------------------------------- | --------------------------------------------------------------- |
+| `session_id`           | `session_id`                    | Agent run identity. Multiple trajectories share one session.    |
+| `trajectory_id`        | `trajectory_id`                 | One parent or child trajectory within the run.                  |
+| `parent_trajectory_id` | subagent relationship metadata  | Optional parent trajectory for subagents.                       |
+| `session_type_id`      | producer-specific metadata      | Reusable workload/profile class.                                |
+
+A harness ATIF file and Dynamo's trace stream can be joined offline on
+`session_id` + `trajectory_id` without schema changes. Full ATIF reconstruction
+still requires harness trajectory data; Dynamo trace records intentionally omit
+prompt and response content.
+
+[harbor]: https://github.com/harbor-framework/harbor
+
+</details>

@@ -38,7 +38,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
-| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context). |
+| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
@@ -78,9 +78,8 @@ behavior.
 }
 ```
 
-For identity semantics, see [Agent Context](../../agents/agent-context.md). For
-trace sink configuration and JSONL schema details, see
-[Agent Tracing](../../agents/agent-tracing.md).
+For identity semantics, trace sink configuration, and JSONL schema details,
+see [Agent Tracing](../../agents/agent-tracing.md).
 
 ## Agent Hints
 
@@ -223,7 +222,6 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
-| [Agent Context](../../agents/agent-context.md) | Passive session/trajectory identity for agent requests |
-| [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces and harness tool-event ingestion |
+| [Agent Tracing](../../agents/agent-tracing.md) | Passive session/trajectory identity, JSONL request traces, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |

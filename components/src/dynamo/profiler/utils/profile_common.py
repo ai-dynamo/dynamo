@@ -166,6 +166,21 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
     return dgdr.model
 
 
+def pick_decode_component(client) -> str:
+    """Pick the decode worker component name from a deployment client.
+
+    Returns the first entry in ``client.components`` that is not the frontend
+    (case-insensitive), falling back to the literal ``"decode"`` if every
+    component is frontend or the list is empty. The previous fallback
+    (``client.components[-1]``) could resolve to ``"frontend"`` in degenerate
+    component lists, which routed log-path lookups at the frontend service.
+    """
+    for svc in getattr(client, "components", None) or []:
+        if str(svc).lower() != "frontend":
+            return svc
+    return "decode"
+
+
 def is_planner_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when the DGDR spec has a planner config with scaling enabled."""
     return (
