@@ -188,6 +188,22 @@ impl EngineCore {
             Self::Sglang(core) => core.execute_hidden_pass(now_ms),
         }
     }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+        match self {
+            Self::Vllm(core) => core.tick_offload_only(now_ms),
+            Self::Sglang(_) => Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn earliest_offload_deadline(&self) -> Option<f64> {
+        match self {
+            Self::Vllm(core) => core.earliest_offload_deadline(),
+            Self::Sglang(_) => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -306,9 +322,12 @@ pub fn init_kvbm_offline(
     };
     tracing::debug!(
         num_g2_blocks = config.num_g2_blocks,
+        num_g3_blocks = config.num_g3_blocks,
         offload_batch_size = config.offload_batch_size,
         bw_g1_to_g2_gbps = config.bandwidth_g1_to_g2_gbps,
         bw_g2_to_g1_gbps = config.bandwidth_g2_to_g1_gbps,
+        bw_g2_to_g3_gbps = config.bandwidth_g2_to_g3_gbps,
+        bw_g3_to_g2_gbps = config.bandwidth_g3_to_g2_gbps,
         "kvbm-offload: init_kvbm_offline attaching engine"
     );
     let engine = build_owned_offload_engine(config)?;

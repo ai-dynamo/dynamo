@@ -1516,6 +1516,13 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        num_g2_blocks: Optional[int] = None,
+        num_g3_blocks: Optional[int] = None,
+        offload_batch_size: Optional[int] = None,
+        bandwidth_g1_to_g2_gbps: Optional[float] = None,
+        bandwidth_g2_to_g1_gbps: Optional[float] = None,
+        bandwidth_g2_to_g3_gbps: Optional[float] = None,
+        bandwidth_g3_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1554,6 +1561,27 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def num_g2_blocks(self) -> Optional[int]: ...
+
+    @property
+    def num_g3_blocks(self) -> Optional[int]: ...
+
+    @property
+    def offload_batch_size(self) -> Optional[int]: ...
+
+    @property
+    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...

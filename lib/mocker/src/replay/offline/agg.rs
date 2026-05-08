@@ -350,10 +350,16 @@ impl AggRuntime {
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        choose_next_timestamp(
+        let next = choose_next_timestamp(
             self.admission.next_ready_time_ms(self.cluster_in_flight()),
             next_event_ms,
-        )
+        );
+        #[cfg(feature = "kvbm-offload")]
+        {
+            return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
+        }
+        #[cfg(not(feature = "kvbm-offload"))]
+        next
     }
 
     /// Apply router-visible KV events at the phase chosen by the scheduler core.
@@ -366,6 +372,14 @@ impl AggRuntime {
             bail!("offline replay router KV event application must not admit requests");
         }
         Ok(())
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn tick_offload_engines(&mut self) -> anyhow::Result<bool> {
+        let events = self.engine.tick_offload_engines(self.now_ms);
+        let changed = !events.is_empty();
+        self.apply_router_events(events)?;
+        Ok(changed)
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
@@ -550,7 +564,13 @@ impl AggRuntime {
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
-            let mut changed = self.apply_worker_completions()?;
+            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
+            let mut changed = false;
+            #[cfg(feature = "kvbm-offload")]
+            {
+                changed |= self.tick_offload_engines()?;
+            }
+            changed |= self.apply_worker_completions()?;
             changed |= self.apply_worker_ready_events()?;
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;

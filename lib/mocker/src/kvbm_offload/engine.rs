@@ -16,7 +16,7 @@
 use std::future::Future;
 use std::net::TcpListener;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -27,28 +27,46 @@ use futures::Stream;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::noop_waker_ref;
 
-use kvbm_engine::leader::{FindMatchesOptions, InstanceLeader, Leader, StagingMode};
+use kvbm_engine::leader::{
+    FindMatchesOptions, FindMatchesResult, InstanceLeader, Leader, OnboardingStatus, StagingMode,
+};
 use kvbm_engine::offload::{
     ExternalBlock, OffloadEngine, PendingTracker, PipelineBuilder, PresenceFilter, SourceBlocks,
     TransferHandle, TransferStatus,
 };
 use kvbm_engine::worker::Worker;
-use kvbm_engine::{BlockId, G1 as EngineG1, G2, SequenceHash};
-use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
+use kvbm_engine::{BlockId, G1 as EngineG1, G2, G3, SequenceHash};
+use kvbm_logical::blocks::{BlockMetadata, ImmutableBlock, MutableBlock};
 use kvbm_logical::events::{EventsManager, KvCacheEvent as LogicalKvCacheEvent};
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 use kvbm_logical::pools::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::protocols::G1 as MockerG1;
 
+use super::capacity_reservation::{
+    CapacityReservationGuard, CapacityReservationPolicy, CapacityReservations,
+};
 use super::config::KvbmOffloadConfig;
+use super::shared_g3::SharedG3Pool;
 use super::worker::MockWorker;
 
 // Successful offline barriers wake via kvbm-engine watch channels or the
 // mock worker's Notify. The timeout is only a hang guard for pipeline bugs.
 const PIPELINE_BARRIER_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy)]
+enum ReservationBlocker {
+    LocalOffload,
+    SharedG3Offload,
+}
+
+#[derive(Clone, Copy)]
+enum TransferLane {
+    G1ToG2,
+    G2ToG3,
+}
 
 /// Handle returned by [`MockOffloadEngine::start_onboard_prefix`]. Scheduler
 /// parks one per deferred request and polls
@@ -65,10 +83,10 @@ const PIPELINE_BARRIER_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct SwapInHandle {
     complete: Arc<AtomicBool>,
     /// Number of G2 blocks this swap-in delivers.
-    block_count: usize,
+    block_count: Arc<AtomicUsize>,
     /// Strong refs pinning the G2 blocks for the transfer's lifetime.
     /// Not accessed directly — presence alone upholds the RAII contract.
-    _g2_blocks: Vec<ImmutableBlock<G2>>,
+    _g2_blocks: Option<Vec<ImmutableBlock<G2>>>,
 }
 
 impl SwapInHandle {
@@ -77,19 +95,87 @@ impl SwapInHandle {
     }
 
     pub fn block_count(&self) -> usize {
-        self.block_count
+        self.block_count.load(Ordering::Acquire)
     }
 }
 
-/// G2 lookup result pinned while the caller reserves destination G1 slots.
-pub struct PreparedSwapIn {
-    requested_blocks: usize,
-    g2_blocks: Vec<ImmutableBlock<G2>>,
+/// Lower-tier lookup prepared while the caller reserves destination G1 slots.
+/// G2-ready matches hold source blocks immediately; G3 matches are kept as a
+/// staging plan so a failed admission probe does not spend G3 bandwidth.
+pub(crate) enum PreparedSwapIn {
+    Ready {
+        requested_blocks: usize,
+        g2_blocks: Vec<ImmutableBlock<G2>>,
+    },
+    Staging {
+        requested_blocks: usize,
+        reservation_blocks: usize,
+        g2_capacity_reservation: Option<CapacityReservationGuard>,
+        lookup_plhs: Vec<SequenceHash>,
+    },
 }
 
 impl PreparedSwapIn {
-    pub fn block_count(&self) -> usize {
-        self.g2_blocks.len()
+    fn from_g2_blocks(requested_blocks: usize, g2_blocks: Vec<ImmutableBlock<G2>>) -> Self {
+        Self::Ready {
+            requested_blocks,
+            g2_blocks,
+        }
+    }
+
+    fn from_staging_plan(
+        requested_blocks: usize,
+        reservation_blocks: usize,
+        g2_capacity_reservation: Option<CapacityReservationGuard>,
+        lookup_plhs: Vec<SequenceHash>,
+    ) -> Self {
+        Self::Staging {
+            requested_blocks,
+            reservation_blocks,
+            g2_capacity_reservation,
+            lookup_plhs,
+        }
+    }
+
+    pub(crate) fn reservation_block_count(&self) -> usize {
+        match self {
+            Self::Ready { g2_blocks, .. } => g2_blocks.len(),
+            Self::Staging {
+                reservation_blocks, ..
+            } => *reservation_blocks,
+        }
+    }
+
+    pub(crate) fn block_count(&self) -> usize {
+        self.reservation_block_count()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct G3LookupPlan {
+    g2_prefix_blocks: usize,
+    g3_stage_blocks: usize,
+}
+
+impl G3LookupPlan {
+    fn reservation_blocks(self) -> usize {
+        self.g2_prefix_blocks.saturating_add(self.g3_stage_blocks)
+    }
+}
+
+struct PendingStagedSwapIn {
+    result: FindMatchesResult,
+    reservation_blocks: usize,
+    complete: Arc<AtomicBool>,
+    block_count: Arc<AtomicUsize>,
+    g2_capacity_reservation: Option<CapacityReservationGuard>,
+    g2_blocks: Option<Vec<ImmutableBlock<G2>>>,
+    g2_to_g1_started: bool,
+}
+
+impl PendingStagedSwapIn {
+    fn is_done(&self) -> bool {
+        self.g2_to_g1_started && self.complete.load(Ordering::Acquire)
     }
 }
 
@@ -121,16 +207,23 @@ pub(crate) enum G2RouterEvent {
 
 struct PendingG1ToG2 {
     handle: TransferHandle,
+    g2_to_g3_chain_blocks: FxHashMap<BlockId, SequenceHash>,
     /// Reset G1 slots held until the simulated source copy completes.
     ///
     /// These tokens do not preserve old bytes — `MockWorker` never reads
     /// source contents — but they do preserve G1 capacity accounting. A real
     /// DMA source slot cannot be reassigned while the copy is in flight.
-    _source_slots: Vec<MutableBlock<MockerG1>>,
+    source_slots: FxHashMap<BlockId, MutableBlock<MockerG1>>,
 }
 
 impl PendingG1ToG2 {
     fn source_slots_releasable(&self) -> bool {
+        if self.source_slots.is_empty() && self.g2_to_g3_chain_blocks.is_empty() {
+            return true;
+        }
+        if !self.g2_to_g3_chain_blocks.is_empty() {
+            return false;
+        }
         if self.handle.is_complete() {
             return true;
         }
@@ -139,6 +232,64 @@ impl PendingG1ToG2 {
             return !matches!(self.handle.status(), TransferStatus::Evaluating);
         }
         self.handle.completed_blocks().len() + self.handle.failed_blocks().len() >= passed
+    }
+
+    fn release_completed_source_slots(&mut self) -> usize {
+        let mut released = 0usize;
+        for block_id in self
+            .handle
+            .completed_blocks()
+            .into_iter()
+            .chain(self.handle.failed_blocks())
+        {
+            if self.source_slots.remove(&block_id).is_some() {
+                released += 1;
+            }
+        }
+        released
+    }
+
+    fn collect_completed_chain_blocks(&mut self) -> Vec<SequenceHash> {
+        if self.g2_to_g3_chain_blocks.is_empty() {
+            return Vec::new();
+        }
+
+        let mut chain_blocks = Vec::new();
+        for block_id in self.handle.completed_blocks() {
+            if let Some(seq_hash) = self.g2_to_g3_chain_blocks.remove(&block_id) {
+                chain_blocks.push(seq_hash);
+            }
+        }
+
+        for block_id in self.handle.failed_blocks() {
+            self.g2_to_g3_chain_blocks.remove(&block_id);
+        }
+
+        if !matches!(self.handle.status(), TransferStatus::Evaluating) {
+            let passed: FxHashSet<BlockId> = self.handle.passed_blocks().into_iter().collect();
+            self.g2_to_g3_chain_blocks
+                .retain(|block_id, _seq_hash| passed.contains(block_id));
+        }
+
+        chain_blocks
+    }
+}
+
+struct PendingG2ToG3 {
+    handle: TransferHandle,
+    released_capacity_blocks: usize,
+}
+
+impl PendingG2ToG3 {
+    fn releaseable_capacity_blocks(&mut self) -> usize {
+        let settled = self.handle.completed_blocks().len() + self.handle.failed_blocks().len();
+        let releasable = settled.saturating_sub(self.released_capacity_blocks);
+        self.released_capacity_blocks = self.released_capacity_blocks.saturating_add(releasable);
+        releasable
+    }
+
+    fn is_complete(&self) -> bool {
+        self.handle.is_complete()
     }
 }
 
@@ -163,7 +314,12 @@ pub struct MockOffloadEngine {
     worker: Arc<MockWorker>,
     registry: Arc<BlockRegistry>,
     g2_manager: Arc<BlockManager<G2>>,
+    g2_destination_reservations: Arc<CapacityReservations>,
+    shared_g3: Option<Arc<SharedG3Pool>>,
+    g3_manager: Option<Arc<BlockManager<G3>>>,
     pending_g1_to_g2: Mutex<Vec<PendingG1ToG2>>,
+    pending_g2_to_g3: Mutex<Vec<PendingG2ToG3>>,
+    pending_staged_swap_ins: Mutex<Vec<PendingStagedSwapIn>>,
     g2_event_stream: Mutex<Pin<Box<dyn Stream<Item = LogicalKvCacheEvent> + Send>>>,
     g2_event_metadata: Mutex<FxHashMap<SequenceHash, G2BlockEventMetadata>>,
 
@@ -189,6 +345,14 @@ impl MockOffloadEngine {
             config.block_size_tokens,
             &registry,
         ));
+        let shared_g3 = SharedG3Pool::get_or_create(&config)?;
+        let g3_manager = shared_g3.as_ref().map(|pool| pool.manager());
+        tracing::debug!(
+            num_g2_blocks = config.num_g2_blocks,
+            num_g3_blocks = config.num_g3_blocks,
+            g3_enabled = g3_manager.is_some(),
+            "kvbm-offload: building mock offload engine"
+        );
 
         let worker = Arc::new(MockWorker::new(
             config.block_size_bytes.unwrap_or(0),
@@ -196,35 +360,70 @@ impl MockOffloadEngine {
             config.bandwidth_g2_to_g1_gbps,
             None,
             None,
+            shared_g3.clone(),
         ));
         let worker_for_leader: Arc<dyn Worker> = worker.clone();
 
         // `InstanceLeader::build` calls `Handle::current()` internally,
         // hence the `async fn` and the in-runtime caller requirement.
-        let leader = Arc::new(
-            InstanceLeader::builder()
-                .messenger(messenger)
-                .registry((*registry).clone())
-                .g2_manager(g2_manager.clone())
-                .worker(worker_for_leader)
-                .build()?,
-        );
+        let mut leader_builder = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry((*registry).clone())
+            .g2_manager(g2_manager.clone())
+            .worker(worker_for_leader);
+        if let Some(g3_manager) = &g3_manager {
+            leader_builder = leader_builder.g3_manager(g3_manager.clone());
+        }
+        let leader = Arc::new(leader_builder.build()?);
 
+        let g2_destination_reservations = Arc::new(CapacityReservations::default());
         let g1_to_g2_pending = Arc::new(PendingTracker::new());
         let g1_to_g2_presence = PresenceFilter::<EngineG1, G2>::new(registry.clone())
             .with_pending_tracker(g1_to_g2_pending.clone());
+        let g1_to_g2_capacity = CapacityReservationPolicy::<EngineG1, G2>::new(
+            g2_manager.clone(),
+            g2_destination_reservations.clone(),
+        );
         let g1_to_g2_pipeline = PipelineBuilder::<EngineG1, G2>::new()
             .policy(Arc::new(g1_to_g2_presence))
+            .policy(Arc::new(g1_to_g2_capacity))
             .pending_tracker(g1_to_g2_pending)
             .batch_size(config.offload_batch_size)
             .max_concurrent_transfers(config.offload_batch_size)
             .build();
 
-        let engine = OffloadEngine::builder(leader.clone())
+        let mut engine_builder = OffloadEngine::builder(leader.clone())
             .with_registry(registry.clone())
             .with_g2_manager(g2_manager.clone())
-            .with_g1_to_g2_pipeline(g1_to_g2_pipeline)
-            .build()?;
+            .with_runtime(tokio::runtime::Handle::current())
+            .with_g1_to_g2_pipeline(g1_to_g2_pipeline);
+
+        if let (Some(g3_manager), Some(shared_g3)) = (&g3_manager, &shared_g3) {
+            let g2_to_g3_pending = shared_g3.pending_tracker();
+            let g3_registry = Arc::new(g3_manager.block_registry().clone());
+            let g2_to_g3_presence = PresenceFilter::<G2, G3>::new(g3_registry)
+                .with_pending_tracker(g2_to_g3_pending.clone());
+            let g2_to_g3_capacity = CapacityReservationPolicy::<G2, G3>::new(
+                g3_manager.clone(),
+                shared_g3.capacity_reservations(),
+            );
+            let g2_to_g3_pipeline = PipelineBuilder::<G2, G3>::new()
+                .policy(Arc::new(g2_to_g3_presence))
+                .policy(Arc::new(g2_to_g3_capacity))
+                .pending_tracker(g2_to_g3_pending)
+                .batch_size(config.offload_batch_size)
+                // G2→G3 is a background write-through copy over one shared
+                // lower-tier link. Multiple concurrent batches do not add
+                // bandwidth in the mock PS model, but they pin many G2 source
+                // blocks and can starve foreground G1→G2 offloads.
+                .max_concurrent_transfers(1)
+                .build();
+            engine_builder = engine_builder
+                .with_g3_manager(g3_manager.clone())
+                .with_g2_to_g3_pipeline(g2_to_g3_pipeline);
+        }
+
+        let engine = engine_builder.build()?;
 
         Ok(Self {
             config,
@@ -233,7 +432,12 @@ impl MockOffloadEngine {
             worker,
             registry,
             g2_manager,
+            g2_destination_reservations,
+            shared_g3,
+            g3_manager,
             pending_g1_to_g2: Mutex::new(Vec::new()),
+            pending_g2_to_g3: Mutex::new(Vec::new()),
+            pending_staged_swap_ins: Mutex::new(Vec::new()),
             g2_event_stream: Mutex::new(g2_event_stream),
             g2_event_metadata: Mutex::new(FxHashMap::default()),
             _runtime: None,
@@ -355,6 +559,7 @@ impl MockOffloadEngine {
         &self,
         handle: &TransferHandle,
         target_reservation_count: u64,
+        blocker: ReservationBlocker,
     ) -> bool {
         let reservation_notify = self.worker.reservation_notifier();
         let mut status = handle.subscribe_status();
@@ -368,7 +573,15 @@ impl MockOffloadEngine {
                 // Active transfers mean this enqueue may be backpressured
                 // behind the pipeline executor. Offline replay should advance
                 // virtual time to that deadline, not spend wall time waiting.
-                if self.worker.earliest_finish().is_some() {
+                let blocked_by_active_transfer = match blocker {
+                    ReservationBlocker::LocalOffload => {
+                        self.worker.earliest_local_offload_finish().is_some()
+                    }
+                    ReservationBlocker::SharedG3Offload => {
+                        self.worker.earliest_shared_g3_offload_finish().is_some()
+                    }
+                };
+                if blocked_by_active_transfer {
                     return false;
                 }
                 tokio::select! {
@@ -383,27 +596,90 @@ impl MockOffloadEngine {
         })
     }
 
-    fn wait_for_settled_g1_to_g2_blocks(&self, expected_settled_blocks: usize) -> bool {
-        let pending = self
-            .pending_g1_to_g2
-            .lock()
-            .expect("pending G1→G2 handles mutex poisoned");
-        let handles: Vec<TransferHandle> = pending
-            .iter()
-            .map(|pending| pending.handle.clone())
-            .collect();
-        drop(pending);
+    fn tier_registrations<T: BlockMetadata>(manager: &BlockManager<T>) -> u64 {
+        manager.metrics().snapshot().registrations
+    }
 
-        let mut completed: Vec<_> = handles
-            .iter()
-            .map(TransferHandle::subscribe_completed)
-            .collect();
-        let mut failed: Vec<_> = handles
-            .iter()
-            .map(TransferHandle::subscribe_failed)
-            .collect();
-
+    fn wait_for_tier_registrations<T: BlockMetadata>(
+        &self,
+        manager: Arc<BlockManager<T>>,
+        expected_registrations: u64,
+    ) -> bool {
         self.wait_on_attached_runtime(async move {
+            loop {
+                let registrations = Self::tier_registrations(&manager);
+                if registrations >= expected_registrations {
+                    return true;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    }
+
+    fn wait_for_tier_publish_blocks<T: BlockMetadata>(
+        &self,
+        manager: Arc<BlockManager<T>>,
+        registrations_before: u64,
+        drained_blocks: usize,
+    ) -> (bool, u64) {
+        if drained_blocks == 0 {
+            return (true, Self::tier_registrations(&manager));
+        }
+
+        let expected =
+            registrations_before.saturating_add(u64::try_from(drained_blocks).unwrap_or(u64::MAX));
+        let published = self.wait_for_tier_registrations(manager.clone(), expected);
+        (published, Self::tier_registrations(&manager))
+    }
+
+    fn pending_handles(&self, lane: TransferLane) -> Vec<TransferHandle> {
+        match lane {
+            TransferLane::G1ToG2 => {
+                let pending = self
+                    .pending_g1_to_g2
+                    .lock()
+                    .expect("pending G1→G2 handles mutex poisoned");
+                pending
+                    .iter()
+                    .map(|pending| pending.handle.clone())
+                    .collect()
+            }
+            TransferLane::G2ToG3 => {
+                let pending = self
+                    .pending_g2_to_g3
+                    .lock()
+                    .expect("pending G2→G3 handles mutex poisoned");
+                pending
+                    .iter()
+                    .map(|pending| pending.handle.clone())
+                    .collect()
+            }
+        }
+    }
+
+    fn settled_blocks(&self, lane: TransferLane) -> usize {
+        self.pending_handles(lane)
+            .iter()
+            .map(|handle| handle.completed_blocks().len() + handle.failed_blocks().len())
+            .sum()
+    }
+
+    fn wait_for_pending_settled_blocks(
+        &self,
+        lane: TransferLane,
+        expected_settled_blocks: usize,
+    ) -> bool {
+        let handles = self.pending_handles(lane);
+        self.wait_on_attached_runtime(async move {
+            let mut completed: Vec<_> = handles
+                .iter()
+                .map(TransferHandle::subscribe_completed)
+                .collect();
+            let mut failed: Vec<_> = handles
+                .iter()
+                .map(TransferHandle::subscribe_failed)
+                .collect();
+
             loop {
                 let settled_blocks: usize = handles
                     .iter()
@@ -412,7 +688,7 @@ impl MockOffloadEngine {
                 if settled_blocks >= expected_settled_blocks {
                     return true;
                 }
-                if handles.is_empty() {
+                if handles.is_empty() || handles.iter().all(TransferHandle::is_complete) {
                     return false;
                 }
 
@@ -423,6 +699,7 @@ impl MockOffloadEngine {
                 for rx in failed.iter_mut() {
                     changes.push(rx.changed());
                 }
+
                 let mut observed_change = false;
                 while let Some(changed) = changes.next().await {
                     if changed.is_ok() {
@@ -435,6 +712,161 @@ impl MockOffloadEngine {
                 }
             }
         })
+    }
+
+    fn wait_for_find_result_completion(&self, result: &FindMatchesResult) -> bool {
+        let wait = result.wait_for_completion();
+        self.wait_on_attached_runtime(async move { wait.await.is_ok() })
+    }
+
+    fn completed_match_count(result: &FindMatchesResult) -> Option<usize> {
+        match result.as_async()?.status() {
+            OnboardingStatus::Complete { matched_blocks } => Some(matched_blocks),
+            _ => None,
+        }
+    }
+
+    fn wait_for_g3_staging_reservation_or_completion(
+        &self,
+        result: &FindMatchesResult,
+        reservation_count_before: u64,
+    ) -> bool {
+        let reservation_notify = self.worker.reservation_notifier();
+        let wait = result.wait_for_completion();
+        self.wait_on_attached_runtime(async move {
+            tokio::select! {
+                reserved = async {
+                    loop {
+                        if self.worker.reservation_count() > reservation_count_before {
+                            return true;
+                        }
+                        reservation_notify.notified().await;
+                    }
+                } => reserved,
+                completed = wait => completed.is_ok(),
+            }
+        })
+    }
+
+    fn build_g3_lookup_plan(
+        &self,
+        plhs: &[SequenceHash],
+        g3_manager: &BlockManager<G3>,
+    ) -> G3LookupPlan {
+        let g2_presence = self.g2_manager.block_registry().check_presence::<G2>(plhs);
+        let g3_presence = g3_manager.block_registry().check_presence::<G3>(plhs);
+        let g2_prefix_blocks = g2_presence.iter().take_while(|(_, in_g2)| *in_g2).count();
+        let g3_stage_blocks = g3_presence
+            .iter()
+            .skip(g2_prefix_blocks)
+            .take_while(|(_, in_g3)| *in_g3)
+            .count();
+
+        G3LookupPlan {
+            g2_prefix_blocks,
+            g3_stage_blocks,
+        }
+    }
+
+    fn release_settled_g2_to_g3_reservations(&self) {
+        let Some(shared_g3) = self.shared_g3.as_ref() else {
+            return;
+        };
+
+        let mut pending = self
+            .pending_g2_to_g3
+            .lock()
+            .expect("pending G2→G3 handles mutex poisoned");
+        let mut releasable = 0usize;
+        for pending in pending.iter_mut() {
+            releasable += pending.releaseable_capacity_blocks();
+        }
+        pending.retain(|pending| !pending.is_complete());
+        drop(pending);
+
+        if releasable > 0 {
+            shared_g3.release_capacity_reservations(releasable);
+        }
+    }
+
+    fn pump_pending_staged_swap_ins(&self, now_ms: f64) {
+        // Waiting for a session while foreground transfers are active can stall
+        // the virtual-time loop: the session may itself be waiting for a
+        // G3→G2 transfer deadline. When no foreground transfer is active, a
+        // bounded wait lets same-timestamp G3 staging publish G2 blocks before
+        // the scheduler immediately retries admission.
+        let should_wait_for_sessions = self.worker.earliest_foreground_finish().is_none();
+        let pending = {
+            let mut pending = self
+                .pending_staged_swap_ins
+                .lock()
+                .expect("pending staged swap-ins mutex poisoned");
+            pending.drain(..).collect::<Vec<_>>()
+        };
+        let mut keep = Vec::with_capacity(pending.len());
+
+        for mut staged in pending {
+            if !staged.g2_to_g1_started {
+                let session_finished = should_wait_for_sessions
+                    && self.wait_for_find_result_completion(&staged.result);
+                let maybe_g2_blocks = staged.result.take_g2_blocks();
+                if let Some(g2_blocks) = maybe_g2_blocks {
+                    drop(staged.g2_capacity_reservation.take());
+                    let block_count = g2_blocks.len();
+                    staged.block_count.store(block_count, Ordering::Release);
+                    tracing::trace!(
+                        now_ms,
+                        block_count,
+                        "kvbm-offload: G3→G2 staging produced G2 blocks"
+                    );
+                    if block_count == 0 {
+                        staged.complete.store(true, Ordering::Release);
+                        staged.g2_to_g1_started = true;
+                    } else {
+                        tracing::trace!(
+                            now_ms,
+                            block_count,
+                            "kvbm-offload: starting staged G2→G1 swap-in"
+                        );
+                        self.worker
+                            .reserve_swap_in(now_ms, block_count, staged.complete.clone());
+                        staged.g2_blocks = Some(g2_blocks);
+                        staged.g2_to_g1_started = true;
+                    }
+                } else if session_finished {
+                    let matched_blocks = Self::completed_match_count(&staged.result);
+                    tracing::debug!(
+                        now_ms,
+                        reservation_blocks = staged.reservation_blocks,
+                        matched_blocks,
+                        status = ?staged.result.as_async().map(|session| session.status()),
+                        "kvbm-offload: G3 staging session completed without available G2 blocks"
+                    );
+                    if matched_blocks.unwrap_or_default() > 0 {
+                        tracing::debug!(
+                            now_ms,
+                            reservation_blocks = staged.reservation_blocks,
+                            matched_blocks,
+                            "kvbm-offload: G3 staging completed with matches but no G2 blocks; treating as 0-block swap-in"
+                        );
+                    }
+                    drop(staged.g2_capacity_reservation.take());
+                    staged.block_count.store(0, Ordering::Release);
+                    staged.complete.store(true, Ordering::Release);
+                    staged.g2_to_g1_started = true;
+                }
+            }
+
+            if !staged.is_done() {
+                keep.push(staged);
+            }
+        }
+
+        let mut pending = self
+            .pending_staged_swap_ins
+            .lock()
+            .expect("pending staged swap-ins mutex poisoned");
+        pending.extend(keep);
     }
 
     /// Number of G1→G2 transfer batches that an idle pipeline can reserve
@@ -459,22 +891,6 @@ impl MockOffloadEngine {
             .min(max_concurrent_transfer_batches)
     }
 
-    /// Total blocks across all pending handles that have reached a terminal
-    /// per-block state (completed or failed); used as the pump target so
-    /// `tick` can confirm drained transfers have published before returning.
-    fn pending_g1_to_g2_settled_blocks(&self) -> usize {
-        let pending = self
-            .pending_g1_to_g2
-            .lock()
-            .expect("pending G1→G2 handles mutex poisoned");
-        pending
-            .iter()
-            .map(|pending| {
-                pending.handle.completed_blocks().len() + pending.handle.failed_blocks().len()
-            })
-            .sum()
-    }
-
     /// Drop pending entries whose source slots are safe to release; the
     /// `Vec<MutableBlock<MockerG1>>` Drop returns the G1 slots to the pool.
     fn prune_releasable_g1_to_g2_sources(&self) {
@@ -483,6 +899,73 @@ impl MockOffloadEngine {
             .lock()
             .expect("pending G1→G2 handles mutex poisoned");
         pending.retain(|pending| !pending.source_slots_releasable());
+    }
+
+    fn release_completed_g1_to_g2_sources(&self) -> usize {
+        let mut released = 0usize;
+        let mut pending = self
+            .pending_g1_to_g2
+            .lock()
+            .expect("pending G1→G2 handles mutex poisoned");
+        for pending in pending.iter_mut() {
+            released += pending.release_completed_source_slots();
+        }
+        pending.retain(|pending| !pending.source_slots_releasable());
+        released
+    }
+
+    fn collect_g2_to_g3_chain_blocks(&self) -> Vec<SequenceHash> {
+        let mut chain_blocks = Vec::new();
+        let mut pending = self
+            .pending_g1_to_g2
+            .lock()
+            .expect("pending G1→G2 handles mutex poisoned");
+        for pending in pending.iter_mut() {
+            chain_blocks.extend(pending.collect_completed_chain_blocks());
+        }
+        pending.retain(|pending| !pending.source_slots_releasable());
+        chain_blocks
+    }
+
+    fn enqueue_g2_to_g3_background(&self, hashes: Vec<SequenceHash>) {
+        if hashes.is_empty() || self.g3_manager.is_none() {
+            return;
+        }
+
+        let mut matches = self.g2_manager.scan_matches(&hashes, false);
+        let blocks: Vec<_> = hashes
+            .into_iter()
+            .filter_map(|seq_hash| matches.remove(&seq_hash))
+            .collect();
+        if blocks.is_empty() {
+            return;
+        }
+
+        // Pin the G2 source while the G2→G3 write-through is in flight. Even
+        // though MockWorker only models timing, a real copy cannot let the
+        // source block reset/reuse before G3 has consumed its bytes.
+        let source: SourceBlocks<G2> = SourceBlocks::Strong(blocks);
+        let reservation_count_before = self.worker.reservation_count();
+        let Ok(handle) = self.engine.enqueue_g2_to_g3(source) else {
+            return;
+        };
+        self.wait_for_policy_evaluation(&handle);
+        if !handle.passed_blocks().is_empty() {
+            let mut pending = self
+                .pending_g2_to_g3
+                .lock()
+                .expect("pending G2→G3 handles mutex poisoned");
+            pending.push(PendingG2ToG3 {
+                handle: handle.clone(),
+                released_capacity_blocks: 0,
+            });
+            drop(pending);
+            self.wait_for_reservations_or_completion(
+                &handle,
+                reservation_count_before + 1,
+                ReservationBlocker::SharedG3Offload,
+            );
+        }
     }
 
     /// Advance PS state to `now_ms` and fire awaiters for any transfers
@@ -501,46 +984,144 @@ impl MockOffloadEngine {
     /// same DRAM bandwidth, and concurrent offloads on the same worker
     /// fair-share via `BandwidthSharingModel`'s PS math.
     ///
-    /// **Assumption that breaks for shared tiers (G3 NVMe, G4 object
-    /// storage):** when multiple workers can drive transfers into the
-    /// same physical resource, per-worker PS undercounts contention —
-    /// two workers each see N=1 on their local model while the
-    /// underlying device sees N=2. A harness-global PS queue is
-    /// required before extending this simulation past G2.
+    /// G3 is modeled by the process-local shared pool hanging off the
+    /// worker, so G2↔G3 transfers contend globally while G1↔G2 remains
+    /// worker-local. Future shared tiers should follow the same pattern
+    /// instead of adding another worker-local PS queue.
     pub fn tick(&self, now_ms: f64) {
         self.worker.set_now_ms(now_ms);
-        let settled_before = self.pending_g1_to_g2_settled_blocks();
-        let (offload_drained, _, offload_drained_blocks, _) = self.worker.drain_completions(now_ms);
+        let g2_registrations_before = Self::tier_registrations(&self.g2_manager);
+        let g3_registrations_before = self
+            .g3_manager
+            .as_ref()
+            .map(|manager| Self::tier_registrations(manager))
+            .unwrap_or_default();
+        let g1_to_g2_settled_before = self.settled_blocks(TransferLane::G1ToG2);
+        let g2_to_g3_settled_before = self.settled_blocks(TransferLane::G2ToG3);
+        let drained = self.worker.drain_completions_summary(now_ms);
+        let offload_drained = drained.local.offload_transfers;
+        let offload_drained_blocks = drained.local.offload_blocks;
+        let shared_g3 = drained.shared_g3.counts;
+        let current_shared_onboard_blocks = shared_g3
+            .onboard_blocks
+            .saturating_sub(drained.shared_g3.deferred_onboard_blocks);
+        let g2_publish_blocks =
+            offload_drained_blocks.saturating_add(current_shared_onboard_blocks);
 
         // Offline replay owns a private runtime for the kvbm-engine
         // pipeline. Once drain fires transfer awaiters, give those
         // pipeline tasks a chance to register completed destination blocks
         // before the scheduler immediately queries G2 in the same pass.
         if offload_drained > 0 {
-            if offload_drained_blocks > 0 {
-                let expected_settled_blocks = settled_before + offload_drained_blocks;
-                let published = self.wait_for_settled_g1_to_g2_blocks(expected_settled_blocks);
-                if !published {
-                    tracing::warn!(
-                        now_ms,
-                        offload_drained,
-                        offload_drained_blocks,
-                        settled_before,
-                        settled_after = self.pending_g1_to_g2_settled_blocks(),
-                        "kvbm-offload: pipeline did not publish drained transfers"
-                    );
-                }
-            }
-            self.prune_releasable_g1_to_g2_sources();
-        } else {
-            self.prune_releasable_g1_to_g2_sources();
+            tracing::debug!(
+                now_ms,
+                transfers = offload_drained,
+                blocks = offload_drained_blocks,
+                "kvbm-offload: G1→G2 drained mock transfers"
+            );
         }
+
+        if offload_drained_blocks > 0 {
+            self.g2_destination_reservations
+                .release(offload_drained_blocks);
+            let released_source_slots = self.release_completed_g1_to_g2_sources();
+            tracing::debug!(
+                now_ms,
+                offload_drained_blocks,
+                released_source_slots,
+                "kvbm-offload: released G1 source slots for drained G1→G2 transfers"
+            );
+        }
+
+        if g2_publish_blocks > 0 {
+            let (published, registrations_after) = self.wait_for_tier_publish_blocks(
+                self.g2_manager.clone(),
+                g2_registrations_before,
+                g2_publish_blocks,
+            );
+            if !published {
+                tracing::warn!(
+                    now_ms,
+                    offload_drained,
+                    offload_drained_blocks,
+                    g3_to_g2_drained_blocks = current_shared_onboard_blocks,
+                    deferred_g3_to_g2_drained_blocks = drained.shared_g3.deferred_onboard_blocks,
+                    registrations_before = g2_registrations_before,
+                    registrations_after,
+                    "kvbm-offload: G2 registration barrier did not observe drained transfers"
+                );
+            }
+        }
+        if offload_drained_blocks > 0 {
+            let expected_settled = g1_to_g2_settled_before.saturating_add(offload_drained_blocks);
+            if !self.wait_for_pending_settled_blocks(TransferLane::G1ToG2, expected_settled) {
+                tracing::debug!(
+                    now_ms,
+                    offload_drained_blocks,
+                    expected_settled,
+                    "kvbm-offload: G1→G2 handle progress not yet visible for G2→G3 chaining"
+                );
+            }
+        }
+        let g2_to_g3_chain_blocks = self.collect_g2_to_g3_chain_blocks();
+
+        if !g2_to_g3_chain_blocks.is_empty() && self.g3_manager.is_some() {
+            tracing::trace!(
+                now_ms,
+                blocks = g2_to_g3_chain_blocks.len(),
+                "kvbm-offload: enqueue G2→G3 background copies"
+            );
+            self.enqueue_g2_to_g3_background(g2_to_g3_chain_blocks);
+        }
+
+        if let (Some(g3_manager), blocks @ 1..) =
+            (self.g3_manager.as_ref(), shared_g3.offload_blocks)
+        {
+            let registration_baseline = drained
+                .shared_g3
+                .offload_registration_baseline
+                .unwrap_or(g3_registrations_before);
+            let (published, registrations_after) = self.wait_for_tier_publish_blocks(
+                g3_manager.clone(),
+                registration_baseline,
+                blocks,
+            );
+            if !published {
+                tracing::warn!(
+                    now_ms,
+                    drained_blocks = blocks,
+                    registration_baseline,
+                    registrations_before = g3_registrations_before,
+                    registrations_after,
+                    "kvbm-offload: G2→G3 pipeline did not publish drained transfers"
+                );
+            }
+            let expected_settled = if registration_baseline < g3_registrations_before {
+                self.settled_blocks(TransferLane::G2ToG3)
+            } else {
+                g2_to_g3_settled_before.saturating_add(blocks)
+            };
+            if !self.wait_for_pending_settled_blocks(TransferLane::G2ToG3, expected_settled) {
+                tracing::debug!(
+                    now_ms,
+                    drained_blocks = blocks,
+                    expected_settled,
+                    "kvbm-offload: G2→G3 handle progress not yet visible after G3 registration"
+                );
+            }
+        }
+        self.release_settled_g2_to_g3_reservations();
+        self.pump_pending_staged_swap_ins(now_ms);
     }
 
-    /// Earliest pending completion across both PS links, or `None` when
-    /// both are idle.
+    /// Earliest foreground completion that can unblock scheduler work.
+    ///
+    /// Background G2→G3 copies are excluded even though they have shared-link
+    /// deadlines. Offline replay drains them opportunistically at arrivals and
+    /// foreground deadlines; they must not manufacture an extra scheduling pass
+    /// that changes admission timing.
     pub fn earliest_pending_deadline(&self) -> Option<f64> {
-        self.worker.earliest_finish()
+        self.worker.earliest_foreground_finish()
     }
 
     /// Enqueue a burst of G1→G2 evictions with router metadata that will be
@@ -601,7 +1182,11 @@ impl MockOffloadEngine {
                 .expect("pending G1→G2 handles mutex poisoned");
             pending.push(PendingG1ToG2 {
                 handle: handle.clone(),
-                _source_slots: source_slots,
+                g2_to_g3_chain_blocks: evicted.iter().copied().collect(),
+                source_slots: source_slots
+                    .into_iter()
+                    .map(|slot| (slot.block_id(), slot))
+                    .collect(),
             });
         }
 
@@ -611,9 +1196,17 @@ impl MockOffloadEngine {
         let target_reservation_count = reservation_count_before
             + self.initial_runnable_transfer_batches(handle.passed_blocks().len()) as u64;
         if target_reservation_count > reservation_count_before {
-            self.wait_for_reservations_or_completion(&handle, target_reservation_count);
+            self.wait_for_reservations_or_completion(
+                &handle,
+                target_reservation_count,
+                ReservationBlocker::LocalOffload,
+            );
         }
         if handle.is_complete() {
+            let g2_to_g3_chain_blocks = self.collect_g2_to_g3_chain_blocks();
+            if !g2_to_g3_chain_blocks.is_empty() && self.g3_manager.is_some() {
+                self.enqueue_g2_to_g3_background(g2_to_g3_chain_blocks);
+            }
             self.prune_releasable_g1_to_g2_sources();
         }
     }
@@ -621,57 +1214,187 @@ impl MockOffloadEngine {
     /// Find and pin the longest G2-resident prefix without reserving G2→G1
     /// bandwidth yet. The caller must reserve destination G1 slots before
     /// passing the prepared lookup to [`start_onboard_prefix`](Self::start_onboard_prefix).
-    pub fn prepare_onboard_prefix(&mut self, plhs: &[SequenceHash]) -> Option<PreparedSwapIn> {
+    pub(crate) fn prepare_onboard_prefix(
+        &mut self,
+        plhs: &[SequenceHash],
+    ) -> Option<PreparedSwapIn> {
         if plhs.is_empty() {
             return None;
         }
+        let g3_lookup_plan = self
+            .g3_manager
+            .as_ref()
+            .map(|g3_manager| self.build_g3_lookup_plan(plhs, g3_manager))
+            .unwrap_or_default();
+        let mut g3_staging_capacity_reservation = if g3_lookup_plan.g3_stage_blocks == 0 {
+            None
+        } else {
+            let available_g2 = self.g2_manager.available_blocks();
+            let required_g2 = g3_lookup_plan.g3_stage_blocks;
+            let reserved = self
+                .g2_destination_reservations
+                .try_reserve(available_g2, required_g2);
+            if reserved {
+                Some(CapacityReservationGuard::new(
+                    self.g2_destination_reservations.clone(),
+                    required_g2,
+                ))
+            } else {
+                tracing::debug!(
+                    plhs_len = plhs.len(),
+                    g2_prefix_blocks = g3_lookup_plan.g2_prefix_blocks,
+                    stage_blocks = g3_lookup_plan.g3_stage_blocks,
+                    reservation_blocks = g3_lookup_plan.reservation_blocks(),
+                    available_g2,
+                    required_g2,
+                    reserved_g2 = self.g2_destination_reservations.reserved_blocks(),
+                    "kvbm-offload: skipping G3 staging; insufficient G2 capacity"
+                );
+                None
+            }
+        };
+        let g3_staging_enabled = g3_staging_capacity_reservation.is_some();
+        if self.g3_manager.is_some() && !g3_staging_enabled && g3_lookup_plan.g2_prefix_blocks == 0
+        {
+            tracing::debug!(
+                plhs_len = plhs.len(),
+                g3_stage_blocks = g3_lookup_plan.g3_stage_blocks,
+                "kvbm-offload: lower-tier lookup MISS"
+            );
+            return None;
+        }
+        if g3_staging_enabled {
+            return Some(PreparedSwapIn::from_staging_plan(
+                plhs.len(),
+                g3_lookup_plan.reservation_blocks(),
+                g3_staging_capacity_reservation.take(),
+                plhs[..g3_lookup_plan.reservation_blocks()].to_vec(),
+            ));
+        }
+
+        let lookup_plhs = if self.g3_manager.is_some() {
+            &plhs[..g3_lookup_plan.g2_prefix_blocks]
+        } else {
+            plhs
+        };
         let options = FindMatchesOptions {
             search_remote: false,
             staging_mode: StagingMode::Hold,
         };
         let mut result = self
             .leader
-            .find_matches_with_options(plhs, options)
-            .expect("find_matches_with_options must not fail on local-only Hold lookup");
-        let g2_blocks = result
-            .take_g2_blocks()
-            .expect("Ready variant must yield G2 blocks on Hold + !search_remote path");
-        if g2_blocks.is_empty() {
-            tracing::debug!(
-                plhs_len = plhs.len(),
-                "kvbm-offload: G2→G1 lookup MISS (0 blocks in G2)"
-            );
-            return None;
+            .find_matches_with_options(lookup_plhs, options)
+            .expect("find_matches_with_options must not fail for mocker local lookup");
+
+        match &mut result {
+            FindMatchesResult::Ready(_) => {
+                let g2_blocks = result
+                    .take_g2_blocks()
+                    .expect("Ready variant must yield G2 blocks");
+                if g2_blocks.is_empty() {
+                    tracing::debug!(
+                        plhs_len = plhs.len(),
+                        "kvbm-offload: lower-tier lookup MISS"
+                    );
+                    return None;
+                }
+                Some(PreparedSwapIn::from_g2_blocks(plhs.len(), g2_blocks))
+            }
+            FindMatchesResult::AsyncSession(_) => {
+                unreachable!("local Hold lookup without G3 staging must return Ready in mocker")
+            }
         }
-        Some(PreparedSwapIn {
-            requested_blocks: plhs.len(),
-            g2_blocks,
-        })
     }
 
     /// Reserve G2→G1 bandwidth for a prepared lookup after the caller has
     /// already reserved destination G1 slots.
-    pub fn start_onboard_prefix(
+    pub(crate) fn start_onboard_prefix(
         &mut self,
         prepared: PreparedSwapIn,
         now_ms: Option<f64>,
     ) -> SwapInHandle {
-        let block_count = prepared.g2_blocks.len();
         let now_ms = now_ms.unwrap_or_else(|| self.worker.now_ms());
         self.worker.set_now_ms(now_ms);
-        tracing::debug!(
-            now_ms,
-            plhs_len = prepared.requested_blocks,
-            block_count,
-            "kvbm-offload: G2→G1 swap-in HIT"
-        );
-        let complete = Arc::new(AtomicBool::new(false));
-        self.worker
-            .reserve_swap_in(now_ms, block_count, complete.clone());
-        SwapInHandle {
-            complete,
-            block_count,
-            _g2_blocks: prepared.g2_blocks,
+        match prepared {
+            PreparedSwapIn::Ready {
+                requested_blocks,
+                g2_blocks,
+            } => {
+                let block_count = g2_blocks.len();
+                tracing::debug!(
+                    now_ms,
+                    plhs_len = requested_blocks,
+                    block_count,
+                    "kvbm-offload: G2→G1 swap-in HIT"
+                );
+                let complete = Arc::new(AtomicBool::new(false));
+                let block_count_cell = Arc::new(AtomicUsize::new(block_count));
+                self.worker
+                    .reserve_swap_in(now_ms, block_count, complete.clone());
+                SwapInHandle {
+                    complete,
+                    block_count: block_count_cell,
+                    _g2_blocks: Some(g2_blocks),
+                }
+            }
+            PreparedSwapIn::Staging {
+                requested_blocks,
+                reservation_blocks,
+                g2_capacity_reservation,
+                lookup_plhs,
+            } => {
+                tracing::debug!(
+                    now_ms,
+                    plhs_len = requested_blocks,
+                    reservation_blocks,
+                    "kvbm-offload: G3→G2 staging swap-in HIT"
+                );
+                let complete = Arc::new(AtomicBool::new(false));
+                let block_count = Arc::new(AtomicUsize::new(0));
+                let reservation_count_before = self.worker.reservation_count();
+                let result = self
+                    .leader
+                    .find_matches_with_options(
+                        &lookup_plhs,
+                        FindMatchesOptions {
+                            search_remote: true,
+                            staging_mode: StagingMode::Full,
+                        },
+                    )
+                    .expect("find_matches_with_options must not fail for mocker G3 staging");
+                let reserved_or_done = self.wait_for_g3_staging_reservation_or_completion(
+                    &result,
+                    reservation_count_before,
+                );
+                if !reserved_or_done {
+                    tracing::debug!(
+                        now_ms,
+                        plhs_len = requested_blocks,
+                        reservation_blocks,
+                        "kvbm-offload: G3 staging session has not reserved transfer yet"
+                    );
+                }
+                let mut pending = self
+                    .pending_staged_swap_ins
+                    .lock()
+                    .expect("pending staged swap-ins mutex poisoned");
+                pending.push(PendingStagedSwapIn {
+                    result,
+                    reservation_blocks,
+                    complete: complete.clone(),
+                    block_count: block_count.clone(),
+                    g2_capacity_reservation,
+                    g2_blocks: None,
+                    g2_to_g1_started: false,
+                });
+                drop(pending);
+                self.pump_pending_staged_swap_ins(now_ms);
+                SwapInHandle {
+                    complete,
+                    block_count,
+                    _g2_blocks: None,
+                }
+            }
         }
     }
 
@@ -682,6 +1405,11 @@ impl MockOffloadEngine {
     #[cfg(test)]
     pub(crate) fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
         &self.g2_manager
+    }
+
+    #[cfg(test)]
+    pub(crate) fn g3_manager(&self) -> Option<&Arc<BlockManager<G3>>> {
+        self.g3_manager.as_ref()
     }
 }
 
@@ -742,6 +1470,38 @@ fn build_g2_block_manager(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kvbm_offload::shared_g3::{shared_g3_test_guard, shared_g3_test_guard_blocking};
+
+    fn g3_config() -> KvbmOffloadConfig {
+        KvbmOffloadConfig {
+            num_g3_blocks: Some(1_024),
+            block_size_bytes: Some(1_000_000),
+            offload_batch_size: 4,
+            bandwidth_g2_to_g1_gbps: 1.0,
+            bandwidth_g2_to_g3_gbps: 1.0,
+            bandwidth_g3_to_g2_gbps: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn single_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn register_test_block<T: BlockMetadata>(manager: &BlockManager<T>, plh: SequenceHash) {
+        let (mut alloc, _evicted) = manager
+            .allocate_blocks_with_evictions(1)
+            .expect("allocate test block");
+        let mutable = alloc.pop().unwrap();
+        let complete = mutable
+            .stage(plh, manager.block_size())
+            .expect("stage test block");
+        drop(manager.register_block(complete));
+    }
 
     #[tokio::test]
     async fn mock_offload_engine_new_builds_end_to_end() {
@@ -757,6 +1517,285 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_offload_engine_new_builds_g3_pipeline_when_enabled() {
+        let _guard = shared_g3_test_guard().await;
+        let engine = MockOffloadEngine::new(g3_config())
+            .await
+            .expect("construction should succeed");
+
+        assert!(engine.engine.has_g1_to_g2());
+        assert!(engine.engine.has_g2_to_g3());
+        assert!(engine.g3_manager().is_some());
+        assert_eq!(engine.earliest_pending_deadline(), None);
+    }
+
+    #[tokio::test]
+    async fn shared_g3_pool_is_visible_across_engines() {
+        use dynamo_tokens::PositionalLineageHash;
+        use kvbm_logical::MutableBlock;
+
+        let _guard = shared_g3_test_guard().await;
+        let config = g3_config();
+        let engine_a = MockOffloadEngine::new(config.clone())
+            .await
+            .expect("engine A build");
+        let mut engine_b = MockOffloadEngine::new(config)
+            .await
+            .expect("engine B build");
+
+        let plh = PositionalLineageHash::new(126, None, 0);
+        let g3_manager = engine_a.g3_manager().expect("G3 enabled").clone();
+        let (mut alloc, _evicted) = g3_manager
+            .allocate_blocks_with_evictions(1)
+            .expect("G3 allocate");
+        let mutable: MutableBlock<G3> = alloc.pop().unwrap();
+        let complete = mutable
+            .stage(plh, g3_manager.block_size())
+            .expect("G3 stage");
+        drop(g3_manager.register_block(complete));
+
+        let prepared = engine_b
+            .prepare_onboard_prefix(&[plh])
+            .expect("worker B should see worker A's shared G3 block");
+        assert_eq!(prepared.reservation_block_count(), 1);
+    }
+
+    #[test]
+    fn shared_g3_capacity_reservations_span_engines() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt_a = single_thread_runtime();
+        let rt_b = single_thread_runtime();
+        let config = KvbmOffloadConfig {
+            num_g3_blocks: Some(1),
+            ..g3_config()
+        };
+        let mut engine_a = rt_a
+            .block_on(MockOffloadEngine::new(config.clone()))
+            .expect("engine A build");
+        let mut engine_b = rt_b
+            .block_on(MockOffloadEngine::new(config))
+            .expect("engine B build");
+        engine_a.attach_runtime(rt_a);
+        engine_b.attach_runtime(rt_b);
+        engine_a.tick(0.0);
+        engine_b.tick(0.0);
+
+        let plh_a = PositionalLineageHash::new(5000, None, 0);
+        let plh_b = PositionalLineageHash::new(5001, None, 0);
+        engine_a.enqueue_g1_evictions_holding_sources(&[(0, plh_a)], Vec::new(), Some(0.0));
+        engine_b.enqueue_g1_evictions_holding_sources(&[(0, plh_b)], Vec::new(), Some(0.0));
+
+        let first_deadline = engine_a
+            .earliest_pending_deadline()
+            .expect("engine A G1→G2 should reserve bandwidth");
+        engine_a.tick(first_deadline);
+        engine_b.tick(first_deadline);
+
+        let g3_deadline = engine_a
+            .worker
+            .earliest_finish()
+            .expect("engine A should own the one shared G3 transfer");
+        engine_a.tick(g3_deadline);
+        engine_b.tick(g3_deadline);
+
+        let g3_manager = engine_a.g3_manager().expect("G3 enabled").clone();
+        let presence = g3_manager
+            .block_registry()
+            .check_presence::<G3>(&[plh_a, plh_b]);
+        assert!(presence[0].1, "first engine should fill the only G3 slot");
+        assert!(
+            !presence[1].1,
+            "second engine must not over-admit into reserved shared G3 capacity"
+        );
+    }
+
+    #[test]
+    fn g1_to_g2_completion_feeds_g3_with_presence_policy() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(g3_config()))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plh = PositionalLineageHash::new(999, None, 0);
+        engine.enqueue_g1_evictions_holding_sources(&[(0, plh)], Vec::new(), Some(0.0));
+
+        let first_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G1→G2 should reserve bandwidth");
+        engine.tick(first_deadline);
+
+        assert!(
+            engine.earliest_pending_deadline().is_none(),
+            "background G2→G3 should not create a scheduler deadline"
+        );
+        let second_deadline = engine
+            .worker
+            .earliest_finish()
+            .expect("G2→G3 background copy should reserve bandwidth");
+        engine.tick(second_deadline);
+
+        let g3_manager = engine.g3_manager().expect("G3 enabled").clone();
+        let g3_presence = g3_manager.block_registry().check_presence::<G3>(&[plh]);
+        assert!(g3_presence[0].1, "G2→G3 should register the block in G3");
+        let matched = g3_manager.match_blocks(&[plh]);
+        assert_eq!(
+            matched.len(),
+            1,
+            "presence-only G2→G3 policy should offload first-seen G2 block"
+        );
+    }
+
+    #[test]
+    fn g2_to_g3_background_copy_pins_g2_source_until_transfer_completes() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let config = KvbmOffloadConfig {
+            num_g2_blocks: 1,
+            bandwidth_g1_to_g2_gbps: 1.0,
+            ..g3_config()
+        };
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(config))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plh = PositionalLineageHash::new(1_234, None, 0);
+        engine.enqueue_g1_evictions_holding_sources(&[(0, plh)], Vec::new(), Some(0.0));
+
+        let first_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G1→G2 should reserve bandwidth");
+        engine.tick(first_deadline);
+        assert!(
+            engine.worker.earliest_finish().is_some(),
+            "G2→G3 background copy should be in flight"
+        );
+        assert!(
+            engine.g2_manager.allocate_blocks(1).is_none(),
+            "in-flight G2→G3 copy must pin the G2 source block"
+        );
+    }
+
+    #[test]
+    fn g3_staging_reserves_only_contiguous_lower_tier_prefix() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(g3_config()))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plhs: Vec<_> = (0..5)
+            .map(|i| PositionalLineageHash::new(2_000 + i, None, i))
+            .collect();
+        register_test_block(engine.g2_manager(), plhs[0]);
+        let g3_manager = engine.g3_manager().expect("G3 enabled").clone();
+        register_test_block(&g3_manager, plhs[1]);
+        register_test_block(&g3_manager, plhs[2]);
+        // Leave plhs[3] absent: plhs[4] must not count past the first hole.
+        register_test_block(&g3_manager, plhs[4]);
+
+        let prepared = engine
+            .prepare_onboard_prefix(&plhs)
+            .expect("lower-tier prefix should match");
+        assert_eq!(
+            prepared.reservation_block_count(),
+            3,
+            "reserve only G2 prefix + contiguous G3 continuation"
+        );
+    }
+
+    #[test]
+    fn g3_staging_allows_full_contiguous_lower_tier_prefix() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let config = KvbmOffloadConfig {
+            offload_batch_size: 2,
+            ..g3_config()
+        };
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(config))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plhs: Vec<_> = (0..5)
+            .map(|i| PositionalLineageHash::new(4_000 + i, None, i))
+            .collect();
+        let g3_manager = engine.g3_manager().expect("G3 enabled").clone();
+        for plh in &plhs {
+            register_test_block(&g3_manager, *plh);
+        }
+
+        let prepared = engine
+            .prepare_onboard_prefix(&plhs)
+            .expect("full contiguous G3 prefix should be staged");
+        assert_eq!(
+            prepared.reservation_block_count(),
+            plhs.len(),
+            "foreground G3 staging should not be capped by offload batch size"
+        );
+        assert_eq!(
+            engine.earliest_pending_deadline(),
+            None,
+            "G3 staging must wait until start_onboard_prefix reserves G1 destinations"
+        );
+    }
+
+    #[test]
+    fn g3_capacity_skip_returns_g2_prefix_without_local_g3_session() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let config = KvbmOffloadConfig {
+            num_g2_blocks: 1,
+            ..g3_config()
+        };
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(config))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plhs: Vec<_> = (0..3)
+            .map(|i| PositionalLineageHash::new(3_000 + i, None, i))
+            .collect();
+        register_test_block(engine.g2_manager(), plhs[0]);
+        let g3_manager = engine.g3_manager().expect("G3 enabled").clone();
+        register_test_block(&g3_manager, plhs[1]);
+        register_test_block(&g3_manager, plhs[2]);
+
+        let prepared = engine
+            .prepare_onboard_prefix(&plhs)
+            .expect("G2 prefix should still be usable when G3 staging lacks capacity");
+        assert_eq!(
+            prepared.reservation_block_count(),
+            1,
+            "G3 capacity preflight should not invoke local-only G3 session fallback"
+        );
+        assert!(
+            matches!(prepared, PreparedSwapIn::Ready { .. }),
+            "capacity-disabled G3 lookup should degrade to G2-only"
+        );
+    }
+
+    #[tokio::test]
     async fn tick_is_noop_when_idle() {
         let engine = MockOffloadEngine::new(KvbmOffloadConfig::default())
             .await
@@ -768,11 +1807,7 @@ mod tests {
 
     #[test]
     fn offline_runtime_attach_pattern() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
+        let rt = single_thread_runtime();
         let mut engine = rt
             .block_on(MockOffloadEngine::new(KvbmOffloadConfig::default()))
             .expect("offline construction succeeds");
@@ -857,5 +1892,62 @@ mod tests {
             handle.is_complete(),
             "swap-in bit must flip once tick advances past finish"
         );
+    }
+
+    #[test]
+    fn staged_g3_swap_in_runs_g3_to_g2_before_g2_to_g1() {
+        use dynamo_tokens::PositionalLineageHash;
+        use kvbm_logical::MutableBlock;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt = single_thread_runtime();
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(g3_config()))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+        engine.tick(0.0);
+
+        let plh = PositionalLineageHash::new(84, None, 0);
+        let g3_manager = engine.g3_manager().expect("G3 enabled").clone();
+        let (mut alloc, _evicted) = g3_manager
+            .allocate_blocks_with_evictions(1)
+            .expect("G3 allocate");
+        let mutable: MutableBlock<G3> = alloc.pop().unwrap();
+        let complete = mutable
+            .stage(plh, g3_manager.block_size())
+            .expect("G3 stage");
+        drop(g3_manager.register_block(complete));
+
+        let prepared = engine
+            .prepare_onboard_prefix(&[plh])
+            .expect("G3 prefix match must produce a staged swap-in");
+        assert_eq!(prepared.reservation_block_count(), 1);
+        let handle = engine.start_onboard_prefix(prepared, Some(0.0));
+        assert!(!handle.is_complete());
+
+        let first_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G3→G2 staging should reserve shared bandwidth");
+        assert!(
+            (first_deadline - 1.0).abs() < 1e-6,
+            "1 MB / 1 GB/s G3→G2 should finish at 1 ms, got {first_deadline}"
+        );
+
+        engine.tick(first_deadline);
+        assert!(
+            !handle.is_complete(),
+            "G2→G1 transfer should start after G3 staging, not complete immediately"
+        );
+        assert_eq!(handle.block_count(), 1);
+        let second_deadline = engine
+            .earliest_pending_deadline()
+            .expect("G2→G1 onboard should reserve bandwidth after staging");
+        assert!(
+            (second_deadline - 2.0).abs() < 1e-6,
+            "second 1 MB / 1 GB/s hop should finish at 2 ms, got {second_deadline}"
+        );
+
+        engine.tick(second_deadline);
+        assert!(handle.is_complete());
     }
 }

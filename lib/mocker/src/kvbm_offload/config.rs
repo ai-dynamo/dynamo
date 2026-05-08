@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Configuration for the G1↔G2 offload simulation.
+//! Configuration for the G1↔G2/G2↔G3 offload simulation.
 //!
 //! [`KvbmOffloadConfig`] holds the parameters that shape both the PS
 //! bandwidth model ([`super::bandwidth_sharing_model::BandwidthSharingModel`]) and the
-//! kvbm-engine pipeline topology (G2 capacity, offload batch size).
+//! kvbm-engine pipeline topology (G2/G3 capacity, offload batch sizes).
 
 use crate::common::protocols::MockEngineArgs;
+
+const DEFAULT_G1_G2_BANDWIDTH_GBPS: f64 = 14.0;
+const DEFAULT_G2_G3_BANDWIDTH_GBPS: f64 = 7.0;
 
 #[derive(Debug, Clone)]
 pub struct KvbmOffloadConfig {
@@ -23,6 +26,10 @@ pub struct KvbmOffloadConfig {
     /// batches of this size before being handed to the worker.
     pub offload_batch_size: usize,
 
+    /// Optional number of shared G3 blocks to simulate. When set, the mocker
+    /// wires a G2→G3 presence pipeline chained after G1→G2.
+    pub num_g3_blocks: Option<usize>,
+
     /// Bytes per block — used by `MockWorker` to compute transfer size
     /// from block counts. Typically `block_size_tokens * kv_bytes_per_token`.
     /// `None` means "unknown" and the worker will use `0` as a sentinel
@@ -36,6 +43,16 @@ pub struct KvbmOffloadConfig {
     /// Throughput of the G2→G1 onboard link in GB/s. Non-positive values
     /// mean "infinite bandwidth" (transfers complete instantly).
     pub bandwidth_g2_to_g1_gbps: f64,
+
+    /// Throughput of the G2→G3 offload link in GB/s. Defaults to a
+    /// conservative single local NVMe/SSD bandwidth; non-positive values
+    /// mean "infinite bandwidth" (transfers complete instantly).
+    pub bandwidth_g2_to_g3_gbps: f64,
+
+    /// Throughput of the G3→G2 staging link in GB/s. Defaults to the same
+    /// conservative single local NVMe/SSD bandwidth as G2→G3; non-positive
+    /// values mean "infinite bandwidth" (transfers complete instantly).
+    pub bandwidth_g3_to_g2_gbps: f64,
 }
 
 impl Default for KvbmOffloadConfig {
@@ -44,9 +61,12 @@ impl Default for KvbmOffloadConfig {
             num_g2_blocks: 100_000,
             block_size_tokens: 64,
             offload_batch_size: 32,
+            num_g3_blocks: None,
             block_size_bytes: None,
-            bandwidth_g1_to_g2_gbps: 14.0,
-            bandwidth_g2_to_g1_gbps: 14.0,
+            bandwidth_g1_to_g2_gbps: DEFAULT_G1_G2_BANDWIDTH_GBPS,
+            bandwidth_g2_to_g1_gbps: DEFAULT_G1_G2_BANDWIDTH_GBPS,
+            bandwidth_g2_to_g3_gbps: DEFAULT_G2_G3_BANDWIDTH_GBPS,
+            bandwidth_g3_to_g2_gbps: DEFAULT_G2_G3_BANDWIDTH_GBPS,
         }
     }
 }
@@ -55,20 +75,29 @@ impl KvbmOffloadConfig {
     /// Derive an offload config from scheduler-level [`MockEngineArgs`].
     ///
     /// Returns `None` unless both `num_g2_blocks` and `kv_bytes_per_token`
-    /// are set. `num_g2_blocks` is the explicit opt-in for the G2 tier;
-    /// `kv_bytes_per_token` is required to compute `block_size_bytes`.
+    /// are set. Positive `num_g2_blocks` is the explicit opt-in for the G2
+    /// tier; `kv_bytes_per_token` is required to compute `block_size_bytes`.
     /// Caller should interpret `None` as "don't attach an offload engine
     /// for this run".
     pub fn from_args(args: &MockEngineArgs) -> Option<Self> {
         let num_g2_blocks = args.num_g2_blocks?;
+        if num_g2_blocks == 0 {
+            return None;
+        }
         let bpt = args.kv_bytes_per_token?;
         let defaults = Self::default();
+        let offload_batch_size = args
+            .offload_batch_size
+            .filter(|batch_size| *batch_size > 0)
+            .unwrap_or(defaults.offload_batch_size);
+        let num_g3_blocks = args
+            .num_g3_blocks
+            .and_then(|block_count| (block_count > 0).then_some(block_count));
         Some(Self {
             num_g2_blocks,
             block_size_tokens: args.block_size,
-            offload_batch_size: args
-                .offload_batch_size
-                .unwrap_or(defaults.offload_batch_size),
+            offload_batch_size,
+            num_g3_blocks,
             block_size_bytes: Some(args.block_size * bpt),
             bandwidth_g1_to_g2_gbps: args
                 .bandwidth_g1_to_g2_gbps
@@ -76,6 +105,12 @@ impl KvbmOffloadConfig {
             bandwidth_g2_to_g1_gbps: args
                 .bandwidth_g2_to_g1_gbps
                 .unwrap_or(defaults.bandwidth_g2_to_g1_gbps),
+            bandwidth_g2_to_g3_gbps: args
+                .bandwidth_g2_to_g3_gbps
+                .unwrap_or(defaults.bandwidth_g2_to_g3_gbps),
+            bandwidth_g3_to_g2_gbps: args
+                .bandwidth_g3_to_g2_gbps
+                .unwrap_or(defaults.bandwidth_g3_to_g2_gbps),
         })
     }
 }
@@ -110,6 +145,18 @@ mod tests {
     }
 
     #[test]
+    fn from_args_none_when_num_g2_blocks_zero() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .kv_bytes_per_token(Some(131_072))
+            .num_g2_blocks(Some(0))
+            .build()
+            .unwrap();
+
+        assert!(KvbmOffloadConfig::from_args(&args).is_none());
+    }
+
+    #[test]
     fn from_args_computes_block_size_bytes() {
         let args = MockEngineArgs::builder()
             .block_size(64)
@@ -125,8 +172,11 @@ mod tests {
         assert_eq!(cfg.num_g2_blocks, 10_000);
         assert_eq!(cfg.block_size_tokens, 64);
         assert_eq!(cfg.offload_batch_size, 32);
-        assert_eq!(cfg.bandwidth_g1_to_g2_gbps, 14.0);
-        assert_eq!(cfg.bandwidth_g2_to_g1_gbps, 14.0);
+        assert_eq!(cfg.num_g3_blocks, None);
+        assert_eq!(cfg.bandwidth_g1_to_g2_gbps, DEFAULT_G1_G2_BANDWIDTH_GBPS);
+        assert_eq!(cfg.bandwidth_g2_to_g1_gbps, DEFAULT_G1_G2_BANDWIDTH_GBPS);
+        assert_eq!(cfg.bandwidth_g2_to_g3_gbps, DEFAULT_G2_G3_BANDWIDTH_GBPS);
+        assert_eq!(cfg.bandwidth_g3_to_g2_gbps, DEFAULT_G2_G3_BANDWIDTH_GBPS);
     }
 
     #[test]
@@ -136,8 +186,11 @@ mod tests {
             .kv_bytes_per_token(Some(131_072))
             .num_g2_blocks(Some(10_000))
             .offload_batch_size(Some(16))
+            .num_g3_blocks(Some(20_000))
             .bandwidth_g1_to_g2_gbps(Some(8.0))
             .bandwidth_g2_to_g1_gbps(Some(12.0))
+            .bandwidth_g2_to_g3_gbps(Some(3.0))
+            .bandwidth_g3_to_g2_gbps(Some(4.0))
             .build()
             .unwrap()
             .normalized()
@@ -146,7 +199,30 @@ mod tests {
         assert_eq!(cfg.num_g2_blocks, 10_000);
         assert_eq!(cfg.block_size_tokens, 64);
         assert_eq!(cfg.offload_batch_size, 16);
+        assert_eq!(cfg.num_g3_blocks, Some(20_000));
         assert_eq!(cfg.bandwidth_g1_to_g2_gbps, 8.0);
         assert_eq!(cfg.bandwidth_g2_to_g1_gbps, 12.0);
+        assert_eq!(cfg.bandwidth_g2_to_g3_gbps, 3.0);
+        assert_eq!(cfg.bandwidth_g3_to_g2_gbps, 4.0);
+    }
+
+    #[test]
+    fn from_args_treats_zero_optional_g3_and_batch_size_as_disabled() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .kv_bytes_per_token(Some(131_072))
+            .num_g2_blocks(Some(10_000))
+            .num_g3_blocks(Some(0))
+            .offload_batch_size(Some(0))
+            .build()
+            .unwrap();
+
+        let cfg = KvbmOffloadConfig::from_args(&args).expect("G2 remains enabled");
+        assert_eq!(cfg.num_g2_blocks, 10_000);
+        assert_eq!(cfg.num_g3_blocks, None);
+        assert_eq!(
+            cfg.offload_batch_size,
+            KvbmOffloadConfig::default().offload_batch_size
+        );
     }
 }
