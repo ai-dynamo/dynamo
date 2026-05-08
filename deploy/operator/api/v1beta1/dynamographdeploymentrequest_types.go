@@ -443,7 +443,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1".
 	// +optional
 	Image string `json:"image,omitempty"`
 
