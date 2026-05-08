@@ -29,7 +29,9 @@ for _name in ("vllm", "sglang"):
 # tries to load the local dynamo.vllm/__init__.py with name "vllm".
 os.environ.setdefault("PY_IGNORE_IMPORTMISMATCH", "1")
 
-_BAD_DYNAMO_PATH = str(Path(__file__).resolve().parent / "components" / "src" / "dynamo")
+_BAD_DYNAMO_PATH = str(
+    Path(__file__).resolve().parent / "components" / "src" / "dynamo"
+)
 
 
 def pytest_runtest_setup(item):
