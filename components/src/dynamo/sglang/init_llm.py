@@ -75,19 +75,20 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
-        if getattr(server_args, "forward_pass_metrics_port", None) is not None:
+        if getattr(server_args, "enable_forward_pass_metrics", False):
             logging.warning(
-                "Forward pass metrics enabled with snapshot engine: "
-                "worker_id may remain empty because the engine was created before "
-                "the endpoint instance existed."
+                "Forward pass metrics disabled in snapshot mode: the engine was "
+                "created before the endpoint existed, so its FPM publisher bound "
+                "a different IPC path than the relay would subscribe to."
             )
+            server_args.enable_forward_pass_metrics = False
     else:
+        set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
@@ -211,19 +212,20 @@ async def init_prefill(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
-    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
-        if getattr(server_args, "forward_pass_metrics_port", None) is not None:
+        if getattr(server_args, "enable_forward_pass_metrics", False):
             logging.warning(
-                "Forward pass metrics enabled with snapshot engine: "
-                "worker_id may remain empty because the engine was created before "
-                "the endpoint instance existed."
+                "Forward pass metrics disabled in snapshot mode: the engine was "
+                "created before the endpoint existed, so its FPM publisher bound "
+                "a different IPC path than the relay would subscribe to."
             )
+            server_args.enable_forward_pass_metrics = False
     else:
+        set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
