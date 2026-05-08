@@ -488,7 +488,7 @@ class LoadScalingMixin:
         # Consolidation-aware scale-down: per-worker KV utilisation
         # (sched + queued) / max_kv, scaled by the consolidation factor.
         # Survivors absorb the killed worker's in-flight KV, so post-survival
-        # util ≈ current × N/(N-1). Refuse scale-down if any survivor would
+        # util ~= current * N/(N-1). Refuse scale-down if any survivor would
         # exceed ``sensitivity`` (default 0.8) of full KV cache after merge.
         can_scale_down = num_workers > 1 and max_kv is not None and max_kv > 0
         for (wid, dp), fpm in fpm_stats.items():
@@ -831,14 +831,14 @@ class LoadScalingMixin:
         Scale-down checks live in the per-component decision functions because
         they are consolidation-aware:
 
-        - prefill / agg-prefill: re-predict TTFT with ``queued × N/(N-1)``
-          (and ``current_decode_kv × N/(N-1)`` for agg) so the new request's
+        - prefill / agg-prefill: re-predict TTFT with ``queued * N/(N-1)``
+          (and ``current_decode_kv * N/(N-1)`` for agg) so the new request's
           own compute time is not double-counted.
-        - decode / agg-decode: per-worker KV utilisation × ``N/(N-1)`` against
+        - decode / agg-decode: per-worker KV utilisation * ``N/(N-1)`` against
           ``sensitivity`` (i.e. fraction of full cache).
 
         Both refuse the scale-down when the predicted post-survival metric
-        exceeds ``sensitivity``-fraction of capacity, fixing the 2→1
+        exceeds ``sensitivity``-fraction of capacity, fixing the 2->1
         oscillation where flat-fraction thresholds let scale-down through but
         the survivor immediately violates SLA.
         """

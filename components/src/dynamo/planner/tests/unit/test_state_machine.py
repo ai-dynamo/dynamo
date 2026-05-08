@@ -404,7 +404,7 @@ class TestDecodeConsolidationAwareScaleDown:
         assert effects.scale_to.num_decode == 1
 
     def test_high_n_permits_scale_down_at_high_util(self):
-        """N=10 at 70% util permits scale-down: post 0.7×10/9≈0.778 < 0.8."""
+        """N=10 at 70% util permits scale-down: post 0.7*10/9~=0.778 < 0.8."""
         core = self._setup()
         tick = self._tick(num_workers=10, sched_kv_per_worker=70_000)
         effects = core.on_tick(_tick_for(tick), tick)
@@ -412,7 +412,7 @@ class TestDecodeConsolidationAwareScaleDown:
         assert effects.scale_to.num_decode == 9
 
     def test_high_n_blocks_when_post_util_overshoots(self):
-        """N=10 at 78% util refuses (post 0.78×10/9≈0.866 > 0.8)."""
+        """N=10 at 78% util refuses (post 0.78*10/9~=0.866 > 0.8)."""
         core = self._setup()
         tick = self._tick(num_workers=10, sched_kv_per_worker=78_000)
         effects = core.on_tick(_tick_for(tick), tick)
@@ -489,10 +489,10 @@ class TestPrefillConsolidationAwareScaleDown:
         )
 
     def test_n2_refuses_when_post_consolidation_breaks_sla(self):
-        """High queue at N=2: post-consolidation TTFT exceeds SLA × 0.8."""
+        """High queue at N=2: post-consolidation TTFT exceeds SLA * 0.8."""
         core = self._setup(ttft=100.0)
         # avg_isl=1500 from training; queue 30K per worker doubled to 60K
-        # post-consolidation -> ceil((60000+1500)/2048)=31 chunks ≈ 95+ ms.
+        # post-consolidation -> ceil((60000+1500)/2048)=31 chunks ~= 95+ ms.
         tick = self._tick(num_workers=2, queued_per_worker=30_000)
         effects = core.on_tick(_tick_for(tick), tick)
         assert (
@@ -513,10 +513,10 @@ class TestPrefillConsolidationAwareScaleDown:
         """At N=10 the queue-only scaling lets us scale down at queue sizes
         that would refuse if we'd naively multiplied the whole TTFT by 10/9.
 
-        With queue=2000 per worker: avg_isl=1500 dominates the TTFT (≈3 ms)
-        and scaling N→N-1 only inflates the queue portion. Post-consolidation
-        queue ≈ 2222, total ≈ 3722 → still 2 chunks → predicted TTFT remains
-        well under 100ms × 0.8.
+        With queue=2000 per worker: avg_isl=1500 dominates the TTFT (~=3 ms)
+        and scaling N->N-1 only inflates the queue portion. Post-consolidation
+        queue ~= 2222, total ~= 3722 -> still 2 chunks -> predicted TTFT remains
+        well under 100ms * 0.8.
         """
         core = self._setup(ttft=100.0)
         core._num_p_workers = 10  # ensure reconcile sees 10 workers
@@ -530,7 +530,7 @@ def _train_prefill_regression_high_own_compute(core: PlannerStateMachine) -> Non
     """Trains a steeper regression so own-compute is a sizeable fraction of SLA.
 
     With wall_time = 1e-5*t + 1e-3 and ISLs in [1500..2500] (avg_isl=2000),
-    a single chunk at MBT=2048 is ≈ 21.5 ms and T_own (queue=0) is ≈ 21 ms.
+    a single chunk at MBT=2048 is ~= 21.5 ms and T_own (queue=0) is ~= 21 ms.
     """
     fpms = [
         _make_fpm(
@@ -547,10 +547,10 @@ class TestPrefillQueueBudgetRefinement:
     """Sensitivity applies to the queue-induced TTFT, not the full TTFT.
 
     When ``T_own`` (own-compute, fixed cost) is a meaningful fraction of SLA,
-    the old `TTFT(post_queue) < SLA × sensitivity` check over-penalises the
+    the old `TTFT(post_queue) < SLA * sensitivity` check over-penalises the
     queue budget by spending sensitivity on the unavoidable own-compute.
     The corrected check allows scale-down when the queue-induced TTFT after
-    consolidation fits within ``(SLA - T_own) × sensitivity``.
+    consolidation fits within ``(SLA - T_own) * sensitivity``.
     """
 
     def _setup(self, ttft: float = 50.0):
@@ -581,9 +581,9 @@ class TestPrefillQueueBudgetRefinement:
     def test_high_own_compute_permits_scale_down(self):
         """Old check would have refused; new queue-budget check allows.
 
-        N=2, queue=1000, SLA=50ms, T_own≈21ms.
-        Post-consolidation TTFT ≈ 42ms → exceeds old SLA*0.8 = 40ms (refuse).
-        Queue-induced post ≈ 21ms < (50-21)*0.8 = 23.2ms (allow).
+        N=2, queue=1000, SLA=50ms, T_own~=21ms.
+        Post-consolidation TTFT ~= 42ms -> exceeds old SLA*0.8 = 40ms (refuse).
+        Queue-induced post ~= 21ms < (50-21)*0.8 = 23.2ms (allow).
         """
         core = self._setup(ttft=50.0)
         tick = self._tick(num_workers=2, queued_per_worker=1_000)
@@ -592,9 +592,9 @@ class TestPrefillQueueBudgetRefinement:
         assert effects.scale_to.num_prefill == 1
 
     def test_t_own_above_sla_blocks_scale_down(self):
-        """When T_own alone exceeds SLA, queue_budget ≤ 0 → refuse.
+        """When T_own alone exceeds SLA, queue_budget <= 0 -> refuse.
 
-        SLA=15ms but T_own≈21ms → new request can't even meet SLA empty;
+        SLA=15ms but T_own~=21ms -> new request can't even meet SLA empty;
         scaling down would only worsen contention.
         """
         core = self._setup(ttft=15.0)
