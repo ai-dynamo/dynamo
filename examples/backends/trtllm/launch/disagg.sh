@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
@@ -21,16 +20,27 @@ export MODALITY=${MODALITY:-"text"}
 #export MODALITY=${MODALITY:-"multimodal"}
 
 ENABLE_OTEL=false
+USE_UNIFIED=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel)
             ENABLE_OTEL=true
             shift
             ;;
+        --unified)
+            # Run the workers via the unified entry point
+            # (`python -m dynamo.trtllm.unified_main`) so disagg goes
+            # through dynamo.common.backend / dynamo_backend_common
+            # instead of the legacy main.py / WorkerFactory dispatch.
+            USE_UNIFIED=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --unified            Use the unified backend entry point"
+            echo "                       (python -m dynamo.trtllm.unified_main)"
             echo "  -h, --help           Show this help message"
             echo ""
             exit 0
@@ -42,6 +52,16 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# EXIT trap installed AFTER parsing — `--help` and unknown-option exits
+# would otherwise kill the caller's process group.
+trap 'echo Cleaning up...; kill 0' EXIT
+
+if [ "$USE_UNIFIED" = true ]; then
+    WORKER_MODULE="dynamo.trtllm.unified_main"
+else
+    WORKER_MODULE="dynamo.trtllm"
+fi
 
 # Enable tracing if requested
 TRACE_ARGS=()
@@ -61,7 +81,7 @@ OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
@@ -70,7 +90,7 @@ OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIB
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
