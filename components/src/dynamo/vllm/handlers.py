@@ -902,7 +902,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         try:
             await self.engine_client.resume_generation()
             self._paused = False
-            logger.debug("[RL] Engine resumed")
+            logger.info("[RL] Engine resumed")
             return {"status": "ok", "message": "Engine resumed"}
         except EngineDeadError as e:
             self._shutdown_on_engine_dead(e)
@@ -1013,7 +1013,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 kwargs={"weights_path": path},
             )
             self._weight_version = version
-            logger.debug(f"[RL] Weights loaded from {path} (version={version})")
+            logger.info(f"[RL] Weights loaded from {path} (version={version})")
             return {
                 "status": "ok",
                 "message": f"Weights loaded from {path}",
@@ -1176,7 +1176,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "lora_name": lora_name,
                         }
 
-                logger.debug(
+                logger.info(
                     f"[RL] LoRA adapter {'hot-swapped' if is_hot_swap else 'loaded'}: "
                     f"name={lora_name} id={lora_id} path={lora_path}"
                 )
@@ -1263,6 +1263,170 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.exception(
                 f"[RL] Failed to unload LoRA adapter '{lora_name}': {e}"
             )
+            return {"status": "error", "message": str(e)}
+
+    # ── WeightTransferConfig API (Phase 1+4) ───────────────────────────
+    #
+    # New unified surface paired with the Rust frontend's
+    # ``/v1/rl/init_transport`` and the discriminated ``/v1/rl/update_weights``
+    # body. Backwards-compatible: legacy ``update_weights_from_path`` /
+    # ``load_lora_adapter`` / ``unload_lora_adapter`` engine routes stay live
+    # for callers that haven't migrated yet.
+
+    def _ensure_weight_transports(self):
+        """Lazy-init transport registry + vLLM engine adapter."""
+        if getattr(self, "_weight_transports", None) is not None:
+            return
+        from .weight_transports import VllmEngineAdapter
+
+        adapter = VllmEngineAdapter(self.engine_client)
+        adapter.bind_lora_helpers(
+            loader=self._lora_load_via_admin,
+            unloader=self._lora_unload_via_admin,
+        )
+        self._weight_engine_adapter = adapter
+        self._weight_transports: dict = {}
+
+    async def _lora_load_via_admin(self, *, name: str, path: str) -> dict:
+        """Re-use the existing :meth:`load_lora_adapter` path so MDC publish,
+        hot-swap detection, and prefix-cache reset all stay consistent."""
+        return await self.load_lora_adapter(
+            {"lora_name": name, "lora_path": path}
+        )
+
+    async def _lora_unload_via_admin(self, *, name: str) -> dict:
+        return await self.unload_lora_adapter({"lora_name": name})
+
+    async def weight_transport_init(self, body: dict) -> dict:
+        """Idempotent transport setup. Backs ``POST /v1/rl/init_transport``.
+
+        Body:
+          - transport_id: str (caller-chosen)
+          - backend: "filesystem" | "nccl"
+          - <backend>: {…}  (backend-specific block)
+        """
+        body = body or {}
+        backend = body.get("backend")
+        if backend not in ("filesystem", "nccl"):
+            return {
+                "status": "error",
+                "message": (
+                    f"Unsupported backend '{backend}'. In scope this iteration: "
+                    "filesystem, nccl. Future (deferred): nixl, model_express, ipc."
+                ),
+            }
+        transport_id = body.get("transport_id", backend)
+        cfg = dict(body.get(backend) or {})
+        cfg.setdefault("transport_id", transport_id)
+
+        try:
+            self._ensure_weight_transports()
+            from .weight_transports import build_transport, InitCtx
+
+            existing = self._weight_transports.get(transport_id)
+            if existing is not None and existing.backend_id == backend:
+                logger.info(
+                    f"[RL] init_transport: '{transport_id}' already configured "
+                    f"(backend={backend}); idempotent re-init"
+                )
+                # Re-run init for idempotency (eg. NCCL group bootstrap).
+                ctx = InitCtx(rank=0, world_size=1, served_model_name="")
+                result = await existing.init(ctx, cfg)
+                return result.to_dict()
+
+            transport = build_transport(backend, self._weight_engine_adapter, cfg)
+            ctx = InitCtx(rank=0, world_size=1, served_model_name="")
+            result = await transport.init(ctx, cfg)
+            self._weight_transports[transport_id] = transport
+            logger.info(
+                f"[RL] init_transport: backend={backend} transport_id={transport_id} "
+                f"ready={result.ready}"
+            )
+            return result.to_dict()
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.exception(f"[RL] init_transport failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def weight_transport_update(self, body: dict) -> dict:
+        """Backs the new-shape ``POST /v1/rl/update_weights``.
+
+        Body:
+          - version: str
+          - target:    {"kind": "base"} | {"kind": "lora", "name": str, "op": …}
+          - transport: {"backend": "filesystem"|"nccl", <backend>: {…}}
+        """
+        try:
+            from .weight_transports import UpdateWeightsRequest, build_transport, InitCtx
+
+            req = UpdateWeightsRequest.from_dict(body or {})
+            self._ensure_weight_transports()
+            backend = (req.transport or {}).get("backend")
+
+            # LoRA unload may omit the transport block — synthesize filesystem.
+            if (
+                req.target.kind == "lora"
+                and req.target.op == "unload"
+                and backend is None
+            ):
+                backend = "filesystem"
+                req.transport = {"backend": "filesystem", "filesystem": {}}
+
+            if backend not in ("filesystem", "nccl"):
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Unsupported backend '{backend}'. In scope this iteration: "
+                        "filesystem, nccl."
+                    ),
+                }
+
+            # Resolve transport instance: prefer one bound by init_transport;
+            # for filesystem we lazily build per-call (no setup needed).
+            transport_id = (req.transport.get(backend) or {}).get(
+                "transport_id", backend
+            )
+            transport = self._weight_transports.get(transport_id)
+            if transport is None:
+                if backend == "filesystem":
+                    transport = build_transport(
+                        backend, self._weight_engine_adapter, {"transport_id": transport_id}
+                    )
+                    await transport.init(
+                        InitCtx(rank=0, world_size=1, served_model_name=""), {}
+                    )
+                    self._weight_transports[transport_id] = transport
+                else:
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"Transport '{transport_id}' (backend={backend}) is not "
+                            f"initialized. Call POST /v1/rl/init_transport first."
+                        ),
+                    }
+            elif transport.backend_id != backend:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Transport '{transport_id}' is bound to backend "
+                        f"'{transport.backend_id}', not '{backend}'."
+                    ),
+                }
+
+            result = await transport.update_weights(req)
+            self._weight_version = req.version
+            payload = result.to_dict()
+            payload.setdefault("version", req.version)
+            payload.setdefault("backend", backend)
+            payload.setdefault("transport_id", transport_id)
+            return payload
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except (ValueError, FileNotFoundError, NotImplementedError) as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logger.exception(f"[RL] weight_transport_update failed: {e}")
             return {"status": "error", "message": str(e)}
 
     @abstractmethod

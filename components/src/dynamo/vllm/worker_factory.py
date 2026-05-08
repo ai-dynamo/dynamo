@@ -701,10 +701,21 @@ class WorkerFactory:
             "unload_lora_adapter", handler.unload_lora_adapter
         )
 
+        # RL WeightTransferConfig API (Phase 1+4): unified transport surface
+        # for filesystem + nccl backends. Coexists with the legacy routes
+        # above; legacy callers continue to work unchanged.
+        runtime.register_engine_route(
+            "weight_transport_init", handler.weight_transport_init
+        )
+        runtime.register_engine_route(
+            "weight_transport_update", handler.weight_transport_update
+        )
+
         logger.info(
             "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
             "start_profile, stop_profile, pause_generation, resume_generation, "
             "flush_cache, update_weights_from_path, get_weight_version, "
             "get_state, liveness_probe, "
-            "load_lora_adapter, unload_lora_adapter"
+            "load_lora_adapter, unload_lora_adapter, "
+            "weight_transport_init, weight_transport_update"
         )
