@@ -314,10 +314,23 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._worker_initialized: bool = False
         self._released: bool = False
 
-        # Plan B: latest save_done event recorded this step, drained at
-        # `clear_connector_metadata` against compute_stream so the LLM
-        # forward's TP NCCL all-reduce serves as the cross-rank fence.
-        self._latest_save_event: torch.cuda.Event | None = None
+        # Plan B: one CUDA event per step instead of one per save. The
+        # flag is set in `save_caches` whenever a D2H is enqueued on
+        # `_save_stream`; `clear_connector_metadata` then records a
+        # single event at the stream's tail and waits on it from
+        # compute_stream. Equivalent to per-save events because every
+        # D2H this step is enqueued serially on the same stream, but
+        # collapses N cudaEventCreate+Record down to 1.
+        self._save_pending_this_step: bool = False
+
+        # O(1) per-step `mm_hash -> _SaveCmd` lookup, populated in
+        # `bind_connector_metadata`. Replaces the per-call linear scan
+        # in `save_caches` (model_runner invokes save_caches once per
+        # produced encoder output → was O(N²) per step). Filtered to
+        # `writer_rank == _tp_rank` once `_setup_worker` has run; the
+        # `writer_rank != _tp_rank` early-return in `save_caches`
+        # remains the correctness boundary.
+        self._save_cmd_by_hash: dict[str, _SaveCmd] = {}
 
         # Plan B activation gate: the model's LLM forward must be known
         # to issue a same-stream TP NCCL all-reduce after _execute_mm_encoder.
@@ -534,6 +547,36 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     # Worker-side
     # ==================================================================
 
+    def bind_connector_metadata(self, connector_metadata: ECConnectorMetadata) -> None:
+        """Build the per-step `mm_hash -> _SaveCmd` lookup so `save_caches`
+        runs in O(1). The model_runner invokes `save_caches` once per
+        produced encoder output, so the previous linear scan over
+        `metadata.saves` was O(N²) per step.
+
+        On the very first multimodal-active step `_setup_worker` has
+        not yet run, so `_tp_rank` is still its default 0 — build an
+        unfiltered dict in that case (slightly more dict entries on
+        non-writer ranks for one step). The `writer_rank != _tp_rank`
+        early-return in `save_caches` remains the correctness gate
+        regardless.
+        """
+        super().bind_connector_metadata(connector_metadata)
+        if not isinstance(
+            connector_metadata, MultimodalEmbeddingCacheConnectorMetadata
+        ):
+            self._save_cmd_by_hash = {}
+            return
+        if self._worker_initialized:
+            self._save_cmd_by_hash = {
+                cmd.mm_hash: cmd
+                for cmd in connector_metadata.saves
+                if cmd.writer_rank == self._tp_rank
+            }
+        else:
+            self._save_cmd_by_hash = {
+                cmd.mm_hash: cmd for cmd in connector_metadata.saves
+            }
+
     def _setup_worker(self) -> None:
         """Allocate shm, cudaHostRegister, build the arena view, and create
         save_stream. Invoked lazily on the first non-empty metadata cycle so
@@ -675,21 +718,49 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._on_step_begin()
 
         compute = torch.cuda.current_stream()
-        for cmd in metadata.loads:
-            if cmd.mm_hash in encoder_cache:
-                continue
+        # Coalesce contiguous arena spans into one cudaMemcpyAsync each.
+        # For hit-heavy steps in big-model sweeps (e.g. 397B / conc=30 /
+        # 5 imgs), the alternative is many small H2Ds. Sort by offset,
+        # walk groups of contiguous cmds, issue one H2D per group, then
+        # expose per-cmd tensors as PyTorch views into the packed
+        # allocation. The packed Storage is ref-counted by the views,
+        # and `record_stream(compute)` on each view tags that shared
+        # Storage, so the packed buffer lives until every view's
+        # compute consumption completes. Degrades cleanly to per-load
+        # H2D when no spans are contiguous (no regression vs prior).
+        pending = [c for c in metadata.loads if c.mm_hash not in encoder_cache]
+        pending.sort(key=lambda c: c.offset)
+        i, n = 0, len(pending)
+        while i < n:
+            j = i + 1
+            while (
+                j < n
+                and pending[j - 1].offset + pending[j - 1].nbytes == pending[j].offset
+            ):
+                j += 1
+
             assert self._arena_uint8 is not None
-            # H2D as raw bytes, then reinterpret on the GPU side.
-            cpu_uint8 = self._arena_uint8.narrow(0, cmd.offset, cmd.nbytes)
-            gpu_uint8 = cpu_uint8.to(device=compute.device, non_blocking=True)
-            gpu_tensor = gpu_uint8.view(self._model_dtype).view(
-                cmd.num_embeds, self._feature_dim
-            )
-            # Tell the caching allocator the destination is consumed by
-            # compute; vLLM may pop encoder_cache[h] before compute drains.
-            gpu_tensor.record_stream(compute)
-            encoder_cache[cmd.mm_hash] = gpu_tensor
-            self._loads_issued += 1
+            group = pending[i:j]
+            group_start = group[0].offset
+            group_total = group[-1].offset + group[-1].nbytes - group_start
+            cpu_uint8 = self._arena_uint8.narrow(0, group_start, group_total)
+            packed = cpu_uint8.to(device=compute.device, non_blocking=True)
+
+            for cmd in group:
+                rel = cmd.offset - group_start
+                view = (
+                    packed.narrow(0, rel, cmd.nbytes)
+                    .view(self._model_dtype)
+                    .view(cmd.num_embeds, self._feature_dim)
+                )
+                # Tag the underlying packed Storage so the caching
+                # allocator keeps it alive until compute drains; vLLM
+                # may pop encoder_cache[h] before that point.
+                view.record_stream(compute)
+                encoder_cache[cmd.mm_hash] = view
+                self._loads_issued += 1
+
+            i = j
 
         # Evict commands carry no worker-side state to clean up — the
         # scheduler-side allocator owns slot lifetime.
@@ -702,11 +773,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MultimodalEmbeddingCacheConnectorMetadata)
 
-        save_cmd: _SaveCmd | None = None
-        for cmd in metadata.saves:
-            if cmd.mm_hash == mm_hash:
-                save_cmd = cmd
-                break
+        save_cmd = self._save_cmd_by_hash.get(mm_hash)
         if save_cmd is None:
             return
         if not self._worker_initialized:
@@ -755,25 +822,39 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._saves_issued += 1
 
         if self._nccl_fence_active:
-            # Plan B: record the save_done event on save_stream and keep the
-            # most recent one for this step. clear_connector_metadata will
-            # drain it against compute_stream so the next LLM-forward NCCL
-            # all-reduce serves as the cross-rank fence.
-            done = torch.cuda.Event()
-            done.record(self._save_stream)
-            self._latest_save_event = done
+            # Plan B: just mark that a D2H was enqueued on save_stream
+            # this step. `clear_connector_metadata` records exactly one
+            # event at the stream's tail, which strictly happens-after
+            # every save enqueued serially on the same stream. One
+            # cudaEventCreate+Record per step instead of one per save.
+            self._save_pending_this_step = True
 
     def clear_connector_metadata(self) -> None:
-        """Plan B fence point. After every metadata-bearing step, drain
-        the latest save_done event against compute_stream. The next op on
-        compute_stream is the LLM forward's first TP all-reduce — that NCCL
-        collective is the cross-rank visibility point.
+        """Plan B fence point + per-step state reset.
 
-        Plan A path leaves _latest_save_event as None (we never record it
-        in save_caches when the fence is inactive), so this is a no-op."""
-        if self._latest_save_event is not None:
-            torch.cuda.current_stream().wait_event(self._latest_save_event)
-            self._latest_save_event = None
+        Plan B: if any D2H was enqueued on `_save_stream` this step,
+        record one CUDA event at the stream's tail and have
+        compute_stream wait on it. The next op on compute_stream is
+        the LLM forward's first TP all-reduce — that NCCL collective
+        is the cross-rank visibility point. Recording the event here
+        instead of inside `save_caches` collapses N events per step
+        down to 1; equivalent because every D2H this step is enqueued
+        serially on the same stream.
+
+        Plan A path leaves `_save_pending_this_step` False, so the
+        fence branch is a no-op.
+
+        Always reset the per-step `_save_cmd_by_hash` dict so we
+        don't pin _SaveCmd objects across non-multimodal steps where
+        `bind_connector_metadata` may not be re-called with our type.
+        """
+        if self._save_pending_this_step:
+            assert self._save_stream is not None
+            done = torch.cuda.Event()
+            done.record(self._save_stream)
+            torch.cuda.current_stream().wait_event(done)
+            self._save_pending_this_step = False
+        self._save_cmd_by_hash = {}
         super().clear_connector_metadata()
 
     # ==================================================================
