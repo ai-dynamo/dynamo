@@ -532,8 +532,8 @@ struct Client {
 
 #[pyclass]
 #[derive(Clone, PartialEq)]
-struct ModelType {
-    inner: llm_rs::model_type::ModelType,
+pub(crate) struct ModelType {
+    pub(crate) inner: llm_rs::model_type::ModelType,
 }
 
 #[pymethods]

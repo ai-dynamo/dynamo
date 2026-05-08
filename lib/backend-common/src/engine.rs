@@ -17,6 +17,8 @@ use futures::stream::BoxStream;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::local_model::runtime_config::DisaggregatedEndpoint;
+pub use dynamo_llm::model_type::ModelType;
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 pub use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 pub use dynamo_llm::protocols::common::{
@@ -32,6 +34,25 @@ pub use dynamo_runtime::engine::AsyncEngineContext;
 /// the router sees no value and falls back to round-robin (for scheduling
 /// hints) or its configured defaults. Engines without a traditional KV cache
 /// can leave `kv_cache_block_size` and `total_kv_blocks` unset.
+///
+/// Disaggregated-serving fields:
+///
+/// * `model_type` — when `Some`, overrides the type derived from
+///   `WorkerConfig.endpoint_types`. A prefill worker sets this to
+///   `ModelType::Prefill` so Dynamo's discovery promotes the worker to
+///   the prefill router.
+/// * `disaggregated_endpoint` — when `Some`, `Worker` propagates it to
+///   `ModelRuntimeConfig.disaggregated_endpoint`. The Rust `PrefillRouter`
+///   resolves it per request and synthesizes `bootstrap_info` (host/port/
+///   room) into each decode request. Used by router-resolved bootstrap-
+///   mode backends (SGLang, TokenSpeed). Synchronous-fallback backends
+///   (vLLM, TRT-LLM) leave this `None` and emit state from prefill chunks
+///   instead.
+/// * `enable_local_indexer` — engine override for the worker-level flag of
+///   the same name. `None` means "respect `WorkerConfig.enable_local_indexer`";
+///   `Some(false)` is typical for prefill workers because they ship KV out
+///   of band and a local prefix-match indexer would track blocks that have
+///   already left.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
@@ -52,6 +73,15 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Engine-driven override of the registered model type. `None` falls
+    /// back to `parse_endpoint_types(WorkerConfig.endpoint_types)`.
+    pub model_type: Option<ModelType>,
+    /// Bootstrap endpoint advertised by prefill workers using router-
+    /// resolved disagg mode. See struct docs for details.
+    pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
+    /// Engine-driven override of the worker-level `enable_local_indexer`
+    /// flag. `None` respects `WorkerConfig.enable_local_indexer`.
+    pub enable_local_indexer: Option<bool>,
 }
 
 /// Inference engine trait.
