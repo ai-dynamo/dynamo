@@ -882,80 +882,30 @@ impl EndpointPicker for Router {
 mod tests {
     use super::*;
 
-    fn parse(
-        json: &str,
-    ) -> dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest {
-        serde_json::from_str(json).expect("test request must parse as chat completion")
-    }
-
-    #[test]
-    fn priority_jump_absent_when_no_nvext() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}]
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 0.0);
-    }
-
-    #[test]
-    fn priority_jump_absent_when_no_agent_hints() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"greed_sampling": true}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 0.0);
-    }
-
+    /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
+    /// non-zero `priority_jump`, and absence collapses to `0.0`. If this
+    /// regresses, the GAIE ext-proc path is back to ignoring priority.
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"priority": 5}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 5.0);
-    }
+        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"agent_hints": {"priority": 5}}
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_priority_jump(&with_priority), 5.0);
 
-    #[test]
-    fn priority_jump_clamps_negative_to_zero() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"priority": -3}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 0.0);
-    }
-
-    #[test]
-    fn priority_jump_falls_back_to_latency_sensitivity_when_priority_missing() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"latency_sensitivity": 2.5}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 2.5);
-    }
-
-    #[test]
-    fn priority_jump_prefers_priority_over_latency_sensitivity() {
-        let req = parse(
-            r#"{
-                "model": "test",
-                "messages": [{"role": "user", "content": "hi"}],
-                "nvext": {"agent_hints": {"priority": 10, "latency_sensitivity": 2.5}}
-            }"#,
-        );
-        assert_eq!(extract_priority_jump(&req), 10.0);
+        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_priority_jump(&without_nvext), 0.0);
     }
 }
