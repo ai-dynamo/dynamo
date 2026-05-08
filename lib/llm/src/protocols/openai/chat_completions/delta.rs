@@ -429,29 +429,33 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // rules stay in one place. The RL `completion_token_ids` accumulator —
         // which is per-chunk-accumulated and emitted only on the finish chunk —
         // is layered on top of the helper output afterwards.
-        if let Some(mut nvext_response) = self.options.response_fields.build_response_nvext(
-            self.tracker.as_ref(),
-            delta.disaggregated_params.as_ref(),
-            finish_reason.is_some(),
-            delta.engine_data,
-        )
-        .or_else(|| {
-            // The helper returns None when no fields would be emitted. RL's
-            // accumulator path needs a base NvExtResponse to attach to when the
-            // finish chunk is the only thing carrying completion_token_ids.
-            if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
-                Some(NvExtResponse {
-                    worker_id: None,
-                    timing: None,
-                    token_ids: None,
-                    routed_experts: None,
-                    engine_data: None,
-                    completion_token_ids: None,
-                })
-            } else {
-                None
-            }
-        }) {
+        if let Some(mut nvext_response) = self
+            .options
+            .response_fields
+            .build_response_nvext(
+                self.tracker.as_ref(),
+                delta.disaggregated_params.as_ref(),
+                finish_reason.is_some(),
+                delta.engine_data,
+            )
+            .or_else(|| {
+                // The helper returns None when no fields would be emitted. RL's
+                // accumulator path needs a base NvExtResponse to attach to when the
+                // finish chunk is the only thing carrying completion_token_ids.
+                if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
+                    Some(NvExtResponse {
+                        worker_id: None,
+                        timing: None,
+                        token_ids: None,
+                        routed_experts: None,
+                        engine_data: None,
+                        completion_token_ids: None,
+                    })
+                } else {
+                    None
+                }
+            })
+        {
             // RL accumulator: emit the full accumulated token_ids list on the finish
             // chunk only. The helper's per-chunk read from `disaggregated_params`
             // is wrong for this field (we want the cumulative, not per-chunk).
@@ -556,7 +560,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         }
@@ -652,7 +656,7 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
-        
+
             return_token_ids: None,
             tokens: None,
         }

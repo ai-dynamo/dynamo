@@ -823,7 +823,7 @@ mod tests {
                 }),
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 

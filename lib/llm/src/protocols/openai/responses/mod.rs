@@ -2115,7 +2115,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 
@@ -2178,7 +2178,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 
@@ -2385,7 +2385,7 @@ thinking
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 
@@ -2420,7 +2420,7 @@ thinking
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 
@@ -2450,7 +2450,7 @@ thinking
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 
@@ -2477,7 +2477,7 @@ thinking
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         };
 
@@ -2597,7 +2597,7 @@ thinking
                 usage: None,
             },
             nvext: None,
-        
+
             prompt_token_ids: None,
         }
     }

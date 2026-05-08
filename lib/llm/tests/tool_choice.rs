@@ -41,7 +41,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         chat_template_args: None,
         media_io_kwargs: None,
         unsupported_fields: Default::default(),
-    
+
         return_token_ids: None,
         tokens: None,
     }

@@ -910,7 +910,7 @@ mod tests {
             token_ids: true,
             routed_experts: true,
             engine_data: false,
-        
+
             completion_token_ids: false,
         };
         let tracker = tracker_with_prefill_worker();
@@ -948,7 +948,7 @@ mod tests {
                 token_ids: false, // only enabled via query_instance_id
                 routed_experts: true,
                 engine_data: false,
-            
+
                 completion_token_ids: false,
             }
         );
