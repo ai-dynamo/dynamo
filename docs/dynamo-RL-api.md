@@ -14,7 +14,6 @@ This document describes the RL training API surface on the Dynamo serving stack.
 6. [Key Data Structures](#6-key-data-structures)
 7. [Worker Engine Routes (Internal)](#7-worker-engine-routes-internal)
 8. [Known Limitations](#8-known-limitations)
-9. [What Changed vs. the Earlier Draft](#9-what-changed-vs-the-earlier-draft)
 
 ---
 
@@ -92,11 +91,11 @@ flowchart TD
 
 ### Key Design Decisions
 
-1. **Single entry point.** prime-rl points both `base_url` and `admin_base_url` at the Dynamo frontend. No separate admin service.
-2. **Fan-out in Rust.** `/v1/rl/*` handlers fan out to all vLLM workers via `DYN_RL_WORKER_SYSTEM_URLS`. Supports DP > 1 without prime-rl needing to discover workers. Returns HTTP 200 only when every worker responds OK; otherwise 502 with per-worker details.
-3. **Token IDs as a response extension.** When `DYN_ENABLE_RL=true`, `prompt_token_ids` and `choices[i].token_ids` are injected into every non-streaming response automatically. `nvext.completion_token_ids` is the canonical Dynamo location; the choice-level field is a compatibility shim for prime-rl/verifiers.
+1. **Single entry point.** The trainer points both `base_url` and `admin_base_url` at the Dynamo frontend. No separate admin service.
+2. **Fan-out in Rust.** `/v1/rl/*` handlers fan out to all vLLM workers via `DYN_RL_WORKER_SYSTEM_URLS`. Supports DP > 1 without the client needing to discover workers. Returns HTTP 200 only when every worker responds OK; otherwise 502 with per-worker details.
+3. **Token IDs as a response extension.** When `DYN_ENABLE_RL=true`, `prompt_token_ids` and `choices[i].token_ids` are injected into every non-streaming response automatically. `nvext.completion_token_ids` is the canonical Dynamo location; the choice-level field is a compatibility shim for clients that read tokens from the choice object.
 4. **Backward compatible.** All new response fields use `#[serde(skip_serializing_if = "Option::is_none")]`. Clients that don't set `DYN_ENABLE_RL` see standard OpenAI-compatible responses with no extra fields.
-5. **TITO without a URI fork.** Pre-tokenized input is a top-level extension on the standard chat-completions request (`prompt_token_ids`), not a separate `/v1/chat/completions/tokens` URI. Bridges until vLLM 0.20+ accepts the same extension natively.
+5. **TITO without a URI fork.** Pre-tokenized input is a top-level extension on the standard chat-completions request (`prompt_token_ids`), not a separate `/v1/chat/completions/tokens` URI. Aligns with vLLM 0.20+ which accepts the same extension natively.
 
 ---
 
@@ -116,7 +115,7 @@ flowchart TD
 |---|---|---|
 | `DYN_SYSTEM_PORT` | `8081` (local) / `9090` (k8s) | Worker's system HTTP port where engine routes are registered. |
 
-### prime-rl `orch.toml` (representative)
+### Sample trainer config
 
 ```toml
 [client]
@@ -162,7 +161,7 @@ The following top-level fields are accepted in addition to the OpenAI schema. Th
 | `bad_words_token_ids` | `u32[]` | Suppresses these IDs. |
 | `truncate_prompt_tokens` | `int` | Truncates prompt to N most-recent tokens. |
 | `weight_version` | `string` | Routing filter for IS-correction strict-version mode (today accepted; routing follow-up). |
-| `cache_salt` | `string` | KV prefix-cache isolation hint. (Coordinated with #8197 → `X-Tenant-Id` header; both forms accepted for one release.) |
+| `cache_salt` | `string` | KV prefix-cache isolation hint. The equivalent `X-Tenant-Id` request header is also accepted; the header takes precedence when both are present. |
 | `return_token_ids` | `bool` | Per-request opt-in for `nvext.completion_token_ids` (also achievable via `extra_fields`). |
 | `return_routed_experts` | `bool` | MoE expert-routing replay capture. |
 | `return_prompt_logprobs` | `bool` | Streaming logprobs for input tokens. |
@@ -189,7 +188,7 @@ Validation rules:
 
 - `messages` may be empty when `prompt_token_ids` is non-empty (the chat template short-circuits).
 - `messages` non-empty + `prompt_token_ids` non-empty → 400 mutual-exclusion error (canonical channel only).
-- `nvext.token_data` + non-empty `messages` → still allowed (renderer-mode placeholder pattern from `verifiers.dynamo_chat_nvext` keeps working).
+- `nvext.token_data` + non-empty `messages` → still allowed (legacy renderer-mode placeholder pattern that uses a synthetic user message alongside pre-tokenized input).
 
 #### Sample response (non-streaming, `DYN_ENABLE_RL=true`)
 
@@ -221,7 +220,7 @@ Validation rules:
 | `token_ids` | `response.choices[i].token_ids` | Per-choice output token IDs, promoted by `rl_promote_token_ids_in_response` from `nvext.completion_token_ids`. |
 | `completion_token_ids` | `response.nvext.completion_token_ids` | Canonical Dynamo location; accumulated across SSE chunks by `DeltaGenerator`. |
 
-**Why two locations?** prime-rl/verifiers reads `response.prompt_token_ids` and `choices[i].token_ids`; Dynamo natively emits in `nvext.completion_token_ids`. The Rust post-processor promotes the latter to the former.
+**Why two locations?** Some RL clients read tokens from `response.prompt_token_ids` / `choices[i].token_ids`; Dynamo natively emits them under `nvext.completion_token_ids`. The Rust post-processor promotes the canonical field to the choice-level field so both client conventions work.
 
 **Invariant:** `len(completion_token_ids) == len(logprobs.content)`.
 
@@ -237,7 +236,7 @@ Mounted only when `DYN_ENABLE_RL=true`. All non-trivial routes fan out to the wo
 
 #### `GET /v1/rl/state` — composite read-only
 
-Single endpoint that returns everything prime-rl needs to make a decision. Aggregates `get_state` per-worker payloads.
+Single endpoint that returns the full fleet state in one call. Aggregates `get_state` per-worker payloads.
 
 ```bash
 curl -s http://localhost:8000/v1/rl/state
@@ -383,7 +382,7 @@ curl -s -X POST http://localhost:8000/v1/rl/load_lora_adapter \
  "message": "Expected body: {\"lora_name\": str, \"lora_path\": str} (both required, non-empty)"}
 ```
 
-vLLM worker requirements: started with `--enable-lora --max-lora-rank R --max-loras N`. For prime-rl's single-adapter loop, `--max-loras 1` is sufficient.
+vLLM worker requirements: started with `--enable-lora --max-lora-rank R --max-loras N`. For a single-adapter training loop, `--max-loras 1` is sufficient.
 
 #### `POST /v1/rl/unload_lora_adapter`
 
@@ -397,7 +396,7 @@ curl -s -X POST http://localhost:8000/v1/rl/unload_lora_adapter \
 
 #### Legacy endpoints (kept for back-compat)
 
-`GET /v1/rl/health`, `GET /v1/rl/ready`, `GET /v1/rl/weight_version` — same shapes as the previous draft. To be removed in Phase 5 of `docs/design-docs/rl-support.md` once prime-rl's AdminAPI migrates to `/v1/rl/state`.
+`GET /v1/rl/health`, `GET /v1/rl/ready`, `GET /v1/rl/weight_version` — return the same shapes they did before `/v1/rl/state` was added. They will be removed once existing clients migrate to `/v1/rl/state`.
 
 ---
 
@@ -407,7 +406,7 @@ curl -s -X POST http://localhost:8000/v1/rl/unload_lora_adapter \
 
 ```mermaid
 sequenceDiagram
-    participant Orch as prime-rl Orchestrator
+    participant Orch as RL Orchestrator
     participant FE as Dynamo Frontend (Rust)
     participant Worker as vLLM Worker (GPU)
 
@@ -425,9 +424,9 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Trainer as prime-rl Trainer
+    participant Trainer as RL Trainer
     participant PVC as Shared Storage
-    participant Orch as prime-rl Orchestrator
+    participant Orch as RL Orchestrator
     participant FE as Dynamo Frontend (Rust)
     participant W1 as vLLM Worker 1
     participant W2 as vLLM Worker 2
@@ -460,7 +459,7 @@ NCCL mode: `weight_dir=null` returns 200 immediately; the actual GPU↔GPU broad
 
 ```mermaid
 sequenceDiagram
-    participant Orch as prime-rl Orchestrator
+    participant Orch as RL Orchestrator
     participant FE as Dynamo Frontend
     participant W1 as vLLM Worker 1
 
@@ -508,7 +507,7 @@ Serialized as `nvext` on each SSE chunk and the unary response body:
 NvExtResponse {
     worker_id:            Option<WorkerIdInfo>,
     timing:               Option<TimingInfo>,
-    token_ids:            Option<Vec<u32>>,        // GAIE Stage 1 prompt
+    token_ids:            Option<Vec<u32>>,        // pre-tokenized prompt (used by disaggregated query/fill stages)
     routed_experts:       Option<serde_json::Value>,
     completion_token_ids: Option<Vec<u32>>,        // RL output, final chunk only
 }
@@ -538,7 +537,7 @@ Tracks `accumulated_completion_token_ids: Vec<u32>` per request. Activated when 
 
 ## 7. Worker Engine Routes (Internal)
 
-Registered on each vLLM worker's system HTTP port (default `8081` local / `9090` k8s) by `worker_factory.py::register_engine_routes()`. Called by Rust `/v1/rl/*` handlers — not by prime-rl directly.
+Registered on each vLLM worker's system HTTP port (default `8081` local / `9090` k8s) by `worker_factory.py::register_engine_routes()`. Called by the Rust `/v1/rl/*` handlers — not by external clients directly.
 
 | Route | vLLM API called | Used by |
 |---|---|---|
@@ -562,26 +561,9 @@ Registered on each vLLM worker's system HTTP port (default `8081` local / `9090`
 
 | Limitation | Workaround | Notes |
 |---|---|---|
-| **NCCL mode is a no-op on Dynamo's vLLM side.** `update_weights` with `weight_dir=null` returns 200 immediately, but `dynamo.vllm` does not load `NCCLWeightBroadcastReceiver` as a vLLM worker class — so the trainer's NCCL broadcast has no peer on the inference side. Trainer's `init_process_group` times out at `weight_broadcast.timeout` (default 1200 s). | Use `weight_broadcast.type = "filesystem"`. The `dynamo.sglang` backend ships `update_weights_from_distributed` natively and does work over NCCL. | Tracked at the prime-rl side: orchestrator already POSTs `/v1/rl/init_broadcaster` which dynamo.vllm doesn't expose (logs `route does not exist. Skipping NCCL broadcast initialization.` on the orch side). Wiring is the next workstream. |
-| `cache_salt` not yet honored end-to-end | Set `[experimental] use_prefix_cache_salt = false` in prime-rl `orch.toml`; or send the equivalent `X-Tenant-Id` header (#8197). | Field is whitelisted (`PASSTHROUGH_EXTRA_FIELDS`) so requests don't 400; routing-side filter is a follow-up. |
+| **NCCL mode is a no-op on Dynamo's vLLM side.** `update_weights` with `weight_dir=null` returns 200 immediately, but `dynamo.vllm` does not load an NCCL weight-broadcast receiver as a vLLM worker class — so the trainer's NCCL broadcast has no peer on the inference side, and `init_process_group` on the trainer times out at `weight_broadcast.timeout` (default 1200 s). | Use `weight_broadcast.type = "filesystem"`. The `dynamo.sglang` backend ships `update_weights_from_distributed` natively and does work over NCCL. | The bootstrap admin route the trainer expects (`/v1/rl/init_broadcaster`) is not exposed by `dynamo.vllm` today; wiring it (and the receiver class) is the next workstream. |
+| `cache_salt` not yet honored end-to-end | Disable prefix-cache-salt on the client side, or send the equivalent `X-Tenant-Id` header. | Field is whitelisted (`PASSTHROUGH_EXTRA_FIELDS`) so requests don't 400; routing-side filter is a follow-up. |
 | `prompt_token_ids` only injected for non-streaming responses | Use non-streaming mode for RL rollouts (the default). | Streaming final-chunk injection is planned. |
 | Weight version `"initial"` before first update | Use `/v1/rl/state.applied_weight_version` for source-of-truth; don't rely on the version string for correctness. | |
 | Filesystem weight broadcast scales poorly for large models | Ok for 0.6B (~250 ms load); marginal at 7B (~25 s); ~150 s at 30B-A3B BF16; impractical at 70B+. | RDMA / NCCL-receive on dynamo.vllm planned. |
 
----
-
-## 9. What Changed vs. the Earlier Draft
-
-For readers who know the previous `Dynamo-RL-api-draft.md`:
-
-| Old | New |
-|---|---|
-| `/v1/chat/completions/tokens` (TITO URI fork) | TITO collapsed into `/v1/chat/completions` via the `prompt_token_ids` top-level extension. URI returns 404. |
-| `/v1/tokenize`, `/v1/detokenize` | Removed (return 404). Owned by [#7699](https://github.com/ai-dynamo/dynamo/pull/7699), out of scope for this surface. |
-| `POST /v1/rl/pause` (no params) | `POST /v1/rl/pause?mode=keep|wait|abort&clear_cache=bool` (3-mode). |
-| `POST /v1/rl/update_weights` (string body) | Typed body `{weight_dir, weight_version?, reset_prefix_cache=true}`; response carries `applied_weight_version`. |
-| `/v1/rl/health` + `/v1/rl/ready` + `/v1/rl/weight_version` | All three kept for back-compat, **plus** new composite `GET /v1/rl/state`. New `GET /v1/rl/liveness` does a deep `check_health()` round-trip. |
-| `PASSTHROUGH_EXTRA_FIELDS = [cache_salt]` | Now: `cache_salt`, `prompt_token_ids`, `weight_version`, `return_routed_experts`, `return_token_ids`, `return_prompt_logprobs`, `stop_token_ids`, `bad_words_token_ids`, `allowed_token_ids`, `truncate_prompt_tokens`. Full `SamplingParams` parity. |
-| `get_stop_token_ids() -> Option<Vec<TokenIdType>>` (silent drop on bad input) | `get_stop_token_ids() -> Result<Option<Vec<TokenIdType>>>`. Malformed input returns a typed 400. |
-| nvext serde failures: `if let Ok(json) = serde_json::to_value(...) { ... }` (silent drop) | `match { Ok(json) => ..., Err(e) => tracing::warn!(...) }`. No silent corruption of promoted token IDs / weight version. |
-| Engine routes: 5–7 (pause, resume, flush_cache, update_weights_from_path, get_weight_version, +load_lora, +unload_lora) | 9. Added: `get_state`, `liveness_probe`. |

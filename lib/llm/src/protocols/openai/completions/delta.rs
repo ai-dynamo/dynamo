@@ -314,9 +314,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             finish_reason.is_some(),
             delta.engine_data,
         ) {
-            // CR-9 closure: log a warning if serialization fails instead of
-            // silently dropping the nvext payload (would mean promoted fields
-            // never reach the client).
+            // Log a warning if serialization fails instead of silently
+            // dropping the nvext payload (would mean promoted fields never
+            // reach the client).
             match serde_json::to_value(&nvext_response) {
                 Ok(nvext_json) => {
                     response.nvext = Some(nvext_json);

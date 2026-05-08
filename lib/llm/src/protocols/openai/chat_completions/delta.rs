@@ -460,10 +460,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                     Some(self.accumulated_completion_token_ids.clone());
             }
 
-            // CR-9 closure: emit a tracing::warn! when serialization fails
-            // instead of silently dropping the nvext payload. A dropped nvext
-            // means promoted token_ids / weight_version / etc. never reach the
-            // RL trainer, which silently corrupts training (off-policy delta).
+            // Emit a tracing::warn! when serialization fails instead of
+            // silently dropping the nvext payload. A dropped nvext means
+            // promoted token_ids / weight_version / etc. never reach the RL
+            // trainer, which silently corrupts training (off-policy delta).
             match serde_json::to_value(&nvext_response) {
                 Ok(nvext_json) => {
                     stream_response.nvext = Some(nvext_json);

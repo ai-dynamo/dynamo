@@ -207,7 +207,6 @@ impl ErrorMessage {
     /// Bad Request Error.
     /// Return this error when the client sends an invalid request — malformed
     /// JSON, schema mismatch, or fields that fail `validate.rs` gating.
-    /// (CR-8 closure: stale doc-block lines about "Not Implemented" removed.)
     #[allow(dead_code)] // exposed for downstream crates; not directly called in lib/llm
     pub fn bad_request(msg: &str) -> ErrorResponse {
         let code = StatusCode::BAD_REQUEST;
@@ -2110,9 +2109,9 @@ fn resolve_model_card(
     Ok((model, card))
 }
 
-// Phase 5: handler kept (no callers) until jthomson04 PR #7699 lands
-// `/tokenize` and `/detokenize` at root paths. Re-mount via
-// `tokenization_router` in `service_v2.rs` if needed standalone.
+// Handler kept (no callers in this branch) for downstream code that re-mounts
+// `tokenization_router` in `service_v2.rs` standalone, until the upstream
+// `/tokenize` and `/detokenize` work lands at the root paths.
 #[allow(dead_code)]
 async fn tokenize(
     State(state): State<Arc<service_v2::State>>,
@@ -2357,11 +2356,11 @@ pub fn chat_completions_router(
 ///
 /// If no path is provided, the default path is `/v1/chat/completions/tokens`.
 ///
-/// Phase 5: dropped from the v2 surface (see `service_v2.rs`). TITO callers
-/// retarget to `/v1/chat/completions` with `prompt_token_ids` extension —
-/// vLLM 0.20+ skips chat templating when that field is present, identical
-/// behavior. The handler is kept as `#[allow(dead_code)]` until prime-rl
-/// `bis/prime-rl-merged` migration P1 lands.
+/// Dropped from the v2 surface (see `service_v2.rs`). TITO callers retarget
+/// to `/v1/chat/completions` with the `prompt_token_ids` extension — vLLM
+/// 0.20+ skips chat templating when that field is present, identical
+/// behavior. The handler is kept as `#[allow(dead_code)]` for downstream
+/// code that still references it; deletion is a follow-up cleanup.
 #[allow(dead_code)]
 pub fn chat_completions_tokens_router(
     state: Arc<service_v2::State>,
@@ -3231,9 +3230,9 @@ async fn rl_ready(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 /// - `mode`: `keep` | `wait` | `abort` (default `keep`)
 /// - `clear_cache`: `true` | `false` (default `false`)
 ///
-/// Closes hhzhang16 HH-21 (3-mode pause: vLLM exposes abort/wait/keep).
-/// Default is `mode=keep&clear_cache=false` to match prime-rl
-/// `client.py:_pause_engines` so existing callers keep working.
+/// Three-mode pause matches what vLLM exposes (abort / wait / keep). The
+/// default `mode=keep&clear_cache=false` preserves the original single-mode
+/// pause behavior so existing callers keep working without changes.
 #[derive(Debug, serde::Deserialize)]
 struct RlPauseQuery {
     #[serde(default)]
@@ -3609,13 +3608,12 @@ fn rl_tokenize_prompt(
 ///
 ///   response.nvext.completion_token_ids  →  response.choices[i].token_ids
 ///
-/// This lets Prime-RL read `choice.token_ids` without knowing about the `nvext`
-/// extension structure. Called on non-streaming responses when RL token ID mode
-/// is active. (CR-10 closure: doc-block was previously misattached to
-/// `rl_tokenize_prompt`.)
+/// This lets RL clients read `choice.token_ids` without knowing about the
+/// `nvext` extension structure. Called on non-streaming responses when RL
+/// token ID mode is active.
 fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
-    // Move completion_token_ids from response-level nvext to each choice.
-    // Prime-RL / verifiers expects:
+    // Move completion_token_ids from response-level nvext to each choice,
+    // because some RL clients expect:
     //   response.choices[i].token_ids  (not response.nvext.completion_token_ids)
     let has_nvext = json_val.get("nvext").is_some();
     let has_completion_ids = json_val
@@ -3649,22 +3647,22 @@ fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
 
 /// `GET /v1/rl/health` — lightweight health check for Prime-RL admin client.
 ///
-/// Prime-RL's `check_health()` calls `GET /health` on the admin client. When
-/// `admin_base_url = ["http://dynamo:8000/v1/rl"]` the request arrives here.
-/// Returns 200 OK if the frontend process is running (no deep probe needed —
-/// the frontend's own `/health` endpoint handles that separately).
+/// RL admin clients that POST `GET /health` against the admin client land
+/// here when `admin_base_url = ["http://dynamo:8000/v1/rl"]`. Returns 200 OK
+/// if the frontend process is running (no deep probe needed — the frontend's
+/// own `/health` endpoint handles that separately).
 ///
-/// **Deprecated in favor of `/v1/rl/state.ingress_alive`** (rl-support.md
-/// Phase 1 / Phase 5). Kept for prime-rl `bis/prime-rl-merged` until the
-/// AdminAPI migration lands; will be removed once prime-rl P2 commits.
+/// **Deprecated in favor of `/v1/rl/state.ingress_alive`.** Kept for
+/// back-compat until existing clients migrate to `/v1/rl/state`; will be
+/// removed in a follow-up.
 async fn rl_health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
-/// `GET /v1/rl/liveness` — engine event-loop probe via `liveness_probe`
-/// engine route. Closes hhzhang16 HH-23 (the v1 `/v1/rl/health` returns OK
-/// no matter what; this endpoint round-trips through the engine so a hung
-/// event loop or wedged worker surfaces as 503).
+/// `GET /v1/rl/liveness` — engine event-loop probe via the `liveness_probe`
+/// engine route. The legacy `/v1/rl/health` returns OK as long as the
+/// frontend process is up; this endpoint round-trips through the engine so
+/// a hung event loop or wedged worker surfaces as 503.
 ///
 /// Each per-worker call carries a 5s timeout (override via
 /// `DYN_RL_LIVENESS_TIMEOUT_MS`). Returns 200 only when every worker
@@ -3750,9 +3748,9 @@ async fn rl_liveness(State(state): State<Arc<RlState>>) -> impl IntoResponse {
 /// `GET /v1/rl/state` — composite RL fleet state snapshot.
 ///
 /// Replaces three v1 endpoints (`/v1/rl/health` + `/v1/rl/ready` +
-/// `/v1/rl/weight_version`) with a single composite. Closes hhzhang16
-/// HH-19 (single state endpoint), HH-25 (RL-specific vs broader Dynamo
-/// readiness), HH-27 (weight_version folded in).
+/// `/v1/rl/weight_version`) with a single composite, scoped to RL-specific
+/// readiness (engine alive, pause state, applied weight version, loaded
+/// LoRAs).
 ///
 /// Aggregates per-worker `get_state` engine-route responses into:
 ///
@@ -3891,8 +3889,8 @@ pub fn rl_router() -> (Vec<RouteDoc>, Router) {
         .route("/v1/rl/update_weights", post(rl_update_weights))
         // LoRA hot-swap.
         .route("/v1/rl/load_lora_adapter", post(rl_load_lora_adapter))
-        // Legacy endpoints — kept until prime-rl `bis/prime-rl-merged` AdminAPI
-        // migration P2 lands; Phase 5 of rl-support.md drops them.
+        // Legacy endpoints — kept for back-compat until existing clients
+        // migrate to /v1/rl/state. Removed in a follow-up.
         .route("/v1/rl/health", get(rl_health))
         .route("/v1/rl/ready", get(rl_ready))
         .route("/v1/rl/weight_version", get(rl_weight_version))

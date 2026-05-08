@@ -97,33 +97,33 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Fields that Prime-RL / verifiers may send as extra_body hints which Dynamo
-/// does not implement but should not reject with a 400. They are silently
-/// accepted (the chat-completions handler reads what it understands and
-/// ignores the rest) so the RL client stack is forward-compatible with new
-/// extension fields without churning Dynamo.
+/// Fields that RL clients may send as extra_body hints which Dynamo does not
+/// implement but should not reject with a 400. They are silently accepted
+/// (the chat-completions handler reads what it understands and ignores the
+/// rest) so the RL client stack is forward-compatible with new extension
+/// fields without churning Dynamo.
 ///
-/// Per `bis-dev/design-docs/rl-support.md` Phase 4, this is the canonical
-/// home for the typed RL extension fields; the prior `nvext.extra_fields`
-/// `["completion_token_ids", ...]` opt-in mechanism still works alongside it
-/// but the named fields here are the recommended path.
+/// This is the canonical home for typed RL extension fields; the prior
+/// `nvext.extra_fields = ["completion_token_ids", ...]` opt-in mechanism
+/// still works alongside it but the named fields here are the recommended
+/// path.
 const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
-    // KV prefix-cache isolation hint from prime-rl orchestrator. Coordinated
-    // with PR #8197 (which moves this to the X-Tenant-Id header); both forms
-    // accepted for one release, header takes precedence.
+    // KV prefix-cache isolation hint. The equivalent `X-Tenant-Id` request
+    // header is also accepted; the header takes precedence when both are
+    // present.
     "cache_salt",
     // Pre-tokenized prompt for the RL TITO path. Mutually exclusive with
-    // `messages`; when present, vLLM 0.20+ skips chat templating. Closes
-    // hhzhang16 HH-22 / HH-26 — the "tokens variant of /v1/chat/completions"
-    // collapses into the same URI with this extension field instead of a
-    // forked /v1/chat/completions/tokens. Today RL clients pre-tokenize
-    // and pass via `nvext.token_data` (preprocessor.rs handles that
-    // already); the typed top-level field shipped here is the long-term
-    // canonical entry for clients written against the vLLM 0.20 schema.
+    // `messages`; when present, vLLM 0.20+ skips chat templating. The
+    // "tokens variant of /v1/chat/completions" collapses into the same URI
+    // with this extension field instead of a forked
+    // /v1/chat/completions/tokens. Today RL clients can also pre-tokenize
+    // and pass via `nvext.token_data` (handled in preprocessor.rs); the
+    // typed top-level field shipped here is the long-term canonical entry
+    // for clients written against the vLLM 0.20 schema.
     "prompt_token_ids",
     // RL routing filter — only dispatch to workers reporting this applied
     // weight version. Used by IS-correction strict-version mode and by
-    // NeMo RL eval-on-subset. Today accepted-and-ignored at the request
+    // eval-on-subset workflows. Today accepted-and-ignored at the request
     // level; the routing-side filter lands in a follow-up.
     "weight_version",
     // Per-request gate for MoE Routing Replay capture. Honored by

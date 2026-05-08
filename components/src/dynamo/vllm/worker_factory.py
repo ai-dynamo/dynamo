@@ -676,8 +676,10 @@ class WorkerFactory:
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
 
-        # RL weight-lifecycle routes (parity with SGLang #6094) — driven by the
+        # RL weight-lifecycle routes — driven by the
         # /v1/rl/{pause,resume,update_weights} bracket in the Rust frontend.
+        # Names line up with the SGLang RL admin routes so a single admin
+        # coordinator can talk to either backend.
         runtime.register_engine_route("pause_generation", handler.pause_generation)
         runtime.register_engine_route("resume_generation", handler.resume_generation)
         runtime.register_engine_route("flush_cache", handler.flush_cache)
@@ -688,12 +690,12 @@ class WorkerFactory:
 
         # RL state + liveness — drive /v1/rl/state and /v1/rl/liveness in the
         # Rust frontend. /v1/rl/state aggregates these per-worker snapshots
-        # into the composite RlStateResponse (rl-support.md Phase 1).
+        # into the composite RlStateResponse.
         runtime.register_engine_route("get_state", handler.get_state)
         runtime.register_engine_route("liveness_probe", handler.liveness_probe)
 
-        # RL LoRA adapter routes: filesystem-native hot-swap used by Prime-RL
-        # every training step to broadcast new adapter weights into the engine.
+        # RL LoRA adapter routes: filesystem-native hot-swap used by RL
+        # trainers every step to broadcast new adapter weights into the engine.
         runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
         runtime.register_engine_route(
             "unload_lora_adapter", handler.unload_lora_adapter

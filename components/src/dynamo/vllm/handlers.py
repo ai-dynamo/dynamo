@@ -826,20 +826,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": str(e)}
 
     # ── RL weight lifecycle engine routes ──────────────────────────────
-    # Signatures kept compatible with SGLang's merged #6094 routes so
-    # a single admin coordinator can talk to either backend.
+    # Signatures intentionally line up with the SGLang RL admin routes so a
+    # single admin coordinator can talk to either backend.
 
     async def pause_generation(self, body: dict) -> dict:
         """Pause the engine: drain in-flight requests, keep model loaded.
 
-        Called by RL admin coordinator before weight updates.
+        Called by the RL admin coordinator before weight updates.
         Uses engine_client.pause_generation() directly -- does NOT sleep
         (no GPU memory release) and does NOT unregister from discovery.
 
-        Body (all optional, all default to the prime-rl client convention):
+        Body (all optional):
           - mode: "keep" | "wait" | "abort"  (default "keep" — drain in-flight)
           - clear_cache: bool                 (default False)
-        Closes hhzhang16 review HH-21 (3-mode pause).
         """
         body = body or {}
         mode = body.get("mode", "keep")
@@ -907,8 +906,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         short timeout (default 5s). Returning ``alive: True`` requires the
         engine_client IPC roundtrip to complete: a hung event loop, deadlocked
         worker, or wedged engine will time out at the frontend instead of
-        returning a stale ``OK``. Closes hhzhang16 HH-23 (health probe returns
-        OK no matter what).
+        returning a stale ``OK`` (which is what the legacy ``/v1/rl/health``
+        does — that endpoint is just a frontend-process check).
         """
         body = body or {}
         try:
@@ -931,9 +930,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Composite per-worker state snapshot for ``GET /v1/rl/state``.
 
         The Rust frontend aggregates these per-worker payloads into the
-        fleet-wide ``RlStateResponse``. Closes hhzhang16 HH-19/HH-25/HH-27
-        (single state endpoint replacing /health + /ready + /weight_version,
-        RL-specific, weight_version folded in).
+        fleet-wide ``RlStateResponse`` — a single composite that replaces the
+        separate ``/v1/rl/health`` + ``/v1/rl/ready`` + ``/v1/rl/weight_version``
+        endpoints with one RL-scoped readiness call.
         """
         body = body or {}
         try:
