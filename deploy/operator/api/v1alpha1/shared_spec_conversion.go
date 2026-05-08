@@ -127,19 +127,17 @@ func delAnnFromObj(obj metav1.Object, key string) {
 // Shared-spec conversion entry points
 // ---------------------------------------------------------------------------
 
-type sharedSpecConversionContext struct {
-	includeOriginSplits bool
-	podTemplateOrigin   bool
+// DynamoComponentDeploymentSharedSpecConversionContext carries shared-spec
+// conversion context that leaf converters cannot derive from local inputs.
+// +kubebuilder:object:generate=false
+type DynamoComponentDeploymentSharedSpecConversionContext struct {
+	IncludeOriginSplits bool
+	PodTemplateOrigin   bool
 }
 
-// convertSharedSpecToHub converts fields represented by both versions from src,
-// restores only v1beta1-only fields from restored, and writes v1alpha1-only
-// fields to save.
-func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
-	if src == nil || dst == nil {
-		return nil
-	}
-
+// ConvertFromDynamoComponentDeploymentSharedSpec converts the shared spec from
+// v1alpha1 to v1beta1.
+func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
 	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
 	// values to first-class component types.
 	dst.ComponentType = sharedComponentTypeToHub(src)
@@ -156,36 +154,33 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 	dst.Replicas = src.Replicas
 
 	if src.Multinode != nil {
-		dst.Multinode = &v1beta1.MultinodeSpec{NodeCount: src.Multinode.NodeCount}
+		dst.Multinode = &v1beta1.MultinodeSpec{}
+		ConvertFromMultinodeSpec(src.Multinode, dst.Multinode)
 	}
 
 	if src.ModelRef != nil {
-		dst.ModelRef = &v1beta1.ModelReference{
-			Name:     src.ModelRef.Name,
-			Revision: src.ModelRef.Revision,
-		}
+		dst.ModelRef = &v1beta1.ModelReference{}
+		ConvertFromModelReference(src.ModelRef, dst.ModelRef)
 	}
 
 	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &v1beta1.TopologyConstraint{
-			PackDomain: v1beta1.TopologyDomain(src.TopologyConstraint.PackDomain),
-		}
+		dst.TopologyConstraint = &v1beta1.TopologyConstraint{}
+		ConvertFromTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
 
 	if src.EPPConfig != nil {
-		dst.EPPConfig = &v1beta1.EPPConfig{
-			ConfigMapRef: src.EPPConfig.ConfigMapRef.DeepCopy(),
-			Config:       src.EPPConfig.Config.DeepCopy(),
-		}
+		dst.EPPConfig = &v1beta1.EPPConfig{}
+		ConvertFromEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
 
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
-	if err := convertSharedMemoryTo(src.SharedMemory, dst); err != nil {
-		return err
+	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
+		dst.SharedMemorySize = &resource.Quantity{}
+		ConvertFromSharedMemorySpec(src.SharedMemory, dst.SharedMemorySize)
 	}
 
 	// volumeMounts + useAsCompilationCache -> compilationCache (the container
-	// volumeMounts themselves are emitted by buildPodTemplateTo).
+	// volumeMounts themselves are emitted by buildPodTemplateToHub).
 	for _, vm := range src.VolumeMounts {
 		if vm.UseAsCompilationCache {
 			dst.CompilationCache = &v1beta1.CompilationCacheConfig{
@@ -197,13 +192,16 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 	}
 
 	// scalingAdapter: drop Enabled bool, keep presence semantics.
-	convertScalingAdapterTo(src.ScalingAdapter, dst)
+	if src.ScalingAdapter != nil && src.ScalingAdapter.Enabled {
+		dst.ScalingAdapter = &v1beta1.ScalingAdapter{}
+		ConvertFromScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
+	}
 
 	// experimental block: gpuMemoryService, failover, checkpoint.
-	convertExperimentalTo(src, dst)
+	convertExperimentalToHub(src, dst)
 
 	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
-	if err := buildPodTemplateTo(src, dst, ctx); err != nil {
+	if err := buildPodTemplateToHub(src, dst, ctx); err != nil {
 		return err
 	}
 
@@ -211,7 +209,7 @@ func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1bet
 		return err
 	}
 	if save != nil {
-		saveSharedAlphaOnlySpec(src, save, ctx.includeOriginSplits)
+		saveSharedAlphaOnlySpec(src, save, ctx.IncludeOriginSplits)
 	}
 	return nil
 }
@@ -499,58 +497,53 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 	return src != nil && len(src.Annotations) == 0 && len(src.Labels) == 0
 }
 
-// convertSharedSpecFromHub converts fields represented by both versions from
-// src, restores only v1alpha1-only fields from restored, and writes v1beta1-only
-// fields to save.
-//
-//nolint:unparam // Keep the structural conversion signature aligned; this direction does not currently need ctx.
-func convertSharedSpecFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
-	if src == nil || dst == nil {
-		return nil
-	}
-
+// ConvertToDynamoComponentDeploymentSharedSpec converts the shared spec from
+// v1beta1 to v1alpha1.
+func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) error {
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
 
 	if src.Multinode != nil {
-		dst.Multinode = &MultinodeSpec{NodeCount: src.Multinode.NodeCount}
+		dst.Multinode = &MultinodeSpec{}
+		ConvertToMultinodeSpec(src.Multinode, dst.Multinode)
 	}
 	if src.ModelRef != nil {
-		dst.ModelRef = &ModelReference{
-			Name:     src.ModelRef.Name,
-			Revision: src.ModelRef.Revision,
-		}
+		dst.ModelRef = &ModelReference{}
+		ConvertToModelReference(src.ModelRef, dst.ModelRef)
 	}
 	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &TopologyConstraint{
-			PackDomain: TopologyDomain(src.TopologyConstraint.PackDomain),
-		}
+		dst.TopologyConstraint = &TopologyConstraint{}
+		ConvertToTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
 	if src.EPPConfig != nil {
-		dst.EPPConfig = &EPPConfig{
-			ConfigMapRef: src.EPPConfig.ConfigMapRef.DeepCopy(),
-			Config:       src.EPPConfig.Config.DeepCopy(),
-		}
+		dst.EPPConfig = &EPPConfig{}
+		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
 
 	dst.ServiceName = src.ComponentName
 
 	// sharedMemorySize -> SharedMemorySpec.
-	convertSharedMemoryFrom(src.SharedMemorySize, dst)
+	if src.SharedMemorySize != nil {
+		dst.SharedMemory = &SharedMemorySpec{}
+		ConvertToSharedMemorySpec(src.SharedMemorySize, dst.SharedMemory)
+	}
 
 	// compilationCache + podTemplate volumeMounts -> VolumeMounts.
-	convertVolumeMountsFrom(src, dst)
+	convertVolumeMountsFromHub(src, dst)
 
 	// experimental -> GPUMemoryService, Failover, Checkpoint.
-	convertExperimentalFrom(src, dst)
+	convertExperimentalFromHub(src, dst)
 
 	// scalingAdapter presence -> Enabled=true; annotation -> Enabled=false payload.
-	convertScalingAdapterFrom(src.ScalingAdapter, dst)
+	if src.ScalingAdapter != nil {
+		dst.ScalingAdapter = &ScalingAdapter{}
+		ConvertToScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
+	}
 
 	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
 	// Resources + Envs + Probes (+ FrontendSidecar).
-	if err := decomposePodTemplate(src, dst, restored); err != nil {
+	if err := decomposePodTemplateFromHub(src, dst, restored); err != nil {
 		return err
 	}
 
@@ -789,6 +782,71 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 }
 
 // ---------------------------------------------------------------------------
+// Simple shared-spec structs
+// ---------------------------------------------------------------------------
+
+// ConvertFromMultinodeSpec converts multinode settings from v1alpha1 to
+// v1beta1.
+func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
+	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
+}
+
+// ConvertToMultinodeSpec converts multinode settings from v1beta1 to
+// v1alpha1.
+func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
+	*dst = MultinodeSpec{NodeCount: src.NodeCount}
+}
+
+// ConvertFromModelReference converts model references from v1alpha1 to
+// v1beta1.
+func ConvertFromModelReference(src *ModelReference, dst *v1beta1.ModelReference) {
+	*dst = v1beta1.ModelReference{
+		Name:     src.Name,
+		Revision: src.Revision,
+	}
+}
+
+// ConvertToModelReference converts model references from v1beta1 to v1alpha1.
+func ConvertToModelReference(src *v1beta1.ModelReference, dst *ModelReference) {
+	*dst = ModelReference{
+		Name:     src.Name,
+		Revision: src.Revision,
+	}
+}
+
+// ConvertFromTopologyConstraint converts component topology constraints from
+// v1alpha1 to v1beta1.
+func ConvertFromTopologyConstraint(src *TopologyConstraint, dst *v1beta1.TopologyConstraint) {
+	*dst = v1beta1.TopologyConstraint{
+		PackDomain: v1beta1.TopologyDomain(src.PackDomain),
+	}
+}
+
+// ConvertToTopologyConstraint converts component topology constraints from
+// v1beta1 to v1alpha1.
+func ConvertToTopologyConstraint(src *v1beta1.TopologyConstraint, dst *TopologyConstraint) {
+	*dst = TopologyConstraint{
+		PackDomain: TopologyDomain(src.PackDomain),
+	}
+}
+
+// ConvertFromEPPConfig converts EPP config from v1alpha1 to v1beta1.
+func ConvertFromEPPConfig(src *EPPConfig, dst *v1beta1.EPPConfig) {
+	*dst = v1beta1.EPPConfig{
+		ConfigMapRef: src.ConfigMapRef.DeepCopy(),
+		Config:       src.Config.DeepCopy(),
+	}
+}
+
+// ConvertToEPPConfig converts EPP config from v1beta1 to v1alpha1.
+func ConvertToEPPConfig(src *v1beta1.EPPConfig, dst *EPPConfig) {
+	*dst = EPPConfig{
+		ConfigMapRef: src.ConfigMapRef.DeepCopy(),
+		Config:       src.Config.DeepCopy(),
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Shared-memory
 // ---------------------------------------------------------------------------
 
@@ -802,20 +860,12 @@ func ConvertFromSharedMemorySpec(src *SharedMemorySpec, dst *resource.Quantity) 
 	*dst = src.Size
 }
 
-func convertSharedMemoryTo(src *SharedMemorySpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) error {
-	if src != nil && (src.Disabled || !src.Size.IsZero()) {
-		dst.SharedMemorySize = &resource.Quantity{}
-		ConvertFromSharedMemorySpec(src, dst.SharedMemorySize)
-	}
-	return nil
-}
-
 // ConvertToSharedMemorySpec converts the v1beta1 shared-memory scalar
 // representation into the shared-memory struct.
 func ConvertToSharedMemorySpec(src *resource.Quantity, dst *SharedMemorySpec) {
 	if src.Sign() == 0 {
 		// Canonical v1beta1 "size=0" <-> v1alpha1 Disabled=true. See
-		// convertSharedMemoryTo for the forward direction.
+		// ConvertFromSharedMemorySpec for the forward direction.
 		//
 		// Size carries the incoming canonical Quantity value (not the Go zero
 		// value) so that every apply produces a spec that is reflect.DeepEqual
@@ -829,13 +879,6 @@ func ConvertToSharedMemorySpec(src *resource.Quantity, dst *SharedMemorySpec) {
 		return
 	}
 	*dst = SharedMemorySpec{Size: *src}
-}
-
-func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploymentSharedSpec) {
-	if src != nil {
-		dst.SharedMemory = &SharedMemorySpec{}
-		ConvertToSharedMemorySpec(src, dst.SharedMemory)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -855,12 +898,12 @@ func convertSharedMemoryFrom(src *resource.Quantity, dst *DynamoComponentDeploym
 //     extraPodSpec escape hatch anyway, so placing them there mirrors the
 //     v1alpha1 reconcile-merge behaviour in graph.go).
 
-// convertVolumeMountsFrom is the v1beta1 -> v1alpha1 inverse: it synthesises
+// convertVolumeMountsFromHub is the v1beta1 -> v1alpha1 inverse: it synthesises
 // a single flagged entry in dst.VolumeMounts when the v1beta1 side declares
 // a CompilationCacheConfig. Non-cache mounts on the main container are
-// preserved through decomposePodTemplate's ExtraPodSpec.MainContainer copy,
+// preserved through decomposePodTemplateFromHub's ExtraPodSpec.MainContainer copy,
 // not here.
-func convertVolumeMountsFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
+func convertVolumeMountsFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
 	if src.CompilationCache == nil {
 		return
 	}
@@ -875,19 +918,16 @@ func convertVolumeMountsFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 // Scaling adapter (Enabled flag removed in v1beta1)
 // ---------------------------------------------------------------------------
 
-func convertScalingAdapterTo(src *ScalingAdapter, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
-	if src == nil {
-		return
-	}
-	if src.Enabled {
-		dst.ScalingAdapter = &v1beta1.ScalingAdapter{}
-	}
+// ConvertFromScalingAdapter converts the v1alpha1 scaling adapter marker into
+// the v1beta1 marker. Callers skip disabled adapters before calling.
+func ConvertFromScalingAdapter(src *ScalingAdapter, dst *v1beta1.ScalingAdapter) {
+	*dst = v1beta1.ScalingAdapter{}
 }
 
-func convertScalingAdapterFrom(src *v1beta1.ScalingAdapter, dst *DynamoComponentDeploymentSharedSpec) {
-	if src != nil {
-		dst.ScalingAdapter = &ScalingAdapter{Enabled: true}
-	}
+// ConvertToScalingAdapter converts the v1beta1 scaling adapter marker into
+// the enabled v1alpha1 marker.
+func ConvertToScalingAdapter(src *v1beta1.ScalingAdapter, dst *ScalingAdapter) {
+	*dst = ScalingAdapter{Enabled: true}
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,7 +1080,7 @@ func ConvertToDynamoCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity, ds
 	}
 }
 
-func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
+func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	var exp *v1beta1.ExperimentalSpec
 	ensureExp := func() *v1beta1.ExperimentalSpec {
 		if exp == nil {
@@ -1067,7 +1107,7 @@ func convertExperimentalTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta
 	dst.Experimental = exp
 }
 
-func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
+func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{}
 		ConvertToGPUMemoryServiceSpec(src.Experimental.GPUMemoryService, dst.GPUMemoryService)
@@ -1088,13 +1128,13 @@ func convertExperimentalFrom(src *v1beta1.DynamoComponentDeploymentSharedSpec, d
 // podTemplate (the big one)
 // ---------------------------------------------------------------------------
 
-// buildPodTemplateTo composes the v1beta1 podTemplate from v1alpha1's flat
+// buildPodTemplateToHub composes the v1beta1 podTemplate from v1alpha1's flat
 // fields (Resources, Envs, Probes, EnvFromSecret, ExtraPodSpec,
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
 // over dedicated fields, except for env which is additive.
-func buildPodTemplateTo(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx sharedSpecConversionContext) error {
-	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.podTemplateOrigin, false)
+func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
+	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
 	if err != nil {
 		return err
 	}
@@ -1228,8 +1268,8 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 	return ctr
 }
 
-// decomposePodTemplate inverts buildPodTemplateTo.
-func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) error {
+// decomposePodTemplateFromHub inverts buildPodTemplateToHub.
+func decomposePodTemplateFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, restored *DynamoComponentDeploymentSharedSpec) error {
 	if src.PodTemplate == nil {
 		decomposeMissingPodTemplate(src, dst, restored)
 		return nil
@@ -1265,7 +1305,7 @@ func decomposePodTemplate(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst,
 	// true escape-hatch remainder.
 	podSpecCopy := podTpl.Spec.DeepCopy()
 	podSpecCopy.Containers = other
-	// The forward path (buildPodTemplateTo) always emits a "main" container,
+	// The forward path (buildPodTemplateToHub) always emits a "main" container,
 	// even when v1alpha1 had no main-container fields set (e.g. only
 	// FrontendSidecar triggered hasAny). Skip recording it on the v1alpha1
 	// side when every field other than Name is zero-valued, so that
@@ -1750,8 +1790,8 @@ func restoreFlatVolumeMountsFromMain(main *corev1.Container, dst *DynamoComponen
 }
 
 // containerIsEmpty reports whether c has no user-visible fields set. Used by
-// decomposePodTemplate to drop the "main" container synthesized by
-// buildPodTemplateTo when v1alpha1 had no main-container fields of its own.
+// decomposePodTemplateFromHub to drop the "main" container synthesized by
+// buildPodTemplateToHub when v1alpha1 had no main-container fields of its own.
 // Name is expected to have been cleared by the caller.
 func containerIsEmpty(c *corev1.Container) bool {
 	if c == nil {

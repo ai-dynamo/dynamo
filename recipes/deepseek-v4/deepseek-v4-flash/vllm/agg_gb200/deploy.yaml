@@ -106,6 +106,7 @@ spec:
                 --attention-config '{"use_fp4_indexer_cache":true}' \
                 --moe-backend deep_gemm_mega_moe \
                 --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+                --no-enable-flashinfer-autotune \
                 --max-num-seqs 256
       replicas: 1
       resources:
