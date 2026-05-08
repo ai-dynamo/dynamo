@@ -31,7 +31,7 @@ Release history in this document begins at v0.6.0.
 | `tensorrtllm-runtime:1.1.0` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.3.0rc11` | `v13.1` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.1.0) | |
 | `tensorrtllm-runtime:1.1.0-efa-amd64` | Runtime container for TensorRT-LLM with AWS EFA | TRT-LLM `v1.3.0rc11` | `v13.1` | AMD64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.1.0-efa-amd64) | Experimental |
 | `dynamo-frontend:1.1.0` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=1.1.0) | |
-| `dynamo-planner:1.1.0` | Standalone Planner image used by Profiler jobs and Planner pods | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-planner?version=1.1.0) | New |
+| `dynamo-planner:1.1.0` | Standalone Planner image used by Profiler jobs and Planner pods | — | — | AMD64/ARM64 | [NGC: dynamo-planner 1.1.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-planner?version=1.1.0) | New |
 | `kubernetes-operator:1.1.0` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=1.1.0) | |
 | `snapshot-agent:1.1.0` | Snapshot agent for fast GPU worker recovery via CRIU | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent?version=1.1.0) | Preview |
 
