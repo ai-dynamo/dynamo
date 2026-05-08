@@ -182,9 +182,24 @@ class DeploymentSpec:
     def __init__(
         self, base: str, endpoint="/v1/chat/completions", port=8000, system_port=9090
     ):
-        """Load the deployment YAML file"""
+        """Load the deployment YAML file (supports multi-document YAML)"""
+        self._extra_resources = []
         with open(base, "r") as f:
-            self._deployment_spec = yaml.safe_load(f)
+            docs = list(yaml.safe_load_all(f))
+        # Find the DynamoGraphDeployment document; store others as extra resources
+        dgd_doc = None
+        for doc in docs:
+            if doc is None:
+                continue
+            kind = doc.get("kind", "")
+            if kind == "DynamoGraphDeployment":
+                dgd_doc = doc
+            else:
+                self._extra_resources.append(doc)
+        if dgd_doc is None:
+            # Fallback: if no DGD found, use the first/only document
+            dgd_doc = docs[0] if docs else {}
+        self._deployment_spec = dgd_doc
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
@@ -357,6 +372,11 @@ class DeploymentSpec:
 
     def spec(self):
         return self._deployment_spec
+
+    @property
+    def extra_resources(self):
+        """Extra non-DGD resources from multi-document YAML (e.g., ResourceClaimTemplates)"""
+        return self._extra_resources
 
     def add_arg_to_service(self, service_name: str, arg_name: str, arg_value: str):
         """
@@ -834,10 +854,41 @@ class ManagedDeployment:
     async def _create_deployment(self):
         """
         Create a DynamoGraphDeployment from either a dict or yaml file path.
+        Also applies any extra resources (e.g., ResourceClaimTemplates) first.
 
         Args:
             deployment: Either a dict containing the deployment spec or a path to a yaml file
         """
+
+        # Apply extra resources (e.g., ResourceClaimTemplate for DRA) first
+        for resource in self.deployment_spec.extra_resources:
+            kind = resource.get("kind", "unknown")
+            api_version = resource.get("apiVersion", "")
+            name = resource.get("metadata", {}).get("name", "unknown")
+            # Set namespace if not already set
+            if "metadata" in resource and "namespace" not in resource["metadata"]:
+                resource["metadata"]["namespace"] = self.namespace
+            self._logger.info(f"Applying extra resource: {kind}/{name}")
+            try:
+                # Use kubectl to apply the resource
+                import subprocess
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+                    yaml.safe_dump(resource, tmp, default_flow_style=False)
+                    tmp_path = tmp.name
+                result = subprocess.run(
+                    ["kubectl", "apply", "-f", tmp_path, "-n", self.namespace],
+                    capture_output=True, text=True, timeout=30
+                )
+                os.unlink(tmp_path)
+                if result.returncode != 0:
+                    self._logger.warning(
+                        f"Failed to apply {kind}/{name}: {result.stderr}"
+                    )
+                else:
+                    self._logger.info(f"Applied {kind}/{name}: {result.stdout.strip()}")
+            except Exception as e:
+                self._logger.warning(f"Failed to apply extra resource {kind}/{name}: {e}")
 
         # Extract service names
 
