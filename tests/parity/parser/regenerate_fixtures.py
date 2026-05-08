@@ -1451,6 +1451,10 @@ async def main(overwrite_if_exists: bool = False) -> None:
     # Group inputs by destination (family, file_stem) so we merge per file.
     # mode is recoverable from case_id; we track it for the YAML header.
     inputs_by_file: dict[tuple[str, str], tuple[str, dict[str, dict[str, Any]]]] = {}
+    # Track which (family, "PARSER.<mode>.<n>") top-level case IDs have been
+    # split into sub-cases via INPUTS. The bare top-level case is retired
+    # whenever any sub-case exists for the same (family, mode, n).
+    retired_bare_ids: set[tuple[str, str]] = set()
     for (family, case_id), entry in INPUTS.items():
         if entry is None:
             continue
@@ -1458,8 +1462,12 @@ async def main(overwrite_if_exists: bool = False) -> None:
         file_stem = _file_stem_for(case_id)  #                  → "PARSER.batch.8"
         slot = inputs_by_file.setdefault((family, file_stem), (mode, {}))
         slot[1][case_id] = entry
+        # If this is a sub-case, mark the corresponding bare top-level for retirement.
+        parts = case_id.split(".")
+        if len(parts) >= 4:
+            retired_bare_ids.add((family, ".".join(parts[:3])))
 
-    n_written = n_skipped = n_orphan_kept = 0
+    n_written = n_skipped = n_orphan_kept = n_retired = 0
     for (family, file_stem), (mode, entries) in inputs_by_file.items():
         existing = _load_existing(family, file_stem)
         merged: dict[str, dict[str, Any]] = {}
@@ -1490,18 +1498,27 @@ async def main(overwrite_if_exists: bool = False) -> None:
 
         # 2. Preserve any on-disk cases that aren't in INPUTS today, so a
         #    contributor's INPUTS edit can't accidentally delete other
-        #    contributors' fixture cases.
+        #    contributors' fixture cases — EXCEPT a bare `PARSER.<mode>.<n>`
+        #    that's been superseded by sub-cases (`<n>.<sub>`) elsewhere in
+        #    INPUTS. That bare ID gets dropped from the flat file so the
+        #    retired top-level doesn't end up running alongside its
+        #    replacement sub-cases after regeneration.
         for case_id, case in existing.items():
-            if case_id not in merged:
-                merged[case_id] = case
-                n_orphan_kept += 1
+            if case_id in merged:
+                continue
+            if (family, case_id) in retired_bare_ids:
+                n_retired += 1
+                continue
+            merged[case_id] = case
+            n_orphan_kept += 1
 
         _write_family_fixtures(family, file_stem, mode, merged)
         print(f"  wrote {family}/{file_stem}.yaml with {len(merged)} cases")
 
     print(
         f"\n{n_written} written, {n_skipped} skipped (already on disk), "
-        f"{n_orphan_kept} preserved (on disk but not in INPUTS).\n"
+        f"{n_orphan_kept} preserved (on disk but not in INPUTS), "
+        f"{n_retired} bare-IDs retired (replaced by sub-cases).\n"
         f"Pass --overwrite-if-exists to refresh the {n_skipped} skipped case(s)."
     )
 

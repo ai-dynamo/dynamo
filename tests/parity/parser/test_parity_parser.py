@@ -393,7 +393,34 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "vllm",
         "mistral",
         "PARSER.batch.8.d",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    ): "EXPECTS_ERROR(Only one BOT token): vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes",
+    # SGLang divergences surfaced by CI (cuda{12.9,13.0} arm64). Reasons are
+    # placeholders pending per-case investigation; concrete divergence shape
+    # to be filled in by `embed_divergence_comments.py` runs against SGLang.
+    # (`sglang/deepseek_v3.b`, `sglang/deepseek_v3_1.b`, and `sglang/mistral.d`
+    # are already registered above as "trims trailing space"-class divergences;
+    # if CI still flags them XPASS-strict, those entries will need updating
+    # rather than re-adding here.)
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.a",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.b",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.c",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.d",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
 }
 
 
@@ -480,17 +507,33 @@ def test_parity(
 
     # Runtime / parser errors. Wrappers prefix the env-shaped case
     # ("impl has no parser registered for this family") with `UNAVAILABLE:`
-    # so we can still skip those cleanly. Errors on cases NOT in
-    # KNOWN_DIVERGENCES are real bugs and fail HARD; errors on cases IN
-    # KNOWN_DIVERGENCES count as the divergence (vLLM/SGLang sometimes
-    # raise an exception where Dynamo returns a value — both are spec-
-    # compliant choices; the registry records which impl chose which).
+    # so we can still skip those cleanly.
+    #
+    # Errors on cases NOT in KNOWN_DIVERGENCES are real bugs → fail HARD.
+    #
+    # Errors on cases IN KNOWN_DIVERGENCES are absorbed as xfail ONLY when the
+    # divergence entry's reason explicitly opts into error-absorption via the
+    # `EXPECTS_ERROR(<pattern>):` prefix and the actual error matches the
+    # pattern. Plain-string divergences (the common case — value mismatches)
+    # do NOT absorb errors. This keeps an unrelated wrapper/runtime crash
+    # (e.g. an upstream API rename) from passing silently on a row that's
+    # only supposed to diverge on output values.
+    #
+    # Example entry that DOES absorb a specific error:
+    #   ("vllm", "mistral", "PARSER.batch.8.d"):
+    #       "EXPECTS_ERROR(Only one BOT token): vllm raises ValueError on two TOOL_CALLS envelopes"
     div = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
     if got.error:
         if got.error.startswith("UNAVAILABLE:"):
             pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
         if div is not None:
-            pytest.xfail(f"known divergence (impl raised): {div}")
+            import re as _re
+
+            m = _re.match(r"^EXPECTS_ERROR\((.+?)\):\s*(.*)$", div, _re.DOTALL)
+            if m and _re.search(m.group(1), got.error):
+                pytest.xfail(
+                    f"known divergence (error matched /{m.group(1)}/): {m.group(2)}"
+                )
         pytest.fail(f"{impl_name} crashed on {family}/{case_id}: {got.error}")
 
     expected = common.ParseResult(
