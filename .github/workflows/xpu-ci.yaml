@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: ''
+      pytest_markers:
+        description: 'Pytest marker expression for test selection'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       framework:
@@ -35,6 +40,11 @@ on:
         default: 'runtime'
       source_ref:
         description: 'Git ref/SHA to checkout. Empty = caller SHA.'
+        required: false
+        type: string
+        default: ''
+      pytest_markers:
+        description: 'Pytest marker expression for test selection'
         required: false
         type: string
         default: ''
@@ -175,7 +185,7 @@ jobs:
       - name: Run XPU tests
         uses: ./.github/actions/pytest
         with:
-          pytest_marks: '${{ env.FRAMEWORK }} and xpu_1 and pre_merge and not multimodal'
+          pytest_marks: ${{ inputs.pytest_markers }}
           image_tag: ${{ env.TEST_IMAGE_TAG }}
           test_suite_name: 'xpu-${{ env.FRAMEWORK }}'
           test_type: 'e2e'
