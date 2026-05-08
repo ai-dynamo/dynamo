@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "description": "Maps base-image references (FROM <image>:<tag>) to slim CycloneDX SBOMs in this directory. Refreshed weekly by container/compliance/base_sboms/refresh.py.",
+  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file in CI.",
+  "entries": []
+}

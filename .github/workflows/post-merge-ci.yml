@@ -472,66 +472,12 @@ jobs:
   # ============================================================================
   # IMAGE COMPLIANCE JOBS
   # ============================================================================
-
-  vllm-compliance:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: vllm
-      target: runtime
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  sglang-compliance:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: sglang
-      target: runtime
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  trtllm-compliance:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: trtllm
-      target: runtime
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  planner-compliance:
-    name: planner # This name overlaps with other planner jobs to group them in the UI
-    needs: [planner-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: planner
-      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  frontend-compliance:
-    name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: frontend
-      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
+  #
+  # Compliance is now an inline step inside each <framework>-build job
+  # (see .github/actions/compliance-extract/action.yml, called from
+  # shared-build-image.yml's "Compliance extract + verify" step).
+  # The separate <framework>-compliance jobs that previously called
+  # shared-compliance.yml have been removed.
 
   # ============================================================================
   # IMAGE COPY JOBS

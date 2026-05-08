@@ -294,6 +294,20 @@ jobs:
             DYNAMO_COMMIT_SHA=${{ github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ${{ inputs.extra_build_args }}
+      # Inline-compliance extraction: runs in the same job as the build, reusing
+      # the warm BuildKit cache. Both --target legal and --target sboms are
+      # FROM scratch so the export is microseconds. Skipped for dev / local-dev
+      # targets (those don't ship and don't go through OSRB).
+      - name: Compliance extract + verify
+        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.push_image == true }}
+        uses: ./.github/actions/compliance-extract
+        with:
+          framework: ${{ inputs.framework }}
+          target: ${{ inputs.target }}
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
+          builder_name: ${{ inputs.builder_name }}
+          artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
