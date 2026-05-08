@@ -28,9 +28,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
-          env:
-          - name: DYN_NAMESPACE_PREFIX
-            value: default-vllm-disagg-xpu-dra
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
