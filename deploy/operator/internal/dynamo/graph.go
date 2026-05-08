@@ -1244,6 +1244,16 @@ func GenerateBasePodSpec(
 	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+	// Track only the mounts declared via the top-level `component.VolumeMounts`
+	// API so we can propagate exactly these to the frontend sidecar. This scope
+	// deliberately excludes:
+	//   - mounts merged in via extraPodSpec.mainContainer.volumeMounts (an escape
+	//     hatch aimed at the worker; users who need those on the sidecar should
+	//     set them explicitly once a sidecar-level field exists),
+	//   - mounts added later by backend.UpdateContainer (e.g. TRT-LLM's /ssh-pk
+	//     MPI secret, which must not leak into the sidecar),
+	//   - the shared-memory /dev/shm mount (not needed by the frontend).
+	userMounts := make([]corev1.VolumeMount, 0, len(component.VolumeMounts))
 
 	for _, volumeMount := range component.VolumeMounts {
 		if volumeMount.Name == "" {
@@ -1272,10 +1282,12 @@ func GenerateBasePodSpec(
 			},
 		})
 
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		mount := corev1.VolumeMount{
 			Name:      volumeMount.Name,
 			MountPath: mountPoint,
-		})
+		}
+		container.VolumeMounts = append(container.VolumeMounts, mount)
+		userMounts = append(userMounts, mount)
 	}
 	// Apply backend-specific container modifications
 	multinodeDeployer := deployerOverride
@@ -1332,7 +1344,7 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
-		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig, userMounts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
 		}
@@ -1414,6 +1426,7 @@ func generateFrontendSidecar(
 	spec *v1alpha1.FrontendSidecarSpec,
 	parentContext ComponentContext,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
+	parentMounts []corev1.VolumeMount,
 ) (corev1.Container, error) {
 	frontendContext := ComponentContext{
 		numberOfNodes:                  1,
@@ -1450,6 +1463,23 @@ func generateFrontendSidecar(
 	}
 
 	AddStandardEnvVars(&container, operatorConfig)
+
+	// Mirror the worker's VolumeMounts so the sidecar can read files the worker
+	// registers in its ModelDeploymentCard (tokenizer, config, chat_template)
+	// when those live on a PVC. Skip any mount whose Name already exists on the
+	// sidecar's base container — protects against kubelet duplicate-mount errors
+	// if FrontendDefaults ever starts seeding mounts of its own.
+	existing := make(map[string]struct{}, len(container.VolumeMounts))
+	for _, m := range container.VolumeMounts {
+		existing[m.Name] = struct{}{}
+	}
+	for _, m := range parentMounts {
+		if _, ok := existing[m.Name]; ok {
+			continue
+		}
+		container.VolumeMounts = append(container.VolumeMounts, m)
+		existing[m.Name] = struct{}{}
+	}
 
 	return container, nil
 }

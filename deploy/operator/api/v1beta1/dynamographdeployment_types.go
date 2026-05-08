@@ -44,6 +44,7 @@ type DynamoGraphDeploymentSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=25
 	// +kubebuilder:validation:XValidation:rule="self.filter(c, has(c.type) && c.type == 'epp').size() <= 1",message="at most one component may have type epp"
+	// +kubebuilder:validation:XValidation:rule="self.all(c1, !has(c1.name) || self.filter(c2, has(c2.name) && c2.name.lowerAscii() == c1.name.lowerAscii()).size() == 1)",message="component names must be unique case-insensitively"
 	Components []DynamoComponentDeploymentSharedSpec `json:"components,omitempty"`
 
 	// env is prepended to every component's environment. Component-specific

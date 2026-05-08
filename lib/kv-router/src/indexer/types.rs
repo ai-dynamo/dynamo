@@ -78,10 +78,13 @@ pub struct WorkerKvQueryRequest {
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WorkerKvQueryResponse {
-    /// Events served from the circular buffer (with original event IDs),
-    /// always covering the requested `start_event_id` through the current
-    /// buffered tail. `last_event_id` is taken from the same buffer snapshot
-    /// and should be used as the recovery watermark after applying the batch.
+    /// Events served from the circular buffer with original event IDs. The batch
+    /// is recovery-equivalent to replaying the requested `start_event_id` through
+    /// the current buffered tail. If the range contains one or more `Cleared`
+    /// barriers, the worker may omit events before the last clear while preserving
+    /// that clear event and all following events. `last_event_id` is taken from the
+    /// same buffer snapshot and should be used as the recovery watermark after
+    /// applying the batch.
     Events {
         events: Vec<RouterEvent>,
         last_event_id: u64,

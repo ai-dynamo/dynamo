@@ -617,9 +617,9 @@ def pytest_collection_modifyitems(config, items):
             getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
         ):
             continue
-        model_mark = item.get_closest_marker("model")
-        if model_mark and model_mark.args:
-            models_to_download.add(model_mark.args[0])
+        for model_mark in item.iter_markers("model"):
+            for repo_id in model_mark.args:
+                models_to_download.add(repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:

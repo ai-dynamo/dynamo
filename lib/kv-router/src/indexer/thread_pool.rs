@@ -434,6 +434,55 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             );
         }
     }
+
+    async fn record_routing_decision_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        let Some(prune_manager) = &self.prune_manager else {
+            // Approximate routing decisions are only recorded when explicitly enabled.
+            return Ok(());
+        };
+
+        let event_id = Self::next_synthetic_event_id(&self.synthetic_event_id);
+        let event = Self::stored_event_for_hashes(worker, local_hashes, sequence_hashes, event_id);
+        let prune_entries = Self::block_entries_for_hashes(worker, sequence_hashes);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker.worker_id,
+            self.num_workers,
+        );
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::EventWithAck {
+                event,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        let applied = resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        if applied {
+            prune_manager.insert_worker_block_entries(worker, prune_entries);
+        }
+
+        Ok(())
+    }
+
+    pub async fn process_routing_decision_with_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
+            .await
+    }
 }
 
 impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
@@ -639,11 +688,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        let Some(prune_manager) = &self.prune_manager else {
-            // Approximate routing decisions are only recorded when explicitly enabled.
-            return Ok(());
-        };
-
         tokens_with_hashes.get_or_compute_seq_hashes();
         let local_hashes = tokens_with_hashes
             .block_hashes()
@@ -651,32 +695,8 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let sequence_hashes = tokens_with_hashes
             .seq_hashes()
             .expect("sequence hashes missing after computing sequence hashes");
-        let event_id = Self::next_synthetic_event_id(&self.synthetic_event_id);
-        let event = Self::stored_event_for_hashes(worker, local_hashes, sequence_hashes, event_id);
-        let prune_entries = Self::block_entries_for_hashes(worker, sequence_hashes);
-        let thread_idx = Self::get_or_assign_thread_idx(
-            &self.worker_assignments,
-            &self.worker_assignment_count,
-            worker.worker_id,
-            self.num_workers,
-        );
-
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.worker_event_channels[thread_idx]
-            .send(WorkerTask::EventWithAck {
-                event,
-                resp: resp_tx,
-            })
-            .map_err(|_| KvRouterError::IndexerOffline)?;
-
-        let applied = resp_rx
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-        if applied {
-            prune_manager.insert_worker_block_entries(worker, prune_entries);
-        }
-
-        Ok(())
     }
 
     async fn flush(&self) -> usize {

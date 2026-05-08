@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::Path;
-use std::time::Instant;
 
 use anyhow::{Result, bail};
 use dynamo_kv_router::config::KvRouterConfig;
@@ -137,7 +136,6 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
-    let started_at = Instant::now();
     let report = if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
         crate::replay::offline::simulate_trace(
             args,
@@ -158,7 +156,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             router_mode,
         )?
     };
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_trace_file_disagg_with_router_mode(
@@ -213,7 +211,6 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     )?
     .normalize_session_starts()?
     .speed_up_timing(arrival_speedup_ratio)?;
-    let started_at = Instant::now();
     let report = if let Some(requests) = single_turn_mooncake_requests(trace_format, &trace)? {
         crate::replay::offline::simulate_trace_disagg(
             config,
@@ -232,7 +229,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             router_mode,
         )?
     };
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_trace_live_file(
@@ -364,7 +361,6 @@ pub fn simulate_trace_requests_with_router_mode(
         bail!("trace replay requires at least one request");
     }
 
-    let started_at = Instant::now();
     let report = crate::replay::offline::simulate_trace(
         args,
         router_config,
@@ -374,7 +370,7 @@ pub fn simulate_trace_requests_with_router_mode(
         arrival_speedup_ratio,
         router_mode,
     )?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_trace_requests_disagg_with_router_mode(
@@ -391,7 +387,6 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         bail!("trace replay requires at least one request");
     }
 
-    let started_at = Instant::now();
     let report = crate::replay::offline::simulate_trace_disagg(
         config,
         router_config,
@@ -400,7 +395,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         arrival_speedup_ratio,
         router_mode,
     )?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_trace_live_requests(
@@ -514,7 +509,6 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
     )?;
-    let started_at = Instant::now();
     let report = simulate_concurrency_workload_with_router_mode(
         args,
         router_config,
@@ -524,7 +518,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
         num_workers,
         router_mode,
     )?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_concurrency_file_disagg_with_router_mode(
@@ -572,7 +566,6 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
     )?;
-    let started_at = Instant::now();
     let report = simulate_concurrency_workload_disagg_with_router_mode(
         config,
         router_config,
@@ -581,7 +574,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
         max_in_flight,
         router_mode,
     )?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_concurrency_live_file(
@@ -798,7 +791,6 @@ pub fn simulate_trace_workload_with_router_mode(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
-    let started_at = Instant::now();
     let report = crate::replay::offline::simulate_trace_workload(
         args,
         router_config,
@@ -807,7 +799,7 @@ pub fn simulate_trace_workload_with_router_mode(
         num_workers,
         router_mode,
     )?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_trace_workload_disagg_with_router_mode(
@@ -819,7 +811,6 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
-    let started_at = Instant::now();
     let report = crate::replay::offline::simulate_trace_workload_disagg(
         config,
         router_config,
@@ -827,7 +818,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
         trace,
         router_mode,
     )?;
-    Ok(report.with_wall_time_ms(started_at.elapsed().as_secs_f64() * 1000.0))
+    Ok(report)
 }
 
 pub fn simulate_trace_live_workload(

@@ -22,7 +22,7 @@
 //
 //   - hub -> spoke -> hub (start from a v1beta1 hub object); the spoke must
 //     losslessly carry every hub shape, with no-v1alpha1-equivalent fields
-//     stashed via reserved "nvidia.com/{dgd,dcd,dgdsa}-*" annotations.
+//     stashed via reserved "nvidia.com/{dgd,dcd,dgdr,dgdsa}-*" annotations.
 //   - spoke -> hub -> spoke (start from a v1alpha1 spoke object); the hub
 //     must be a strict superset of the spoke.
 //
@@ -78,6 +78,7 @@ var (
 var reservedAnnotationPrefixes = []string{
 	"nvidia.com/dgd-",
 	"nvidia.com/dcd-",
+	"nvidia.com/dgdr-",
 	"nvidia.com/dgdsa-",
 }
 
@@ -98,6 +99,43 @@ func scrubReservedAnnotations(m map[string]string) map[string]string {
 	}
 	return m
 }
+
+// DGDR still writes legacy nvidia.com/dgdr-* annotations for downgrade
+// compatibility with Dynamo 1.1. Direct round-trip fuzzing compares live API
+// fields and ignores those intentionally re-emitted compatibility annotations.
+var legacyDGDRCompatibilityAnnotations = []string{
+	"nvidia.com/dgdr-config-map-ref",
+	"nvidia.com/dgdr-output-pvc",
+	"nvidia.com/dgdr-enable-gpu-discovery",
+	"nvidia.com/dgdr-deployment-overrides",
+	"nvidia.com/dgdr-profiling-config",
+	"nvidia.com/dgdr-status-backend",
+	"nvidia.com/dgdr-profiling-results",
+	"nvidia.com/dgdr-deployment-status",
+	"nvidia.com/dgdr-profiling-job-name",
+}
+
+var ignoreDGDRCompatibilityAnnotations = cmpopts.AcyclicTransformer(
+	"ignoreDGDRCompatibilityAnnotations",
+	func(m metav1.ObjectMeta) metav1.ObjectMeta {
+		if len(m.Annotations) == 0 {
+			return m
+		}
+		annotations := make(map[string]string, len(m.Annotations))
+		for k, v := range m.Annotations {
+			annotations[k] = v
+		}
+		for _, k := range legacyDGDRCompatibilityAnnotations {
+			delete(annotations, k)
+		}
+		if len(annotations) == 0 {
+			m.Annotations = nil
+		} else {
+			m.Annotations = annotations
+		}
+		return m
+	},
+)
 
 // dynamoFuzzerFuncs constrains generated values so that random objects on
 // either side represent shapes the conversion is expected to round-trip
@@ -172,12 +210,12 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		// string output is not admitted by the CRD schema and would be dropped
 		// when projecting through v1alpha1's profiling JSON blob.
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
-			if c.Bool() {
-				*v = v1beta1.OptimizationTypeLatency
-			} else {
-				*v = v1beta1.OptimizationTypeThroughput
-			}
+			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
+		fuzzAlphaDGDRSpec,
+		fuzzAlphaDGDRStatus,
+		fuzzBetaDGDRSpec,
+		fuzzBetaDGDRStatus,
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.
@@ -193,9 +231,118 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 	}
 }
 
+func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.Backend = oneOf(c, "auto", "vllm", "sglang", "trtllm")
+
+	// Empty resources do not survive the alpha resources to beta profiling job projection.
+	if s.ProfilingConfig.Resources != nil &&
+		len(s.ProfilingConfig.Resources.Requests) == 0 &&
+		len(s.ProfilingConfig.Resources.Limits) == 0 &&
+		len(s.ProfilingConfig.Resources.Claims) == 0 {
+		s.ProfilingConfig.Resources = nil
+	}
+
+	// Only true EnableGPUDiscovery is annotation-preserved; false is dropped.
+	if s.EnableGPUDiscovery != nil {
+		*s.EnableGPUDiscovery = true
+	}
+
+	// WorkersImage maps to Image and is not restored as a deployment override.
+	if s.DeploymentOverrides != nil {
+		s.DeploymentOverrides.WorkersImage = ""
+
+		// Empty deployment overrides are not annotation-preserved.
+		if s.DeploymentOverrides.Name == "" &&
+			s.DeploymentOverrides.Namespace == "" &&
+			len(s.DeploymentOverrides.Labels) == 0 &&
+			len(s.DeploymentOverrides.Annotations) == 0 {
+			s.DeploymentOverrides = nil
+		}
+	}
+}
+
+func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.State = oneOf(c,
+		v1alpha1.DGDRStateInitializing,
+		v1alpha1.DGDRStatePending,
+		v1alpha1.DGDRStateProfiling,
+		v1alpha1.DGDRStateReady,
+		v1alpha1.DGDRStateDeploying,
+		v1alpha1.DGDRStateDeploymentDeleted,
+		v1alpha1.DGDRStateFailed,
+	)
+}
+
+func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
+
+	if s.Workload != nil && s.SLA == nil && (s.Workload.ISL != nil || s.Workload.OSL != nil) {
+		// ISL/OSL live under the alpha profiling config's "sla" object, whose
+		// reconstruction creates an empty v1beta1 SLA shell.
+		s.SLA = &v1beta1.SLASpec{}
+	}
+	if s.Workload != nil &&
+		s.Workload.ISL == nil &&
+		s.Workload.OSL == nil &&
+		s.Workload.Concurrency == nil &&
+		s.Workload.RequestRate == nil {
+		s.Workload = nil
+	}
+
+	// Empty ModelCache is not reconstructed from the alpha profiling config blob.
+	if s.ModelCache != nil &&
+		s.ModelCache.PVCName == "" &&
+		s.ModelCache.PVCModelPath == "" &&
+		s.ModelCache.PVCMountPath == "" {
+		s.ModelCache = nil
+	}
+
+	if s.Features != nil {
+		// Empty Features is not reconstructed without Planner or Mocker.
+		if s.Features.Planner == nil && s.Features.Mocker == nil {
+			s.Features = nil
+		}
+	}
+
+	// Nil AutoApply round-trips as the v1beta1 default true.
+	if s.AutoApply == nil {
+		autoApply := true
+		s.AutoApply = &autoApply
+	}
+}
+
+func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseDeployed, v1beta1.DGDRPhaseFailed)
+
+	// Profiling substatus is only valid while the request is profiling.
+	if s.Phase != v1beta1.DGDRPhaseProfiling {
+		s.ProfilingPhase = ""
+		s.ProfilingJobName = ""
+	}
+
+	if s.ProfilingResults != nil {
+		// Empty ProfilingResults is not reconstructed without SelectedConfig or Pareto.
+		if s.ProfilingResults.SelectedConfig == nil && len(s.ProfilingResults.Pareto) == 0 {
+			s.ProfilingResults = nil
+		}
+	}
+}
+
 func newRoundTripFiller(seed int64) *randfill.Filler {
 	funcs := apitestingfuzzer.MergeFuzzerFuncs(metafuzzer.Funcs, dynamoFuzzerFuncs)
 	return apitestingfuzzer.FuzzerFor(funcs, rand.NewSource(seed), runtimeserializer.NewCodecFactory(runtime.NewScheme()))
+}
+
+func oneOf[T any](c randfill.Continue, values ...T) T {
+	return values[c.Intn(len(values))]
 }
 
 func fuzzJSONValue(c randfill.Continue, depth int) any {
@@ -280,10 +427,11 @@ func fuzzHubSpokeHub[
 		*S
 		conversion.Convertible
 	},
-](t *testing.T, name string, newHub func() H) {
+](t *testing.T, name string, newHub func() H, diffOpts ...cmp.Option) {
 	t.Helper()
 	t.Logf("hub->spoke->hub %s seed=%d iters=%d", name, *fuzzSeed, *fuzzIters)
 	f := newRoundTripFiller(*fuzzSeed)
+	diffOpts = append([]cmp.Option{cmpopts.EquateEmpty()}, diffOpts...)
 	for i := 0; i < *fuzzIters; i++ {
 		in := newHub()
 		f.Fill(in)
@@ -299,7 +447,7 @@ func fuzzHubSpokeHub[
 		if err := spoke.ConvertTo(out); err != nil {
 			t.Fatalf("%s iter %d ConvertTo: %v\ninput=%s", name, i, err, mustJSON(in))
 		}
-		if diff := cmp.Diff(in, out, cmpopts.EquateEmpty()); diff != "" {
+		if diff := cmp.Diff(in, out, diffOpts...); diff != "" {
 			t.Fatalf("%s iter %d hub->spoke->hub mismatch (-want +got):\n%s\ninput=%s", name, i, diff, mustJSON(in))
 		}
 	}
@@ -314,10 +462,11 @@ func fuzzSpokeHubSpoke[
 		*S
 		conversion.Convertible
 	},
-](t *testing.T, name string, newHub func() H) {
+](t *testing.T, name string, newHub func() H, diffOpts ...cmp.Option) {
 	t.Helper()
 	t.Logf("spoke->hub->spoke %s seed=%d iters=%d", name, *fuzzSeed, *fuzzIters)
 	f := newRoundTripFiller(*fuzzSeed)
+	diffOpts = append([]cmp.Option{cmpopts.EquateEmpty()}, diffOpts...)
 	for i := 0; i < *fuzzIters; i++ {
 		in := PS(new(S))
 		f.Fill(in)
@@ -333,7 +482,7 @@ func fuzzSpokeHubSpoke[
 		if err := out.ConvertFrom(hub); err != nil {
 			t.Fatalf("%s iter %d ConvertFrom: %v\ninput=%s", name, i, err, mustJSON(in))
 		}
-		if diff := cmp.Diff(in, out, cmpopts.EquateEmpty()); diff != "" {
+		if diff := cmp.Diff(in, out, diffOpts...); diff != "" {
 			t.Fatalf("%s iter %d spoke->hub->spoke mismatch (-want +got):\n%s\ninput=%s", name, i, diff, mustJSON(in))
 		}
 	}
@@ -360,6 +509,20 @@ func TestFuzzRoundTrip_DCD_HubSpokeHub(t *testing.T) {
 func TestFuzzRoundTrip_DCD_SpokeHubSpoke(t *testing.T) {
 	fuzzSpokeHubSpoke[*v1beta1.DynamoComponentDeployment, v1alpha1.DynamoComponentDeployment](t, "DCD",
 		func() *v1beta1.DynamoComponentDeployment { return &v1beta1.DynamoComponentDeployment{} },
+	)
+}
+
+func TestFuzzRoundTrip_DGDR_HubSpokeHub(t *testing.T) {
+	fuzzHubSpokeHub[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
+		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+		ignoreDGDRCompatibilityAnnotations,
+	)
+}
+
+func TestFuzzRoundTrip_DGDR_SpokeHubSpoke(t *testing.T) {
+	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
+		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+		ignoreDGDRCompatibilityAnnotations,
 	)
 }
 

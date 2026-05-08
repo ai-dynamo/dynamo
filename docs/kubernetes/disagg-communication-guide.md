@@ -242,13 +242,15 @@ No pod annotations are needed. InfiniBand devices are injected by the device plu
 
 **Security Context:**
 
-Add `IPC_LOCK` capability so NIXL/UCX can pin GPU memory for RDMA registration. Without this, transfers fail with `waiting_timeout`:
+Add `IPC_LOCK` and `SYS_RESOURCE` capabilities. `IPC_LOCK` allows RDMA memory pinning, `SYS_RESOURCE` allows memlock limit escalation:
 
 ```yaml
 securityContext:
+  runAsUser: 0
   capabilities:
     add:
       - IPC_LOCK
+      - SYS_RESOURCE
 ```
 
 **Environment Variables (worker containers):**
@@ -257,109 +259,38 @@ securityContext:
 env:
   # --- UCX (RDMA transport) ---
   - name: UCX_TLS
-    value: "cuda_ipc,cuda_copy,rc"
+    value: "rc_x,rc,cuda_copy,cuda_ipc"
+  - name: UCX_NET_DEVICES
+    value: "<ib-device>:1"       # e.g. "mlx5_0:1" — run `ibv_devinfo` to find your device
+  - name: UCX_IB_ADDR_TYPE
+    value: "eth"                 # required for cross-pod IB on Kubernetes
+  - name: UCX_RNDV_SCHEME
+    value: "get_zcopy"
+  - name: UCX_RNDV_THRESH
+    value: "0"
   - name: UCX_RC_TIMEOUT
     value: "600s"
   - name: UCX_KEEPALIVE_INTERVAL
     value: "300s"
-
-  # --- NCCL ---
-  - name: NCCL_IB_DISABLE
-    value: "0"
-  - name: NCCL_STORE_TIMEOUT
-    value: "7200"
-  - name: NCCL_DEBUG
-    value: INFO
-
-  # --- NIXL ---
-  - name: NIXL_LOG_LEVEL
-    value: INFO           # use DEBUG during bringup
-  - name: NIXL_TELEMETRY_ENABLE
-    value: "y"
-  - name: NIXL_TELEMETRY_EXPORTER
-    value: prometheus
-  - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-    value: "19090"
 ```
 
-**Shared networking env vars (spec-level, all services):**
+| Variable | Description |
+|----------|-------------|
+| `UCX_TLS` | `rc_x` (accelerated RC) listed first for optimal RDMA performance |
+| `UCX_NET_DEVICES` | Bind to a specific IB device. Run `ibv_devinfo` inside a pod to list available devices. Use a non-bonded device with a valid LID. |
+| `UCX_IB_ADDR_TYPE` | Must be `eth` for cross-pod communication on Kubernetes. Without this, UCX uses LID-based addressing which does not route between pods. |
+| `UCX_RNDV_SCHEME` | `get_zcopy` enables zero-copy RDMA GET, optimal for large KV cache transfers |
 
-```yaml
-spec:
-  envs:
-    - name: GLOO_SOCKET_IFNAME
-      value: eth0
-    - name: NCCL_SOCKET_IFNAME
-      value: eth0
-    - name: NATS_SERVER
-      value: nats://dynamo-platform-nats.<namespace>.svc.cluster.local:4222
-```
+> **Note**: `UCX_IB_ADDR_TYPE=eth` is the most common missing setting when bringing up NIXL disagg on InfiniBand clusters. If NIXL init succeeds but transfers fail with `NIXL_ERR_REMOTE_DISCONNECT`, this is likely the cause.
 
 **Known Issue — Bonded IB devices:**
 
-Some clusters expose bonded InfiniBand devices (e.g., `mlx5_bond_0`) with LID=0. UCX's UD transport fails on devices with invalid LIDs. If you see `ibv_create_ah failed: No such device`, verify the LID:
+Some clusters expose bonded InfiniBand devices (e.g., `mlx5_bond_0`) with LID=0. If UCX selects a bonded device, transfers may fail. Verify device LIDs and select a non-bonded device:
 
 ```bash
+# Inside a pod with rdma/ib resources:
 ibv_devinfo | grep -E "hca_id|lid"
-```
-
-If `mlx5_bond_0` shows LID=0, use a non-bonded device:
-
-```yaml
-- name: UCX_NET_DEVICES
-  value: "mlx5_0:1"
-```
-
-### GKE RDMA Configuration (GCP GB200)
-
-For GCP GKE clusters with GB200 NVL hardware, NIXL KV transfer uses RDMA over GKE multi-network annotations. This is separate from ComputeDomain (which handles NCCL/NVLink for tensor parallelism).
-
-**GKE RDMA Network Annotations:**
-
-Both prefill and decode pods require RDMA NIC annotations. Without these, UCX `rc` transport has no IB devices and NIXL KV transfer fails:
-
-```yaml
-annotations:
-  networking.gke.io/default-interface: eth0
-  networking.gke.io/interfaces: |
-    [{"interfaceName":"eth0","network":"default"},
-     {"interfaceName":"rdma0","network":"rdma-0"},
-     {"interfaceName":"rdma1","network":"rdma-1"},
-     {"interfaceName":"rdma2","network":"rdma-2"},
-     {"interfaceName":"rdma3","network":"rdma-3"}]
-resources:
-  limits:
-    networking.gke.io.networks/rdma-0: "1"
-    networking.gke.io.networks/rdma-1: "1"
-    networking.gke.io.networks/rdma-2: "1"
-    networking.gke.io.networks/rdma-3: "1"
-```
-
-**Environment Variables:**
-
-```yaml
-env:
-  - name: UCX_TLS
-    value: "cuda_ipc,cuda_copy,rc"
-  - name: UCX_IB_GID_INDEX
-    value: "3"
-  - name: UCX_RC_TIMEOUT
-    value: "600s"
-  - name: UCX_KEEPALIVE_INTERVAL
-    value: "300s"
-```
-
-**ComputeDomain:**
-
-Multi-node tensor parallelism (e.g., TP8 across 2×4-GPU nodes) requires ComputeDomain for NCCL scheduling. Both prefill and decode need `compute-domain-channel` claims if they span multiple nodes.
-
-**NATS Isolation:**
-
-GCP clusters may have network isolation between `system-cpu` and `customer-gpu` node pools. If the system NATS is unreachable from GPU pods, deploy a namespace-local NATS on a `customer-cpu` node and override:
-
-```yaml
-- name: NATS_SERVER
-  value: "nats://nats-local.<namespace>.svc.cluster.local:4222"
+# Use a device with a non-zero LID in UCX_NET_DEVICES
 ```
 
 ### AWS EFA Configuration
