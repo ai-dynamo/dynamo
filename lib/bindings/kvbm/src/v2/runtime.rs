@@ -61,15 +61,20 @@ impl PyKvbmRuntime {
             None => KvbmConfig::from_env_for_worker().map_err(to_pyerr)?,
         };
 
-        // Create tokio runtime from config
-        let tokio_rt = config.tokio.build_runtime().map_err(to_pyerr)?;
+        // Wrap the Tokio runtime in an Arc up front so we hold an extra reference
+        // outside block_on. Runtime::drop panics if it runs from inside an async
+        // context (a tokio worker thread). Holding the Arc in this function's
+        // scope guarantees the final drop runs after block_on returns — on the
+        // calling Python thread, which is not async-context.
+        let tokio_rt = Arc::new(config.tokio.build_runtime().map_err(to_pyerr)?);
         let handle = tokio_rt.handle().clone();
+        let rt_for_builder = tokio_rt.clone();
 
         // Build KvbmRuntime using block_on
         let runtime = handle
             .block_on(async {
                 KvbmRuntimeBuilder::new(config)
-                    .with_runtime(Arc::new(tokio_rt))
+                    .with_runtime(rt_for_builder)
                     .build_worker()
                     .await
             })
@@ -107,15 +112,16 @@ impl PyKvbmRuntime {
             None => KvbmConfig::from_env_for_leader().map_err(to_pyerr)?,
         };
 
-        // Create tokio runtime from config
-        let tokio_rt = config.tokio.build_runtime().map_err(to_pyerr)?;
+        // Wrap the Tokio runtime in an Arc up front (see build_worker for rationale).
+        let tokio_rt = Arc::new(config.tokio.build_runtime().map_err(to_pyerr)?);
         let handle = tokio_rt.handle().clone();
+        let rt_for_builder = tokio_rt.clone();
 
         // Build KvbmRuntime using block_on
         let runtime = handle
             .block_on(async {
                 KvbmRuntimeBuilder::new(config)
-                    .with_runtime(Arc::new(tokio_rt))
+                    .with_runtime(rt_for_builder)
                     .build_leader()
                     .await
             })
