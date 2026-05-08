@@ -60,6 +60,13 @@ class _DeprecatedOverlapScoreWeightAction(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
+class _CanonicalOverlapScoreAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        if hasattr(namespace, "overlap_score_weight"):
+            delattr(namespace, "overlap_score_weight")
+        setattr(namespace, self.dest, values)
+
+
 def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
     for env_var in ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT"):
         if env_var in os.environ:
@@ -140,6 +147,7 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="overlap_score_credit",
+            action=_CanonicalOverlapScoreAction,
         )
         g.add_argument(
             "--router-kv-overlap-score-weight",
@@ -161,6 +169,7 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+            action=_CanonicalOverlapScoreAction,
         )
         add_argument(
             g,

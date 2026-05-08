@@ -131,6 +131,44 @@ def test_deprecated_overlap_score_weight_env_is_ignored_with_new_credit_env(
     assert "overlap_score_weight" not in config.kv_router_kwargs()
 
 
+def test_deprecated_overlap_score_weight_env_is_ignored_with_new_scale_cli(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
+
+    with pytest.warns(FutureWarning, match="deprecated"):
+        parser = argparse.ArgumentParser()
+        KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-prefill-load-scale", "3"])
+
+    assert args.overlap_score_credit == 1.0
+    assert args.prefill_load_scale == 3.0
+    assert not hasattr(args, "overlap_score_weight")
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert "overlap_score_weight" not in config.kv_router_kwargs()
+
+
+def test_deprecated_overlap_score_weight_env_is_ignored_with_new_credit_cli(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
+
+    with pytest.warns(FutureWarning, match="deprecated"):
+        parser = argparse.ArgumentParser()
+        KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-kv-overlap-score-credit", "0.5"])
+
+    assert args.overlap_score_credit == 0.5
+    assert args.prefill_load_scale == 1.0
+    assert not hasattr(args, "overlap_score_weight")
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert "overlap_score_weight" not in config.kv_router_kwargs()
+
+
 def test_prefill_load_scale_cli_uses_kv_router_config_field() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
