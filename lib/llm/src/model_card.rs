@@ -491,7 +491,7 @@ fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
     local_model_path: Option<&Path>,
-    allow_hf_fallback: bool,
+    is_custom: bool,
 ) -> anyhow::Result<String> {
     use std::borrow::Cow;
 
@@ -513,6 +513,7 @@ fn checked_file_uri(
         "http" | "https" | "hf" => Ok(url.to_string()),
         "file" => {
             // worker location → --model-path → hf://. Basename + checksum preserved.
+            // is_custom slots aren't published on HF, so rung 4 errors instead.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -529,13 +530,13 @@ fn checked_file_uri(
                     return file_uri_for(&local);
                 }
             }
-            if !allow_hf_fallback {
+            if is_custom {
                 anyhow::bail!(
-                    "{filename} not reachable on this host (worker path {} \
-                     missing, no --model-path overlay) and HF fallback is \
-                     disabled for this slot — ensure the file exists at the \
-                     same path on every host (shared mount) or pass \
-                     --model-path with the same basename",
+                    "custom file {filename} not reachable on this host \
+                     (worker path {} missing, no --model-path overlay); \
+                     custom files aren't published on HF, so ensure the \
+                     file exists at the same path on every host (shared \
+                     mount) or pass --model-path with the same basename",
                     path.display()
                 );
             }
@@ -984,38 +985,6 @@ impl ModelDeploymentCard {
         out
     }
 
-    /// Per-slot iteration for URI synthesis. Returns `(cf, allow_hf_fallback)`.
-    /// Custom chat templates set `allow_hf_fallback = false` because
-    /// HF doesn't host them — the operator's local file is the only
-    /// source of truth.
-    fn iter_metadata_entries(&self) -> Vec<(&CheckedFile, bool)> {
-        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5);
-        if let Some(m) = self.model_info.as_ref() {
-            match m {
-                ModelInfoType::HfConfigJson(cf) => out.push((cf, true)),
-            }
-        }
-        if let Some(t) = self.tokenizer.as_ref() {
-            match t {
-                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
-                    out.push((cf, true))
-                }
-            }
-        }
-        if let Some(p) = self.prompt_formatter.as_ref() {
-            out.push((pf_checked_file(p), true));
-        }
-        if let Some(c) = self.chat_template_file.as_ref() {
-            out.push((pf_checked_file(c), !is_custom_chat_template(c)));
-        }
-        if let Some(g) = self.gen_config.as_ref() {
-            match g {
-                GenerationConfig::HfGenerationConfigJson(cf) => out.push((cf, true)),
-            }
-        }
-        out
-    }
-
     async fn resolve_metadata_files(
         &mut self,
         local_model_path: Option<&Path>,
@@ -1025,16 +994,38 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_entries()
-            .into_iter()
-            .map(|(cf, allow_hf)| {
-                Ok((
-                    checked_file_uri(cf, &source, local_model_path, allow_hf)?,
-                    cf.clone(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        // Walk slots inline so we can call `is_custom_chat_template`
+        // directly with the wrapper still in scope. Today only the chat
+        // template can be custom (operator-supplied via
+        // `--chat-template`, not published on HF).
+        let mut entries: Vec<(String, CheckedFile)> = Vec::with_capacity(5);
+        let push = |out: &mut Vec<(String, CheckedFile)>,
+                    cf: &CheckedFile,
+                    is_custom: bool|
+         -> anyhow::Result<()> {
+            out.push((
+                checked_file_uri(cf, &source, local_model_path, is_custom)?,
+                cf.clone(),
+            ));
+            Ok(())
+        };
+        if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
+            push(&mut entries, cf, false)?;
+        }
+        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
+            self.tokenizer.as_ref()
+        {
+            push(&mut entries, cf, false)?;
+        }
+        if let Some(p) = self.prompt_formatter.as_ref() {
+            push(&mut entries, pf_checked_file(p), false)?;
+        }
+        if let Some(c) = self.chat_template_file.as_ref() {
+            push(&mut entries, pf_checked_file(c), is_custom_chat_template(c))?;
+        }
+        if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_ref() {
+            push(&mut entries, cf, false)?;
+        }
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -1900,7 +1891,7 @@ mod tests {
             "hf://Qwen/Qwen3-0.6B/config.json",
         ] {
             let got =
-                super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), true)
+                super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
                     .unwrap();
             assert_eq!(got, url);
         }
@@ -1913,7 +1904,7 @@ mod tests {
         let local_cfg = local.path().join("config.json");
         std::fs::write(&local_cfg, b"").unwrap();
         let got =
-            super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), true).unwrap();
+            super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
             url::Url::from_file_path(&local_cfg).unwrap().to_string()
@@ -1923,20 +1914,21 @@ mod tests {
     #[test]
     fn checked_file_uri_falls_back_to_hf_when_local_path_unavailable() {
         let cf = cf_for("/nonexistent/worker/path/config.json");
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true).unwrap();
+        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
         assert_eq!(got, "hf://Qwen/Qwen3-0.6B/config.json");
     }
 
-    /// Custom chat templates aren't on HF; with `allow_hf_fallback = false`,
-    /// rung 4 must error with a clear operator-action message instead of
-    /// synthesizing an hf:// URL that would 404.
+    /// `is_custom` slots aren't published on HF; rung 4 must error with
+    /// a clear operator-action message instead of synthesizing an hf://
+    /// URL that would 404.
     #[test]
-    fn checked_file_uri_errors_when_hf_fallback_disabled() {
+    fn checked_file_uri_errors_for_custom_when_unreachable() {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
-        let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false)
-            .expect_err("expected error when HF fallback disabled and no local copy");
+        let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
+            .expect_err("expected error for unreachable custom slot");
         let msg = err.to_string();
         assert!(msg.contains("template.jinja"), "wrong error: {msg}");
+        assert!(msg.contains("custom"), "wrong error: {msg}");
         assert!(
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
