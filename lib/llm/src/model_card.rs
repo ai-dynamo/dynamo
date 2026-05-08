@@ -1920,21 +1920,19 @@ mod tests {
         );
     }
 
+    /// Rung 4: when worker path is missing and `--model-path` doesn't
+    /// supply the basename, synthesize hf://; if `is_custom`, error
+    /// with a clear operator-action message instead (HF doesn't host
+    /// custom slots).
     #[test]
-    fn checked_file_uri_falls_back_to_hf_when_local_path_unavailable() {
-        let cf = cf_for("/nonexistent/worker/path/config.json");
-        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/config.json");
-    }
-
-    /// `is_custom` slots aren't published on HF; rung 4 must error with
-    /// a clear operator-action message instead of synthesizing an hf://
-    /// URL that would 404.
-    #[test]
-    fn checked_file_uri_errors_for_custom_when_unreachable() {
+    fn checked_file_uri_rung_4_hf_fallback_or_custom_error() {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
+
+        let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
+        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
-            .expect_err("expected error for unreachable custom slot");
+            .expect_err("custom slot must error instead of falling back to HF");
         let msg = err.to_string();
         assert!(msg.contains("template.jinja"), "wrong error: {msg}");
         assert!(msg.contains("custom"), "wrong error: {msg}");
