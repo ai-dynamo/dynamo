@@ -250,7 +250,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
                 # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
