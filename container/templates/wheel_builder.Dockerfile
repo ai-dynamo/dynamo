@@ -247,6 +247,33 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
     fi
 
+# Compliance: native source archives drop here. RUN git clone / wget …tar lines
+# in the wheel_builder pipeline preserve their resulting archive at
+# /tmp/native-sources/<name>-<version>.tar.gz so the per-image `sources_collect`
+# stage can COPY them out for OSRB submission. Created here unconditionally
+# (cheap) so the COPY always succeeds even when no native source builds run
+# for this framework.
+RUN mkdir -p /tmp/native-sources
+
+# Compliance source-archival pattern (do NOT add ARG ENABLE_SOURCE_ARCHIVAL
+# at this scope — it would invalidate every downstream layer when the flag
+# flips between PR builds and post-merge builds).
+#
+# When future work adds cargo-vendor / go-mod-vendor / native source-tree
+# preservation, declare the ARG INLINE in the smallest possible scope,
+# immediately before the gated RUN, e.g.:
+#
+#     ARG ENABLE_SOURCE_ARCHIVAL=false
+#     RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+#           cargo vendor --locked --manifest-path /opt/dynamo/Cargo.toml \
+#               /tmp/native-sources/rust-vendor; \
+#         fi
+#
+# This way the cache invalidation is contained to one RUN layer (the gated
+# one), not the rest of wheel_builder_base. shared-build-image.yml passes
+# ENABLE_SOURCE_ARCHIVAL=true via extra_build_args on push / release /
+# workflow_dispatch events; PR builds get the default "false" and skip.
+
 # Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
 # setup-env only when the sccache server starts successfully)
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \

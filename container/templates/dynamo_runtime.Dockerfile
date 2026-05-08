@@ -242,6 +242,60 @@ COPY --from=licenses /legal/ /
 
 
 #######################################
+########## Compliance: sources ########
+#######################################
+#
+# Collects source archives for everything we ship on top of the FROM base
+# (for OSRB submission + GPL/LGPL distribution-on-request compliance).
+# Runs in post-merge / RC / release pipelines only — see the conditional
+# `if:` in shared-build-image.yml's "Compliance source-archive" step.
+# Skipped for PR builds (storage cost too high per-build).
+#
+# This stage is NEVER COPY'd into the runtime image. Only extracted by CI
+# via `--target sources_archive --output type=local`.
+
+FROM runtime_pre AS sources_collect
+
+USER root
+RUN mkdir -p /sources /opt/compliance /opt/native-sources
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+# Native source archives preserved by upstream builder stages land in
+# /tmp/native-sources/<name>-<version>.tar.gz. The wheel_builder Dockerfile
+# (or any stage that does `RUN git clone ... && tar -czf ...`) writes there.
+# Right now this directory may be empty — the wiring is structural.
+COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+
+# The collect step itself is the only layer that needs to bust cache when
+# ENABLE_SOURCE_ARCHIVAL flips. Scope the ARG to immediately before this RUN
+# so layers above (the COPY of /opt/compliance, the COPY from wheel_builder)
+# stay cached across the PR-vs-post-merge boundary. Skipping when false also
+# means PR builds don't pay the apt-get source / vendor download cost.
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem dpkg --ecosystem native \
+            --output-tarball /sources.tar.gz \
+            --sources-root /sources \
+            --native-source-dir /opt/native-sources \
+            --base-sbom-manifest /opt/compliance/base_sboms/manifest.json \
+            -v ; \
+    else \
+        # Skipped: produce an empty tarball so the sources_archive stage's
+        # COPY still succeeds; CI just won't request --target sources_archive
+        # when archive_sources=false.
+        : > /sources.tar.gz ; \
+    fi
+
+
+# CI extracts via `--target sources_archive --output type=local,dest=/tmp/sources`.
+# This is FROM scratch so the export is bounded by the size of /sources.tar.gz,
+# not the runtime_pre filesystem.
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.tar.gz /sources.tar.gz
+
+
+#######################################
 ########## Final runtime image ########
 #######################################
 

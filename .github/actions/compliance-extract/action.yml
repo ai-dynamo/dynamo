@@ -34,6 +34,10 @@ inputs:
   artifact_name_prefix:
     description: 'Prefix for the uploaded compliance artifacts (typically the same as the build job target_tag_plain)'
     required: true
+  archive_sources:
+    description: 'When "true", also extract the source archive (--target sources_archive). Set on post-merge / RC / release pipelines only; PR builds skip to avoid storage cost.'
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -121,6 +125,23 @@ runs:
             --target-notices-dir /tmp/legal \
             --base-sbom container/compliance/base_sboms/${BASE_SBOM}
 
+    # /sources/ — reproducible tarball of source archives for everything we
+    # ship on top of the FROM base. Bigger than legal/sboms (typically
+    # 50-300 MB), so gated by archive_sources input. Skipped on PR builds.
+    - name: Extract /sources/ (post-merge / RC / release only)
+      if: ${{ inputs.archive_sources == 'true' }}
+      shell: bash
+      run: |
+        mkdir -p /tmp/sources
+        docker buildx build \
+            --builder ${{ inputs.builder_name }} \
+            --platform ${{ inputs.platform }} \
+            --target sources_archive \
+            --output type=local,dest=/tmp/sources \
+            --progress=plain \
+            -f ${{ steps.render.outputs.rendered }} \
+            .
+
     - name: Compute artifact suffix
       id: suffix
       shell: bash
@@ -148,3 +169,11 @@ runs:
         name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-sboms
         path: /tmp/sboms/
         retention-days: 90
+
+    - name: Upload /sources/ tarball (post-merge / RC / release only)
+      if: ${{ inputs.archive_sources == 'true' && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-sources
+        path: /tmp/sources/sources.tar.gz
+        retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

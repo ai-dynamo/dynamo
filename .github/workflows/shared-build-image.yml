@@ -293,6 +293,7 @@ jobs:
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
+            ENABLE_SOURCE_ARCHIVAL=${{ (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}
             ${{ inputs.extra_build_args }}
       # Inline-compliance extraction: runs in the same job as the build, reusing
       # the warm BuildKit cache. Both --target legal and --target sboms are
@@ -308,6 +309,10 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          # Source archival runs on post-merge to main + RC tags + release tags only.
+          # PR builds skip — storage cost too high per-build, and the source-of-
+          # truth is what merges to main, not what's in flight on a PR.
+          archive_sources: ${{ (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
