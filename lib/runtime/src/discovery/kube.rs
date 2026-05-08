@@ -199,6 +199,20 @@ impl Discovery for KubeDiscoveryClient {
         Ok(instance)
     }
 
+    async fn try_claim_singleton(
+        &self,
+        claim_key: &str,
+        _payload: serde_json::Value,
+    ) -> Result<bool> {
+        // TODO: Back this with an atomic Kubernetes resource create. For now this
+        // keeps Kubernetes discovery compatible with approximate served indexers.
+        tracing::warn!(
+            claim_key,
+            "Kubernetes discovery singleton claim is advisory and not atomically enforced"
+        );
+        Ok(true)
+    }
+
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let instance_id = self.instance_id();
 
