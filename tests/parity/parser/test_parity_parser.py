@@ -95,9 +95,7 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.10",
     ): "Dynamo drops back-to-back commentary blocks; SGLang extracts them",
     # Whitespace handling on text immediately preceding the bot_token:
-    # - SGLang on deepseek_v3_1: trims one trailing space; Dynamo keeps it
-    # - vLLM on minimax_m2: keeps trailing space; Dynamo trims it (opposite
-    #   direction from deepseek)
+    # - SGLang on DeepSeek variants trims one trailing space; Dynamo keeps it.
     (
         "sglang",
         "deepseek_v3_1",
@@ -153,16 +151,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "deepseek_v4",
         "PARSER.batch.7",
     ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    (
-        "vllm",
-        "minimax_m2",
-        "PARSER.batch.8",
-    ): "preserves trailing space; Dynamo trims it",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.8",
-    ): "preserves trailing space; Dynamo trims it",
     # PARSER.batch.4 (malformed) — impl-defined recovery contract.
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
