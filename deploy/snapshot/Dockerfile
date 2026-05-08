@@ -66,12 +66,6 @@ RUN go test ./... -v
 # =============================================================================
 # Stage: Builder - Build Go binaries
 # =============================================================================
-#
-# TODO: inline-compliance integration for snapshot-agent — same pattern as
-# operator (see deploy/operator/Dockerfile's TODO comment in the builder
-# stage). One extra wrinkle: snapshot-agent's final stage is Ubuntu-based,
-# so dpkg generator runs too — `--ecosystem go,dpkg,native`. The native
-# component covers CRIU + cuda-checkpoint already in native_packages.yaml.
 FROM go-base AS builder
 
 ARG TARGETOS=linux
@@ -79,6 +73,19 @@ ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
+
+# Emit a CycloneDX SBOM for snapshot-agent's Go module set. nsrestore's
+# deps are a subset of agent's, so a single SBOM keyed on ./cmd/agent is
+# sufficient. The git-init dance satisfies cyclonedx-gomod's main-module
+# version probe (Docker build context doesn't carry .git). Pinned to
+# v1.7.0 to keep the SBOM tool itself reproducible.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
+    git init -q && \
+    git -c user.email=build@dynamo -c user.name=build add -A && \
+    git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
+    cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json .
 
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
@@ -139,9 +146,12 @@ RUN git init /tmp/criu \
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # =============================================================================
-# Stage: Agent - Final snapshot-agent image
+# Stage: Agent (pre-compliance) - Everything that ships, minus /legal
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS agent
+# Split out so the licenses stage can run dpkg-query against the actual
+# installed package state (CRIU runtime libs included), then the final
+# `agent` stage is a thin downstream that COPYs /legal in.
+FROM ${AGENT_BASE_IMAGE} AS agent_pre
 
 ARG TARGETARCH=amd64
 
@@ -187,6 +197,68 @@ COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 RUN mkdir -p /checkpoints /var/run/snapshot
 
 USER root
+
+# =============================================================================
+# Stage: Compliance: licenses
+# =============================================================================
+# Runs in agent_pre's actual filesystem so dpkg-query enumerates the real
+# runtime package set (cuda-dl-base + everything we apt-get installed in
+# agent_pre). cyclonedx-gomod produced /sbom-go.cdx.json upstream in the
+# Go builder; we COPY it in here for the go generator.
+#
+# `compliance` build context is plumbed by .github/actions/build-deploy-component/action.yml
+# as `--build-context compliance=../../container/compliance`.
+FROM agent_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+# Install python3 + python3-yaml. PyYAML is required for the
+# license_db.lookup() override chain — without it, license_overrides.yaml
+# silently no-ops and NVIDIA-proprietary dpkgs (libnccl2 etc.) come back
+# UNKNOWN despite having hand-curated overrides.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY --from=compliance . /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
+
+# go + dpkg cover the runtime image. native (CRIU + cuda-checkpoint) is
+# handled today by the manual COPY of /legal/CRIU/COPYING and
+# /legal/cuda-checkpoint/LICENSE in agent_pre — the native generator
+# is a stub awaiting native_packages.yaml. Once native lands, this
+# becomes --ecosystem go,dpkg,native.
+RUN python3 -m compliance.generators \
+    --ecosystem go,dpkg \
+    --go-sbom /tmp/sbom-go.cdx.json \
+    --output-dir /legal \
+    -v
+RUN find /legal -name '*-deps.csv' -print0 | \
+    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input {}
+RUN find /legal -name '*-deps.csv' -print -exec sh -c \
+    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+
+
+# =============================================================================
+# Stage: Compliance: sboms
+# =============================================================================
+FROM scratch AS sboms
+COPY --from=licenses /sboms/ /
+
+
+# =============================================================================
+# Stage: Compliance: legal
+# =============================================================================
+FROM scratch AS legal
+COPY --from=licenses /legal/ /
+
+
+# =============================================================================
+# Stage: Agent - Final snapshot-agent image
+# =============================================================================
+FROM agent_pre AS agent
+COPY --from=licenses /legal /legal
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 

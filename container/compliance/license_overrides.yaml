@@ -168,11 +168,78 @@ overrides:
   - { ecosystem: dpkg, name: libnccl-dev,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA NCCL License" }
   - { ecosystem: dpkg, name: libnccl2,                         license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA NCCL License" }
   - { ecosystem: dpkg, name: nsight-compute-2025.2.1,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+  - { ecosystem: dpkg, name: nsight-compute-2025.3.1,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
   - { ecosystem: dpkg, name: nsight-systems-cli-2025.3.1,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+  - { ecosystem: dpkg, name: nsight-systems-cli-2025.5.1,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+
+  # --- CUDA 13 toolkit dpkgs (cuda-dl-base 25.11-cuda13.0 + later) ---
+  # Same NVIDIA EULA as the 12.9 variants above; the cuda-dl-base 25.11
+  # image bundles cuda-gdb so DEP-5 parser misclassifies these as GPL-3.
+  - { ecosystem: dpkg, name: cuda-cccl-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-crt-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-dev-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuobjdump-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-dev-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-driver-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-gdb-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-gdb proper, not GDB upstream" }
+  - { ecosystem: dpkg, name: cuda-nvcc-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvdisasm-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvml-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvprune-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-dev-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvtx-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-profiler-api-13-0,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-sanitizer-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-0-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-config-common,    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-dev-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparselt0-cuda-13,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuSPARSELt License Agreement" }
+  - { ecosystem: dpkg, name: libcusparselt0-dev-cuda-13,       license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuSPARSELt License Agreement" }
+  - { ecosystem: dpkg, name: libnpp-13-0,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnpp-dev-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvfatbin-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-dev-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvptxcompiler-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvvm-13-0,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: mlnx-dpdk,                        license: "BSD-3-Clause", source: "Mellanox build of upstream DPDK — https://www.dpdk.org/about/legal/" }
+
+  # --- NVIDIA DOCA SDK (cuda-dl-base 25.11 ships these) ---
+  - { ecosystem: dpkg, name: doca-sdk-common,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-dpdk-bridge,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-eth,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-gpunetio,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-rdma,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-verbs,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: libnet1,                          license: "BSD-3-Clause", source: "libnet upstream — https://github.com/libnet/libnet/blob/master/LICENSE" }
 
   # --- Misc dpkg packages with parser-miss UNKNOWN ---
   # Verified upstream license; parser couldn't extract from the copyright file shape.
   - { ecosystem: dpkg, name: openssl,           license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
+  - { ecosystem: dpkg, name: libpcap0.8t64,     license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
+  - { ecosystem: dpkg, name: libpcap0.8-dev,    license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
+  - { ecosystem: dpkg, name: libpython3-stdlib, license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
+  - { ecosystem: dpkg, name: python3,           license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
+  - { ecosystem: dpkg, name: python3-minimal,   license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
+  - { ecosystem: dpkg, name: python3-yaml,      license: "MIT",              source: "PyYAML upstream — https://github.com/yaml/pyyaml/blob/main/LICENSE" }
   - { ecosystem: dpkg, name: unzip,             license: "Info-ZIP",         source: "Info-ZIP license — http://www.info-zip.org/license.html" }
   - { ecosystem: dpkg, name: nats-server,       license: "Apache-2.0",       source: "NATS Server upstream — https://github.com/nats-io/nats-server/blob/main/LICENSE" }
   - { ecosystem: dpkg, name: media-types,       license: "GPL-2.0-or-later", source: "Debian/Ubuntu media-types package; copyright file references common-licenses/GPL" }

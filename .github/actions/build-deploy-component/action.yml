@@ -166,10 +166,9 @@ runs:
 
     # Inline-compliance extraction: reuses the warm BuildKit cache from the
     # push step above. Both targets are FROM scratch so the export is a few
-    # MB regardless of runtime image size. Operator-only today; snapshot's
-    # compliance stages land in a follow-up.
+    # MB regardless of runtime image size.
     - name: Compliance extract + verify
-      if: ${{ inputs.component == 'operator' }}
+      if: ${{ inputs.component == 'operator' || inputs.component == 'snapshot' }}
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       env:
@@ -198,7 +197,7 @@ runs:
             -f Dockerfile .
 
     - name: Upload /legal/ NOTICES artifact
-      if: ${{ inputs.component == 'operator' && always() }}
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-legal
@@ -206,7 +205,7 @@ runs:
         retention-days: 90
 
     - name: Upload /sboms/ artifact
-      if: ${{ inputs.component == 'operator' && always() }}
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-sboms

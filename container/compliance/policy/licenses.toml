@@ -1303,3 +1303,186 @@ name = "media-types"
 allow = ["GPL-2.0-or-later"]
 reason = "Mere aggregation; system component (resolved via license_overrides.yaml)"
 
+# --- Additional dpkg [[exceptions]] for snapshot-agent / cuda-dl-base 25.11 ----
+# These are standard Ubuntu / Debian base packages installed by the
+# snapshot-agent runtime stage (or already present in cuda-dl-base 25.11).
+# Same "mere aggregation" rationale as the Ubuntu exceptions above —
+# version-unpinned per user policy: keep GPL/copyleft denied by default,
+# allow per-package when verified.
+
+[[exceptions]]
+type = "dpkg"
+name = "libnetfilter-conntrack3"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnfnetlink0"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnftables1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnftnl11"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpci3"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pciutils"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libquadmath0"
+allow = ["GPL-2.0-or-later"]
+reason = "GCC runtime library with GCC-Runtime-Library-Exception (mere aggregation)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libxtables12"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (iptables/netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "sgml-base"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "usb.ids"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; data-only system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "uuid-runtime"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (util-linux family)"
+
+[[exceptions]]
+type = "dpkg"
+name = "xml-core"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+# --- Toolchain + base packages picked up by cuda-dl-base 25.11 ---
+
+[[exceptions]]
+type = "dpkg"
+name = "binutils-x86-64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-13-x86-64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-13-x86-64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-13-x86-64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "hwdata"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; data-only system component (PCI/USB IDs)"
+
+[[exceptions]]
+type = "dpkg"
+name = "iproute2"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "iptables"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdbus-1-3"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (D-Bus library is dual-licensed AFL/GPL; LGPL bindings)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdbus-1-dev"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (D-Bus dev headers)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libelf1t64"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (elfutils library)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libip4tc2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (iptables/netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libip6tc2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (iptables/netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkmod2"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (kernel module loader)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmnl0"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component (netfilter messaging library)"
+
