@@ -985,6 +985,37 @@ impl ModelDeploymentCard {
         out
     }
 
+    /// Per-slot iteration for URI synthesis. Returns `(cf, is_custom)`.
+    /// Today only the chat template can be `is_custom = true` — operator
+    /// supplied via `--chat-template`, not published on HF.
+    fn iter_metadata_entries(&self) -> Vec<(&CheckedFile, bool)> {
+        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5);
+        if let Some(m) = self.model_info.as_ref() {
+            match m {
+                ModelInfoType::HfConfigJson(cf) => out.push((cf, false)),
+            }
+        }
+        if let Some(t) = self.tokenizer.as_ref() {
+            match t {
+                TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf) => {
+                    out.push((cf, false))
+                }
+            }
+        }
+        if let Some(p) = self.prompt_formatter.as_ref() {
+            out.push((pf_checked_file(p), false));
+        }
+        if let Some(c) = self.chat_template_file.as_ref() {
+            out.push((pf_checked_file(c), is_custom_chat_template(c)));
+        }
+        if let Some(g) = self.gen_config.as_ref() {
+            match g {
+                GenerationConfig::HfGenerationConfigJson(cf) => out.push((cf, false)),
+            }
+        }
+        out
+    }
+
     async fn resolve_metadata_files(
         &mut self,
         local_model_path: Option<&Path>,
@@ -994,38 +1025,16 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
 
-        // Walk slots inline so we can call `is_custom_chat_template`
-        // directly with the wrapper still in scope. Today only the chat
-        // template can be custom (operator-supplied via
-        // `--chat-template`, not published on HF).
-        let mut entries: Vec<(String, CheckedFile)> = Vec::with_capacity(5);
-        let push = |out: &mut Vec<(String, CheckedFile)>,
-                    cf: &CheckedFile,
-                    is_custom: bool|
-         -> anyhow::Result<()> {
-            out.push((
-                checked_file_uri(cf, &source, local_model_path, is_custom)?,
-                cf.clone(),
-            ));
-            Ok(())
-        };
-        if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
-            push(&mut entries, cf, false)?;
-        }
-        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
-            self.tokenizer.as_ref()
-        {
-            push(&mut entries, cf, false)?;
-        }
-        if let Some(p) = self.prompt_formatter.as_ref() {
-            push(&mut entries, pf_checked_file(p), false)?;
-        }
-        if let Some(c) = self.chat_template_file.as_ref() {
-            push(&mut entries, pf_checked_file(c), is_custom_chat_template(c))?;
-        }
-        if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_ref() {
-            push(&mut entries, cf, false)?;
-        }
+        let entries: Vec<(String, CheckedFile)> = self
+            .iter_metadata_entries()
+            .into_iter()
+            .map(|(cf, is_custom)| {
+                Ok((
+                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
+                    cf.clone(),
+                ))
+            })
+            .collect::<anyhow::Result<_>>()?;
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
