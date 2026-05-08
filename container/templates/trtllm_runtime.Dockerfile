@@ -217,7 +217,7 @@ RUN TRTLLM_NIXL_BUNDLE=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
     for f in libnixl.so libnixl_common.so libnixl_build.so libnixl_test_utils.so; do \
         [ -f "${TRTLLM_NIXL_BUNDLE}/${f}" ] || { echo "ERROR: missing bundle lib: ${TRTLLM_NIXL_BUNDLE}/${f}" >&2; exit 1; }; \
         [ -f "${NIXL_LIB_DIR}/${f}" ] || { echo "ERROR: missing system lib: ${NIXL_LIB_DIR}/${f}" >&2; exit 1; }; \
-        ln -sf "${NIXL_LIB_DIR}/${f}" "${TRTLLM_NIXL_BUNDLE}/${f}"; \
+        ln -sf "${NIXL_LIB_DIR}/${f}" "${TRTLLM_NIXL_BUNDLE}/${f}" || { echo "ERROR: ln -sf failed for ${f}" >&2; exit 1; }; \
     done && \
     [ -d "${TRTLLM_NIXL_BUNDLE}/plugins" ] || { echo "ERROR: missing bundle plugins dir: ${TRTLLM_NIXL_BUNDLE}/plugins" >&2; exit 1; } && \
     rm -rf "${TRTLLM_NIXL_BUNDLE}/plugins" && \
