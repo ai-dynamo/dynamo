@@ -509,6 +509,8 @@ def setup_vllm_engine(
         not config.route_to_encoder
         and config.multimodal_embedding_cache_capacity_gb > 0
     ):
+        import uuid
+
         from vllm.config import ECTransferConfig
 
         logger.info(
@@ -518,6 +520,10 @@ def setup_vllm_engine(
         )
         instance_id = 0
         engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
+        # Nonce disambiguates the POSIX shm name across concurrent engines
+        # on the same host — generated once on the parent and threaded
+        # through extra_config so every TP worker sees the same value.
+        shared_arena_nonce = uuid.uuid4().hex
         engine_args.ec_transfer_config = ECTransferConfig(
             engine_id=engine_id,
             ec_role="ec_both",
@@ -525,9 +531,14 @@ def setup_vllm_engine(
             ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
             ec_connector_extra_config={
                 "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
+                "shared_arena_nonce": shared_arena_nonce,
             },
         )
-        logger.info("Configured ec_both with engine_id=%s", engine_id)
+        logger.info(
+            "Configured ec_both with engine_id=%s shared_arena_nonce=%s",
+            engine_id,
+            shared_arena_nonce[:8],
+        )
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
