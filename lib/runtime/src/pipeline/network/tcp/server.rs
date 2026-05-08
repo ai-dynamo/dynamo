@@ -677,20 +677,20 @@ async fn tcp_listener(
 
                 _ = response_tx.closed() => {
                     tracing::trace!("response channel closed before the client finished writing data");
-                    control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                    let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
                 _ = context.killed() => {
                     tracing::trace!("context kill signal received; shutting down");
-                    control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                    let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
                 _ = context.stopped(), if can_stop => {
                     tracing::trace!("context stop signal received; shutting down");
                     can_stop = false;
-                    control_tx.send(ControlMessage::Stop).await.expect("the control channel should not be closed");
+                    let _ = control_tx.send(ControlMessage::Stop).await;
                 }
 
                 msg = framed_reader.next() => {
@@ -704,28 +704,24 @@ async fn tcp_listener(
                                     Ok(ControlAction::Continue) => {}
                                     Ok(ControlAction::Shutdown) => {
                                         if !data.is_empty() {
-                                            // Client sent Sentinel with a data
-                                            // payload (protocol violation). Kill
-                                            // this stream rather than panic the
-                                            // process via assert!.
+                                            // Sentinel-with-data is a protocol
+                                            // violation; kill this stream, don't
+                                            // assert!() the process down.
                                             tracing::warn!(
                                                 data_len = data.len(),
                                                 "client sent Sentinel with data (protocol violation); killing stream"
                                             );
-                                            control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                                            let _ = control_tx.send(ControlMessage::Kill).await;
                                             break;
                                         }
                                         tracing::trace!("received sentinel message; shutting down");
                                         break;
                                     }
                                     Err(e) => {
-                                        // Malformed control message — kill the
-                                        // connection so only this stream is torn
-                                        // down.
-                                        tracing::warn!(
-                                            "malformed control message, closing connection: {e:?}"
-                                        );
-                                        control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                                        // Malformed control message — kill only
+                                        // this stream.
+                                        tracing::warn!(err = ?e, "malformed control message, closing connection");
+                                        let _ = control_tx.send(ControlMessage::Kill).await;
                                         break;
                                     }
                                 }
@@ -733,19 +729,16 @@ async fn tcp_listener(
 
                             if !data.is_empty()
                                 && let Err(err) = response_tx.send(data).await {
-                                    tracing::debug!("forwarding body/data message to response channel failed: {err}");
-                                    control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                                    tracing::debug!(?err, "forwarding body/data to response channel failed");
+                                    let _ = control_tx.send(ControlMessage::Kill).await;
                                     break;
                                 };
                         }
                         Some(Err(e)) => {
-                            // TCP RST or decode error from worker side — the
-                            // connection is broken.  Kill the request context and
-                            // break so only this stream is affected.
-                            tracing::warn!(
-                                "tcp stream read error from worker, closing connection: {e:?}"
-                            );
-                            control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                            // TCP RST or decode error from worker — kill only
+                            // this stream.
+                            tracing::warn!(err = ?e, "tcp stream read error from worker, closing connection");
+                            let _ = control_tx.send(ControlMessage::Kill).await;
                             break;
                         }
                         None => {

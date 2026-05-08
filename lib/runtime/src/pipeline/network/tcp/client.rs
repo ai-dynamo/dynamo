@@ -143,15 +143,17 @@ impl TcpClient {
         ));
 
         let subject = info.subject.clone();
+        // Spawn the connection monitor; errors are already logged inside
+        // wait_for_connection_tasks, so the Result is intentionally dropped.
         tokio::spawn(async move {
-            wait_for_connection_tasks(
+            let _ = wait_for_connection_tasks(
                 reader_task,
                 writer_task,
                 monitor_context,
                 peer_port,
                 subject,
             )
-            .await
+            .await;
         });
 
         // set up the prologue for the stream
@@ -284,7 +286,8 @@ async fn handle_reader(
                                     Ok(msg) => msg,
                                     Err(e) => {
                                         tracing::warn!(
-                                            "invalid control message, closing connection: {e:?}"
+                                            err = ?e,
+                                            "invalid control message, closing connection"
                                         );
                                         if let Some(counter) = &cancellation_counter && !cancellation_counted {
                                             counter.inc();
@@ -334,13 +337,9 @@ async fn handle_reader(
                         }
                     }
                     Some(Err(e)) => {
-                        // TCP RST from peer or a protocol decode error — the stream
-                        // is unrecoverable. Kill the engine context so the producer
-                        // stops generating responses that can no longer be delivered,
-                        // then break so only this connection is torn down.
-                        tracing::warn!(
-                            "tcp stream read error, closing connection: {e:?}"
-                        );
+                        // Kill the engine context so the producer stops
+                        // generating responses that can no longer be delivered.
+                        tracing::warn!(err = ?e, "tcp stream read error, closing connection");
                         if let Some(counter) = &cancellation_counter && !cancellation_counted {
                             counter.inc();
                         }
@@ -1289,10 +1288,12 @@ mod tests {
         );
     }
 
-    /// Undecodable control header from the server must not panic.
-    /// Covers `serde_json::from_slice::<ControlMessage>` Err arm.
-    #[tokio::test]
-    async fn test_handle_reader_kills_on_invalid_control_message() {
+    /// Drives `handle_reader` against a single message and returns the
+    /// controller + cancellation counter for assertions.
+    async fn run_reader_with(
+        msg: TwoPartMessage,
+        counter_name: &str,
+    ) -> (Arc<Controller>, IntCounter) {
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -1300,10 +1301,9 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
-        let cancellation_counter =
-            IntCounter::new("tcp_client_reader_invalid_control_test", "test counter").unwrap();
+        let counter = IntCounter::new(counter_name, "test counter").unwrap();
 
-        let counter_clone = cancellation_counter.clone();
+        let counter_clone = counter.clone();
         let controller_clone = controller.clone();
         let reader_handle = tokio::spawn(async move {
             handle_reader(
@@ -1315,113 +1315,42 @@ mod tests {
             .await
         });
 
-        framed_server
-            .send(TwoPartMessage::from_header(Bytes::from_static(
-                b"this is not a valid control message",
-            )))
-            .await
-            .unwrap();
-
+        framed_server.send(msg).await.unwrap();
         let _ = reader_handle.await.unwrap();
 
-        assert!(
-            controller.is_killed(),
-            "invalid control message should kill the stream context"
-        );
-        assert_eq!(
-            cancellation_counter.get(),
-            1,
-            "invalid control message should be counted once"
-        );
+        (controller, counter)
     }
 
-    /// Sentinel from server is a protocol violation (Sentinel is
-    /// client→server). Must not panic the worker.
+    /// Each protocol-violating message variant must kill only this stream
+    /// (controller killed, cancellation counted once) and never panic the
+    /// worker. Covers the three non-read-error panic arms in `handle_reader`:
+    /// undecodable control bytes, server-sent Sentinel, and non-control
+    /// (data-only) messages.
     #[tokio::test]
-    async fn test_handle_reader_kills_on_sentinel_from_server() {
-        let ReaderHarness {
-            mut framed_server,
-            framed_reader,
-            alive_tx,
-            alive_rx: _alive_rx,
-            controller,
-        } = reader_harness().await;
-        let cancellation_counter =
-            IntCounter::new("tcp_client_reader_sentinel_test", "test counter").unwrap();
+    async fn test_handle_reader_kills_on_protocol_violations() {
+        let cases: Vec<(&str, TwoPartMessage)> = vec![
+            (
+                "invalid control bytes",
+                TwoPartMessage::from_header(Bytes::from_static(b"not a valid control message")),
+            ),
+            (
+                "sentinel from server",
+                control_message(&ControlMessage::Sentinel),
+            ),
+            (
+                "non-control (data-only)",
+                TwoPartMessage::from_data(Bytes::from_static(b"unexpected payload")),
+            ),
+        ];
 
-        let counter_clone = cancellation_counter.clone();
-        let controller_clone = controller.clone();
-        let reader_handle = tokio::spawn(async move {
-            handle_reader(
-                framed_reader,
-                controller_clone,
-                alive_tx,
-                Some(counter_clone),
-            )
-            .await
-        });
-
-        framed_server
-            .send(control_message(&ControlMessage::Sentinel))
-            .await
-            .unwrap();
-
-        let _ = reader_handle.await.unwrap();
-
-        assert!(
-            controller.is_killed(),
-            "Sentinel from server should kill the stream context"
-        );
-        assert_eq!(
-            cancellation_counter.get(),
-            1,
-            "Sentinel-from-server should be counted once"
-        );
-    }
-
-    /// Non-control message (data attached, header missing, etc.) from
-    /// the server must not panic. Covers the catch-all `_` arm.
-    #[tokio::test]
-    async fn test_handle_reader_kills_on_non_control_message() {
-        let ReaderHarness {
-            mut framed_server,
-            framed_reader,
-            alive_tx,
-            alive_rx: _alive_rx,
-            controller,
-        } = reader_harness().await;
-        let cancellation_counter =
-            IntCounter::new("tcp_client_reader_non_control_test", "test counter").unwrap();
-
-        let counter_clone = cancellation_counter.clone();
-        let controller_clone = controller.clone();
-        let reader_handle = tokio::spawn(async move {
-            handle_reader(
-                framed_reader,
-                controller_clone,
-                alive_tx,
-                Some(counter_clone),
-            )
-            .await
-        });
-
-        framed_server
-            .send(TwoPartMessage::from_data(Bytes::from_static(
-                b"unexpected payload",
-            )))
-            .await
-            .unwrap();
-
-        let _ = reader_handle.await.unwrap();
-
-        assert!(
-            controller.is_killed(),
-            "non-control message from server should kill the stream context"
-        );
-        assert_eq!(
-            cancellation_counter.get(),
-            1,
-            "non-control message should be counted once"
-        );
+        for (i, (label, msg)) in cases.into_iter().enumerate() {
+            let counter_name = format!("tcp_client_reader_protocol_violation_test_{i}");
+            let (controller, counter) = run_reader_with(msg, &counter_name).await;
+            assert!(
+                controller.is_killed(),
+                "{label}: should kill stream context"
+            );
+            assert_eq!(counter.get(), 1, "{label}: should be counted once");
+        }
     }
 }
