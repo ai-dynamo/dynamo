@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
@@ -62,8 +62,25 @@ use kvbm_engine::{
 };
 use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
-use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
+use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayout};
 use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
+
+/// Block layout selector for G1/G2 layouts in the bench.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lower")]
+enum BenchLayout {
+    /// Fully contiguous (single allocation, all layers packed together)
+    Fc,
+    /// Layer-separate with block-as-first-dim (one allocation per layer)
+    Lw,
+}
+
+impl Default for BenchLayout {
+    fn default() -> Self {
+        Self::Fc
+    }
+}
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -157,6 +174,15 @@ struct Cli {
     #[arg(long)]
     weak_scale: bool,
 
+    /// Layout for G1 (GPU device memory). Default: fc.
+    /// Use `lw` to mirror vLLM-style layer-separate KV cache.
+    #[arg(long, value_enum, default_value_t = BenchLayout::Fc)]
+    g1_layout: BenchLayout,
+
+    /// Layout for G2 (pinned host memory). Default: fc.
+    #[arg(long, value_enum, default_value_t = BenchLayout::Fc)]
+    g2_layout: BenchLayout,
+
     /// Optional TOML config file (overridden by CLI args)
     #[arg(long)]
     config: Option<PathBuf>,
@@ -187,6 +213,10 @@ struct BenchConfig {
     output: Option<PathBuf>,
     #[serde(default)]
     weak_scale: bool,
+    #[serde(default)]
+    g1_layout: BenchLayout,
+    #[serde(default)]
+    g2_layout: BenchLayout,
 }
 
 impl From<Cli> for BenchConfig {
@@ -212,6 +242,8 @@ impl From<Cli> for BenchConfig {
             offload_concurrency: cli.offload_concurrency,
             output: cli.output,
             weak_scale: cli.weak_scale,
+            g1_layout: cli.g1_layout,
+            g2_layout: cli.g2_layout,
         }
     }
 }
@@ -393,6 +425,8 @@ fn spawn_worker_thread(
     let skip_disk = config.skip_disk;
     let skip_gds = config.skip_gds;
     let disk_path = config.disk_path.clone();
+    let g1_layout = config.g1_layout;
+    let g2_layout = config.g2_layout;
 
     let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
@@ -453,19 +487,33 @@ fn spawn_worker_thread(
                     .build()?;
 
                 // Allocate G1 (GPU device memory) — NUMA-local allocation
-                let g1 = PhysicalLayout::builder(agent.clone())
-                    .with_config(layout_config.clone())
-                    .fully_contiguous()
-                    .allocate_device(device_id)
-                    .build()?;
+                let g1 = match g1_layout {
+                    BenchLayout::Fc => PhysicalLayout::builder(agent.clone())
+                        .with_config(layout_config.clone())
+                        .fully_contiguous()
+                        .allocate_device(device_id)
+                        .build()?,
+                    BenchLayout::Lw => PhysicalLayout::builder(agent.clone())
+                        .with_config(layout_config.clone())
+                        .layer_separate(BlockDimension::BlockIsFirstDim)
+                        .allocate_device(device_id)
+                        .build()?,
+                };
                 let g1_handle = manager.register_layout(g1)?;
 
                 // Allocate G2 (pinned host memory) — NUMA-local allocation
-                let g2 = PhysicalLayout::builder(agent.clone())
-                    .with_config(layout_config.clone())
-                    .fully_contiguous()
-                    .allocate_pinned(Some(device_id))
-                    .build()?;
+                let g2 = match g2_layout {
+                    BenchLayout::Fc => PhysicalLayout::builder(agent.clone())
+                        .with_config(layout_config.clone())
+                        .fully_contiguous()
+                        .allocate_pinned(Some(device_id))
+                        .build()?,
+                    BenchLayout::Lw => PhysicalLayout::builder(agent.clone())
+                        .with_config(layout_config.clone())
+                        .layer_separate(BlockDimension::BlockIsFirstDim)
+                        .allocate_pinned(Some(device_id))
+                        .build()?,
+                };
                 let g2_handle = manager.register_layout(g2)?;
 
                 // Allocate G3 (disk) if enabled
@@ -1333,6 +1381,10 @@ fn main() -> Result<()> {
     eprintln!(
         "  Layers: {}, Inner dim: {}",
         config.num_layers, config.inner_dim
+    );
+    eprintln!(
+        "  G1 layout: {:?}, G2 layout: {:?}",
+        config.g1_layout, config.g2_layout
     );
     eprintln!(
         "  Warmup: {}, Iterations: {}",
