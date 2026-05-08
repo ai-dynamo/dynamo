@@ -43,7 +43,7 @@ cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
 ./scripts/install_gaie_crd_kgateway.sh
 ```
-**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
+**Note**: The manifest at `config/manifests/gateway/agentgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
 
 #### f. Verify the Gateway is running
 
