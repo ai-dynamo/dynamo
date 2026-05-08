@@ -1163,14 +1163,18 @@ func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst 
 	}
 	if src.Phase == v1beta1.DGDRPhaseDeployed && dgdrStateToPhase(string(dst.State), dst.Deployment) != src.Phase {
 		save.Phase = src.Phase
+		save.DGDName = src.DGDName
 	}
-	save.ProfilingPhase = src.ProfilingPhase
-	save.ProfilingJobName = src.ProfilingJobName
+	if src.Phase == v1beta1.DGDRPhaseProfiling {
+		save.ProfilingPhase = src.ProfilingPhase
+		save.ProfilingJobName = src.ProfilingJobName
+	}
 	if src.ProfilingResults != nil && len(src.ProfilingResults.Pareto) > 0 {
 		save.ProfilingResults = src.ProfilingResults.DeepCopy()
 		save.ProfilingResults.SelectedConfig = nil
 	}
 	if src.DeploymentInfo != nil {
+		save.DGDName = src.DGDName
 		save.DeploymentInfo = src.DeploymentInfo.DeepCopy()
 	}
 }
@@ -1182,18 +1186,21 @@ func restoreDGDRHubOnlyStatus(restored *v1beta1.DynamoGraphDeploymentRequestStat
 	if restored.Phase == v1beta1.DGDRPhaseDeployed &&
 		dst.Phase == v1beta1.DGDRPhaseReady &&
 		src != nil &&
-		dgdrAlphaStatusMatchesHubPhase(src.State, src.Deployment, restored.Phase) {
+		dgdrAlphaStatusMatchesHubPhase(src.State, src.Deployment, restored.Phase) &&
+		restored.DGDName == dst.DGDName {
 		dst.Phase = v1beta1.DGDRPhaseDeployed
 	}
-	dst.ProfilingPhase = restored.ProfilingPhase
-	dst.ProfilingJobName = restored.ProfilingJobName
+	if dst.Phase == v1beta1.DGDRPhaseProfiling {
+		dst.ProfilingPhase = restored.ProfilingPhase
+		dst.ProfilingJobName = restored.ProfilingJobName
+	}
 	if restored.ProfilingResults != nil && len(restored.ProfilingResults.Pareto) > 0 {
 		if dst.ProfilingResults == nil {
 			dst.ProfilingResults = &v1beta1.ProfilingResultsStatus{}
 		}
 		dst.ProfilingResults.Pareto = restored.ProfilingResults.DeepCopy().Pareto
 	}
-	if restored.DeploymentInfo != nil {
+	if restored.DeploymentInfo != nil && restored.DGDName == dst.DGDName {
 		dst.DeploymentInfo = restored.DeploymentInfo.DeepCopy()
 	}
 }

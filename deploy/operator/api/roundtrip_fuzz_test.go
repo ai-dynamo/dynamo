@@ -322,6 +322,12 @@ func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfil
 
 	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseDeployed, v1beta1.DGDRPhaseFailed)
 
+	// Profiling substatus is only valid while the request is profiling.
+	if s.Phase != v1beta1.DGDRPhaseProfiling {
+		s.ProfilingPhase = ""
+		s.ProfilingJobName = ""
+	}
+
 	if s.ProfilingResults != nil {
 		// Empty ProfilingResults is not reconstructed without SelectedConfig or Pareto.
 		if s.ProfilingResults.SelectedConfig == nil && len(s.ProfilingResults.Pareto) == 0 {

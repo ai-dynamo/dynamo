@@ -133,9 +133,10 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
-			Phase:              v1beta1.DGDRPhaseDeployed,
+			Phase:              v1beta1.DGDRPhaseProfiling,
 			ObservedGeneration: 2,
 			DGDName:            "hub-dgd",
+			ProfilingPhase:     v1beta1.ProfilingPhaseSweepingDecode,
 			ProfilingJobName:   "profiling-job-1",
 			ProfilingResults: &v1beta1.ProfilingResultsStatus{
 				SelectedConfig: &runtime.RawExtension{Raw: rawDGD},
@@ -499,7 +500,8 @@ func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	}
 	original.Spec.SearchStrategy = v1beta1.SearchStrategyThorough
 	original.Status.Phase = v1beta1.DGDRPhaseDeployed
-	original.Status.ProfilingPhase = v1beta1.ProfilingPhaseSweepingDecode
+	original.Status.ProfilingPhase = ""
+	original.Status.ProfilingJobName = ""
 	original.Status.DeploymentInfo = &v1beta1.DeploymentInfoStatus{
 		Replicas:          &replicas,
 		AvailableReplicas: &availableReplicas,

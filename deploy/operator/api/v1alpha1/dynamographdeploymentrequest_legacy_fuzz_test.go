@@ -244,6 +244,7 @@ func normalizeAlphaDGDRForLegacyComparison(obj *DynamoGraphDeploymentRequest) {
 func normalizeHubDGDRForLegacyComparison(obj *v1beta1.DynamoGraphDeploymentRequest) {
 	obj.Annotations = scrubDGDRConversionAnnotations(obj.Annotations)
 	spec := &obj.Spec
+	status := &obj.Status
 
 	if spec.Workload != nil {
 		spec.Workload.Concurrency = nil
@@ -270,6 +271,12 @@ func normalizeHubDGDRForLegacyComparison(obj *v1beta1.DynamoGraphDeploymentReque
 		if len(podSpec.Containers) > 0 {
 			podSpec.Containers[0].Resources.Claims = nil
 		}
+	}
+
+	// Profiling substatus is only valid while the request is profiling.
+	if status.Phase != v1beta1.DGDRPhaseProfiling {
+		status.ProfilingPhase = ""
+		status.ProfilingJobName = ""
 	}
 }
 
