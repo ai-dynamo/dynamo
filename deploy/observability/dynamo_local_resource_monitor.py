@@ -8,6 +8,24 @@ Dynamo Local Resource Monitor — per-process resource metrics exporter for Prom
 Tracks VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, and network I/O
 for Dynamo inference processes, labeled by model name and process identity.
 
+Why this exists (full design context: DEP #9065):
+  - DCGM is per-device + 1 s scrape — can't attribute VRAM/PCIe to a PID,
+    and 1 s smears 10-200 ms startup events (cudaMalloc defrag, PCIe weight
+    bursts, torch-compile stalls).
+  - Dynamo's request-lifecycle Prometheus metrics scrape every 1-15 s and
+    only fire after a request lands, so they're blind to startup failures.
+  - Generic per-PID exporters don't walk the Dynamo subprocess lineage
+    (pytest -> python -> bash -> python), so one test shows up as four
+    unrelated rows instead of one logical worker.
+  - Nsight Systems is profile-then-analyze, not always-on telemetry.
+  - aiperf is client-side load+latency, not server-side per-process state,
+    and runs after the engine is already up.
+
+This exporter fills that gap: 200 ms scrape (PCIe internally 10/s),
+subprocess-lineage grouping, per-engine PID labels with framework + model +
+test name so Grafana can render bin-packed parallel engines as separate
+side-by-side series.
+
 Architecture (multiprocess, bypasses GIL):
   - 1 subprocess per GPU: PCIe TX/RX sampling at 10/s
   - 1 subprocess: CPU + GPU mem/util/temp + network at 5/s
@@ -194,7 +212,11 @@ def _gpu_process_context(proc) -> tuple[str, str, str]:
 
 
 def _extract_arg(cmdline: list[str], flag: str) -> str:
-    """Extract the value after a CLI flag like --model. Also checks --model-path."""
+    """Extract the value after a CLI flag like --model. Also checks --model-path.
+
+    vLLM uses ``--model``, SGLang uses ``--model-path`` for the same thing —
+    the function tries both so the same caller works regardless of backend.
+    """
     for f in (flag, flag + "-path"):
         try:
             idx = cmdline.index(f)

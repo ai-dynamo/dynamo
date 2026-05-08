@@ -87,12 +87,16 @@ services:
     depends_on:
       - nats-prometheus-exporter
 
-  # Dedicated Prometheus instance for high-frequency resource monitoring (100ms scrape).
-  # Runs with 15m retention to keep storage minimal. See dynamo_local_resource_monitor.yml for rationale.
-  # Requires dynamo_local_resource_monitor.py running on the host
+  # Dedicated Prometheus instance for high-frequency resource monitoring (200ms scrape, 15m retention).
+  # See dynamo_local_resource_monitor.yml for rationale.
+  # Opt-in via the `resource-monitor` compose profile — does NOT start unless invoked with
+  #   docker compose --profile resource-monitor -f deploy/docker-observability.yml up -d
+  # Requires dynamo_local_resource_monitor.py running on the host.
   dynamo-resource-monitor:
     image: prom/prometheus:v3.4.1
     container_name: dynamo-resource-monitor
+    profiles:
+      - resource-monitor
     volumes:
       - ./observability/dynamo_local_resource_monitor.yml:/etc/prometheus/prometheus.yml
     command:
@@ -189,6 +193,5 @@ services:
       - server
     depends_on:
       - prometheus
-      - dynamo-resource-monitor
       - tempo
       - loki

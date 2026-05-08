@@ -44,12 +44,6 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 
 **Variables marked with † are shared across multiple observability systems.**
 
-## Live Monitoring
-
-| Guide | Description |
-|-------|-------------|
-| [Dynamo Local Resource Monitor](local-resource-monitor.md) | Per-process GPU/CPU/disk/network Prometheus exporter with 200ms resolution |
-
 ## Developer Guides
 
 | Guide | Description | Environment Variables to Control |
@@ -74,7 +68,6 @@ This provides:
 - **OpenTelemetry Collector** on `http://localhost:4317` (gRPC) / `http://localhost:4318` (HTTP) - receives OTLP signals and routes traces to Tempo and logs to Loki
 - **DCGM Exporter** on `http://localhost:9401/metrics` - GPU metrics
 - **NATS Exporter** on `http://localhost:7777/metrics` - NATS messaging metrics
-- **Prometheus (GPU)** on `http://localhost:9091` - high-frequency GPU metrics (200ms scrape, 15m retention)
 
 ### Service Relationship Diagram
 ```mermaid
@@ -106,8 +99,6 @@ The following configuration files are located in the `deploy/observability/` dir
 - [docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml): Defines NATS and etcd services
 - [docker-observability.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
 - [prometheus.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
-- [dynamo_local_resource_monitor.yml](../../deploy/observability/dynamo_local_resource_monitor.yml): High-frequency resource monitoring Prometheus config (200ms scrape, 15m retention)
-- [grafana-datasource-local-resource-monitor.yml](../../deploy/observability/grafana-datasource-local-resource-monitor.yml): Grafana datasource for the resource monitor Prometheus instance
 - [grafana-datasources.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
 - [otel-collector.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/otel-collector.yaml): OpenTelemetry Collector configuration (routes traces to Tempo, logs to Loki)
 - [loki.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/loki.yaml): Loki log aggregation configuration
