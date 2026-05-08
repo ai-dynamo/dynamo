@@ -275,7 +275,7 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
             --ecosystem dpkg --ecosystem native \
-            --output-tarball /sources.tar.gz \
+            --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
             --base-sbom-manifest /opt/compliance/base_sboms/manifest.json \
@@ -284,15 +284,15 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         # Skipped: produce an empty tarball so the sources_archive stage's
         # COPY still succeeds; CI just won't request --target sources_archive
         # when archive_sources=false.
-        : > /sources.tar.gz ; \
+        : > /sources.zip ; \
     fi
 
 
 # CI extracts via `--target sources_archive --output type=local,dest=/tmp/sources`.
-# This is FROM scratch so the export is bounded by the size of /sources.tar.gz,
+# This is FROM scratch so the export is bounded by the size of /sources.zip,
 # not the runtime_pre filesystem.
 FROM scratch AS sources_archive
-COPY --from=sources_collect /sources.tar.gz /sources.tar.gz
+COPY --from=sources_collect /sources.zip /sources.zip
 
 
 #######################################

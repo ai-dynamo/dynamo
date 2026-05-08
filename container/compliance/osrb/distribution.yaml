@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-image distribution context. OSRB applies different review rigor based
+# on where the image is shipped (public NGC vs internal vs customer-specific).
+#
+# Schema:
+#   <image-name>: <distribution-class>
+# Where distribution-class is one of:
+#   public            shipped on NGC public registry; broadest distribution
+#   internal          NVIDIA-internal only; no external distribution
+#   customer-specific shipped to specific customer(s) under contract
+
+dynamo-runtime:        public
+dynamo-frontend:       public
+vllm-runtime:          public
+sglang-runtime:        public
+trtllm-runtime:        public
+planner:               public
+kubernetes-operator:   public
+snapshot-agent:        internal      # internal-only deployment as of 2026-Q2

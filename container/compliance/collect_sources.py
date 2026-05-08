@@ -38,8 +38,10 @@ Per-ecosystem strategy (matches the plan in
            site-packages); pip download --no-binary would
            duplicate ~GB for zero compliance value.
 
-Final output: /sources.tar.gz, packed with reproducible-tar flags so
-the artifact's hash is deterministic across rebuilds.
+Final output: /sources.zip, packed with deterministic ordering and a
+fixed mtime so the artifact's sha256 is stable across rebuilds. The
+companion OSRB bundle (osrb/package.py) records this archive's
+sha256 in build-provenance.json for cross-verification.
 
 Runs in the post-merge / RC / release CI pipelines only — skipped on
 PR builds (storage cost too high per-build, and PR doesn't change
@@ -57,8 +59,8 @@ import argparse
 import json
 import logging
 import shutil
-import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -123,28 +125,28 @@ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
     return n
 
 
-def pack_sources_tarball(sources_root: Path, tarball_path: Path) -> None:
-    """Create a reproducible tarball of sources_root.
+def pack_sources_zip(sources_root: Path, zip_path: Path) -> None:
+    """Pack sources_root as a deterministic-ish zip.
 
-    Reproducible flags so the hash is deterministic across rebuilds — important
-    for OSRB integrity checks and our own provenance.
+    Walks in sorted order with a fixed mtime per ZipInfo — central-directory
+    layout makes byte-exact reproducibility imperfect for zip vs tar, but
+    these knobs are enough for OSRB cross-verification: the bundle records
+    the sha256 of this archive in build-provenance.json.
     """
     if not sources_root.is_dir():
         raise FileNotFoundError(f"sources root missing: {sources_root}")
-    cmd = [
-        "tar",
-        "--owner=0",
-        "--group=0",
-        "--mtime=1980-01-01",
-        "--sort=name",
-        "-czf",
-        str(tarball_path),
-        "-C",
-        str(sources_root.parent),
-        sources_root.name,
-    ]
-    subprocess.run(cmd, check=True)
-    logger.info("Wrote %s (%.1f MB)", tarball_path, tarball_path.stat().st_size / 1e6)
+    fixed_mtime = (1980, 1, 1, 0, 0, 0)
+    paths = sorted(p for p in sources_root.rglob("*") if p.is_file())
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for path in paths:
+            arcname = path.relative_to(sources_root.parent).as_posix()
+            info = zipfile.ZipInfo(filename=arcname, date_time=fixed_mtime)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            with path.open("rb") as f:
+                zf.writestr(info, f.read())
+    logger.info("Wrote %s (%.1f MB, %d files)",
+                zip_path, zip_path.stat().st_size / 1e6, len(paths))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,10 +159,10 @@ def main(argv: list[str] | None = None) -> int:
         "Default: all applicable.",
     )
     parser.add_argument(
-        "--output-tarball",
+        "--output-zip",
         type=Path,
-        default=Path("/sources.tar.gz"),
-        help="Where to write the final reproducible tarball.",
+        default=Path("/sources.zip"),
+        help="Where to write the final sources zip.",
     )
     parser.add_argument(
         "--sources-root",
@@ -225,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             args.native_source_dir, args.sources_root / "native"
         )
 
-    pack_sources_tarball(args.sources_root, args.output_tarball)
+    pack_sources_zip(args.sources_root, args.output_zip)
     logger.info("Source archival complete: %s", counts)
     return 0
 

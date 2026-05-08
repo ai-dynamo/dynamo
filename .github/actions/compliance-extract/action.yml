@@ -175,5 +175,5 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-sources
-        path: /tmp/sources/sources.tar.gz
+        path: /tmp/sources/sources.zip
         retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs
