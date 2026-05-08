@@ -330,7 +330,12 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         )
         mm_cfg = getattr(vllm_config.model_config, "multimodal_config", None)
         mm_encoder_only = bool(getattr(mm_cfg, "mm_encoder_only", False))
-        env_disabled = os.environ.get("DYN_EC_NCCL_FENCE", "1") == "0"
+        env_disabled = os.environ.get("DYN_EC_NCCL_FENCE", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
         self._nccl_fence_active: bool = (
             role == ECConnectorRole.WORKER
             and self._tp_world_size > 1
@@ -348,7 +353,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         elif mm_encoder_only:
             self._fence_reason = "mm_encoder_only"
         elif env_disabled:
-            self._fence_reason = "DYN_EC_NCCL_FENCE=0"
+            self._fence_reason = "DYN_EC_NCCL_FENCE_disabled"
         elif arch not in KNOWN_TP_NCCL_FORWARD_MODELS:
             self._fence_reason = f"arch_not_allowlisted:{arch}"
         else:
@@ -418,8 +423,11 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             return False
         # Lazy promotion: an entry is considered safely loaded once at least
         # one full scheduling step has elapsed since it was saved. By that
-        # point the worker has called `_on_step_begin` (post-save), which
-        # drained save_stream on every rank, and the bytes are visible.
+        # point the prior step's worker fence has run — under Plan B this
+        # is `clear_connector_metadata`'s wait_event chained into the LLM
+        # forward's TP NCCL all-reduce; under Plan A it is `_on_step_begin`'s
+        # CPU drain + `dist.barrier`. Either way the D2H is globally visible
+        # across ranks before any H2D in this step issues.
         if entry.state == "PENDING" and entry.save_step < self._scheduling_step:
             entry.state = "READY"
         if entry.state == "READY":
