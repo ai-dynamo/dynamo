@@ -208,6 +208,14 @@ impl HfTokenizerConfigJsonFormatter {
             .templates()
             .any(|(_, tmpl)| tmpl.source().contains("reasoning_content"));
 
+        // Detect if the template branches on `tool_call.arguments is string` (Qwen3, Hermes).
+        // Such templates render a JSON-string `arguments` field verbatim; if we pre-parse
+        // it into an object, the `tojson` branch fires instead and emits compact JSON,
+        // breaking byte-level append-only across multi-step tool-use turns.
+        let template_handles_arguments_string = env
+            .templates()
+            .any(|(_, tmpl)| tmpl.source().contains("arguments is string"));
+
         Ok(HfTokenizerConfigJsonFormatter {
             env,
             config,
@@ -217,6 +225,7 @@ impl HfTokenizerConfigJsonFormatter {
             exclude_tools_when_tool_choice_none,
             template_handles_reasoning,
             image_placeholder_template,
+            template_handles_arguments_string,
         })
     }
 }

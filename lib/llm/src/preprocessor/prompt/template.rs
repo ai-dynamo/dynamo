@@ -201,6 +201,13 @@ struct HfTokenizerConfigJsonFormatter {
     /// arrays natively (Qwen-VL family) or when we have no flatten strategy
     /// for it (no MM-aware routing benefit either way).
     image_placeholder_template: Option<&'static str>,
+    /// True if the chat template branches on `tool_call.arguments is string`
+    /// (Qwen3, Hermes, etc.). When true, skip pre-parsing the JSON-string
+    /// arguments into an object — the template wants the raw string verbatim.
+    /// Pre-parsing forces the `tojson`-with-object branch and re-emits with
+    /// minijinja's compact separators, which breaks append-only prefix matching
+    /// across multi-step tool-use turns.
+    template_handles_arguments_string: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter
