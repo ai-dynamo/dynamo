@@ -52,6 +52,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
@@ -1401,14 +1402,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 					},
 				},
 			},
-			{
-				Name:  "NATS_SERVER",
-				Value: fmt.Sprintf("nats://%s-nats:4222", dgdr.Namespace),
-			},
-			{
-				Name:  "ETCD_ENDPOINTS",
-				Value: fmt.Sprintf("%s-etcd:2379", dgdr.Namespace),
-			},
 			// DGDR metadata for setting ownerReferences
 			{
 				Name:  "DGDR_NAME",
@@ -1422,12 +1415,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name:  "DGDR_UID",
 				Value: string(dgdr.UID),
 			},
-		}
-		if r.Config.Infrastructure.PrometheusEndpoint != "" {
-			profilerEnv = append(profilerEnv, corev1.EnvVar{
-				Name:  "PROMETHEUS_ENDPOINT",
-				Value: r.Config.Infrastructure.PrometheusEndpoint,
-			})
 		}
 
 		// Build volume mounts
@@ -1487,6 +1474,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			VolumeMounts: volumeMounts,
 			WorkingDir:   "/workspace",
 		}
+		dynamo.AddStandardEnvVars(&profilerContainer, r.Config)
 
 		// Generate sidecar script from template
 		tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)

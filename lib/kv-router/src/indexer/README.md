@@ -342,3 +342,69 @@ let workers_at_64 = index.get(&(64, local_hashes[64]));  // O(1) lookup
 let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 // Skip positions 1-63, 65-127 entirely!
 ```
+
+---
+
+## Indexer Selection Guide
+
+There are five production indexer variants. This section maps deployment scenarios to the right choice.
+
+### Variant Summary
+
+| Variant | Struct | Concurrency | Routing | When to use |
+|---------|--------|-------------|---------|-------------|
+| `RadixTree` | `RadixTree` | Single-threaded | N/A (local) | Worker-side `LocalKvIndexer`, unit tests |
+| `ConcurrentRadixTree` (CRT) | `ConcurrentRadixTree` | Thread-safe reads | N/A (local) | Single-node, moderate traffic |
+| `ThreadPoolIndexer<CRT>` (CRTC) | `ThreadPoolIndexer<ConcurrentRadixTree>` | N write threads + inline reads | Full-mesh, all workers | Default for most deployments |
+| `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | FNV prefix hash | High worker counts, approximate pruning needed |
+| `AnchorAwareBranchShardedIndexer<CRTC>` | `AnchorAwareBranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | Prefix-TRIE routing | High worker counts, correctness-first (no approximate pruning) |
+
+### When to use each
+
+**`RadixTree` (non-concurrent)**
+- Never use on the router/scheduler side.
+- Correct choice inside `LocalKvIndexer` — worker-side, single-tokio-task access, no lock needed.
+- Also useful in unit tests where you want a simple, deterministic index.
+
+**`ConcurrentRadixTree` alone (not inside a ThreadPoolIndexer)**
+- Only if you have a single dedicated writer with many concurrent readers and prefer simpler code over maximum throughput.
+- In practice, `ThreadPoolIndexer<CRT>` dominates: it gives you both safe concurrent writes *and* higher throughput.
+
+**`ThreadPoolIndexer<ConcurrentRadixTree>` (CRTC)**
+- The default. Start here.
+- One global index, all workers. Read path (`find_matches`) is always O(depth × workers).
+- Works well up to ~1 000 workers. Above that, `find_matches` p99 climbs because every query scans all workers.
+- Does not shard; a single hot branch can become a write bottleneck at extreme scale.
+
+**`BranchShardedIndexer<CRTC>` (BSI)**
+- Routes each conversation to one shard via a fixed-depth FNV prefix hash. Read path scans one shard for the routed prefix key.
+- Enables *approximate pruning*: a shard can evict its least-recently-used entries independently without coordinating with others.
+- Use when: worker count > ~1 000, you need per-shard approximate pruning, and you can tolerate the flat-map router's shallow-chain and out-of-order limitations.
+- **Shard-crossing**: `branch_sharded.rs` stores `block_to_fnv_state` for shallow roots and registers prefix aliases for short queries, but the flat map does not provide the stronger anchor/replay model needed to guarantee every shallow continuation stays with its parent shard. Out-of-order delivery remains a caveat when a continuation arrives before its parent is known.
+- Not the right choice if you need a guarantee that every conversation stays on one shard even under out-of-order events (use anchor-aware BSI for that).
+
+**`AnchorAwareBranchShardedIndexer<CRTC>` (anchor-aware BSI)**
+- Uses a routing TRIE instead of a flat hash map. Before dispatching a continuation, it pre-installs *anchor* nodes on the target shard so the CRTC already has the parent chain at lookup time.
+- Architecturally prevents shard crossing: the routing decision is made before the event is dispatched, not after.
+- Trade-off: does **not** support approximate pruning (anchor nodes are shared state; pruning one shard would corrupt the TRIE).
+- Use when: correctness of routing is the top priority and you can live without approximate pruning.
+
+### Quick decision tree
+
+```text
+Start
+  │
+  ├─ Single worker or worker-side local index?
+  │      └─ RadixTree
+  │
+  ├─ < ~1 000 workers, no sharding needed?
+  │      └─ CRTC (ThreadPoolIndexer<ConcurrentRadixTree>)
+  │
+  └─ ≥ ~1 000 workers (or want per-shard pruning)?
+         │
+         ├─ Need approximate pruning / full BSI feature set?
+         │      └─ BranchShardedIndexer<CRTC>  (flat-map routing)
+         │
+         └─ Need routing-correctness guarantee, no pruning needed?
+                └─ AnchorAwareBranchShardedIndexer<CRTC>
+```

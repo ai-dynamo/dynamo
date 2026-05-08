@@ -1,6 +1,6 @@
 # Flash Indexer Figures -- Reproduction Guide
 
-Build instructions for all Flash Indexer blog post figures.
+Build instructions for all Flash Indexer Digest post figures.
 
 ## Figure Inventory
 

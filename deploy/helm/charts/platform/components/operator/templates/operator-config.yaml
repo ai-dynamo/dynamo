@@ -65,7 +65,7 @@ data:
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
-    {{- else if and .Values.nats .Values.nats.enabled }}
+    {{- else if and .Values.global .Values.global.nats .Values.global.nats.install }}
       {{- $natsAddr = printf "nats://%s-nats.%s.svc.cluster.local:4222" .Release.Name .Release.Namespace }}
     {{- end }}
     {{- $etcdAddr := "" }}

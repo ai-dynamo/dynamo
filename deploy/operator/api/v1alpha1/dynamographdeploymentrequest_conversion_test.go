@@ -371,3 +371,55 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 		t.Fatal("ConvertTo() expected error for invalid JSON, got nil")
 	}
 }
+
+func TestRestoreDGDRDeploymentStatusValidatesRequestState(t *testing.T) {
+	hubStatus := &v1beta1.DynamoGraphDeploymentRequestStatus{
+		Phase:   v1beta1.DGDRPhaseReady,
+		DGDName: "demo-dgd",
+	}
+	deploymentStatus := DeploymentStatus{
+		Name:    "demo-dgd",
+		Created: true,
+	}
+	validPayload, err := json.Marshal(dgdrDeploymentStatusAnnotation{
+		DeploymentStatus: deploymentStatus,
+		RequestState:     DGDRStateDeploymentDeleted,
+	})
+	if err != nil {
+		t.Fatalf("marshal valid payload: %v", err)
+	}
+	legacyPayload, err := json.Marshal(deploymentStatus)
+	if err != nil {
+		t.Fatalf("marshal legacy payload: %v", err)
+	}
+	invalidPayload, err := json.Marshal(dgdrDeploymentStatusAnnotation{
+		DeploymentStatus: deploymentStatus,
+		RequestState:     DGDRState("NotAState"),
+	})
+	if err != nil {
+		t.Fatalf("marshal invalid payload: %v", err)
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		gotDeployment, gotState, ok := restoreDGDRDeploymentStatus(string(validPayload), hubStatus)
+		if !ok {
+			t.Fatal("restoreDGDRDeploymentStatus() rejected valid payload")
+		}
+		if gotState != DGDRStateDeploymentDeleted {
+			t.Fatalf("state = %q, want %q", gotState, DGDRStateDeploymentDeleted)
+		}
+		if diff := cmp.Diff(deploymentStatus, gotDeployment); diff != "" {
+			t.Fatalf("deployment mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("legacy", func(t *testing.T) {
+		if _, _, ok := restoreDGDRDeploymentStatus(string(legacyPayload), hubStatus); ok {
+			t.Fatal("restoreDGDRDeploymentStatus() accepted legacy payload without requestState")
+		}
+	})
+	t.Run("invalid", func(t *testing.T) {
+		if _, _, ok := restoreDGDRDeploymentStatus(string(invalidPayload), hubStatus); ok {
+			t.Fatal("restoreDGDRDeploymentStatus() accepted invalid requestState")
+		}
+	})
+}
