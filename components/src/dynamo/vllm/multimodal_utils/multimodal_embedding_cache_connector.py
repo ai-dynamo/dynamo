@@ -40,6 +40,7 @@ KNOWN_TP_NCCL_FORWARD_MODELS: frozenset[str] = frozenset(
         "Qwen2_5_VLForConditionalGeneration",
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
     }
 )
 
