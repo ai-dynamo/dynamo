@@ -59,6 +59,7 @@ class _TestEntry:
     timeout: float
     requested_vllm_kv_cache_bytes: int | None = None
     requested_sglang_kv_tokens: int | None = None
+    requested_sglang_vram_gib: float | None = None
     requested_trtllm_kv_tokens: int | None = None
     requested_trtllm_vram_gib: float | None = None
     skip_reason: str | None = None
@@ -119,6 +120,8 @@ def _fmt_req(test: _TestEntry) -> str:
     """Format the resource request value for display."""
     if test.requested_sglang_kv_tokens is not None:
         return f"req_kv_tokens={int(test.requested_sglang_kv_tokens)}"
+    if test.requested_sglang_vram_gib is not None:
+        return f"req_vram={test.requested_sglang_vram_gib:.1f} GiB"
     if test.requested_trtllm_kv_tokens is not None:
         return f"req_kv_tokens={int(test.requested_trtllm_kv_tokens)}"
     if test.requested_trtllm_vram_gib is not None:
@@ -353,6 +356,7 @@ def run_parallel(
                 requested_vllm_kv_cache_bytes=m.get("requested_vllm_kv_cache_bytes"),
                 timeout=m.get("timeout", 600),
                 requested_sglang_kv_tokens=m.get("requested_sglang_kv_tokens"),
+                requested_sglang_vram_gib=m.get("requested_sglang_vram_gib"),
                 requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
                 requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
                 skip_reason=m.get("skip_reason"),
@@ -375,6 +379,7 @@ def run_parallel(
         for t in tests
         if t.requested_vllm_kv_cache_bytes is None
         and t.requested_sglang_kv_tokens is None
+        and t.requested_sglang_vram_gib is None
         and t.requested_trtllm_kv_tokens is None
         and t.requested_trtllm_vram_gib is None
         and t.profiled_gib > 0
@@ -382,8 +387,9 @@ def run_parallel(
     if no_kv:
         _print(
             f"\nERROR: {len(no_kv)} test(s) lack a requested_vllm_kv_cache_bytes, "
-            f"requested_sglang_kv_tokens, requested_trtllm_kv_tokens, "
-            f"or requested_trtllm_vram_gib marker and cannot run in parallel:"
+            f"requested_sglang_kv_tokens, requested_sglang_vram_gib, "
+            f"requested_trtllm_kv_tokens, or requested_trtllm_vram_gib marker "
+            f"and cannot run in parallel:"
         )
         for t in no_kv:
             _print(f"  {t.name}")
