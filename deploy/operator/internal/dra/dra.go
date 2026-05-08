@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,10 +34,10 @@ const (
 	DefaultDeviceClassName = "gpu.nvidia.com"
 )
 
-// ApplyClaim replaces the first container's nvidia.com/gpu resources with a
-// shared DRA ResourceClaim. Every container that references this claim name
-// will share the same physical GPUs. The function is idempotent — calling it
-// on a pod that already has the claim is a no-op.
+// ApplyClaim replaces the first container's scalar GPU resources with a shared
+// DRA ResourceClaim. Every container that references this claim name will share
+// the same physical GPUs. The function is idempotent — calling it on a pod that
+// already has the claim is a no-op.
 func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for DRA claim")
@@ -49,10 +50,10 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 		}
 	}
 
-	// Replace nvidia.com/gpu with the shared DRA claim.
-	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
-	delete(podSpec.Containers[0].Resources.Limits, gpuResource)
-	delete(podSpec.Containers[0].Resources.Requests, gpuResource)
+	// Replace GPU resources with the shared DRA claim. The resource name can be
+	// nvidia.com/gpu or a MIG shape such as nvidia.com/mig-3g.20gb.
+	deleteGPUResources(podSpec.Containers[0].Resources.Limits)
+	deleteGPUResources(podSpec.Containers[0].Resources.Requests)
 	podSpec.Containers[0].Resources.Claims = append(podSpec.Containers[0].Resources.Claims, corev1.ResourceClaim{
 		Name: ClaimName,
 	})
@@ -105,13 +106,39 @@ func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceS
 		return 0, ""
 	}
 	deviceClassName = gmsSpec.DeviceClassName
-	if q, ok := resources.Limits[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
+	if q, ok := gpuResourceQuantity(resources.Limits); ok {
 		return int(q.Value()), deviceClassName
 	}
-	if q, ok := resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
+	if q, ok := gpuResourceQuantity(resources.Requests); ok {
 		return int(q.Value()), deviceClassName
 	}
 	return 0, deviceClassName
+}
+
+func deleteGPUResources(resources corev1.ResourceList) {
+	for name := range resources {
+		if isGPUResourceName(name) {
+			delete(resources, name)
+		}
+	}
+}
+
+func gpuResourceQuantity(resources corev1.ResourceList) (resource.Quantity, bool) {
+	for name, quantity := range resources {
+		if isGPUResourceName(name) {
+			return quantity, true
+		}
+	}
+	return resource.Quantity{}, false
+}
+
+func isGPUResourceName(name corev1.ResourceName) bool {
+	normalized := strings.ToLower(string(name))
+	return normalized == commonconsts.KubeResourceGPUNvidia ||
+		normalized == "gpu" ||
+		strings.HasSuffix(normalized, "/gpu") ||
+		strings.Contains(normalized, "/mig-") ||
+		strings.HasPrefix(normalized, "gpu.")
 }
 
 // GenerateResourceClaimTemplate builds the ResourceClaimTemplate that provides

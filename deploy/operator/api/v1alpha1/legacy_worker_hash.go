@@ -23,18 +23,12 @@ const (
 // GetDGDLegacyWorkerHash returns the preserved v1alpha1 worker hash carried on
 // converted v1beta1 DGD objects.
 func GetDGDLegacyWorkerHash(obj metav1.Object) string {
-	if obj == nil {
-		return ""
-	}
 	return obj.GetAnnotations()[AnnotationDGDLegacyWorkerHash]
 }
 
 // ClearDGDLegacyWorkerHash removes the preserved v1alpha1 worker hash from a
 // DGD object after the v1beta1 controller has consumed it.
 func ClearDGDLegacyWorkerHash(obj metav1.Object) {
-	if obj == nil || obj.GetAnnotations() == nil {
-		return
-	}
 	annotations := obj.GetAnnotations()
 	delete(annotations, AnnotationDGDLegacyWorkerHash)
 	obj.SetAnnotations(annotations)

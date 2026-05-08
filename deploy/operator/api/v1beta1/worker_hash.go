@@ -51,6 +51,10 @@ type workerComponentHashInput struct {
 // ComputeDGDWorkersSpecHash computes a deterministic hash of all v1beta1
 // worker component specs.
 //
+// WARNING: this hash is part of the rolling-update compatibility contract. A
+// changed value for the same semantic input can roll workers across existing
+// deployments. Update the golden test only with an explicit migration plan.
+//
 // The v2 hash uses a versioned, normalized input made from fields that affect
 // generated worker pods. This avoids tying rollout decisions to the wire shape
 // of whichever CRD version the API server returns.
