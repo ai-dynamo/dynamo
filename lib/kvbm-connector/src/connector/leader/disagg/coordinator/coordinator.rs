@@ -1043,14 +1043,15 @@ impl ConditionalDisaggCoordinator {
     }
 
     pub fn release(&self, request_id: &str) {
-        if let Some(state) = self.states.get(request_id) {
-            let session_opt = state.value().session.lock().clone();
-            let mut status = state.value().status.lock();
+        // Atomic remove() closes the get()-then-remove() race observed under
+        // kv_load_failure_policy=recompute (see commit message for details).
+        if let Some((_, state)) = self.states.remove(request_id) {
+            let session_opt = state.session.lock().clone();
+            let mut status = state.status.lock();
             if *status != CdRequestStatus::Released {
                 *status = CdRequestStatus::Released;
             }
             drop(status);
-            drop(state);
             if let Some(session) = session_opt {
                 session.finalize(Some("released".to_string()));
             }
