@@ -52,6 +52,18 @@ _CANONICAL_OVERLAP_ENV_VARS = (
     "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
     "DYN_ROUTER_PREFILL_LOAD_SCALE",
 )
+_LOAD_AWARE_KWARG_OVERRIDES = {
+    "overlap_score_credit": 0.0,
+    "use_kv_events": False,
+    "durable_kv_events": False,
+    "router_track_active_blocks": True,
+    "router_assume_kv_reuse": False,
+    "router_track_prefill_tokens": True,
+    "use_remote_indexer": False,
+    "serve_indexer": False,
+    "shared_cache_multiplier": 0.0,
+    "shared_cache_type": "none",
+}
 
 
 class _DeprecatedOverlapScoreWeightAction(argparse.Action):
@@ -120,9 +132,21 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    load_aware: bool = False
+
+    def apply_load_aware_preset(self) -> None:
+        if not self.load_aware:
+            return
+
+        for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
+            setattr(self, field, value)
+
+        if hasattr(self, "overlap_score_weight"):
+            delattr(self, "overlap_score_weight")
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
+        self.apply_load_aware_preset()
         kwargs = {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
         if hasattr(self, "overlap_score_weight"):
             kwargs["overlap_score_weight"] = self.overlap_score_weight
@@ -135,6 +159,20 @@ class KvRouterArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--load-aware",
+            env_var="DYN_ROUTER_LOAD_AWARE",
+            default=False,
+            dest="load_aware",
+            help=(
+                "KV Router: Enable load-aware routing without cache-reuse signals. "
+                "On the frontend, this implies --router-mode kv. "
+                "This preset sets overlap_score_credit=0, disables KV events and "
+                "durable KV events, disables KV-reuse assumptions, enables active-block "
+                "and prefill-token load tracking, and disables remote/shared cache indexers."
+            ),
+        )
         add_argument(
             g,
             flag_name="--router-kv-overlap-score-credit",

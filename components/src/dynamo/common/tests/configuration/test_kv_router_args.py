@@ -9,6 +9,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
+from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -188,3 +189,89 @@ def test_prefill_load_scale_env_uses_kv_router_config_field(monkeypatch) -> None
 
     assert args.prefill_load_scale == 3.5
     assert not hasattr(args, "router_prefill_load_scale")
+
+
+def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--load-aware"])
+
+    assert args.load_aware is True
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["overlap_score_credit"] == 0.0
+    assert kwargs["use_kv_events"] is False
+    assert kwargs["durable_kv_events"] is False
+    assert kwargs["router_track_active_blocks"] is True
+    assert kwargs["router_assume_kv_reuse"] is False
+    assert kwargs["router_track_prefill_tokens"] is True
+    assert kwargs["use_remote_indexer"] is False
+    assert kwargs["serve_indexer"] is False
+    assert kwargs["shared_cache_multiplier"] == 0.0
+    assert kwargs["shared_cache_type"] == "none"
+    assert "load_aware" not in kwargs
+    assert "overlap_score_weight" not in kwargs
+
+
+def test_load_aware_env_applies_no_cache_load_balancing_preset(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert args.load_aware is True
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["overlap_score_credit"] == 0.0
+    assert kwargs["use_kv_events"] is False
+    assert kwargs["router_assume_kv_reuse"] is False
+    assert kwargs["router_track_prefill_tokens"] is True
+
+
+def test_load_aware_preserves_prefill_load_scale() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--load-aware", "--router-prefill-load-scale", "2.5"])
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["overlap_score_credit"] == 0.0
+    assert kwargs["prefill_load_scale"] == 2.5
+
+
+def test_load_aware_ignores_deprecated_overlap_score_weight_env(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "2.5")
+
+    with pytest.warns(FutureWarning, match="deprecated"):
+        parser = argparse.ArgumentParser()
+        KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--load-aware"])
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["overlap_score_credit"] == 0.0
+    assert kwargs["prefill_load_scale"] == 1.0
+    assert "overlap_score_weight" not in kwargs
+
+
+def test_load_aware_frontend_implies_kv_router_mode() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--load-aware"])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.router_mode == "kv"
+    assert config.overlap_score_credit == 0.0
+    assert config.use_kv_events is False
+    assert config.router_assume_kv_reuse is False

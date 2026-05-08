@@ -19,6 +19,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--load-aware` | disabled | Use KV active-load routing without cache-reuse signals; implies `--router-mode kv` on the frontend |
 | `--router-kv-overlap-score-credit` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
