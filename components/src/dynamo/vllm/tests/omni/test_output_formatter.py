@@ -103,7 +103,7 @@ class TestErrorChunk:
     def test_error_chunk_format(self):
         chunk = _error_chunk("req-1", "my-model", "something broke")
         assert chunk["choices"][0]["delta"]["content"] == "Error: something broke"
-        assert chunk["choices"][0]["finish_reason"] == "error"
+        assert chunk["choices"][0]["finish_reason"] == "stop"
         assert chunk["model"] == "my-model"
 
 

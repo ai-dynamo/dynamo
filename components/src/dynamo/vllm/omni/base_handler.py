@@ -180,7 +180,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
                         "role": "assistant",
                         "content": f"Error: {error_message}",
                     },
-                    "finish_reason": "error",
+                    "finish_reason": "stop",
                 }
             ],
         }

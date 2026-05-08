@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -323,6 +324,69 @@ class TestParseOmniRequest:
         assert prompt["modalities"] == ["text", "audio"]
         assert prompt["additional_information"] == {"speaker": ["cherry"]}
         assert result["original_prompt"] == prompt
+
+    @pytest.mark.asyncio
+    async def test_chat_uses_engine_renderer_for_multimodal_messages(self):
+        class FakeRenderer:
+            def __init__(self):
+                self.conversations = None
+                self.prompt_extras = None
+
+            async def render_chat_async(
+                self,
+                conversations,
+                chat_params,  # noqa: ARG002
+                tok_params,  # noqa: ARG002
+                *,
+                prompt_extras=None,
+            ):
+                self.conversations = conversations
+                self.prompt_extras = prompt_extras
+                return conversations, [
+                    {
+                        "prompt_token_ids": [1, 2, 3],
+                        "multi_modal_data": {"image": object()},
+                    }
+                ]
+
+        renderer = FakeRenderer()
+        engine = SimpleNamespace(
+            renderer=renderer,
+            model_config=SimpleNamespace(max_model_len=4096),
+        )
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://x/img.jpg"},
+                        },
+                        {"type": "text", "text": "describe this"},
+                    ],
+                }
+            ],
+            "modalities": ["text", "audio"],
+            "audio": {"voice": "Cherry"},
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text", "audio"],
+            engine=engine,
+        )
+
+        prompt = result["engine_inputs"]
+        assert renderer.conversations == [request["messages"]]
+        assert prompt["prompt_token_ids"] == [1, 2, 3]
+        assert "multi_modal_data" in prompt
+        assert prompt["modalities"] == ["text", "audio"]
+        assert prompt["additional_information"] == {"speaker": ["cherry"]}
+        assert result["original_prompt"] == {
+            "modalities": ["text", "audio"],
+            "additional_information": {"speaker": ["cherry"]},
+        }
 
     @pytest.mark.asyncio
     async def test_chatml_fallback_when_qwen_tokenizer_has_no_template(self):

@@ -466,7 +466,7 @@ def _error_chunk(
             {
                 "index": 0,
                 "delta": {"role": "assistant", "content": f"Error: {error_message}"},
-                "finish_reason": "error",
+                "finish_reason": "stop",
             }
         ],
     }

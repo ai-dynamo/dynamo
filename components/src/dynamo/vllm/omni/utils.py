@@ -3,6 +3,7 @@
 
 """Shared utilities for the vLLM-Omni backend."""
 
+import importlib
 import json
 import logging
 from pathlib import Path
@@ -154,11 +155,127 @@ def _render_chatml_messages(messages: list[dict[str, Any]]) -> str:
     return "".join(prompt_parts)
 
 
+async def _render_chat_with_engine(
+    request: dict,
+    engine: Any | None,
+) -> dict[str, Any] | None:
+    """Use vLLM's renderer for multimodal chat prompts when AsyncOmni exposes it."""
+    if engine is None:
+        return None
+
+    messages = request.get("messages")
+    renderer = getattr(engine, "renderer", None)
+    model_config = getattr(engine, "model_config", None)
+    if not isinstance(messages, list) or renderer is None or model_config is None:
+        return None
+
+    try:
+        params_module = importlib.import_module("vllm.renderers.params")
+        ChatParams = getattr(params_module, "ChatParams")
+        TokenizeParams = getattr(params_module, "TokenizeParams")
+
+        max_output_tokens = request.get(
+            "max_completion_tokens", request.get("max_tokens", 0)
+        )
+        try:
+            max_output_tokens = int(max_output_tokens or 0)
+        except (TypeError, ValueError):
+            max_output_tokens = 0
+
+        chat_template_kwargs = {
+            "add_generation_prompt": request.get("add_generation_prompt", True),
+            "continue_final_message": request.get("continue_final_message", False),
+        }
+        for key in ("documents", "reasoning_effort"):
+            if request.get(key) is not None:
+                chat_template_kwargs[key] = request[key]
+
+        chat_params = ChatParams(
+            chat_template=request.get("chat_template"),
+            chat_template_content_format=request.get(
+                "chat_template_content_format", "auto"
+            ),
+            chat_template_kwargs=chat_template_kwargs,
+            media_io_kwargs=request.get("media_io_kwargs"),
+        )
+        tok_params = TokenizeParams(
+            max_total_tokens=getattr(model_config, "max_model_len", None),
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=request.get("truncate_prompt_tokens"),
+            add_special_tokens=request.get("add_special_tokens", True),
+        )
+        prompt_extras = {
+            key: value
+            for key in ("mm_processor_kwargs", "cache_salt")
+            if (value := request.get(key)) is not None
+        }
+
+        _, engine_prompts = await renderer.render_chat_async(
+            [messages],
+            chat_params,
+            tok_params,
+            prompt_extras=prompt_extras or None,
+        )
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "vLLM renderer chat preprocessing failed, using fallback prompt",
+            exc_info=True,
+        )
+        return None
+
+    if not engine_prompts or not isinstance(engine_prompts[0], dict):
+        return None
+
+    engine_prompt = engine_prompts[0]
+    additional_information = _chat_additional_information(request)
+    if additional_information:
+        info = engine_prompt.get("additional_information")
+        if not isinstance(info, dict):
+            info = {}
+        info.update(additional_information)
+        engine_prompt["additional_information"] = info
+    if request.get("modalities"):
+        engine_prompt["modalities"] = request["modalities"]
+
+    original_prompt = _serializable_original_prompt(engine_prompt)
+    return {
+        "engine_inputs": engine_prompt,
+        "original_prompt": original_prompt,
+        "sampling_params_list": None,
+    }
+
+
+def _serializable_original_prompt(engine_prompt: dict[str, Any]) -> dict[str, Any]:
+    """Keep only JSON-friendly prompt metadata for Dynamo stage handoff."""
+    original_prompt: dict[str, Any] = {}
+    for key in (
+        "prompt",
+        "negative_prompt",
+        "modalities",
+        "additional_information",
+        "mm_processor_kwargs",
+        "cache_salt",
+    ):
+        value = engine_prompt.get(key)
+        if value is not None and _is_json_serializable(value):
+            original_prompt[key] = value
+    return original_prompt
+
+
+def _is_json_serializable(value: Any) -> bool:
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 async def parse_omni_request(
     request: dict,
     output_modalities: list,
     default_video_fps: int = 16,
     tokenizer_getter=None,
+    engine: Any | None = None,
 ) -> dict:
     """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
 
@@ -194,6 +311,10 @@ async def parse_omni_request(
         }
 
     # Chat / text
+    rendered = await _render_chat_with_engine(request, engine)
+    if rendered is not None:
+        return rendered
+
     messages = request.get("messages", [])
     if not isinstance(messages, list):
         messages = []

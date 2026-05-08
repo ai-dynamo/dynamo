@@ -156,6 +156,7 @@ class OmniStageWorker:
                 self._output_modalities,
                 self._default_video_fps,
                 tokenizer_getter=self.engine.get_tokenizer,
+                engine=self.engine,
             )
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
