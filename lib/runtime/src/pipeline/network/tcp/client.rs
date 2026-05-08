@@ -185,7 +185,12 @@ async fn wait_for_connection_tasks(
             let writer = match writer {
                 Ok(writer) => writer.into_inner(),
                 Err(e) => {
-                    tracing::error!("failed to join writer task: {:?}", e);
+                    tracing::error!(
+                        subject = %subject,
+                        peer_port = ?peer_port,
+                        err = ?e,
+                        "writer task returned error"
+                    );
                     return Err(e);
                 }
             };
@@ -195,27 +200,32 @@ async fn wait_for_connection_tasks(
         }
         (Err(reader_err), Ok(_)) => {
             tracing::error!(
-                "reader task failed to join (peer_port: {peer_port:?}, subject: {subject}): {reader_err:?}"
+                subject = %subject,
+                peer_port = ?peer_port,
+                err = ?reader_err,
+                "reader task failed to join"
             );
-            anyhow::bail!(
-                "reader task failed to join (peer_port: {peer_port:?}, subject: {subject}): {reader_err:?}"
-            );
+            Err(reader_err.into())
         }
         (Ok(_), Err(writer_err)) => {
             tracing::error!(
-                "writer task failed to join (peer_port: {peer_port:?}, subject: {subject}): {writer_err:?}"
+                subject = %subject,
+                peer_port = ?peer_port,
+                err = ?writer_err,
+                "writer task failed to join"
             );
-            anyhow::bail!(
-                "writer task failed to join (peer_port: {peer_port:?}, subject: {subject}): {writer_err:?}"
-            );
+            Err(writer_err.into())
         }
         (Err(reader_err), Err(writer_err)) => {
             tracing::error!(
-                "both reader and writer tasks failed to join (peer_port: {peer_port:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
+                subject = %subject,
+                peer_port = ?peer_port,
+                reader_err = ?reader_err,
+                writer_err = ?writer_err,
+                "both reader and writer tasks failed to join"
             );
-            anyhow::bail!(
-                "both reader and writer tasks failed to join (peer_port: {peer_port:?}, subject: {subject}) - reader: {reader_err:?}, writer: {writer_err:?}"
-            );
+            // Surface the reader error; the writer error is captured above.
+            Err(reader_err.into())
         }
     }
 }
@@ -224,14 +234,17 @@ async fn wait_for_server_shutdown(
     mut stream: TcpStream,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<()> {
-    if context.is_killed() {
-        tracing::debug!("stream context killed; skipping server FIN wait");
+    // `handle_writer` skips the closing sentinel on both `killed` and
+    // `stopped`, so the server has nothing to react to in either case;
+    // sitting in the read loop until the 10 s deadline would be dead time.
+    if context.is_killed() || context.is_stopped() {
+        tracing::debug!("stream context killed or stopped; skipping server FIN wait");
         return Ok(());
     }
 
     // Await the tcp server to shutdown the socket connection, bounded by a
     // timeout so normal sentinel shutdown cannot hang indefinitely.
-    let mut buf = vec![0u8; 1024];
+    let mut buf = [0u8; 1024];
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let n = time::timeout_at(deadline, stream.read(&mut buf))
@@ -321,13 +334,10 @@ async fn handle_reader(
                         }
                     }
                     Some(Err(e)) => {
-                        // TCP RST from peer (e.g. server crash) or a protocol decode
-                        // error — both mean the stream is unrecoverable.  Break so
-                        // only this connection is torn down; other requests are not
-                        // affected. `context.kill()` preserves the downstream signal
-                        // the old `panic!` used to deliver via `JoinError::Panic`:
-                        // without it, the engine keeps processing requests whose
-                        // responses can no longer be delivered.
+                        // TCP RST from peer or a protocol decode error — the stream
+                        // is unrecoverable. Kill the engine context so the producer
+                        // stops generating responses that can no longer be delivered,
+                        // then break so only this connection is torn down.
                         tracing::warn!(
                             "tcp stream read error, closing connection: {e:?}"
                         );
@@ -829,6 +839,30 @@ mod tests {
         );
     }
 
+    /// Stopped contexts also skip the FIN wait. `handle_writer` suppresses
+    /// the closing sentinel on both `killed` and `stopped`, so the server
+    /// has nothing to react to in either case and the read loop would
+    /// otherwise sit idle until the 10s deadline.
+    #[tokio::test]
+    async fn test_wait_for_server_shutdown_skips_stopped_context() {
+        let (client, _server) = create_tcp_pair().await;
+        let controller = Arc::new(Controller::default());
+        controller.stop();
+
+        let context: Arc<dyn AsyncEngineContext> = controller;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            wait_for_server_shutdown(client, context),
+        )
+        .await;
+
+        assert!(result.is_ok(), "stopped context should not wait for FIN");
+        assert!(
+            result.unwrap().is_ok(),
+            "stopped context shutdown should succeed"
+        );
+    }
+
     /// Read error in the connection monitor kills the context and skips the FIN wait.
     #[tokio::test]
     async fn test_connection_monitor_skips_fin_wait_after_read_error_kills_context() {
@@ -1152,6 +1186,242 @@ mod tests {
         assert!(
             controller.is_killed(),
             "Controller should be killed after TCP stream read error"
+        );
+    }
+
+    /// Read errors are counted as cancellations, matching the clean-close
+    /// accounting path.
+    #[tokio::test]
+    async fn test_handle_reader_increments_cancellation_counter_on_read_error() {
+        let ReaderHarness {
+            framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx: _alive_rx,
+            controller,
+        } = reader_harness().await;
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_reader_read_error_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
+
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        let mut raw_writer = framed_server.into_inner();
+        raw_writer.write_all(&[0u8; 8]).await.unwrap();
+        raw_writer.shutdown().await.unwrap();
+
+        let _ = reader_handle.await.unwrap();
+
+        assert!(
+            controller.is_killed(),
+            "Controller should be killed after TCP stream read error"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            1,
+            "read-error close should increment cancellation metric once"
+        );
+    }
+
+    /// Real TCP-RST integration test: configures the peer socket with
+    /// SO_LINGER=0 and drops it, forcing the kernel to send RST instead
+    /// of FIN. This produces a `Some(Err(ConnectionReset))` from the
+    /// codec — the canonical "worker crashed mid-stream" trigger.
+    /// Linux-only because abortive-close semantics are reliable there;
+    /// other platforms may interpret SO_LINGER=0 differently.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_handle_reader_handles_tcp_rst() {
+        let (client, server) = create_tcp_pair().await;
+        let (read_half, _write_half) = tokio::io::split(client);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let (alive_tx, _alive_rx) = oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+
+        // SO_LINGER=0 → on close(), kernel sends RST instead of FIN.
+        server
+            .set_linger(Some(std::time::Duration::ZERO))
+            .expect("set_linger should succeed on a connected socket");
+
+        let cancellation_counter =
+            IntCounter::new("tcp_client_reader_rst_test", "RST-path counter").unwrap();
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        // Dropping the server socket while linger=0 emits a TCP RST.
+        drop(server);
+
+        let join = tokio::time::timeout(std::time::Duration::from_secs(2), reader_handle)
+            .await
+            .expect("handle_reader should complete promptly after RST");
+        join.expect("handle_reader must NOT panic on TCP RST");
+
+        assert!(
+            controller.is_killed(),
+            "controller should be killed after RST"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            1,
+            "RST close should increment cancellation metric once"
+        );
+    }
+
+    /// Undecodable control header from the server must not panic.
+    /// Covers `serde_json::from_slice::<ControlMessage>` Err arm.
+    #[tokio::test]
+    async fn test_handle_reader_kills_on_invalid_control_message() {
+        let ReaderHarness {
+            mut framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx: _alive_rx,
+            controller,
+        } = reader_harness().await;
+        let cancellation_counter =
+            IntCounter::new("tcp_client_reader_invalid_control_test", "test counter").unwrap();
+
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        framed_server
+            .send(TwoPartMessage::from_header(Bytes::from_static(
+                b"this is not a valid control message",
+            )))
+            .await
+            .unwrap();
+
+        let _ = reader_handle.await.unwrap();
+
+        assert!(
+            controller.is_killed(),
+            "invalid control message should kill the stream context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            1,
+            "invalid control message should be counted once"
+        );
+    }
+
+    /// Sentinel from server is a protocol violation (Sentinel is
+    /// client→server). Must not panic the worker.
+    #[tokio::test]
+    async fn test_handle_reader_kills_on_sentinel_from_server() {
+        let ReaderHarness {
+            mut framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx: _alive_rx,
+            controller,
+        } = reader_harness().await;
+        let cancellation_counter =
+            IntCounter::new("tcp_client_reader_sentinel_test", "test counter").unwrap();
+
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        framed_server
+            .send(control_message(&ControlMessage::Sentinel))
+            .await
+            .unwrap();
+
+        let _ = reader_handle.await.unwrap();
+
+        assert!(
+            controller.is_killed(),
+            "Sentinel from server should kill the stream context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            1,
+            "Sentinel-from-server should be counted once"
+        );
+    }
+
+    /// Non-control message (data attached, header missing, etc.) from
+    /// the server must not panic. Covers the catch-all `_` arm.
+    #[tokio::test]
+    async fn test_handle_reader_kills_on_non_control_message() {
+        let ReaderHarness {
+            mut framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx: _alive_rx,
+            controller,
+        } = reader_harness().await;
+        let cancellation_counter =
+            IntCounter::new("tcp_client_reader_non_control_test", "test counter").unwrap();
+
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        framed_server
+            .send(TwoPartMessage::from_data(Bytes::from_static(
+                b"unexpected payload",
+            )))
+            .await
+            .unwrap();
+
+        let _ = reader_handle.await.unwrap();
+
+        assert!(
+            controller.is_killed(),
+            "non-control message from server should kill the stream context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            1,
+            "non-control message should be counted once"
         );
     }
 }
