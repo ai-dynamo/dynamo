@@ -243,8 +243,7 @@ mod tests {
         //     stride_logical[3=HeadCount] = 2048      (HeadCount jumps over Page*HeadSize)
         //     stride_logical[4=HeadSize]  = 1
         let layout = nhd_layout();
-        let s =
-            KvDimStrides::from_element_strides(&[16777216, 16384, 128, 2048, 1], 2).unwrap();
+        let s = KvDimStrides::from_element_strides(&[16777216, 16384, 128, 2048, 1], 2).unwrap();
         // Innermost axis stride matches elem_size, so tail starts at 1 * HeadSize.
         // Next axis (HeadCount) stride is 2048 elem = 4096 bytes; expected
         // for contiguous = 1 * 128 elem = 256 bytes. They disagree, so the
@@ -257,11 +256,7 @@ mod tests {
     fn non_contiguous_innermost_returns_zero_tail() {
         let layout = nhd_layout();
         // Stride 4 instead of elem_size=2 on the innermost axis ⇒ no tail.
-        let s = KvDimStrides::from_byte_strides(
-            vec![8388608, 65536, 4096, 512, 4],
-            2,
-        )
-        .unwrap();
+        let s = KvDimStrides::from_byte_strides(vec![8388608, 65536, 4096, 512, 4], 2).unwrap();
         assert_eq!(s.contiguous_tail_bytes(&layout).unwrap(), 0);
     }
 

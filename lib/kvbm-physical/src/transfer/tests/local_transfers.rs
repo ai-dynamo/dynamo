@@ -321,8 +321,8 @@ async fn test_large_block_counts(#[case] block_count: usize) {
 /// Token budget per side for page-size sweeps. With `k = (BUDGET/page_size).max(2)`
 /// the per-side byte count is exactly `BUDGET * inner_dim * dtype_width * num_layers
 /// * outer_dim` for every page_size up to the budget, then doubles once at
-/// page_size=256 (k floors at 2). Picking 256 keeps the sweep apples-to-apples
-/// across all but the largest page_size.
+///   page_size=256 (k floors at 2). Picking 256 keeps the sweep apples-to-apples
+///   across all but the largest page_size.
 const PAGE_SWEEP_TOKEN_BUDGET: usize = 256;
 
 /// Sweep `page_size` (tokens per block) across the production range so layout

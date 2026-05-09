@@ -131,7 +131,7 @@ impl FullyContiguousLayout {
     /// default `BlockFormat`. Used by in-module tests; production callers
     /// go through `PhysicalLayoutBuilder` (which threads `KvBlockLayout`
     /// from the labelled probe).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-kvbm"))]
     pub(crate) fn new(config: LayoutConfig, memory: Buffer) -> Result<Self> {
         Self::new_internal(
             config,

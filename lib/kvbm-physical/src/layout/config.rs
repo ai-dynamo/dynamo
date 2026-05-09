@@ -96,7 +96,7 @@ impl LayoutConfig {
     /// `Some(head_dim)` if `num_heads` is set, `None` otherwise.
     pub fn head_dim(&self) -> Option<usize> {
         self.num_heads
-            .map(|nh| if nh > 0 { self.inner_dim / nh } else { 0 })
+            .map(|nh| self.inner_dim.checked_div(nh).unwrap_or(0))
     }
 
     /// Check if this config supports KvBlockLayout operations.

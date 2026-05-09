@@ -145,13 +145,13 @@ impl KvDimLayout {
         }
 
         // Outer size must be 1 or 2 if present.
-        if let Some(idx) = dims.iter().position(|d| *d == KvDim::Outer) {
-            if !(1..=2).contains(&sizes[idx]) {
-                bail!(
-                    "KvDimLayout: Outer axis size must be 1 or 2, got {}",
-                    sizes[idx]
-                );
-            }
+        if let Some(idx) = dims.iter().position(|d| *d == KvDim::Outer)
+            && !(1..=2).contains(&sizes[idx])
+        {
+            bail!(
+                "KvDimLayout: Outer axis size must be 1 or 2, got {}",
+                sizes[idx]
+            );
         }
 
         Ok(Self { dims, sizes })

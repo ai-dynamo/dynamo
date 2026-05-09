@@ -65,7 +65,10 @@ fn relabel_to_physical_order(
     perm.sort_by(|&a, &b| actual[b].cmp(&actual[a]).then(a.cmp(&b)));
 
     let phys_dims: Vec<KvDim> = perm.iter().map(|&i| logical_dim_layout.dims()[i]).collect();
-    let phys_sizes: Vec<usize> = perm.iter().map(|&i| logical_dim_layout.sizes()[i]).collect();
+    let phys_sizes: Vec<usize> = perm
+        .iter()
+        .map(|&i| logical_dim_layout.sizes()[i])
+        .collect();
     let phys_layout = KvDimLayout::new(phys_dims, phys_sizes)?;
 
     let phys_byte_strides: Vec<usize> = perm.iter().map(|&i| actual[i] * elem_size).collect();
@@ -420,7 +423,14 @@ mod tests {
         let dim_layout = nhd_per_layer_layout(n_blocks, page, nh, hd);
         let tensors = layers(vec![2, n_blocks, page, nh, hd], 32, dtype);
 
-        let (cfg, block_dim) = determine_kv_layout(n_blocks, dtype, &tensors, &dim_layout, KvBlockLayout::Unknown).unwrap();
+        let (cfg, block_dim) = determine_kv_layout(
+            n_blocks,
+            dtype,
+            &tensors,
+            &dim_layout,
+            KvBlockLayout::Unknown,
+        )
+        .unwrap();
 
         assert_eq!(cfg.num_blocks, n_blocks);
         assert_eq!(cfg.num_layers, 32);
@@ -452,7 +462,14 @@ mod tests {
         .unwrap();
         let tensors = layers(vec![n_blocks, 2, page, 8, 128], 32, dtype);
 
-        let (cfg, block_dim) = determine_kv_layout(n_blocks, dtype, &tensors, &dim_layout, KvBlockLayout::Unknown).unwrap();
+        let (cfg, block_dim) = determine_kv_layout(
+            n_blocks,
+            dtype,
+            &tensors,
+            &dim_layout,
+            KvBlockLayout::Unknown,
+        )
+        .unwrap();
 
         assert_eq!(cfg.outer_dim, 2);
         assert_eq!(cfg.inner_dim, 8 * 128);
@@ -481,8 +498,14 @@ mod tests {
         .unwrap();
         let tensors = layers(vec![2, n_blocks, 8, page, 128], 32, dtype);
 
-        let (cfg, _block_dim) =
-            determine_kv_layout(n_blocks, dtype, &tensors, &dim_layout, KvBlockLayout::Unknown).unwrap();
+        let (cfg, _block_dim) = determine_kv_layout(
+            n_blocks,
+            dtype,
+            &tensors,
+            &dim_layout,
+            KvBlockLayout::Unknown,
+        )
+        .unwrap();
         assert_eq!(cfg.outer_dim, 2);
         assert_eq!(cfg.page_size, page);
         // inner_dim is purely label-derived: HeadCount * HeadSize, regardless
@@ -507,7 +530,14 @@ mod tests {
         .unwrap();
         let tensors = layers(vec![n_blocks, page, head_size], 27, dtype);
 
-        let (cfg, block_dim) = determine_kv_layout(n_blocks, dtype, &tensors, &dim_layout, KvBlockLayout::Unknown).unwrap();
+        let (cfg, block_dim) = determine_kv_layout(
+            n_blocks,
+            dtype,
+            &tensors,
+            &dim_layout,
+            KvBlockLayout::Unknown,
+        )
+        .unwrap();
 
         assert_eq!(cfg.outer_dim, 1);
         assert_eq!(cfg.page_size, page);
@@ -532,7 +562,14 @@ mod tests {
         .unwrap();
         let tensors = layers(vec![n_blocks, page, nh, payload], 32, dtype);
 
-        let (cfg, block_dim) = determine_kv_layout(n_blocks, dtype, &tensors, &dim_layout, KvBlockLayout::Unknown).unwrap();
+        let (cfg, block_dim) = determine_kv_layout(
+            n_blocks,
+            dtype,
+            &tensors,
+            &dim_layout,
+            KvBlockLayout::Unknown,
+        )
+        .unwrap();
         assert_eq!(cfg.outer_dim, 1); // no Outer axis
         assert_eq!(cfg.inner_dim, nh * payload);
         assert_eq!(cfg.num_heads, Some(nh));
@@ -716,8 +753,14 @@ mod tests {
         let dim_layout = nhd_per_layer_layout(1024, 16, 8, 128);
         let tensors = layers(vec![2, 1024, 16, 8, 128], 32, 2);
         assert!(
-            determine_kv_layout(1024, 2, &tensors, &dim_layout, KvBlockLayout::OperationalNHD)
-                .is_ok()
+            determine_kv_layout(
+                1024,
+                2,
+                &tensors,
+                &dim_layout,
+                KvBlockLayout::OperationalNHD
+            )
+            .is_ok()
         );
     }
 

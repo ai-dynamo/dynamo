@@ -138,7 +138,7 @@ impl LayerSeparateLayout {
     /// in-module tests; production callers go through
     /// `PhysicalLayoutBuilder` (which threads `KvBlockLayout` from the
     /// labelled probe).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-kvbm"))]
     pub(crate) fn new(
         config: LayoutConfig,
         memory: Vec<Buffer>,
