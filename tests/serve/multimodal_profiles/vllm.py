@@ -183,6 +183,63 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
     ),
+    # Lightseek-supported VLM coverage on `agg_router` (Rust-frontend
+    # MM-aware routing path). Each profile below adds the same smoke test
+    # as Qwen3-VL-2B's agg_router (pre_merge), but on post_merge with the
+    # corresponding family — Qwen2.5-VL, Qwen2-VL, Phi-3-vision — so the
+    # full lightseek model list (FAMILIES in lightseek_mm.rs) is exercised
+    # end-to-end. SINGLE_GPU=true packs both workers onto GPU 0 to match
+    # the gpu_1 single-GPU box. Initial VRAM profiles are estimates; the
+    # first post_merge run will surface real peaks and we'll tighten.
+    MultimodalModelProfile(
+        name="Qwen/Qwen2.5-VL-3B-Instruct",
+        short_name="qwen2.5-vl-3b",
+        topologies={
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=19.0,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+        },
+    ),
+    MultimodalModelProfile(
+        name="Qwen/Qwen2-VL-2B-Instruct",
+        short_name="qwen2-vl-2b",
+        topologies={
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=16.0,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+        },
+    ),
+    MultimodalModelProfile(
+        name="microsoft/Phi-3-vision-128k-instruct",
+        short_name="phi3-vision",
+        topologies={
+            # Phi-3-vision is the largest of the post_merge additions
+            # (~8.6 GB weights × 2 workers + KV ≈ ~21 GiB peak); profile
+            # leaves slim headroom on a 24 GiB box. If first post_merge
+            # run OOMs, drop to one worker (NUM_WORKERS=1) or move to
+            # gpu_2 with one worker per GPU.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=22.0,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+        },
+        # Phi-3-vision uses --trust-remote-code for its custom processor.
+        extra_vllm_args=["--trust-remote-code"],
+    ),
     MultimodalModelProfile(
         name="Qwen/Qwen3.5-0.8B",
         short_name="qwen3.5-0.8b",
