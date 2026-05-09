@@ -122,6 +122,13 @@ docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
+Intel XPU variant (SGLang only) — pass `--device=xpu` to both `render.py` and `run.sh`:
+```bash
+container/render.py --framework=sglang --device=xpu --target=runtime
+docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
+```
+
 ### 2. test image (layers test deps on top of runtime):
 ```bash
 # Build test image from a runtime image (for running tests locally)
@@ -239,7 +246,14 @@ docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -f cont
 # Build TensorRT-LLM runtime image called dynamo:latest-trtllm-runtime
 container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
 docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+
+# Build SGLang runtime image for Intel XPU (instead of the default CUDA device)
+container/render.py --framework=sglang --device=xpu --target=runtime
+docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
 ```
+
+The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
+to produce an Intel XPU image (currently supported for `--framework=sglang`).
 
 After building, use `run.sh` to launch the container (see [run.sh - Container Runtime Manager](#runsh---container-runtime-manager) below for full options):
 ```bash
@@ -449,6 +463,47 @@ python -m dynamo.frontend &
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ```
 
+**Intel XPU variant** (SGLang only) — pass `--device=xpu` so `run.sh` exposes `/dev/dri` and joins the host render group, then start the SGLang backend instead of vLLM:
+```bash
+# 1. Build SGLang local-dev image for Intel XPU
+container/render.py --framework=sglang --device=xpu --target=local-dev
+docker build --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) \
+  -t dynamo:latest-sglang-xpu-local-dev \
+  -f container/sglang-local-dev-xpu-amd64-rendered.Dockerfile .
+
+# 2. Run development container with Intel GPU access + workspace mounted
+container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
+  --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -p 8000:8000 -it
+
+# From this point forward, commands run inside the container started in step 2.
+
+# 3. Editable install of dynamo into the SGLang conda env
+# (local-dev images intentionally skip the dynamo wheel install; see
+#  container/templates/dev.Dockerfile -> "The editable install must be done at runtime")
+# The conda env at /opt/miniforge3/envs/sglang is root-owned, so chown it once
+# to the dynamo user (the image grants NOPASSWD sudo) before installing.
+sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
+cargo build --locked --features dynamo-llm/block-manager --workspace
+# 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
+cd lib/bindings/python && maturin develop --uv && cd -
+# 3b. ai-dynamo (Python namespace packages: dynamo.frontend, dynamo.sglang, ...)
+uv pip install --no-deps -e /workspace
+# 3c. NIXL python bindings (C++ libs are already baked in at /opt/intel/intel_nixl;
+#     local-dev intentionally skips installing the wheel into the env)
+uv pip install --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+
+# 4. Sanity check (optional but recommended)
+deploy/sanity_check.py
+
+# 5. Start infrastructure services (NATS for messaging, etcd for service discovery)
+nats-server -js &
+etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+
+# 6. Run inference (frontend + SGLang XPU backend)
+python -m dynamo.frontend &
+python -m dynamo.sglang --model Qwen/Qwen3-0.6B --mem-fraction-static 0.20 &
+```
+
 ### Production Workflow
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
@@ -457,6 +512,17 @@ docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # 2. Run production container as non-root dynamo user
 container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/home/dynamo/.cache
+```
+
+**Intel XPU variant** (SGLang only) — replace `--gpus all` with `--device=xpu` so `run.sh` exposes `/dev/dri` and joins the host render group:
+```bash
+# 1. Build SGLang XPU runtime image
+container/render.py --framework=sglang --device=xpu --target=runtime
+docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+
+# 2. Run as dynamo user with Intel GPU access
+container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu \
+  -v $HOME/.cache:/home/dynamo/.cache -p 8000:8000 -it
 ```
 
 ### Testing Workflow
@@ -506,87 +572,3 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-
 - **SGLang**: `--mem-fraction-static 0.20` (20% GPU memory for static allocation), `--max-running-requests 64` (max concurrent requests)
 - **TensorRT-LLM**: `--free-gpu-memory-fraction 0.20` (reserve 20% GPU memory), `--max-num-tokens 8192` (max tokens in batch), `--max-batch-size 64` (max batch size)
 
-## Intel XPU Support
-
-Dynamo supports Intel Data Center GPU Max Series (PVC) via the SGLang framework with XPU backend. The XPU build uses a conda-based environment following the upstream [sgl-project/sglang/docker/xpu.Dockerfile](https://github.com/sgl-project/sglang/blob/main/docker/xpu.Dockerfile) pattern.
-
-### XPU Build Overview
-
-The XPU build differs from the CUDA build in several ways:
-
-| Aspect | CUDA Build | XPU Build |
-|--------|-----------|-----------|
-| **Base Image** | `nvcr.io/nvidia/cuda:*` | `intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04` |
-| **Python Env** | uv venv (`/opt/dynamo/venv`) | Miniforge conda (`/opt/miniforge3/envs/sglang`) |
-| **PyTorch** | `torch` (CUDA) | `torch==2.11.0+xpu` from PyTorch XPU index |
-| **Kernel Package** | `sgl-kernel` | `sgl-kernel-xpu` (built from source with DPCPP/SYCL) |
-| **Device Access** | `--gpus all` | `--device /dev/dri --group-add <render-gid>` |
-
-### Building SGLang XPU Image
-
-```bash
-# 1. Render the Dockerfile for SGLang XPU runtime
-container/render.py --framework sglang --device xpu --target runtime
-
-# 2. Build the image
-DOCKER_BUILDKIT=1 docker build \
-  -t dynamo-sglang-xpu:latest \
-  -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
-```
-
-> **Note**: The sgl-kernel-xpu build compiles SYCL kernels from source using `icpx` (Intel DPC++ compiler), which can take significant time. Subsequent builds with Docker layer caching will be much faster.
-
-### Running SGLang XPU Container
-
-The XPU container requires access to Intel GPU devices via `/dev/dri` and the render group:
-
-```bash
-# Find the render group GID on your host
-RENDER_GID=$(getent group render | cut -d: -f3)
-
-# Run with Qwen3-0.6B model
-docker run --rm \
-  --device /dev/dri \
-  --group-add ${RENDER_GID} \
-  --user root \
-  -v $HOME/.cache/huggingface:/root/.cache/huggingface \
-  -e HF_HOME=/root/.cache/huggingface \
-  -e DYN_DISCOVERY_BACKEND=file \
-  -e DYN_FILE_KV=/tmp/dynamo-discovery \
-  -p 8000:8000 \
-  --ipc=host --shm-size=8g \
-  dynamo-sglang-xpu:latest bash -c '
-source /etc/bash.bashrc
-mkdir -p /tmp/dynamo-discovery
-cat > /tmp/nats.conf << EOF
-listen: 0.0.0.0:4222
-jetstream: enabled
-max_payload: 15728640
-EOF
-nats-server -c /tmp/nats.conf &
-sleep 2
-python3 -m dynamo.frontend --http-port 8000 --discovery-backend file &
-python3 -m dynamo.sglang \
-  --model-path Qwen/Qwen3-0.6B \
-  --served-model-name Qwen/Qwen3-0.6B \
-  --page-size 16 --tp 1 --trust-remote-code --skip-tokenizer-init \
-  --discovery-backend file
-wait
-'
-```
-
-### Testing Inference
-
-Once the server is ready, send a request:
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}'
-```
-### XPU Requirements
-
-- **Hardware**: Intel Data Center GPU Max Series (e.g., Max 1550) or Intel Arc B-Series (BMG, e.g., B580)
-- **Host Driver**: Intel GPU driver with Level Zero runtime
-- **Device Access**: `/dev/dri` must be accessible; user must be in the `render` group (or use `--group-add`)
-- **Base Image**: Includes Intel oneAPI, Level Zero 1.21.9+, and DPC++ compiler

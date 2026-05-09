@@ -88,7 +88,7 @@ RUN git clone ${SGLANG_GIT_URL} sglang && \
     cd python && \
     cp pyproject_xpu.toml pyproject.toml && \
     pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu . && \
-    pip3 install xgrammar --no-deps && \
+    pip3 install "xgrammar==0.1.33" --no-deps && \
     pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate
 
 # Source conda + oneAPI environment in bashrc for interactive shells
