@@ -1876,7 +1876,7 @@
     {
       "id": 29,
       "type": "row",
-      "title": "Per-Worker Detail \u2014 fan out by worker_id (collapsed)",
+      "title": "Per-Worker Detail \u2014 fan out by worker_id",
       "collapsed": true,
       "gridPos": {
         "x": 0,
@@ -3557,7 +3557,7 @@
     {
       "id": 49,
       "type": "row",
-      "title": "P/D Disagg Queues \u2014 prefill/decode/grammar (collapsed)",
+      "title": "P/D Disagg Queues \u2014 prefill/decode/grammar",
       "collapsed": true,
       "gridPos": {
         "x": 0,
@@ -3839,7 +3839,7 @@
     {
       "id": 56,
       "type": "row",
-      "title": "HiCache (RAM/disk tiers) \u2014 collapsed; populates with --enable-hierarchical-cache",
+      "title": "HiCache (RAM/disk tiers) \u2014 populates with --enable-hierarchical-cache",
       "collapsed": true,
       "gridPos": {
         "x": 0,
@@ -4378,7 +4378,7 @@
     {
       "id": 61,
       "type": "row",
-      "title": "GPU & Runtime Health \u2014 collapsed",
+      "title": "GPU & Runtime Health",
       "collapsed": true,
       "gridPos": {
         "x": 0,
