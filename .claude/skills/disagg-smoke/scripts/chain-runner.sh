@@ -125,7 +125,7 @@ teardown_disagg() {
   # Tolerate failures during cleanup; we want best-effort.
   set +e
   pkill -f "vllm.entrypoints.openai" 2>/dev/null
-  pkill -f "kvbm_hub" 2>/dev/null
+  pkill -x kvbm_hub 2>/dev/null
   sleep 3
   local pids
   pids="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
@@ -134,7 +134,7 @@ teardown_disagg() {
     echo "$pids" | xargs -r kill -9 2>/dev/null
     sleep 2
   fi
-  pkill -9 -f "kvbm_hub" 2>/dev/null
+  pkill -9 -x kvbm_hub 2>/dev/null
   sleep 1
   set -e
 }
