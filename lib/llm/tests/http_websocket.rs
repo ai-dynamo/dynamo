@@ -53,33 +53,18 @@ fn register_echo(service: &HttpService) {
         .expect("register echo realtime engine");
 }
 
-async fn spawn_test_service() -> (u16, CancellationToken, JoinHandle<Result<()>>) {
+async fn spawn_test_service(
+    realtime_enabled: bool,
+    register_echo_engine: bool,
+) -> (u16, CancellationToken, JoinHandle<Result<()>>) {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(EndpointType::Realtime, true);
-    register_echo(&service);
-    let token = CancellationToken::new();
-    let handle = service.spawn_with_listener(token.clone(), listener).await;
-    wait_for_health(port).await;
-    (port, token, handle)
-}
-
-async fn spawn_test_service_realtime_disabled() -> (u16, CancellationToken, JoinHandle<Result<()>>)
-{
-    let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    register_echo(&service);
-    let token = CancellationToken::new();
-    let handle = service.spawn_with_listener(token.clone(), listener).await;
-    wait_for_health(port).await;
-    (port, token, handle)
-}
-
-async fn spawn_test_service_no_engine() -> (u16, CancellationToken, JoinHandle<Result<()>>) {
-    let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
-    service.enable_model_endpoint(EndpointType::Realtime, true);
-    // No engine registered — exercises the `model_not_found` error path.
+    if realtime_enabled {
+        service.enable_model_endpoint(EndpointType::Realtime, true);
+    }
+    if register_echo_engine {
+        register_echo(&service);
+    }
     let token = CancellationToken::new();
     let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
@@ -88,7 +73,7 @@ async fn spawn_test_service_no_engine() -> (u16, CancellationToken, JoinHandle<R
 
 #[tokio::test]
 async fn realtime_websocket_route_gated_by_endpoint_flag() {
-    let (port, token, handle) = spawn_test_service_realtime_disabled().await;
+    let (port, token, handle) = spawn_test_service(false, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let result = tokio_tungstenite::connect_async(&url).await;
@@ -131,7 +116,7 @@ async fn expect_text_event(
 /// per the OpenAI Realtime spec, before any client event arrives.
 #[tokio::test]
 async fn realtime_websocket_emits_session_created_on_connect() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -159,7 +144,7 @@ async fn realtime_websocket_emits_session_created_on_connect() {
 /// Demonstrates end-to-end realtime-event plumbing through the WebSocket.
 #[tokio::test]
 async fn realtime_websocket_session_update_echoes_session_updated() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -200,7 +185,7 @@ async fn realtime_websocket_session_update_echoes_session_updated() {
 /// in the right order with stable response_id across the turn.
 #[tokio::test]
 async fn realtime_websocket_audio_append_streams_response_envelope() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -339,7 +324,7 @@ async fn realtime_websocket_audio_append_streams_response_envelope() {
 /// (the echo test) or server-side rejection (the binary-frame test).
 #[tokio::test]
 async fn realtime_websocket_emits_close_after_client_close() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -421,7 +406,7 @@ async fn expect_error_event_no_close(
 
 #[tokio::test]
 async fn realtime_websocket_binary_frame_during_selection_emits_error() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -449,7 +434,7 @@ async fn realtime_websocket_binary_frame_during_selection_emits_error() {
 
 #[tokio::test]
 async fn realtime_websocket_unknown_model_emits_error() {
-    let (port, token, handle) = spawn_test_service_no_engine().await;
+    let (port, token, handle) = spawn_test_service(true, false).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -480,7 +465,7 @@ async fn realtime_websocket_unknown_model_emits_error() {
 
 #[tokio::test]
 async fn realtime_websocket_non_session_update_first_frame_emits_error() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -511,7 +496,7 @@ async fn realtime_websocket_non_session_update_first_frame_emits_error() {
 
 #[tokio::test]
 async fn realtime_websocket_session_update_missing_model_emits_error() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -546,7 +531,7 @@ async fn realtime_websocket_session_update_missing_model_emits_error() {
 /// for.
 #[tokio::test]
 async fn realtime_websocket_recovers_after_unknown_model() {
-    let (port, token, handle) = spawn_test_service().await;
+    let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
