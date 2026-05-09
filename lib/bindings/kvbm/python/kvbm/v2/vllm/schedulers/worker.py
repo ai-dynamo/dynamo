@@ -22,50 +22,23 @@ bind happens later, when the leader's `initialize_workers()` RPC drives
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import kvbm
 import torch
 from kvbm.v2.vllm import KvbmVllmConfig
+from kvbm.v2.vllm.dim_probe import (
+    KvBlockLayout,
+    KvDim,
+    build_dim_layout_from_tensor,
+    derive_block_layout,
+)
+from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
-from vllm.model_executor.models.utils import extract_layer_index
-
-
-@dataclass
-class KvTensorLayout:
-    """Semantic description of the KV cache tensor layout.
-
-    Python derives this from VllmConfig (which has the model architecture)
-    so that Rust doesn't have to guess from raw tensor shapes.
-
-    For MLA models, outer_dim and inner_dim are set explicitly because Rust's
-    shape-based inference cannot distinguish the fused KV latent axis from the
-    block/page axis. For standard attention the fields are None, which tells
-    Rust to fall back to its own contiguity-based inference (already correct).
-
-    Mirrors the v1 helper in
-    lib/bindings/kvbm/python/kvbm/vllm_integration/connector_worker.py.
-    """
-
-    outer_dim: Optional[int]  # None = let Rust infer; 1 for MLA
-    inner_dim: Optional[int]  # None = let Rust infer; head_size for MLA
-
-    @classmethod
-    def from_vllm_config(
-        cls, shape: "torch.Size", use_mla: bool = False
-    ) -> "KvTensorLayout":
-        if use_mla:
-            # MLA tensors are 3D: [num_blocks, page_size, head_size].
-            # No outer_dim axis — K and V are fused into a single latent.
-            return cls(outer_dim=1, inner_dim=int(shape[-1]))
-        # Standard attention: Rust already infers outer_dim/inner_dim correctly
-        # from tensor shape. Don't guess here — the block dimension can be at
-        # position 0 or 1 depending on the attention backend.
-        return cls(outer_dim=None, inner_dim=None)
-
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
 if kvbm.v2.is_available():
@@ -163,6 +136,36 @@ class SchedulerConnectorWorker:
             worker_address=worker_addr,
         )
 
+        # Cache the deduplicated AttentionBackend classes for this model.
+        # Sentinel-probed in `register_kv_caches` to derive `KvDimLayout` /
+        # `KvBlockLayout`. Mirrors NIXL's pattern at
+        # `vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py:316`.
+        self._attn_backends = get_current_attn_backends(vllm_config)
+        if not self._attn_backends:
+            # `get_current_attn_backends` is supposed to fall back to
+            # `get_attn_backend(...)` when `static_forward_context` is empty
+            # (`utils.py:873-886`); an empty result here indicates an
+            # unexpected vLLM init order — fail loudly so register_kv_caches
+            # doesn't blow up later with a confusing IndexError.
+            raise RuntimeError(
+                "get_current_attn_backends(vllm_config) returned an empty "
+                "list — vLLM static_forward_context appears to be empty at "
+                "connector init time. File a bug."
+            )
+
+        # Build layer_name → tensor_index from `kv_cache_config.kv_cache_tensors`,
+        # not from `extract_layer_index(name)` over the kv_caches dict. The
+        # vLLM model runner registers tensors keyed by layer name; multiple
+        # logical layers may share one cache tensor (`shared_by`), and the
+        # tensor list we hand to Rust must be ordered by `kv_cache_tensors`
+        # index — so save_kv_layer / wait_for_layer_load lookups stay
+        # consistent with the per-tensor index. Built once here so cross-
+        # layer mode (M2) shares the same source of truth.
+        self.layer_name_to_index: dict[str, int] = {}
+        for i, kct in enumerate(kv_cache_config.kv_cache_tensors):
+            for name in kct.shared_by:
+                self.layer_name_to_index[name] = i
+
         # Will be set during register_kv_caches
         self._num_device_blocks: Optional[int] = None
         self._num_layers: int = 0
@@ -177,92 +180,131 @@ class SchedulerConnectorWorker:
         """
         Register KV caches with NIXL for RDMA transfers.
 
-        This registers the KV cache tensors with NIXL via the UCX backend,
-        enabling remote GPU-to-GPU transfers.
+        Drives the labelled-axis path: probe the per-layer
+        `AttentionBackend.get_kv_cache_shape(...)` with sentinel values to
+        learn each axis's role (`Block`, `Outer`, `Page`, `HeadCount`,
+        `HeadSize`/`Payload`), classify NHD vs HND from
+        `get_kv_cache_stride_order(False)`, validate every tensor's
+        `shape()` and `numel()` against the labelled sizes, then hand
+        labelled `(dims, sizes, block_layout)` to Rust. Replaces the
+        previous shape-inference codepath.
         """
         if not kv_caches:
             print("Warning: register_kv_caches called with empty kv_caches")
             return
 
-        print(
-            f"SchedulerConnectorWorker.register_kv_caches called with {len(kv_caches)} layers"
-        )
-
-        # Sort tensors by layer index to ensure correct ordering
-        ordered_kv_caches = sorted(
-            kv_caches.items(), key=lambda item: extract_layer_index(item[0])
-        )
-        self.ordered_kv_caches = ordered_kv_caches
-
-        # Create a mapping of layer name to layer index
-        self.layer_name_to_index = {
-            item[0]: i for i, item in enumerate(ordered_kv_caches)
-        }
-
-        # Extract tensors in order
-        tensors = [tensor for _, tensor in ordered_kv_caches]
-
-        # Get first tensor to extract common properties
-        first_tensor = tensors[0]
-        shape = first_tensor.shape
-
-        # Validate all tensors have same shape
-        if not all(t.shape == shape for t in tensors):
+        kct_list = self.vllm_kv_cache_config.kv_cache_tensors
+        groups = self.vllm_kv_cache_config.kv_cache_groups
+        if len(groups) != 1:
             raise NotImplementedError(
-                "Hybrid models with different KV cache shapes are not supported yet."
+                f"hybrid kv_cache_groups not supported (found {len(groups)} "
+                f"groups); KVBM v2 currently assumes a single uniform group"
+            )
+        if len(self._attn_backends) != 1:
+            raise NotImplementedError(
+                f"per-layer-divergent attn_backends not supported "
+                f"(found {len(self._attn_backends)}); KVBM v2 currently "
+                f"requires a single backend across all attention layers"
             )
 
-        # Derive layout semantics from the vLLM model config so Rust doesn't
-        # have to guess the outer_dim/inner_dim from potentially-ambiguous
-        # tensor shapes (MLA caches are 3D without a K/V axis).
-        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
-        layout = KvTensorLayout.from_vllm_config(shape, use_mla)
+        backend = self._attn_backends[0]
+        use_mla = bool(getattr(self.vllm_config.model_config, "use_mla", False))
+        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
 
-        # Extract parameters.
-        # Standard attention: [2 (K/V), num_blocks, ...] or [num_blocks, 2, ...]
-        #   — block dim is whichever of shape[0]/shape[1] is larger.
-        # MLA: [num_blocks, page_size, head_size] — block dim is always axis 0.
-        num_device_blocks = shape[0] if use_mla else max(shape[0], shape[1])
-        page_size = self.vllm_config.cache_config.block_size
-        dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
+        # Tensor list ordered by `kv_cache_tensors` index — same source as
+        # `layer_name_to_index` (built in __init__). Multiple layer names
+        # may share the same physical tensor (`shared_by`); we register the
+        # tensor once, indexed by its kv_cache_tensors position.
+        tensors: list[torch.Tensor] = []
+        for kct in kct_list:
+            # Any name in shared_by points to the same underlying tensor.
+            tensors.append(kv_caches[kct.shared_by[0]])
+
+        # All tensors must share a shape — same restriction as before, but
+        # the error now points at the offending layer index.
+        first_shape = tuple(tensors[0].shape)
+        for i, t in enumerate(tensors[1:], start=1):
+            if tuple(t.shape) != first_shape:
+                raise NotImplementedError(
+                    f"hybrid models with per-layer-divergent shapes are not "
+                    f"supported yet (tensor {i} has shape {tuple(t.shape)}, "
+                    f"tensor 0 has shape {first_shape})"
+                )
+
+        # Probe the backend with sentinels and bind the labels to the
+        # ACTUAL tensor shape — not `kv_cache_spec.block_size` /
+        # `num_gpu_blocks` — so we sidestep vLLM's `kernel_block_size !=
+        # spec.block_size` case (`kv_connector_model_runner_mixin.py:235-238`).
+        dims, sizes = build_dim_layout_from_tensor(
+            backend,
+            tensor_shape=first_shape,
+            cache_dtype_str=cache_dtype_str,
+            use_mla=use_mla,
+        )
+        block_layout: KvBlockLayout = derive_block_layout(backend, dims)
+
+        # Per-layer fast-fail in Python so the error fires before crossing
+        # the FFI boundary. (The Rust side checks the same invariants.)
+        expected_numel = math.prod(sizes)
+        for layer_name, kct, tensor in zip(
+            (kct.shared_by[0] for kct in kct_list), kct_list, tensors
+        ):
+            if tuple(tensor.shape) != tuple(sizes):
+                raise RuntimeError(
+                    f"layer {layer_name}: tensor.shape {tuple(tensor.shape)} "
+                    f"!= probed-and-labelled sizes {tuple(sizes)}"
+                )
+            if tensor.numel() != expected_numel:
+                raise RuntimeError(
+                    f"layer {layer_name}: tensor.numel() {tensor.numel()} "
+                    f"!= product of labelled sizes {expected_numel}"
+                )
+
+        # Find the Block axis size — the authoritative `num_device_blocks`
+        # value. Cross-checked against `kv_cache_config` for visibility but
+        # the layout's value wins (matches the previous
+        # `tensor-derived value wins over config` behaviour).
+        block_idx = dims.index(KvDim.Block)
+        num_device_blocks = sizes[block_idx]
 
         config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
-        if num_device_blocks != config_gpu_blocks:
+        if config_gpu_blocks is not None and num_device_blocks != config_gpu_blocks:
             print(
-                f"Warning: num_device_blocks from tensor ({num_device_blocks}) "
-                f"!= config.num_gpu_blocks ({config_gpu_blocks}). "
-                f"Using tensor-derived value."
+                f"Warning: num_device_blocks from labelled tensor "
+                f"({num_device_blocks}) != config.num_gpu_blocks "
+                f"({config_gpu_blocks}). Using labelled value."
             )
 
-        # Phase 2A: Register KV caches with NIXL via Rust binding
-        # This caches tensor state for deferred NIXL registration
-        # The actual NIXL registration happens when the leader triggers
-        # initialization via bind_connector_metadata()
+        dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
+
+        # Hand off to Rust. Strings (not pyclass enums) cross the FFI;
+        # `kvbm-py3` parses them via `parse_kv_dim` / `parse_kv_block_layout`.
         self.worker.register_kv_caches(
             tensors,
             num_device_blocks,
-            page_size,
             dtype_width_bytes,
-            outer_dim=layout.outer_dim,
-            inner_dim=layout.inner_dim,
+            [d.value for d in dims],
+            list(sizes),
+            block_layout.value,
         )
 
-        # Store device block count and last layer name for later use
         self._num_device_blocks = num_device_blocks
         self._num_layers = len(tensors)
+        # Last "layer name" = a representative name for the trailing tensor.
+        # save_kv_layer's "is this the last layer?" check on the Rust side
+        # already keys off layer index, so this is just for logging.
+        self._last_layer_name = kct_list[-1].shared_by[0] if kct_list else None
 
-        # Get the last layer name from the ordered list
-        self._last_layer_name = ordered_kv_caches[-1][0] if ordered_kv_caches else None
         print(
-            f"[DEBUG] register_kv_caches: _last_layer_name set to: {self._last_layer_name}"
+            f"[KVBM] KV caches registered (deferred mode): "
+            f"backend={backend.__name__}, "
+            f"cache_dtype_str={cache_dtype_str}, use_mla={use_mla}, "
+            f"dims={[d.value for d in dims]}, sizes={list(sizes)}, "
+            f"block_layout={block_layout.value}, "
+            f"num_device_blocks={num_device_blocks}, "
+            f"num_layers={self._num_layers}, "
+            f"dtype_bytes={dtype_width_bytes}"
         )
-
-        print("[KVBM] KV caches registered (deferred mode)")
-        print(f"  - Num device blocks: {num_device_blocks}")
-        print(f"  - Num layers: {len(tensors)}")
-        print(f"  - Page size: {page_size}")
-        print(f"  - Dtype width bytes: {dtype_width_bytes}")
-        print(f"  - Shape: {shape}")
         print("[KVBM] Waiting for leader to trigger initialization...")
 
     def bind_connector_metadata(self, data: bytes) -> bool:

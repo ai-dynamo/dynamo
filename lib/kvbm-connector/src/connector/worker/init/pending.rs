@@ -30,7 +30,7 @@ use kvbm_engine::object::create_object_client;
 use kvbm_engine::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse};
 
 use crate::KvbmRuntime;
-use kvbm_common::LogicalLayoutHandle;
+use kvbm_common::{KvBlockLayout, LogicalLayoutHandle};
 use kvbm_physical::TransferManager;
 use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
 
@@ -50,19 +50,19 @@ pub struct PendingWorkerState {
     /// Number of device blocks from vLLM's cache config.
     pub num_device_blocks: usize,
 
-    /// Block/page size for the KV cache.
-    #[expect(dead_code)]
-    pub page_size: usize,
-
     /// Data type width in bytes (e.g., 2 for fp16).
     #[expect(dead_code)]
     pub dtype_width_bytes: usize,
 
-    /// Layout configuration determined from tensor shapes.
+    /// Layout configuration resolved from the labeled `KvDimLayout`.
     pub layout_config: LayoutConfig,
 
     /// Block dimension (first or second dimension).
     pub block_dim: BlockDimension,
+
+    /// Per-block dimension ordering (NHD/HND/Universal/Unknown). Threaded
+    /// into `PhysicalLayoutBuilder::with_block_layout` at NIXL bind time.
+    pub block_layout: KvBlockLayout,
 }
 
 impl PendingWorkerStateBuilder {
@@ -175,6 +175,7 @@ impl PendingWorkerState {
         let physical_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
             .with_config(self.layout_config.clone())
             .layer_separate(self.block_dim)
+            .with_block_layout(self.block_layout)
             .with_external_device_regions(self.tensors)?
             .build()?;
 

@@ -64,17 +64,21 @@ use kvbm_physical::TransferOptions;
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
     ///
-    /// `explicit_outer_dim` / `explicit_inner_dim` let the caller (Python, reading
-    /// `vllm_config.model_config.use_mla`) bypass shape inference. Both must be
-    /// `Some` or both `None`. See [`crate::vllm::layout::determine_kv_layout`].
+    /// `dim_layout` carries axis-by-axis labels (Block, Layer, Outer, Page,
+    /// HeadCount, HeadSize / Payload) and concrete sizes for every tensor;
+    /// `block_layout` describes the per-block dimension ordering (NHD/HND/
+    /// universal) for the physical layout. Both come from a sentinel-probe
+    /// of the per-layer `AttentionBackend` performed in Python — no shape
+    /// inference happens on the Rust side. See
+    /// [`crate::vllm::layout::determine_kv_layout`] and
+    /// `lib/bindings/kvbm/python/kvbm/v2/vllm/dim_probe.py`.
     fn register_kv_caches(
         &self,
         tensors: Vec<Arc<dyn TensorDescriptor>>,
         num_device_blocks: usize,
-        page_size: usize,
         dtype_width_bytes: usize,
-        explicit_outer_dim: Option<usize>,
-        explicit_inner_dim: Option<usize>,
+        dim_layout: kvbm_common::KvDimLayout,
+        block_layout: kvbm_common::KvBlockLayout,
     ) -> Result<()>;
 
     /// Bind connector metadata from the leader.
@@ -383,10 +387,9 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         &self,
         tensors: Vec<Arc<dyn TensorDescriptor>>,
         num_device_blocks: usize,
-        page_size: usize,
         dtype_width_bytes: usize,
-        explicit_outer_dim: Option<usize>,
-        explicit_inner_dim: Option<usize>,
+        dim_layout: kvbm_common::KvDimLayout,
+        block_layout: kvbm_common::KvBlockLayout,
     ) -> Result<()> {
         // Prevent double registration
         if self.state.service.get().is_some() {
@@ -399,19 +402,14 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             bail!("Worker details already set");
         }
 
-        // Determine layout from tensor shapes (or from explicit dims, preferred path).
-        let (layout_config, block_dim) = determine_kv_layout(
-            num_device_blocks,
-            page_size,
-            dtype_width_bytes,
-            &tensors,
-            explicit_outer_dim,
-            explicit_inner_dim,
-        )?;
+        // Resolve LayoutConfig + BlockDimension from the labeled layout.
+        let (layout_config, block_dim) =
+            determine_kv_layout(num_device_blocks, dtype_width_bytes, &tensors, &dim_layout)?;
 
         tracing::debug!(
             ?layout_config,
             ?block_dim,
+            ?block_layout,
             "Determined KV layout configuration"
         );
 
@@ -419,10 +417,10 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         let pending = PendingWorkerState::builder()
             .tensors(tensors)
             .num_device_blocks(num_device_blocks)
-            .page_size(page_size)
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
             .block_dim(block_dim)
+            .block_layout(block_layout)
             .build()?;
 
         let details = WorkerDetails {
@@ -433,7 +431,6 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             cuda_device = pending.cuda_device_id,
             num_tensors = pending.tensors.len(),
             num_device_blocks,
-            page_size,
             dtype_width_bytes,
             "KV caches registered (deferred mode - waiting for leader RPC)"
         );

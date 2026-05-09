@@ -45,35 +45,35 @@ impl PyConnectorWorker {
 
     /// Register KV cache tensors with NIXL for RDMA transfers.
     ///
-    /// This is the critical step that enables remote GPU-to-GPU transfers.
-    /// Each tensor is registered with NIXL via the UCX backend.
-    ///
     /// Args:
     ///     tensors: List of PyTorch CUDA tensors representing KV cache layers.
-    ///              Must be in layer order and all on the same CUDA device.
-    ///     num_device_blocks: Number of device blocks (from vLLM's cache config)
-    ///     page_size: Block/page size for the KV cache
-    ///     dtype_width_bytes: Data type width in bytes (e.g., 2 for fp16)
-    ///     outer_dim: Optional explicit outer_dim (1 for MLA, 2 for standard K/V).
-    ///                When provided, bypasses shape-based inference. Must be paired
-    ///                with `inner_dim`. Python should pass this when it knows the
-    ///                model is MLA (from `vllm_config.model_config.use_mla`).
-    ///     inner_dim: Optional explicit inner_dim (paired with `outer_dim`).
+    ///              Must be in layer order (matching `kv_cache_config.kv_cache_tensors`)
+    ///              and all on the same CUDA device.
+    ///     num_device_blocks: Number of device blocks (from vLLM's per-rank cache config).
+    ///     dtype_width_bytes: Data type width in bytes (e.g., 2 for fp16).
+    ///     dim_labels: Per-axis labels as strings — one of `"Block"`, `"Layer"`,
+    ///                 `"Outer"`, `"Page"`, `"HeadCount"`, `"HeadSize"`, `"Payload"`.
+    ///                 Length must match the rank of every tensor.
+    ///     dim_sizes: Per-axis sizes (matching `dim_labels` index-for-index). Each
+    ///                tensor's `shape()` must equal `dim_sizes` exactly.
+    ///     block_layout: Per-block dim ordering as a string — one of
+    ///                   `"OperationalNHD"`, `"OperationalHND"`, `"UniversalTP"`,
+    ///                   `"UniversalPP"`, `"Unknown"`. Derived in Python from
+    ///                   `attn_backend.get_kv_cache_stride_order(False)`.
     ///
     /// Raises:
-    ///     RuntimeError: If registration fails (e.g., UCX backend not available,
-    ///                   tensors on different devices, or already registered).
-    #[pyo3(signature = (tensors, num_device_blocks, page_size, dtype_width_bytes, outer_dim=None, inner_dim=None))]
+    ///     RuntimeError: If registration fails (UCX backend missing, tensor
+    ///                   shape disagreement, unknown labels, etc.).
+    #[pyo3(signature = (tensors, num_device_blocks, dtype_width_bytes, dim_labels, dim_sizes, block_layout))]
     pub fn register_kv_caches(
         &self,
         tensors: Vec<Py<PyAny>>,
         num_device_blocks: usize,
-        page_size: usize,
         dtype_width_bytes: usize,
-        outer_dim: Option<usize>,
-        inner_dim: Option<usize>,
+        dim_labels: Vec<String>,
+        dim_sizes: Vec<usize>,
+        block_layout: String,
     ) -> PyResult<()> {
-        // Convert Python tensors to Rust TensorDescriptor
         let rust_tensors: Vec<Arc<dyn TensorDescriptor>> = tensors
             .into_iter()
             .map(|py_tensor| {
@@ -82,14 +82,20 @@ impl PyConnectorWorker {
             })
             .collect::<PyResult<Vec<_>>>()?;
 
+        let dims: Vec<kvbm_common::KvDim> = dim_labels
+            .iter()
+            .map(|s| parse_kv_dim(s))
+            .collect::<PyResult<_>>()?;
+        let dim_layout = kvbm_common::KvDimLayout::new(dims, dim_sizes).map_err(to_pyerr)?;
+        let block_layout = parse_kv_block_layout(&block_layout)?;
+
         self.inner
             .register_kv_caches(
                 rust_tensors,
                 num_device_blocks,
-                page_size,
                 dtype_width_bytes,
-                outer_dim,
-                inner_dim,
+                dim_layout,
+                block_layout,
             )
             .map_err(to_pyerr)
     }
@@ -235,5 +241,41 @@ impl PyConnectorWorker {
 
     pub fn get_failed_onboarding(&self) -> PyResult<HashSet<usize>> {
         Ok(self.inner.get_failed_onboarding())
+    }
+}
+
+/// Parse a `KvDim` axis label string. The accepted values mirror the
+/// `kvbm_common::KvDim` variants exactly.
+fn parse_kv_dim(s: &str) -> PyResult<kvbm_common::KvDim> {
+    use kvbm_common::KvDim;
+    match s {
+        "Block" => Ok(KvDim::Block),
+        "Layer" => Ok(KvDim::Layer),
+        "Outer" => Ok(KvDim::Outer),
+        "Page" => Ok(KvDim::Page),
+        "HeadCount" => Ok(KvDim::HeadCount),
+        "HeadSize" => Ok(KvDim::HeadSize),
+        "Payload" => Ok(KvDim::Payload),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown KvDim label '{other}'; expected one of \
+             Block, Layer, Outer, Page, HeadCount, HeadSize, Payload"
+        ))),
+    }
+}
+
+/// Parse a `KvBlockLayout` enum string. Custom block layouts are not
+/// reachable from Python today; if needed, add a serde-via-JSON path.
+fn parse_kv_block_layout(s: &str) -> PyResult<kvbm_common::KvBlockLayout> {
+    use kvbm_common::KvBlockLayout;
+    match s {
+        "UniversalTP" => Ok(KvBlockLayout::UniversalTP),
+        "UniversalPP" => Ok(KvBlockLayout::UniversalPP),
+        "OperationalHND" => Ok(KvBlockLayout::OperationalHND),
+        "OperationalNHD" => Ok(KvBlockLayout::OperationalNHD),
+        "Unknown" => Ok(KvBlockLayout::Unknown),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown KvBlockLayout '{other}'; expected one of \
+             UniversalTP, UniversalPP, OperationalHND, OperationalNHD, Unknown"
+        ))),
     }
 }

@@ -479,13 +479,7 @@ async fn test_page_size_sweep_partial_layer(
     )?;
     notification.await?;
 
-    verify_checksums_by_position_with_mode(
-        &checksums,
-        &src_block_ids,
-        &dst,
-        &dst_block_ids,
-        mode,
-    )?;
+    verify_checksums_by_position_with_mode(&checksums, &src_block_ids, &dst, &dst_block_ids, mode)?;
 
     Ok(())
 }

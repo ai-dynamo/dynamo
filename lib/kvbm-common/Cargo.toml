@@ -13,5 +13,10 @@ repository.workspace = true
 keywords.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 dynamo-tokens = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

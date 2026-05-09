@@ -127,14 +127,11 @@ impl FullyContiguousLayout {
         FullyContiguousLayoutBuilder::new()
     }
 
-    /// Create a new fully contiguous layout with default KV block layout.
-    ///
-    /// # Arguments
-    /// * `config` - Layout configuration
-    /// * `memory` - Owned memory region that backs this layout
-    ///
-    /// # Returns
-    /// A new FullyContiguousLayout instance with `KvBlockLayout::Unknown`
+    /// Convenience constructor with `KvBlockLayout::Unknown` and the
+    /// default `BlockFormat`. Used by in-module tests; production callers
+    /// go through `PhysicalLayoutBuilder` (which threads `KvBlockLayout`
+    /// from the labelled probe).
+    #[cfg(test)]
     pub(crate) fn new(config: LayoutConfig, memory: Buffer) -> Result<Self> {
         Self::new_internal(
             config,

@@ -3,6 +3,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod block;
+pub mod tensor;
+
+pub use block::{BlockDim, InnerShape, KvBlockLayout};
+pub use tensor::{KvDim, KvDimLayout};
+
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
 

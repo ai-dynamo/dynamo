@@ -87,31 +87,26 @@ impl LayoutConfig {
 
     /// Get the head dimension if `num_heads` is specified.
     ///
-    /// Computes `inner_dim / (page_size * num_heads)`.
+    /// In KVBM's layout model `inner_dim` is per-token bytes-per-head times
+    /// `num_heads` — i.e. `inner_dim = num_heads * head_dim`. The page (token)
+    /// axis is multiplied separately in `bytes_per_block`, so it must NOT
+    /// appear in this divisor.
     ///
     /// # Returns
     /// `Some(head_dim)` if `num_heads` is set, `None` otherwise.
     pub fn head_dim(&self) -> Option<usize> {
-        self.num_heads.map(|nh| {
-            let divisor = self.page_size * nh;
-            if divisor > 0 {
-                self.inner_dim / divisor
-            } else {
-                0
-            }
-        })
+        self.num_heads
+            .map(|nh| if nh > 0 { self.inner_dim / nh } else { 0 })
     }
 
     /// Check if this config supports KvBlockLayout operations.
     ///
-    /// Returns `true` if `num_heads` is set and the dimensions are valid
-    /// (inner_dim is evenly divisible by page_size * num_heads).
+    /// Returns `true` if `num_heads` is set and `inner_dim` is evenly
+    /// divisible by `num_heads`.
     pub fn supports_kv_block_layout(&self) -> bool {
-        if let Some(nh) = self.num_heads {
-            let divisor = self.page_size * nh;
-            divisor > 0 && self.inner_dim.is_multiple_of(divisor)
-        } else {
-            false
+        match self.num_heads {
+            Some(nh) => nh > 0 && self.inner_dim.is_multiple_of(nh),
+            None => false,
         }
     }
 
@@ -133,14 +128,64 @@ impl LayoutConfig {
             return Err(ValidationError::new("num_heads_must_be_positive"));
         }
 
-        let divisor = self.page_size * nh;
-        if !self.inner_dim.is_multiple_of(divisor) {
+        if !self.inner_dim.is_multiple_of(nh) {
             return Err(ValidationError::new(
-                "inner_dim_must_be_divisible_by_page_size_times_num_heads",
+                "inner_dim_must_be_divisible_by_num_heads",
             ));
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod head_dim_tests {
+    use super::*;
+
+    fn cfg(inner_dim: usize, num_heads: Option<usize>) -> LayoutConfig {
+        let mut b = LayoutConfig::builder();
+        b.num_blocks(1)
+            .num_layers(1)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(inner_dim)
+            .dtype_width_bytes(2);
+        if let Some(nh) = num_heads {
+            b.num_heads(Some(nh));
+        }
+        b.build().unwrap()
+    }
+
+    /// `inner_dim = num_heads * head_dim`. For Llama-style `nh=8, hd=128`,
+    /// `inner_dim=1024 → head_dim=128`. The old buggy formula divided by
+    /// `page_size * nh = 16 * 8 = 128`, returning `8` — verifiably wrong
+    /// because actual `head_dim` for Llama-3-8B is 128.
+    #[test]
+    fn head_dim_is_inner_dim_over_num_heads() {
+        let c = cfg(8 * 128, Some(8));
+        assert_eq!(c.head_dim(), Some(128));
+    }
+
+    #[test]
+    fn head_dim_none_without_num_heads() {
+        let c = cfg(1024, None);
+        assert_eq!(c.head_dim(), None);
+    }
+
+    #[test]
+    fn supports_kv_block_layout_requires_divisibility_by_num_heads() {
+        assert!(cfg(1024, Some(8)).supports_kv_block_layout());
+        // 1023 / 8 has a remainder — should be rejected.
+        assert!(!cfg(1023, Some(8)).supports_kv_block_layout());
+        assert!(!cfg(1024, None).supports_kv_block_layout());
+    }
+
+    #[test]
+    fn validate_for_kv_block_layout_rejects_non_divisible_inner_dim() {
+        let err = cfg(1023, Some(8))
+            .validate_for_kv_block_layout()
+            .unwrap_err();
+        assert_eq!(err.code, "inner_dim_must_be_divisible_by_num_heads");
     }
 }
 

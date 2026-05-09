@@ -28,7 +28,7 @@ pub(super) mod tests;
 pub use builder::PhysicalLayoutBuilder;
 pub use config::{BlockDimension, LayoutConfig};
 pub(crate) use fully_contiguous::FullyContiguousLayout;
-pub use kv_block_layout::{BlockDim, KvBlockLayout};
+pub use kv_block_layout::{BlockDim, InnerShape, KvBlockLayout};
 pub(crate) use layer_separate::LayerSeparateLayout;
 pub use physical::NixlMetadata;
 pub use physical::PhysicalLayout;
@@ -39,7 +39,6 @@ pub use serialize::{BlockFormat, FullyContiguousDetails, LayerSeparateDetails, L
 // pub use registration::{RegisteredLayout, RegisteredStorageMetadata, RegistrationManager};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 pub(crate) use dynamo_memory::MemoryDescriptor;
 pub use dynamo_memory::{Buffer, MemoryRegion};
@@ -128,20 +127,6 @@ pub trait Layout: Send + Sync + std::fmt::Debug {
     /// For layer-separate layouts, this describes the inner tensor format.
     /// For fully contiguous layouts, this describes the full block format.
     fn block_layout(&self) -> KvBlockLayout;
-}
-
-/// Inner shape format for tensor layout
-#[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum InnerShape {
-    /// Unknown shape - fallback when we can't determine the format
-    Unknown,
-    /// NHD format: [block_size, num_heads, head_dim]
-    /// Common for attention layers where N=tokens, H=heads, D=dimension
-    NHD,
-    /// HND format: [num_heads, block_size, head_dim]
-    /// Alternative layout with heads first
-    HND,
 }
 
 /// Trait for layouts that provide contiguous per-block memory regions.

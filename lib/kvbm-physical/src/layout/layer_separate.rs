@@ -134,21 +134,42 @@ impl LayerSeparateLayout {
         LayerSeparateLayoutBuilder::new()
     }
 
-    /// Create a new layer-separate layout with default KV block layout.
-    ///
-    /// # Arguments
-    /// - `config` - Layout configuration
-    /// - `memory` - Vector of owned memory regions (one per layer)
-    /// - `block_dim` - Whether block or outer dimension is first
-    ///
-    /// # Returns
-    /// A new LayerSeparateLayout instance with `KvBlockLayout::Unknown`
+    /// Convenience constructor with `KvBlockLayout::Unknown`. Used by
+    /// in-module tests; production callers go through
+    /// `PhysicalLayoutBuilder` (which threads `KvBlockLayout` from the
+    /// labelled probe).
+    #[cfg(test)]
     pub(crate) fn new(
         config: LayoutConfig,
         memory: Vec<Buffer>,
         block_dim: BlockDimension,
     ) -> Result<Self> {
         Self::new_internal(config, memory, block_dim, KvBlockLayout::Unknown)
+    }
+
+    /// Create a new layer-separate layout with an explicit `KvBlockLayout`.
+    ///
+    /// `LayerSeparateLayout` only supports operational layouts
+    /// (`OperationalNHD`, `OperationalHND`) plus `Unknown` — passing a
+    /// universal or custom layout is rejected.
+    pub(crate) fn new_with_block_layout(
+        config: LayoutConfig,
+        memory: Vec<Buffer>,
+        block_dim: BlockDimension,
+        kv_block_layout: KvBlockLayout,
+    ) -> Result<Self> {
+        match kv_block_layout {
+            KvBlockLayout::OperationalNHD
+            | KvBlockLayout::OperationalHND
+            | KvBlockLayout::Unknown => {}
+            other => {
+                return Err(anyhow!(
+                    "LayerSeparateLayout only supports operational/unknown KvBlockLayouts, got {:?}",
+                    other
+                ));
+            }
+        }
+        Self::new_internal(config, memory, block_dim, kv_block_layout)
     }
 
     /// Internal constructor with all parameters.

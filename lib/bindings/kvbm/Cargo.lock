@@ -3914,8 +3914,10 @@ dependencies = [
 name = "kvbm-common"
 version = "1.1.0"
 dependencies = [
+ "anyhow",
  "dynamo-tokens",
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -4079,6 +4081,7 @@ dependencies = [
  "dlpark",
  "dynamo-llm",
  "dynamo-runtime",
+ "kvbm-common",
  "kvbm-connector",
  "kvbm-kernels",
  "once_cell",

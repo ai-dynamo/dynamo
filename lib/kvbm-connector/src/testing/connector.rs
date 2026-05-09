@@ -1234,14 +1234,34 @@ impl TestConnectorInstanceBuilder {
                 })
                 .collect();
 
+            // Build a labeled `KvDimLayout` matching the synthetic
+            // `[num_blocks, outer_dim, page_size, inner_dim]` shape produced
+            // by `MockTensor::from_memory_region` above. The trailing axis
+            // is labeled `HeadSize` because the test layout has no
+            // `HeadCount` axis (num_heads = None on its `LayoutConfig`),
+            // so the entire `inner_dim` is treated as opaque per-token bytes.
+            let dim_layout = kvbm_common::KvDimLayout::new(
+                vec![
+                    kvbm_common::KvDim::Block,
+                    kvbm_common::KvDim::Outer,
+                    kvbm_common::KvDim::Page,
+                    kvbm_common::KvDim::HeadSize,
+                ],
+                vec![
+                    self.layout_config.num_blocks,
+                    self.layout_config.outer_dim,
+                    self.layout_config.page_size,
+                    self.layout_config.inner_dim,
+                ],
+            )?;
+
             connector_worker
                 .register_kv_caches(
                     tensors,
                     self.layout_config.num_blocks,
-                    self.layout_config.page_size,
                     self.layout_config.dtype_width_bytes,
-                    None,
-                    None,
+                    dim_layout,
+                    kvbm_common::KvBlockLayout::Unknown,
                 )
                 .context("Failed to register KV caches")?;
 
