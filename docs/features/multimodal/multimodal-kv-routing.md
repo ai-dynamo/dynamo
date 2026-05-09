@@ -25,11 +25,36 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 
 ## Support Matrix
 
-| Backend | Supported | Notes |
-|---------|-----------|-------|
-| **vLLM** | ✅ | Uses frontend vLLM processor with KV router (`--dyn-chat-processor vllm --router-mode kv`) |
-| **TRT-LLM** | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers |
-| **SGLang** | ❌ | Not supported yet |
+| Backend | Path | Supported | Notes |
+|---------|------|-----------|-------|
+| **vLLM** | Rust frontend (default) | ✅ | Uses lightseek `llm-multimodal` for image-token counting + placeholder expansion. Supported models tracked below. |
+| **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
+| **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
+| **SGLang** | — | ❌ | Not supported yet. |
+
+## Supported Model Families (Rust frontend path)
+
+The Rust frontend's MM-aware routing path supports the same VLM families that
+[lightseek `llm-multimodal`](https://github.com/lightseekorg/smg/tree/main/crates/multimodal)
+registers in `ImageProcessorRegistry::with_defaults()`.
+
+- Qwen3-VL
+- Qwen2.5-VL
+- Qwen2-VL
+- LLaVA-NeXT (v1.6+)
+- LLaVA-1.5
+- Phi-3-vision
+- Llama-4
+- Kimi-K2.5
+
+A model not in this list will silently fall back to text-prefix-only KV
+routing (image tokens aren't counted, blocks aren't MM-tagged) — the request
+still completes correctly, just without the prefix-cache benefit across
+images.
+
+The Python chat-processor variant doesn't share this constraint — it
+delegates to vLLM's own multimodal processor and works with any VLM vLLM
+supports.
 
 ## How It Works
 
@@ -49,7 +74,7 @@ Frontend (Rust + lightseek llm-multimodal + KV router) → Backend Workers
               vLLM's multi_modal_uuids (cache key match)
 ```
 
-1. The Rust frontend computes an `mm_hash` per image: `xxh3_64` of the decoded bytes for `data:` URIs (and for `http(s)://` when `media_decoder` is enabled on the model), otherwise `xxh3_64` of the URL with cache-buster query params (`v`, `t`, `cache`, `_`, `ts`, `sig`, `signature`) stripped.
+1. The Rust frontend computes an `mm_hash` per image: `xxh3_64` of the decoded bytes for `data:` URIs (and for `http(s)://` when `media_decoder` is enabled on the model), otherwise `xxh3_64` of the full URL string. Two callers will share an `mm_hash` only when they send byte-identical URLs.
 2. The image-token id is resolved per model from `config.json` (`image_token_id` / `image_token_index` / `media_placeholder_token_id`), `processor_config.json` / `tokenizer_config.json` (`image_token` string), or a probe of common placeholder strings against the tokenizer vocab.
 3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the lightseek `llm-multimodal` crate computes the per-image expanded token count.
 4. The single placeholder token is expanded to N copies in `routing_token_ids` (a router-only view); the worker still sees one placeholder per image in `token_ids`.
