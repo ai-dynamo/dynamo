@@ -686,13 +686,31 @@ class InstrumentedScheduler(AsyncScheduler):
         self, ctx_len: int, batch_size: int
     ) -> SchedulerOutput:
         """Create fake decode requests with pre-allocated KV and return
-        a custom SchedulerOutput that registers them with the model runner."""
+        a custom SchedulerOutput that registers them with the model runner.
+
+        We pad the synthetic prompt to ``ctx_len + 1`` tokens (rather than
+        ``ctx_len``) so the input slot at position ``ctx_len`` -- the one
+        the decode iteration reads from -- is part of the request's prompt
+        and therefore guaranteed to be a valid token id (0). Without this
+        padding the worker's async-scheduler bookkeeping writes a ``-1``
+        placeholder into ``token_ids_cpu[req_idx, ctx_len]`` after
+        sampling (gpu_model_runner._update_states_after_model_execute, see
+        ``sampled_ids = [-1]`` for async scheduling). When the same input
+        batch slot gets reused by a later benchmark batch, that ``-1``
+        is read as the input token and the embedding lookup OOBs. Padding
+        by one keeps the placeholder write at position ``ctx_len + 1``
+        (out of the read range) and leaves position ``ctx_len`` untouched.
+        Also allocate ``ctx_len + 1`` KV slots so block-table indexing for
+        position ``ctx_len`` (block ``ctx_len // block_size`` -- which is
+        a NEW block when ``ctx_len % block_size == 0``) stays in range.
+        """
         new_reqs_data: list[NewRequestData] = []
         num_scheduled_tokens: dict[str, int] = {}
+        padded_len = ctx_len + 1
 
         for _ in range(batch_size):
             req_id = f"__bench_{self._bench_seq}"
-            prompt = [0] * ctx_len
+            prompt = [0] * padded_len
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
@@ -703,11 +721,11 @@ class InstrumentedScheduler(AsyncScheduler):
             )
 
             new_blocks = self.kv_cache_manager.allocate_slots(
-                req, ctx_len, delay_cache_blocks=True
+                req, padded_len, delay_cache_blocks=True
             )
             if new_blocks is None:
                 logger.warning(
-                    "KV exhausted at ctx_len=%d after %d requests, " "truncating batch",
+                    "KV exhausted at ctx_len=%d after %d requests, truncating batch",
                     ctx_len,
                     len(new_reqs_data),
                 )
@@ -715,7 +733,6 @@ class InstrumentedScheduler(AsyncScheduler):
 
             req.num_computed_tokens = ctx_len
             req.status = RequestStatus.RUNNING
-            req.append_output_token_ids(0)
 
             self.requests[req_id] = req
             self.running.append(req)  # type: ignore[has-type]

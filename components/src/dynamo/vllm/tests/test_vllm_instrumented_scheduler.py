@@ -422,3 +422,63 @@ def test_decode_sweep_empty_frame_no_connector_leaves_metadata_none():
 
     assert out.kv_connector_metadata is None
     assert out.ec_connector_metadata is None
+
+
+# ---------------------------------------------------------------------------
+# Prompt padding in _bench_inject_fake_decode (batch>1 OOB regression)
+# ---------------------------------------------------------------------------
+#
+# vLLM's worker (gpu_model_runner._update_states_after_model_execute) writes
+# a ``-1`` placeholder into ``token_ids_cpu[req_idx, num_tokens_no_spec]``
+# after every async-scheduling sample, where ``num_tokens_no_spec`` equals
+# the request's prompt length. If the synthetic decode prompt is exactly
+# ``ctx_len`` long, the placeholder lands at position ``ctx_len`` -- the
+# exact slot the next decode iteration's request reads as its input token
+# when the InputBatch slot gets reused. The embedding lookup OOBs because
+# -1 is out of vocab.
+#
+# Padding the synthetic prompt by +1 keeps the placeholder write at
+# ``ctx_len + 1`` (out of the read range) and leaves position ``ctx_len``
+# as a valid token id (0).
+
+
+def test_bench_inject_fake_decode_pads_prompt_for_async_placeholder():
+    """The injected NewRequestData must carry ``ctx_len + 1`` prompt tokens
+    (not ``ctx_len``) and ``num_computed_tokens == ctx_len`` so the worker
+    reads input at position ``ctx_len`` from a guaranteed-zero prompt slot.
+
+    Bypasses ``Request`` construction by short-circuiting allocate_slots
+    on the first iteration -- the function still builds and returns the
+    SchedulerOutput when the batch was empty due to KV exhaustion.
+    """
+    from unittest.mock import MagicMock
+
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub.requests = {}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub._bench_block_hasher = None
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.kv_cache_manager.take_new_block_ids = MagicMock(return_value=None)
+    stub.connector = None
+    stub.ec_connector = None
+
+    captured_num_new_tokens: list[int] = []
+
+    def _allocate_slots(req, num_new_tokens, **kwargs):
+        captured_num_new_tokens.append(num_new_tokens)
+        return None  # short-circuit the loop body before NewRequestData append
+
+    stub.kv_cache_manager.allocate_slots = _allocate_slots
+
+    InstrumentedScheduler._bench_inject_fake_decode(stub, ctx_len=16, batch_size=1)
+
+    # Critical regression assertion: the +1 padding is applied.
+    assert captured_num_new_tokens == [17], (
+        f"Expected allocate_slots(req, ctx_len + 1 = 17, ...) to leave room "
+        f"for the async-scheduler placeholder write at position ctx_len. "
+        f"Got num_new_tokens={captured_num_new_tokens}."
+    )
