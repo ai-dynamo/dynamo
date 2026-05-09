@@ -13,6 +13,10 @@ Each backend's ``unified_main.py`` calls :func:`run` with its
         run(VllmLLMEngine)
 """
 
+import os
+import threading
+import time
+
 import uvloop
 
 from .engine import LLMEngine
@@ -28,3 +32,10 @@ async def _start(engine_cls: type[LLMEngine], argv: list[str] | None = None):
 def run(engine_cls: type[LLMEngine], argv: list[str] | None = None):
     """Entry point for per-backend unified_main.py files."""
     uvloop.run(_start(engine_cls, argv))
+    # Engines leak non-daemon threads that block exit after Worker.run
+    # cleaned up; force-exit backstop. Issue #9343.
+    threading.Thread(
+        target=lambda: (time.sleep(2), os._exit(0)),
+        daemon=True,
+        name="dynamo-backend-shutdown-watchdog",
+    ).start()
