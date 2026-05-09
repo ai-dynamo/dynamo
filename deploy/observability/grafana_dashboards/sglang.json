@@ -824,7 +824,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Inflight vs Queued Requests",
-      "description": "DYN: dynamo_frontend_inflight_requests / queued_requests gauges",
+      "description": "DYN: dynamo_frontend_inflight_requests / queued_requests gauges. Inflight = currently being processed (dispatched to a worker, awaiting completion). Queued = received by the frontend but not yet dispatched (waiting on router scheduling / worker permit). Inflight pinned at the worker concurrency limit while queued grows means workers are saturated and the gateway is buffering.",
       "datasource": {
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
@@ -1874,20 +1874,362 @@
       ]
     },
     {
-      "id": 25,
+      "id": 29,
       "type": "row",
-      "title": "SGLang Engine \u2014 throughput & batching",
-      "collapsed": false,
+      "title": "Per-Worker Detail \u2014 fan out by worker_id (collapsed)",
+      "collapsed": true,
       "gridPos": {
         "x": 0,
         "y": 49,
         "w": 24,
         "h": 1
       },
+      "panels": [
+        {
+          "id": 25,
+          "type": "timeseries",
+          "title": "Successful Request Rate Per Worker",
+          "description": "DYN (worker side): dynamo_component_requests_total{dynamo_endpoint=generate} grouped by worker_id",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P1809F7CD0C75ACF3"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 1,
+            "w": 12,
+            "h": 7
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "spanNulls": false,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "lineInterpolation": "linear",
+                "pointSize": 5,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "P1809F7CD0C75ACF3"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker_id) (rate(dynamo_component_requests_total{dynamo_endpoint=\"generate\"}[$__rate_interval]))",
+              "legendFormat": "{{worker_id}}",
+              "range": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 26,
+          "type": "timeseries",
+          "title": "KV Cache Hit Rate Per Worker",
+          "description": "SGL: sglang:cache_hit_rate grouped by worker_id",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P1809F7CD0C75ACF3"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 1,
+            "w": 12,
+            "h": 7
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "spanNulls": false,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "lineInterpolation": "linear",
+                "pointSize": 5,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "P1809F7CD0C75ACF3"
+              },
+              "editorMode": "code",
+              "expr": "avg by (worker_id) (sglang:cache_hit_rate)",
+              "legendFormat": "{{worker_id}}",
+              "range": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 27,
+          "type": "timeseries",
+          "title": "KV Pool Utilization Per Worker",
+          "description": "SGL: sglang:token_usage grouped by worker_id",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P1809F7CD0C75ACF3"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 8,
+            "w": 12,
+            "h": 7
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "spanNulls": false,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "lineInterpolation": "linear",
+                "pointSize": 5,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "P1809F7CD0C75ACF3"
+              },
+              "editorMode": "code",
+              "expr": "avg by (worker_id) (sglang:token_usage)",
+              "legendFormat": "{{worker_id}}",
+              "range": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 28,
+          "type": "timeseries",
+          "title": "E2E Request Latency Per Worker (p99)",
+          "description": "SGL: sglang:e2e_request_latency_seconds_bucket grouped by worker_id",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P1809F7CD0C75ACF3"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 8,
+            "w": 12,
+            "h": 7
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "spanNulls": false,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "lineInterpolation": "linear",
+                "pointSize": 5,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "P1809F7CD0C75ACF3"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, worker_id) (rate(sglang:e2e_request_latency_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "{{worker_id}}",
+              "range": true,
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "SGLang Engine \u2014 throughput & batching",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 24,
+        "h": 1
+      },
       "panels": []
     },
     {
-      "id": 26,
+      "id": 31,
       "type": "timeseries",
       "title": "Running / Queued / Paused Requests",
       "description": "SGL: sglang:num_running_reqs / num_queue_reqs / num_paused_reqs gauges",
@@ -1897,7 +2239,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 51,
         "w": 12,
         "h": 7
       },
@@ -1991,7 +2333,7 @@
       ]
     },
     {
-      "id": 27,
+      "id": 32,
       "type": "timeseries",
       "title": "Token Generation Throughput",
       "description": "SGL: sglang:gen_throughput (tokens/sec across schedulers)",
@@ -2001,7 +2343,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 50,
+        "y": 51,
         "w": 12,
         "h": 7
       },
@@ -2073,7 +2415,7 @@
       ]
     },
     {
-      "id": 28,
+      "id": 33,
       "type": "timeseries",
       "title": "Engine TTFT (p50/p90/p99)",
       "description": "SGL: sglang:time_to_first_token_seconds histogram (engine-internal TTFT, excludes frontend overhead)",
@@ -2083,7 +2425,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 58,
         "w": 8,
         "h": 7
       },
@@ -2177,7 +2519,7 @@
       ]
     },
     {
-      "id": 29,
+      "id": 34,
       "type": "timeseries",
       "title": "Engine ITL (p50/p90/p99)",
       "description": "SGL: sglang:inter_token_latency_seconds histogram",
@@ -2187,7 +2529,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 57,
+        "y": 58,
         "w": 8,
         "h": 7
       },
@@ -2281,7 +2623,7 @@
       ]
     },
     {
-      "id": 30,
+      "id": 35,
       "type": "timeseries",
       "title": "Retracted Requests + New Token Ratio",
       "description": "SGL: sglang:num_retracted_reqs (preempted) and sglang:new_token_ratio",
@@ -2291,7 +2633,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 57,
+        "y": 58,
         "w": 8,
         "h": 7
       },
@@ -2374,30 +2716,30 @@
       ]
     },
     {
-      "id": 31,
+      "id": 36,
       "type": "row",
       "title": "SGLang Engine \u2014 KV Pool Breakdown (per pool type)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 65,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 32,
+      "id": 37,
       "type": "timeseries",
       "title": "Pool Utilization % \u2014 Full / SWA / Mamba",
-      "description": "SGL: per-pool fractional usage. Hybrid models (Gemma2/Jamba) populate swa/mamba; non-hybrid models report full only.",
+      "description": "SGL: per-pool fractional usage. full_token_usage = full-attention KV pool, swa_token_usage = sliding-window pool (populates on hybrid SWA models like Gemma-2), mamba_usage = Mamba SSM state pool (populates on hybrid SSM models like Jamba). Non-hybrid models only move `full attention`.",
       "datasource": {
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
       "gridPos": {
         "x": 0,
-        "y": 65,
+        "y": 66,
         "w": 12,
         "h": 7
       },
@@ -2487,22 +2829,11 @@
           "legendFormat": "mamba (ssm state)",
           "range": true,
           "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "editorMode": "code",
-          "expr": "max(sglang:token_usage)",
-          "legendFormat": "overall (legacy)",
-          "range": true,
-          "refId": "D"
         }
       ]
     },
     {
-      "id": 33,
+      "id": 38,
       "type": "timeseries",
       "title": "Absolute KV Pool Tokens (used / evictable / available)",
       "description": "SGL: token counts in the main KV pool. used+evictable+available <= max_total_num_tokens. On hybrid models these reflect the FULL-attention pool only.",
@@ -2512,7 +2843,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 65,
+        "y": 66,
         "w": 12,
         "h": 7
       },
@@ -2606,7 +2937,7 @@
       ]
     },
     {
-      "id": 34,
+      "id": 39,
       "type": "timeseries",
       "title": "Cache Hit Rate (engine-side)",
       "description": "SGL: sglang:cache_hit_rate (radix prefix-cache hits)",
@@ -2616,7 +2947,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 72,
+        "y": 73,
         "w": 8,
         "h": 6
       },
@@ -2688,7 +3019,7 @@
       ]
     },
     {
-      "id": 35,
+      "id": 40,
       "type": "timeseries",
       "title": "Pending Pre-alloc Tokens (PD)",
       "description": "SGL: sglang:pending_prealloc_token_usage (disagg pre-allocation reservation; 0 in agg mode)",
@@ -2698,7 +3029,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 72,
+        "y": 73,
         "w": 8,
         "h": 6
       },
@@ -2770,7 +3101,7 @@
       ]
     },
     {
-      "id": 36,
+      "id": 41,
       "type": "timeseries",
       "title": "Streaming Sessions Held Tokens",
       "description": "SGL: sglang:streaming_session_held_tokens (KV held by retained streaming sessions)",
@@ -2780,7 +3111,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 72,
+        "y": 73,
         "w": 8,
         "h": 6
       },
@@ -2852,7 +3183,7 @@
       ]
     },
     {
-      "id": 37,
+      "id": 42,
       "type": "timeseries",
       "title": "LoRA Pool Utilization",
       "description": "SGL: sglang:lora_pool_* (only emitted when --enable-lora). Empty in non-LoRA runs.",
@@ -2862,7 +3193,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 78,
+        "y": 79,
         "w": 12,
         "h": 6
       },
@@ -2956,7 +3287,7 @@
       ]
     },
     {
-      "id": 38,
+      "id": 43,
       "type": "timeseries",
       "title": "Pool Capacity Reference",
       "description": "SGL: static pool sizing \u2014 max_total_num_tokens / num_pages / page_size",
@@ -2966,7 +3297,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 78,
+        "y": 79,
         "w": 12,
         "h": 6
       },
@@ -3060,19 +3391,19 @@
       ]
     },
     {
-      "id": 42,
+      "id": 47,
       "type": "row",
       "title": "P/D Disagg Queues \u2014 prefill/decode/grammar/spec (collapsed)",
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 84,
+        "y": 85,
         "w": 24,
         "h": 1
       },
       "panels": [
         {
-          "id": 39,
+          "id": 44,
           "type": "timeseries",
           "title": "Prefill Queues",
           "description": "SGL: prefill-side disagg queues (zero in agg mode)",
@@ -3165,7 +3496,7 @@
           ]
         },
         {
-          "id": 40,
+          "id": 45,
           "type": "timeseries",
           "title": "Decode Queues",
           "description": "SGL: decode-side disagg queues (zero in agg mode)",
@@ -3258,7 +3589,7 @@
           ]
         },
         {
-          "id": 41,
+          "id": 46,
           "type": "timeseries",
           "title": "Grammar / Spec Decode Queue",
           "description": "SGL: grammar-constrained queue + speculative decoding stats",
@@ -3364,19 +3695,19 @@
       ]
     },
     {
-      "id": 49,
+      "id": 54,
       "type": "row",
       "title": "HiCache (RAM/disk tiers) \u2014 collapsed; populates with --enable-hierarchical-cache",
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 85,
+        "y": 86,
         "w": 24,
         "h": 1
       },
       "panels": [
         {
-          "id": 43,
+          "id": 48,
           "type": "timeseries",
           "title": "HiCache Host Tokens (used vs total)",
           "description": "SGL: sglang:hicache_host_used_tokens / hicache_host_total_tokens (RAM tier; zero unless --enable-hierarchical-cache)",
@@ -3469,7 +3800,7 @@
           ]
         },
         {
-          "id": 44,
+          "id": 49,
           "type": "timeseries",
           "title": "Host Tier Utilization %",
           "description": "Derived: hicache_host_used / hicache_host_total",
@@ -3551,7 +3882,7 @@
           ]
         },
         {
-          "id": 45,
+          "id": 50,
           "type": "timeseries",
           "title": "Eviction & Load-back Rate by Cache Type",
           "description": "SGL: sglang:evicted_tokens_total / load_back_tokens_total (labeled by cache_type \u2014 RadixCache, SWARadixCache, MambaRadixCache, etc.)",
@@ -3644,7 +3975,7 @@
           ]
         },
         {
-          "id": 46,
+          "id": 51,
           "type": "timeseries",
           "title": "Eviction Latency (p99) by Cache Type",
           "description": "SGL: sglang:eviction_duration_seconds_bucket grouped by cache_type",
@@ -3726,7 +4057,7 @@
           ]
         },
         {
-          "id": 47,
+          "id": 52,
           "type": "timeseries",
           "title": "Prefetch / Backup Tokens Rate",
           "description": "SGL: sglang:prefetched_tokens_total / backuped_tokens_total (hicache prefetch + backup activity)",
@@ -3819,7 +4150,7 @@
           ]
         },
         {
-          "id": 48,
+          "id": 53,
           "type": "timeseries",
           "title": "Load-back Latency (p99) by Cache Type",
           "description": "SGL: sglang:load_back_duration_seconds_bucket grouped by cache_type",
@@ -3895,348 +4226,6 @@
               "editorMode": "code",
               "expr": "histogram_quantile(0.99, sum by (le, cache_type) (rate(sglang:load_back_duration_seconds_bucket[$__rate_interval])))",
               "legendFormat": "{{cache_type}} p99",
-              "range": true,
-              "refId": "A"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "id": 54,
-      "type": "row",
-      "title": "Per-Worker Detail \u2014 fan out by worker_id (collapsed)",
-      "collapsed": true,
-      "gridPos": {
-        "x": 0,
-        "y": 86,
-        "w": 24,
-        "h": 1
-      },
-      "panels": [
-        {
-          "id": 50,
-          "type": "timeseries",
-          "title": "Successful Request Rate Per Worker",
-          "description": "DYN (worker side): dynamo_component_requests_total{dynamo_endpoint=generate} grouped by worker_id",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "gridPos": {
-            "x": 0,
-            "y": 1,
-            "w": 12,
-            "h": 7
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 1,
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "spanNulls": false,
-                "showPoints": "never",
-                "stacking": {
-                  "mode": "none",
-                  "group": "A"
-                },
-                "axisPlacement": "auto",
-                "axisLabel": "",
-                "lineInterpolation": "linear",
-                "pointSize": 5,
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "lastNotNull",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "sum by (worker_id) (rate(dynamo_component_requests_total{dynamo_endpoint=\"generate\"}[$__rate_interval]))",
-              "legendFormat": "{{worker_id}}",
-              "range": true,
-              "refId": "A"
-            }
-          ]
-        },
-        {
-          "id": 51,
-          "type": "timeseries",
-          "title": "KV Cache Hit Rate Per Worker",
-          "description": "SGL: sglang:cache_hit_rate grouped by worker_id",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "gridPos": {
-            "x": 12,
-            "y": 1,
-            "w": 12,
-            "h": 7
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 1,
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "spanNulls": false,
-                "showPoints": "never",
-                "stacking": {
-                  "mode": "none",
-                  "group": "A"
-                },
-                "axisPlacement": "auto",
-                "axisLabel": "",
-                "lineInterpolation": "linear",
-                "pointSize": 5,
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "lastNotNull",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "avg by (worker_id) (sglang:cache_hit_rate)",
-              "legendFormat": "{{worker_id}}",
-              "range": true,
-              "refId": "A"
-            }
-          ]
-        },
-        {
-          "id": 52,
-          "type": "timeseries",
-          "title": "KV Pool Utilization Per Worker",
-          "description": "SGL: sglang:token_usage grouped by worker_id",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "gridPos": {
-            "x": 0,
-            "y": 8,
-            "w": 12,
-            "h": 7
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 1,
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "spanNulls": false,
-                "showPoints": "never",
-                "stacking": {
-                  "mode": "none",
-                  "group": "A"
-                },
-                "axisPlacement": "auto",
-                "axisLabel": "",
-                "lineInterpolation": "linear",
-                "pointSize": 5,
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "lastNotNull",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "avg by (worker_id) (sglang:token_usage)",
-              "legendFormat": "{{worker_id}}",
-              "range": true,
-              "refId": "A"
-            }
-          ]
-        },
-        {
-          "id": 53,
-          "type": "timeseries",
-          "title": "E2E Request Latency Per Worker (p99)",
-          "description": "SGL: sglang:e2e_request_latency_seconds_bucket grouped by worker_id",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "gridPos": {
-            "x": 12,
-            "y": 8,
-            "w": 12,
-            "h": 7
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "s",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 1,
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "spanNulls": false,
-                "showPoints": "never",
-                "stacking": {
-                  "mode": "none",
-                  "group": "A"
-                },
-                "axisPlacement": "auto",
-                "axisLabel": "",
-                "lineInterpolation": "linear",
-                "pointSize": 5,
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "lastNotNull",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by (le, worker_id) (rate(sglang:e2e_request_latency_seconds_bucket[$__rate_interval])))",
-              "legendFormat": "{{worker_id}}",
               "range": true,
               "refId": "A"
             }
@@ -4605,256 +4594,6 @@
               "refId": "C"
             }
           ]
-        }
-      ]
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 45
-      },
-      "id": 20,
-      "panels": [],
-      "title": "KV Pool Detail (sglang ≥ 0.5.11)",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
-      },
-      "description": "Stacked breakdown of the KV cache token pool: actively used (locked by running requests), evictable (radix-cached, reclaimable on demand), and available (free). The three series sum to <= max_total_num_tokens. Source gauges added in sgl-project/sglang#22726, available from sglang 0.5.11.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "drawStyle": "line",
-            "fillOpacity": 30,
-            "gradientMode": "opacity",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              }
-            ]
-          },
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Used (locked)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Evictable (radix cache)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Available (free)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 46
-      },
-      "id": 21,
-      "options": {
-        "legend": {
-          "calcs": ["last"],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "title": "KV Pool Breakdown (tokens)",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "editorMode": "code",
-          "expr": "sglang:kv_used_tokens",
-          "legendFormat": "Used (locked)",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "editorMode": "code",
-          "expr": "sglang:kv_evictable_tokens",
-          "legendFormat": "Evictable (radix cache)",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "editorMode": "code",
-          "expr": "sglang:kv_available_tokens",
-          "legendFormat": "Available (free)",
-          "range": true,
-          "refId": "C"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "P1809F7CD0C75ACF3"
-      },
-      "description": "Fraction of the KV cache pool that is not free, normalized against `sglang:max_total_num_tokens`. Equivalent to `1 - kv_available/max`. Captures true pool occupancy — including used, evictable (radix-cached), and any internally protected slots — vs. `sglang:token_usage`, which is the bottleneck across full/SWA/mamba pools and can miss evictable + protected slots. Gauge inputs available from sglang 0.5.11 (sgl-project/sglang#22726).",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 90
-              }
-            ]
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 46
-      },
-      "id": 22,
-      "options": {
-        "legend": {
-          "calcs": ["last", "mean", "max"],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "title": "KV Pool Physical Usage %",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "editorMode": "code",
-          "expr": "(1 - sglang:kv_available_tokens / sglang:max_total_num_tokens) * 100",
-          "legendFormat": "Physical usage %",
-          "range": true,
-          "refId": "A"
         }
       ]
     }
