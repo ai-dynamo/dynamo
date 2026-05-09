@@ -191,8 +191,10 @@ fn extract_tool_calls(
         if let Some((start_pos, _start_len)) = find_section_start(text, cursor, config) {
             let abs_start = cursor + start_pos;
 
-            // Add text before tool call section to normal parts.
-            normal_parts.push(&text[cursor..abs_start]);
+            // Keep only normal text before the first parsed tool call.
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..abs_start]);
+            }
 
             let (block, next_cursor) =
                 if let Some((end_pos, end_len)) = find_section_end(text, abs_start, config) {
@@ -213,12 +215,19 @@ fn extract_tool_calls(
             cursor = next_cursor;
         } else {
             // No more tool call sections.
-            normal_parts.push(&text[cursor..]);
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..]);
+            }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let normal_text = normal_parts.join("");
+    let normal_text = if calls.is_empty() {
+        normal_text.trim().to_string()
+    } else {
+        normal_text
+    };
     Ok((normal_text, calls))
 }
 
@@ -400,10 +409,7 @@ mod tests {
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(
-            normal,
-            Some("I'll help you with that.  Let me check.".to_string())
-        );
+        assert_eq!(normal, Some("I'll help you with that. ".to_string()));
     }
 
     #[test] // PARSER.batch.6

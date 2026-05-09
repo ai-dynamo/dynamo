@@ -84,8 +84,10 @@ fn extract_tool_calls(
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
 
-            // Add text before tool call to normal parts
-            normal_parts.push(&text[cursor..abs_start]);
+            // Keep only normal text before the first parsed tool call.
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..abs_start]);
+            }
 
             // Find the corresponding end token
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -98,7 +100,9 @@ fn extract_tool_calls(
                     Ok(parsed_call) => calls.push(parsed_call),
                     Err(e) => {
                         warn!("Failed to parse GLM-4.7 tool call block: {e}");
-                        normal_parts.push(block);
+                        if calls.is_empty() {
+                            normal_parts.push(block);
+                        }
                     }
                 }
 
@@ -123,17 +127,26 @@ fn extract_tool_calls(
                         }
                     }
                 }
-                normal_parts.push(&text[abs_start..]);
+                if calls.is_empty() {
+                    normal_parts.push(&text[abs_start..]);
+                }
                 break;
             }
         } else {
             // No more tool calls
-            normal_parts.push(&text[cursor..]);
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..]);
+            }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let normal_text = normal_parts.join("");
+    let normal_text = if calls.is_empty() {
+        normal_text.trim().to_string()
+    } else {
+        normal_text
+    };
     Ok((normal_text, calls))
 }
 
@@ -395,7 +408,7 @@ mod tests {
     #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let config = get_test_config();
-        let message = "I'll check the weather for you. <tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call>";
+        let message = "I'll check the weather for you. <tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call> Done.";
 
         let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
 
@@ -403,7 +416,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(
             normal_text,
-            Some("I'll check the weather for you.".to_string())
+            Some("I'll check the weather for you. ".to_string())
         );
     }
 

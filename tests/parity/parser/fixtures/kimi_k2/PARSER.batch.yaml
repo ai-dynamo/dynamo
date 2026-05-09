@@ -117,7 +117,7 @@ cases:
       - name: get_weather
         arguments:
           location: Dallas
-      normal_text: I'll help you with that.  Let me check.
+      normal_text: 'I''ll help you with that. '
   PARSER.batch.9:
     description: Empty input
     model_text: ''
