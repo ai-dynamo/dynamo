@@ -4,67 +4,43 @@
 name: PR-XPU
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
-    types: [opened, synchronize, reopened, labeled]
-  pull_request_review:
-    types: [submitted]
+      - "pull-request/[0-9]+"
 
 concurrency:
-  group: pr-xpu-${{ github.event.pull_request.number || github.ref_name }}
+  group: pr-xpu-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
 
   # ============================================================================
-  # GATE – "xpu" label required.  If author is an XPU contributor, CI starts
-  # immediately; otherwise at least one XPU contributor must approve first.
-  # Repo variable XPU_CONTRIBUTOR_LIST: comma-separated GitHub usernames.
+  # GATE – only run XPU CI when the PR has the "xpu" label.
+  # Push trigger (pull-request/* branch) already guarantees only internal
+  # users / copy-pr-bot can reach this workflow.
   # ============================================================================
 
   guard:
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'pull_request'
-       && (
-         (github.event.action == 'labeled' && github.event.label.name == 'xpu')
-         || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'xpu'))
-       ))
-      || (github.event_name == 'pull_request_review'
-          && github.event.review.state == 'approved'
-          && contains(github.event.pull_request.labels.*.name, 'xpu'))
+    outputs:
+      has_xpu_label: ${{ steps.pr-info.outputs.has_xpu_label }}
     steps:
-      - name: Check XPU contributor or approval
+      - name: Get PR info and check xpu label
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::add-mask::${{ vars.XPU_CONTRIBUTOR_LIST }}"
-          AUTHOR="${{ github.event.pull_request.user.login }}"
-          EVENT="${{ github.event_name }}"
+          PR_NUMBER="${GITHUB_REF_NAME##*/}"
 
-          # Helper: check if a user is in the XPU contributor list
-          is_contributor() {
-            echo "${{ vars.XPU_CONTRIBUTOR_LIST }}" | tr ',' '\n' | grep -qx "$1"
-          }
-
-          if is_contributor "${AUTHOR}"; then
-            echo "✅ PR author ${AUTHOR} is an XPU contributor – CI allowed"
-            exit 0
+          # Check for xpu label
+          HAS_XPU=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            --jq '[.labels[].name] | any(. == "xpu")')
+          echo "has_xpu_label=${HAS_XPU}" >> "$GITHUB_OUTPUT"
+          if [[ "${HAS_XPU}" == "true" ]]; then
+            echo "✅ PR #${PR_NUMBER} has 'xpu' label – running XPU CI"
+          else
+            echo "⏭️ PR #${PR_NUMBER} does not have 'xpu' label – skipping XPU CI"
           fi
-
-          # Author is not a contributor – require an XPU contributor's approval
-          if [[ "${EVENT}" == "pull_request_review" ]]; then
-            REVIEWER="${{ github.event.review.user.login }}"
-            if is_contributor "${REVIEWER}"; then
-              echo "✅ XPU contributor ${REVIEWER} approved – CI allowed"
-              exit 0
-            else
-              echo "❌ Reviewer ${REVIEWER} is not an XPU contributor"
-              exit 1
-            fi
-          fi
-
-          echo "❌ ${AUTHOR} is not an XPU contributor. An XPU contributor must approve to trigger CI."
-          exit 1
 
   # ============================================================================
   # CHANGE DETECTION
@@ -72,6 +48,7 @@ jobs:
 
   changed-files:
     needs: [guard]
+    if: needs.guard.outputs.has_xpu_label == 'true'
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.changes.outputs.core }}
@@ -82,7 +59,6 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Check for changes
         id: changes
         uses: ./.github/actions/changed-files
@@ -109,8 +85,8 @@ jobs:
 
   xpu-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, xpu-ci-vllm]
-    if: always()
+    needs: [guard, changed-files, xpu-ci-vllm]
+    if: always() && needs.guard.outputs.has_xpu_label == 'true'
     steps:
       - name: Check all XPU jobs
         run: |
