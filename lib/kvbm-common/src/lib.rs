@@ -4,9 +4,11 @@
 use serde::{Deserialize, Serialize};
 
 pub mod block;
+pub mod strides;
 pub mod tensor;
 
 pub use block::{BlockDim, InnerShape, KvBlockLayout};
+pub use strides::KvDimStrides;
 pub use tensor::{KvDim, KvDimLayout};
 
 pub type BlockId = usize;

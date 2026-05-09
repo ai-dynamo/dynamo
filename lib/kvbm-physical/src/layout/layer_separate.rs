@@ -449,4 +449,54 @@ mod tests {
         assert_eq!(region.addr, 0x1000 + region_size);
         assert_eq!(region.size, region_size);
     }
+
+    /// Closes a coverage gap: `BlockIsSecondDim` (layout
+    /// `[outer_dim, num_blocks, page_size, inner_dim]`) had its
+    /// construction and per-region size verified, but the indexing
+    /// math itself was untested. The stride contract is:
+    ///   `block_stride = page_size * inner_dim * dtype_width_bytes`,
+    ///   `outer_stride = block_stride * num_blocks`,
+    /// so that walking the Outer axis crosses an entire block-major
+    /// run (num_blocks regions). This test asserts the address math
+    /// matches that contract for every (block, layer, outer) triple.
+    #[test]
+    fn test_memory_region_outer_contiguous() {
+        let config = LayoutConfig::builder()
+            .num_blocks(2)
+            .num_layers(2)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(128)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap();
+
+        let per_layer_size = 2 * 2 * 16 * 128 * 2;
+        let memory: Vec<Buffer> = (0..2)
+            .map(|i| Buffer::from_arc(MockMemory::new(0x1000 + i * per_layer_size, per_layer_size)))
+            .collect();
+
+        let layout =
+            LayerSeparateLayout::new(config, memory, BlockDimension::BlockIsSecondDim).unwrap();
+
+        let region_size = 16 * 128 * 2; // 4096 bytes
+        let block_stride = region_size; // = 4096
+        let outer_stride = block_stride * 2; // num_blocks * region_size = 8192
+
+        for layer_id in 0..2 {
+            let layer_base = 0x1000 + layer_id * per_layer_size;
+            for outer_id in 0..2 {
+                for block_id in 0..2 {
+                    let region = layout.memory_region(block_id, layer_id, outer_id).unwrap();
+                    let expected_addr =
+                        layer_base + block_id * block_stride + outer_id * outer_stride;
+                    assert_eq!(
+                        region.addr, expected_addr,
+                        "addr mismatch for (block={block_id}, layer={layer_id}, outer={outer_id})",
+                    );
+                    assert_eq!(region.size, region_size);
+                }
+            }
+        }
+    }
 }

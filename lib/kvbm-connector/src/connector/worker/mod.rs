@@ -403,8 +403,16 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         }
 
         // Resolve LayoutConfig + BlockDimension from the labeled layout.
-        let (layout_config, block_dim) =
-            determine_kv_layout(num_device_blocks, dtype_width_bytes, &tensors, &dim_layout)?;
+        // The relabeler inspects tensor strides and re-expresses the layout
+        // in physical order; `block_layout` is cross-checked against the
+        // stride-derived view (warn on disagreement).
+        let (layout_config, block_dim) = determine_kv_layout(
+            num_device_blocks,
+            dtype_width_bytes,
+            &tensors,
+            &dim_layout,
+            block_layout,
+        )?;
 
         tracing::debug!(
             ?layout_config,
@@ -432,6 +440,12 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             num_tensors = pending.tensors.len(),
             num_device_blocks,
             dtype_width_bytes,
+            block_layout = %pending.block_layout,
+            outer_dim = pending.layout_config.outer_dim,
+            page_size = pending.layout_config.page_size,
+            inner_dim = pending.layout_config.inner_dim,
+            num_heads = ?pending.layout_config.num_heads,
+            block_dim = ?pending.block_dim,
             "KV caches registered (deferred mode - waiting for leader RPC)"
         );
 

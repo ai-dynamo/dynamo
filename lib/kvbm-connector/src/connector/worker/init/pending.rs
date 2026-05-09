@@ -245,6 +245,7 @@ impl PendingWorkerState {
             let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                 .with_config(host_layout)
                 .fully_contiguous()
+                .with_block_layout(self.block_layout)
                 .allocate_pinned(Some(self.cuda_device_id as u32))
                 .build()
                 .map_err(|e| {
@@ -287,6 +288,7 @@ impl PendingWorkerState {
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
+                    .with_block_layout(self.block_layout)
                     .allocate_disk(Some(g3_path.clone()))
                     .build()
                     .map_err(|e| {

@@ -952,6 +952,38 @@ fn test_validate_layout_compatibility_fc_lw_same_block_layout() {
     assert!(validate_layout_compatibility(&src, &dst).is_ok());
 }
 
+/// Regression: G1 layer-separate (OperationalNHD) ↔ G2/G3 fully-contiguous
+/// (OperationalNHD) must pass validate_layout_compatibility. Before
+/// `with_block_layout` was threaded into the G2/G3 builders in
+/// `pending.rs`, G2/G3 defaulted to `Unknown`, and
+/// `requires_transform(OperationalNHD, Unknown) = true` rejected every
+/// G1↔G2 / G1↔G3 transfer at the validator. This test pins the fix.
+#[test]
+fn test_validate_layout_compatibility_lw_to_fc_operational_nhd() {
+    use kvbm_common::KvBlockLayout;
+    let agent = create_test_agent("test_compat_lw_to_fc_op_nhd");
+    let config = standard_config(4);
+
+    let src = PhysicalLayout::builder(agent.clone())
+        .with_config(config.clone())
+        .layer_separate(BlockDimension::BlockIsFirstDim)
+        .with_block_layout(KvBlockLayout::OperationalNHD)
+        .allocate_system()
+        .build()
+        .unwrap();
+    let dst = PhysicalLayout::builder(agent)
+        .with_config(config)
+        .fully_contiguous()
+        .with_block_layout(KvBlockLayout::OperationalNHD)
+        .allocate_system()
+        .build()
+        .unwrap();
+
+    assert!(validate_layout_compatibility(&src, &dst).is_ok());
+    // Symmetric direction (FC→LW) must also pass.
+    assert!(validate_layout_compatibility(&dst, &src).is_ok());
+}
+
 #[test]
 fn test_can_use_whole_block_fc_fc_full_block() {
     let agent = create_test_agent("test_whole_block_fc_fc");
