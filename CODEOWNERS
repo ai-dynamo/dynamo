@@ -26,6 +26,10 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /.github/workflows/*.ps1 @ai-dynamo/Devops
 CODEOWNERS @ai-dynamo/Devops
 
+# XPU
+**/xpu/** @ai-dynamo/Devops @ai-dynamo/xpu-code-owners
+**/*xpu* @ai-dynamo/Devops @ai-dynamo/xpu-code-owners
+
 # Planner
 /components/src/dynamo/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /components/src/dynamo/global_router/ @ai-dynamo/python-codeowners @ai-dynamo/Devops

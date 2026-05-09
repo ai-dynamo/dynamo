@@ -8,27 +8,63 @@ on:
     branches:
       - main
     types: [opened, synchronize, reopened, labeled]
+  pull_request_review:
+    types: [submitted]
 
 concurrency:
-  group: pr-xpu-${{ github.ref_name }}
+  group: pr-xpu-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
 
   # ============================================================================
-  # GATE – only proceed when "xpu" label is present
+  # GATE – "xpu" label required.  If author is an XPU contributor, CI starts
+  # immediately; otherwise at least one XPU contributor must approve first.
+  # Repo variable XPU_CONTRIBUTOR_LIST: comma-separated GitHub usernames.
   # ============================================================================
 
   guard:
     runs-on: ubuntu-latest
-    # (1) labeled event + label is "xpu" → pass
-    # (2) labeled event + label is NOT "xpu" → skip
-    # (3) other PR events + PR already has "xpu" label → pass
     if: >-
-      (github.event.action == 'labeled' && github.event.label.name == 'xpu')
-      || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'xpu'))
+      (github.event_name == 'pull_request'
+       && (
+         (github.event.action == 'labeled' && github.event.label.name == 'xpu')
+         || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'xpu'))
+       ))
+      || (github.event_name == 'pull_request_review'
+          && github.event.review.state == 'approved'
+          && contains(github.event.pull_request.labels.*.name, 'xpu'))
     steps:
-      - run: echo "Gate passed"
+      - name: Check XPU contributor or approval
+        run: |
+          echo "::add-mask::${{ vars.XPU_CONTRIBUTOR_LIST }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          EVENT="${{ github.event_name }}"
+
+          # Helper: check if a user is in the XPU contributor list
+          is_contributor() {
+            echo "${{ vars.XPU_CONTRIBUTOR_LIST }}" | tr ',' '\n' | grep -qx "$1"
+          }
+
+          if is_contributor "${AUTHOR}"; then
+            echo "✅ PR author ${AUTHOR} is an XPU contributor – CI allowed"
+            exit 0
+          fi
+
+          # Author is not a contributor – require an XPU contributor's approval
+          if [[ "${EVENT}" == "pull_request_review" ]]; then
+            REVIEWER="${{ github.event.review.user.login }}"
+            if is_contributor "${REVIEWER}"; then
+              echo "✅ XPU contributor ${REVIEWER} approved – CI allowed"
+              exit 0
+            else
+              echo "❌ Reviewer ${REVIEWER} is not an XPU contributor"
+              exit 1
+            fi
+          fi
+
+          echo "❌ ${AUTHOR} is not an XPU contributor. An XPU contributor must approve to trigger CI."
+          exit 1
 
   # ============================================================================
   # CHANGE DETECTION
