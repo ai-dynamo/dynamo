@@ -43,6 +43,8 @@ pub(crate) use view::{LayoutView, intersect_views};
 // mod registration;
 // pub use registration::{RegisteredLayout, RegisteredStorageMetadata, RegistrationManager};
 
+use std::any::Any;
+
 use anyhow::Result;
 
 pub(crate) use dynamo_memory::MemoryDescriptor;
@@ -55,7 +57,15 @@ pub use dynamo_memory::{Buffer, MemoryRegion};
 /// - Memory region lookup for specific blocks
 /// - Allocation requirements for external allocators
 /// - Metadata about block organization
-pub trait Layout: Send + Sync + std::fmt::Debug {
+pub trait Layout: Any + Send + Sync + std::fmt::Debug {
+    /// Borrow as `&dyn Any` for runtime type identification.
+    ///
+    /// Used by the planner-path lowering to downcast to a concrete
+    /// layout type (FullyContiguousLayout / LayerSeparateLayout) and
+    /// project to a labelled `LayoutView`. Default impls in this crate
+    /// just return `self`.
+    fn as_any(&self) -> &dyn Any;
+
     /// Get the configuration for this layout.
     fn config(&self) -> &LayoutConfig;
 

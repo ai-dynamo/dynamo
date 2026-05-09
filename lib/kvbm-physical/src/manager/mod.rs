@@ -256,9 +256,10 @@ impl TransferManager {
             src_kv_layout,
             dst_kv_layout,
             metric_route,
+            use_planner,
         ) = options.dissolve();
 
-        let mut internal_options = TransferOptionsInternal::builder();
+        let mut internal_options = TransferOptionsInternal::builder().use_planner(use_planner);
 
         if let Some(range) = layer_range {
             internal_options = internal_options.layer_range(range);
