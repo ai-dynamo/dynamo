@@ -20,12 +20,12 @@ use rstest::rstest;
 // ============================================================================
 
 #[derive(Clone)]
-enum LayoutType {
+pub(super) enum LayoutType {
     FC,
     LW,
 }
 
-fn build_layout(
+pub(super) fn build_layout(
     agent: NixlAgent,
     layout_type: LayoutType,
     storage_kind: StorageKind,
@@ -66,7 +66,7 @@ fn is_nixl_backend_available(backend: &str) -> bool {
     agent.add_backend(backend).is_ok()
 }
 
-fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
+pub(super) fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
     let mut agent = NixlAgent::new("agent")?;
     let mut added_backends = Vec::new();
 
