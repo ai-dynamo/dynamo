@@ -18,6 +18,7 @@ mod layer_separate;
 mod physical;
 mod serialize;
 mod validation;
+mod view;
 
 #[cfg(all(test, feature = "testing-kvbm"))]
 pub(super) mod tests;
@@ -34,6 +35,7 @@ pub use physical::NixlMetadata;
 pub use physical::PhysicalLayout;
 pub(crate) use serialize::LayoutDescriptor;
 pub use serialize::{BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutTypeDetails};
+pub(crate) use view::{LayoutView, intersect_views};
 
 // mod registration;
 // pub use registration::{RegisteredLayout, RegisteredStorageMetadata, RegistrationManager};
