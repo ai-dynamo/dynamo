@@ -36,9 +36,11 @@ jobs:
           && contains(github.event.pull_request.labels.*.name, 'xpu'))
     steps:
       - name: Check XPU contributor or approval
+        env:
+          XPU_LIST: ${{ vars.XPU_CONTRIBUTOR_LIST }}
         run: |
           # Mask each contributor username individually
-          IFS=',' read -ra USERS <<< "${{ vars.XPU_CONTRIBUTOR_LIST }}"
+          IFS=',' read -ra USERS <<< "${XPU_LIST}"
           for user in "${USERS[@]}"; do
             echo "::add-mask::${user}"
           done
@@ -48,7 +50,7 @@ jobs:
 
           # Helper: check if a user is in the XPU contributor list
           is_contributor() {
-            echo "${{ vars.XPU_CONTRIBUTOR_LIST }}" | tr ',' '\n' | grep -qx "$1"
+            echo "${XPU_LIST}" | tr ',' '\n' | grep -qx "$1"
           }
 
           if is_contributor "${AUTHOR}"; then
