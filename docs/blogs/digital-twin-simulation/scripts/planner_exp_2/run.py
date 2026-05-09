@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Exp 3: Engine cold-start time sweep — when does the planner stop keeping up?
+"""Exp 2: Load-based scaling interval sweep — responsiveness vs oscillation.
 
-Sweep `startup_time` from 0 to 300 s in 30-second steps with the SLA-mode
-planner (`ttft=1500`, `itl=50`, both throughput- and load-based scaling
-enabled). Mirrors the earlier Llama-3.1-8B sweep, but on Qwen3-32B so it
-lines up with the rest of the digital twin blog.
+Disable throughput-based scaling and keep only load-based scaling enabled.
+Sweep `load_adjustment_interval` and observe how TTFT/ITL track latency vs
+how often the planner toggles workers (the oscillation proxy). Engine
+startup time is **0** here so this experiment isolates the interval knob;
+its interaction with cold-start is the subject of Exp 3.
 """
 
 from __future__ import annotations
@@ -23,34 +24,34 @@ from common import (  # noqa: E402
     run_sweep,
 )
 
-EXP_NAME = "exp3_cold_start"
-STARTUP_VALUES_S = list(range(0, 301, 30))
+EXP_NAME = "planner_exp_2"
+LOAD_INTERVAL_VALUES_S = [1, 2, 5, 10, 20, 30, 60, 120, 300]
 
 
 def build_invocations() -> list[ReplayInvocation]:
     invs: list[ReplayInvocation] = []
-    for s in STARTUP_VALUES_S:
-        tag = f"startup_{s:03d}s"
+    for s in LOAD_INTERVAL_VALUES_S:
+        tag = f"load_interval_{s:03d}s"
         cfg = base_planner_config(
             f"{tag}.html",
             mode="agg",
             optimization_target="sla",
             ttft=1500,
             itl=50,
-            enable_throughput_scaling=True,
+            enable_throughput_scaling=False,
             enable_load_scaling=True,
-            load_adjustment_interval=10,
-            throughput_adjustment_interval=300,
+            load_adjustment_interval=s,
         )
         invs.append(
             ReplayInvocation(
                 tag=tag,
                 params={
-                    "startup_time_s": s,
+                    "load_adjustment_interval_s": s,
                     "mode": "agg",
                     "optimization_target": "sla",
+                    "startup_time_s": 0,
                 },
-                extra_engine_args=base_engine_args(startup_time=s if s > 0 else None),
+                extra_engine_args=base_engine_args(startup_time=None),
                 planner_config=cfg,
                 cli_extra=["--num-workers", "2"],
             )
@@ -62,7 +63,7 @@ def _on_done(row: dict) -> None:
     ttft = row["ttft_ms"] or {}
     itl = row["itl_ms"] or {}
     print(
-        f"[done {row['tag']:18s}] wall={row['wall_time_s']:5.1f}s "
+        f"[done {row['tag']:24s}] wall={row['wall_time_s']:5.1f}s "
         f"ttft_avg={ttft.get('avg')}  ttft_p90={ttft.get('p90')}  "
         f"itl_avg={itl.get('avg')}  itl_p90={itl.get('p90')}  "
         f"gpu_h={row['gpu_hours']}  events_up/down={row['scale_up_events']}/{row['scale_down_events']}",

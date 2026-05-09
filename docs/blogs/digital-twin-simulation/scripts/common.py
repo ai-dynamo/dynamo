@@ -11,15 +11,15 @@ The expected layout is:
     docs/blogs/digital-twin-simulation/
         scripts/
             common.py                        (this file)
-            expN_*/run.py                    (uses run_replay)
-            expN_*/plot.py                   (consumes results.json)
-        results/
-            expN_*/results.json              (one row per run)
-            expN_*/plot.png                  (rendered figure)
+            planner_exp_N/run.py             (uses run_sweep)
+            planner_exp_N/plot.py            (consumes results.json)
+        images/
+            planner_exp_N.png                (rendered figure for the blog)
 
-Replay HTML / per-run JSON artifacts land outside the docs tree, under
-`<repo_root>/planner_reports/blog_exp/expN_*/`, so they can be inspected
-without bloating the docs directory.
+All replay artifacts (per-run HTML, log, JSON, AND the aggregated
+`results.json`) land outside the docs tree, under
+`<repo_root>/planner_reports/blog_exp/planner_exp_N/`, so the docs
+directory only carries the blog-facing PNGs.
 """
 
 from __future__ import annotations
@@ -39,8 +39,19 @@ REPO = Path(__file__).resolve().parents[4]
 PY = REPO / ".venv/bin/python"
 TRACE = REPO / "traces/mooncake_fast25/toolagent_trace.jsonl"
 BLOG_DIR = REPO / "docs/blogs/digital-twin-simulation"
-RESULTS_ROOT = BLOG_DIR / "results"
+IMAGES_DIR = BLOG_DIR / "images"
 REPORTS_ROOT = REPO / "planner_reports/blog_exp"
+
+
+def results_json_path(exp_name: str) -> Path:
+    """Aggregated per-run metrics JSON for a given experiment."""
+    return REPORTS_ROOT / exp_name / "results.json"
+
+
+def image_path(exp_name: str) -> Path:
+    """Rendered figure path for a given experiment (lives in the blog images dir)."""
+    return IMAGES_DIR / f"{exp_name}.png"
+
 
 # --- Model / system defaults (Qwen3-32B, BF16, TP=2, H200-SXM, vLLM 0.12.0) --
 
@@ -261,15 +272,12 @@ def run_sweep(
 ) -> list[dict[str, Any]]:
     """Run a list of replay invocations in a process pool and aggregate results.
 
-    Per-run logs/JSON live under `planner_reports/blog_exp/<exp_name>/`.
-    The aggregated `results.json` is written to
-    `docs/blogs/digital-twin-simulation/results/<exp_name>/results.json`.
+    All per-run logs/JSON AND the aggregated `results.json` land under
+    `planner_reports/blog_exp/<exp_name>/`.
     """
     exp_html_dir = REPORTS_ROOT / exp_name
-    exp_results_dir = RESULTS_ROOT / exp_name
     exp_html_dir.mkdir(parents=True, exist_ok=True)
-    exp_results_dir.mkdir(parents=True, exist_ok=True)
-    results_json = exp_results_dir / "results.json"
+    results_json = results_json_path(exp_name)
 
     invocations = list(invocations)
     results: list[dict[str, Any]] = []

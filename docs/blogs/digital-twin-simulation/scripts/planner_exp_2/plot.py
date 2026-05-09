@@ -13,15 +13,14 @@ import matplotlib.pyplot as plt
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
-from common import RESULTS_ROOT  # noqa: E402
+from common import image_path, results_json_path  # noqa: E402
 
-EXP_NAME = "exp2_load_interval"
+EXP_NAME = "planner_exp_2"
 GRAY = "#8C8C8C"
 
 
 def load() -> list[dict]:
-    p = RESULTS_ROOT / EXP_NAME / "results.json"
-    rows = json.loads(p.read_text())
+    rows = json.loads(results_json_path(EXP_NAME).read_text())
     rows.sort(key=lambda r: r["params"]["load_adjustment_interval_s"])
     return rows
 
@@ -78,12 +77,13 @@ def main() -> None:
     ax.grid(True, which="both", alpha=0.3)
 
     fig.suptitle(
-        "Exp 2 — Qwen3-32B / TP=2 / H200 / vLLM 0.12.0 — toolagent_trace, "
+        "Exp 2 — Qwen3-32B / TP=2 / H200 / vLLM — toolagent_trace, "
         "load-only planner, startup_time=0",
         y=1.0,
     )
     plt.tight_layout()
-    out = RESULTS_ROOT / EXP_NAME / "plot.png"
+    out = image_path(EXP_NAME)
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print(f"wrote {out}")
 

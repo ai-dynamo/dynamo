@@ -10,8 +10,10 @@ A) **Static-deployment baseline** (no `--planner-config`). Worker counts are
    ratios (P, D) ∈ {(1,1), (1,2), (2,2), (2,3), (3,3), (3,4)}.
 
 B) **Planner runs** with `optimization_target` ∈ {throughput, latency, sla}
-   for both agg and disagg. The `sla` variant is swept across TTFT targets
-   {500, 750, 1000, 1500, 2500, 5000} ms while ITL stays at 50 ms.
+   for both agg and disagg. The `sla` variant uses a single representative
+   target (`ttft=1500`, `itl=50`) — earlier sweeps confirmed all SLA targets
+   collapse to nearly the same operating point on this trace, so plotting
+   one point per mode is enough.
 
 All runs use Qwen/Qwen3-32B BF16, TP=2, vLLM 0.12.0 on H200-SXM, with
 `startup_time=60` s for fair comparison (no effect on static runs since
@@ -35,13 +37,13 @@ from common import (  # noqa: E402
     run_sweep,
 )
 
-EXP_NAME = "exp1_setup_tradeoff"
+EXP_NAME = "planner_exp_1"
 STARTUP_TIME_S = 60
 
 AGG_STATIC_WORKERS = [2, 3, 4, 5, 6, 7, 8]
 DISAGG_STATIC_PD = [(1, 1), (1, 2), (2, 2), (2, 3), (3, 3), (3, 4)]
 
-SLA_TTFT_VALUES_MS = [500, 750, 1000, 1500, 2500, 5000]
+SLA_TTFT_VALUES_MS = [1500]
 SLA_ITL_MS = 50
 
 PLANNER_TARGETS = ["throughput", "latency"]  # SLA is handled separately

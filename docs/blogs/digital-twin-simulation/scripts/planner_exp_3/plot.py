@@ -13,15 +13,14 @@ import matplotlib.pyplot as plt
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
-from common import RESULTS_ROOT  # noqa: E402
+from common import image_path, results_json_path  # noqa: E402
 
-EXP_NAME = "exp3_cold_start"
+EXP_NAME = "planner_exp_3"
 GRAY = "#8C8C8C"
 
 
 def load() -> list[dict]:
-    p = RESULTS_ROOT / EXP_NAME / "results.json"
-    rows = json.loads(p.read_text())
+    rows = json.loads(results_json_path(EXP_NAME).read_text())
     rows.sort(key=lambda r: r["params"]["startup_time_s"])
     return rows
 
@@ -77,12 +76,13 @@ def main() -> None:
     ax.legend()
 
     fig.suptitle(
-        "Exp 3 — Qwen3-32B / TP=2 / H200 / vLLM 0.12.0 — toolagent_trace, "
+        "Exp 3 — Qwen3-32B / TP=2 / H200 / vLLM — toolagent_trace, "
         "agg planner SLA(ttft=1500, itl=50)",
         y=1.0,
     )
     plt.tight_layout()
-    out = RESULTS_ROOT / EXP_NAME / "plot.png"
+    out = image_path(EXP_NAME)
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print(f"wrote {out}")
 
