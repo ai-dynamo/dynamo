@@ -10,13 +10,16 @@ use prometheus::{
     Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry,
 };
 
-/// Exact v1-compatible metrics that existing dashboards and tests consume.
+/// V1-compatible metrics that existing dashboards and tests consume,
+/// plus v2 additions (e.g. `onboard_blocks_d2h` for the G3→G2 staging
+/// step that KVBM v2 introduces between disk hits and the GPU promotion).
 #[derive(Clone)]
 pub struct CompatMetrics {
     pub offload_blocks_d2h: IntCounter,
     pub offload_blocks_h2d: IntCounter,
     pub offload_blocks_d2d: IntCounter,
     pub offload_blocks_d2o: IntCounter,
+    pub onboard_blocks_d2h: IntCounter,
     pub onboard_blocks_h2d: IntCounter,
     pub onboard_blocks_d2d: IntCounter,
     pub onboard_blocks_o2d: IntCounter,
@@ -51,6 +54,11 @@ impl CompatMetrics {
                 "The number of offload blocks from device to object storage",
             ))
             .expect("valid metric"),
+            onboard_blocks_d2h: IntCounter::with_opts(Opts::new(
+                "kvbm_onboard_blocks_d2h",
+                "The number of onboard blocks from disk to host (G3→G2 staging step)",
+            ))
+            .expect("valid metric"),
             onboard_blocks_h2d: IntCounter::with_opts(Opts::new(
                 "kvbm_onboard_blocks_h2d",
                 "The number of onboard blocks from host to device",
@@ -58,7 +66,7 @@ impl CompatMetrics {
             .expect("valid metric"),
             onboard_blocks_d2d: IntCounter::with_opts(Opts::new(
                 "kvbm_onboard_blocks_d2d",
-                "The number of onboard blocks from disk to device",
+                "The number of onboard blocks from disk to device (G3→G1 direct, e.g. via GDS)",
             ))
             .expect("valid metric"),
             onboard_blocks_o2d: IntCounter::with_opts(Opts::new(
@@ -104,6 +112,7 @@ impl CompatMetrics {
         registry.register(Box::new(self.offload_blocks_h2d.clone()))?;
         registry.register(Box::new(self.offload_blocks_d2d.clone()))?;
         registry.register(Box::new(self.offload_blocks_d2o.clone()))?;
+        registry.register(Box::new(self.onboard_blocks_d2h.clone()))?;
         registry.register(Box::new(self.onboard_blocks_h2d.clone()))?;
         registry.register(Box::new(self.onboard_blocks_d2d.clone()))?;
         registry.register(Box::new(self.onboard_blocks_o2d.clone()))?;
@@ -122,6 +131,7 @@ impl CompatMetrics {
             KvbmTransferRoute::OffloadH2D => self.offload_blocks_h2d.inc_by(blocks),
             KvbmTransferRoute::OffloadD2D => self.offload_blocks_d2d.inc_by(blocks),
             KvbmTransferRoute::OffloadD2O => self.offload_blocks_d2o.inc_by(blocks),
+            KvbmTransferRoute::OnboardD2H => self.onboard_blocks_d2h.inc_by(blocks),
             KvbmTransferRoute::OnboardH2D => self.onboard_blocks_h2d.inc_by(blocks),
             KvbmTransferRoute::OnboardD2D => self.onboard_blocks_d2d.inc_by(blocks),
             KvbmTransferRoute::OnboardO2D => self.onboard_blocks_o2d.inc_by(blocks),
@@ -249,6 +259,7 @@ mod tests {
         let names: Vec<_> = gathered.iter().map(|mf| mf.name()).collect();
 
         assert!(names.contains(&"kvbm_offload_blocks_d2h"));
+        assert!(names.contains(&"kvbm_onboard_blocks_d2h"));
         assert!(names.contains(&"kvbm_onboard_blocks_d2d"));
         assert!(names.contains(&"kvbm_matched_tokens"));
         assert!(names.contains(&"kvbm_object_write_failures"));

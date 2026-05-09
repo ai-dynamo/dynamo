@@ -233,11 +233,46 @@ impl KvbmConfig {
     /// )?;
     /// ```
     pub fn extract_from<T: Provider>(provider: T) -> Result<Self, ConfigError> {
-        let config: Self = Figment::from(provider)
+        let mut config: Self = Figment::from(provider)
             .extract()
             .map_err(|e| ConfigError::Extraction(Box::new(e)))?;
+        config.auto_enable_nixl_backends_for_tiers();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Ensure `nixl.backends` includes whatever the configured cache tiers need.
+    ///
+    /// - Host cache (G2) enabled → UCX (used for inter-worker / remote transfers)
+    /// - Disk cache (G3) enabled → POSIX, or GDS_MT when `disk.use_gds = true`
+    ///
+    /// Idempotent and additive: only fills gaps, never removes a backend the
+    /// user explicitly enabled. If no tier is enabled, leaves `nixl` untouched
+    /// (so a user with NIXL fully disabled stays that way).
+    fn auto_enable_nixl_backends_for_tiers(&mut self) {
+        let host_enabled = self.cache.host.is_enabled();
+        let disk_cfg = self.cache.disk.as_ref();
+        let disk_enabled = disk_cfg.is_some_and(|d| d.is_enabled());
+        let prefer_gds = disk_cfg.is_some_and(|d| d.use_gds);
+
+        if !host_enabled && !disk_enabled {
+            return;
+        }
+
+        let nixl = self.nixl.get_or_insert_with(NixlConfig::empty);
+
+        if host_enabled && !nixl.has_backend("UCX") {
+            tracing::info!(
+                "Auto-enabling NIXL backend UCX (host cache requires it for inter-worker transfers)"
+            );
+            *nixl = nixl.clone().with_backend("UCX");
+        }
+
+        if disk_enabled && !nixl.has_backend("POSIX") && !nixl.has_backend("GDS_MT") {
+            let backend = if prefer_gds { "GDS_MT" } else { "POSIX" };
+            tracing::info!(backend, "Auto-enabling NIXL backend for disk cache");
+            *nixl = nixl.clone().with_backend(backend);
+        }
     }
 
     /// Build a figment from defaults, then merge a custom provider.
@@ -608,5 +643,120 @@ mod tests {
                 assert!(worker_config.is_ok(), "from_env_for_worker should succeed");
             },
         );
+    }
+
+    fn config_with_cache(host_gb: Option<f64>, disk_gb: Option<f64>, use_gds: bool) -> KvbmConfig {
+        let mut config = KvbmConfig {
+            cache: CacheConfig {
+                host: HostCacheConfig {
+                    cache_size_gb: host_gb,
+                    num_blocks: None,
+                },
+                disk: disk_gb.map(|gb| DiskCacheConfig {
+                    cache_size_gb: Some(gb),
+                    num_blocks: None,
+                    use_gds,
+                    storage_path: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.auto_enable_nixl_backends_for_tiers();
+        config
+    }
+
+    #[test]
+    fn test_auto_enable_no_tiers_leaves_nixl_none() {
+        let config = config_with_cache(None, None, false);
+        assert!(config.nixl.is_none());
+    }
+
+    #[test]
+    fn test_auto_enable_host_adds_ucx() {
+        let config = config_with_cache(Some(4.0), None, false);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("UCX"));
+        assert!(!nixl.has_backend("POSIX"));
+    }
+
+    #[test]
+    fn test_auto_enable_disk_adds_posix() {
+        let config = config_with_cache(None, Some(10.0), false);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("POSIX"));
+        assert!(!nixl.has_backend("GDS_MT"));
+        // host wasn't enabled, so UCX shouldn't be added
+        assert!(!nixl.has_backend("UCX"));
+    }
+
+    #[test]
+    fn test_auto_enable_disk_with_gds_adds_gds_mt() {
+        let config = config_with_cache(None, Some(10.0), true);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("GDS_MT"));
+        assert!(!nixl.has_backend("POSIX"));
+    }
+
+    #[test]
+    fn test_auto_enable_host_and_disk_adds_both() {
+        let config = config_with_cache(Some(4.0), Some(10.0), false);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("UCX"));
+        assert!(nixl.has_backend("POSIX"));
+    }
+
+    #[test]
+    fn test_auto_enable_preserves_user_backends() {
+        // User explicitly configured GDS_MT for disk; auto-enable must not add POSIX too.
+        let mut config = KvbmConfig {
+            cache: CacheConfig {
+                host: HostCacheConfig {
+                    cache_size_gb: Some(4.0),
+                    num_blocks: None,
+                },
+                disk: Some(DiskCacheConfig {
+                    cache_size_gb: Some(10.0),
+                    num_blocks: None,
+                    use_gds: false, // even with use_gds=false, user's existing GDS_MT wins
+                    storage_path: None,
+                }),
+                ..Default::default()
+            },
+            nixl: Some(NixlConfig::empty().with_backend("GDS_MT")),
+            ..Default::default()
+        };
+        config.auto_enable_nixl_backends_for_tiers();
+        let nixl = config.nixl.expect("nixl present");
+        assert!(nixl.has_backend("GDS_MT"));
+        assert!(!nixl.has_backend("POSIX"));
+        // UCX still gets added because host cache is enabled
+        assert!(nixl.has_backend("UCX"));
+    }
+
+    #[test]
+    fn test_auto_enable_idempotent() {
+        let mut config = config_with_cache(Some(4.0), Some(10.0), false);
+        let snapshot: Vec<String> = config
+            .nixl
+            .as_ref()
+            .unwrap()
+            .enabled_backends()
+            .into_iter()
+            .cloned()
+            .collect();
+        config.auto_enable_nixl_backends_for_tiers();
+        let mut after: Vec<String> = config
+            .nixl
+            .as_ref()
+            .unwrap()
+            .enabled_backends()
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut before = snapshot;
+        before.sort();
+        after.sort();
+        assert_eq!(before, after);
     }
 }
