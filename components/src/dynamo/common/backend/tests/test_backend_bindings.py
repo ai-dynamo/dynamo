@@ -108,6 +108,7 @@ def test_worker_config_accepts_parser_runtime_settings():
     )
 
 
+@pytest.mark.unified
 def test_python_worker_config_from_runtime_config_copies_parser_settings():
     from dynamo.common.backend.worker import WorkerConfig
 
@@ -132,6 +133,43 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     assert config.reasoning_parser == "kimi_k25"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
+
+
+@pytest.mark.unified
+def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_absent():
+    from dynamo.common.backend.worker import WorkerConfig
+
+    class _BareRuntime:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = "nats"
+
+    cfg = WorkerConfig.from_runtime_config(_BareRuntime(), model_name="m")
+
+    assert cfg.component == "backend"
+    assert cfg.endpoint == "generate"
+    assert cfg.endpoint_types == "chat,completions"
+    assert cfg.use_kv_events is False
+    assert cfg.custom_jinja_template is None
+
+
+@pytest.mark.unified
+def test_python_worker_config_from_runtime_config_overrides_win():
+    from dynamo.common.backend.worker import WorkerConfig
+
+    class _WithComponent:
+        namespace = "ns"
+        component = "from-runtime"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = "nats"
+
+    cfg = WorkerConfig.from_runtime_config(
+        _WithComponent(), model_name="m", component="from-override"
+    )
+
+    assert cfg.component == "from-override"
 
 
 def test_worker_constructor_requires_engine_config_loop():

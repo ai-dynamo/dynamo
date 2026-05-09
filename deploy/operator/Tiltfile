@@ -201,8 +201,7 @@ def render_helm():
         '--namespace', NAMESPACE,
         '--set', 'dynamo-operator.enabled=true',
         # Subcharts — NATS is on by default (workers need it)
-        '--set', 'nats.enabled=%s' % str(ENABLE_NATS).lower(),
-        '--set', 'dynamo-operator.nats.enabled=%s' % str(ENABLE_NATS).lower(),
+        '--set', 'global.nats.install=%s' % str(ENABLE_NATS).lower(),
         '--set', 'global.etcd.install=%s' % str(ENABLE_ETCD).lower(),
         '--set', 'global.kai-scheduler.install=%s' % str(ENABLE_KAI_SCHEDULER).lower(),
         '--set', 'global.grove.install=%s' % str(ENABLE_GROVE).lower(),
