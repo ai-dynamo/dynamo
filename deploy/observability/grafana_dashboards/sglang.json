@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Dynamo Frontend (port 8000) + SGLang Engine (port 8081) \u2014 pipeline view with per-pool KV breakdown (full / SWA / Mamba), routing overhead, and collapsed disagg/hicache/per-worker rows.",
+  "description": "Dynamo Frontend + SGLang Engine \u2014 pipeline view with per-pool KV breakdown (full / SWA / Mamba), routing overhead, and collapsed disagg/hicache/per-worker rows. Sources: Dynamo metrics from the frontend HTTP port, SGLang engine metrics from the worker DYN_SYSTEM_PORT.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -25,7 +25,7 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Overview \u2014 Big-Number Summary (Dynamo Frontend + SGLang Engine)",
+      "title": "Overview \u2014 Big-Number Summary",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -542,7 +542,7 @@
     {
       "id": 10,
       "type": "row",
-      "title": "Dynamo Frontend (port 8000) \u2014 gateway view",
+      "title": "Dynamo Frontend \u2014 gateway view",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -1876,7 +1876,7 @@
     {
       "id": 25,
       "type": "row",
-      "title": "SGLang Engine (port 8081) \u2014 throughput & batching",
+      "title": "SGLang Engine \u2014 throughput & batching",
       "collapsed": false,
       "gridPos": {
         "x": 0,
