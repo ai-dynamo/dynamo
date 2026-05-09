@@ -24,8 +24,8 @@
 use std::sync::{Arc, Weak};
 
 use crate::ManagerId;
-use crate::blocks::{BlockId, BlockMetadata, BlockRegistrationHandle, SequenceHash};
 use crate::blocks::pin::{LifecyclePin, LifecyclePinRef};
+use crate::blocks::{BlockId, BlockMetadata, BlockRegistrationHandle, SequenceHash};
 use crate::pools::{BlockStore, store::upgrade_or_resurrect};
 
 /// Internal owner of a registered slot. Every clone of an

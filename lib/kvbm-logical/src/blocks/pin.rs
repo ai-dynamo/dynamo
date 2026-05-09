@@ -98,9 +98,18 @@ mod tests {
         salt: u32,
     ) -> (crate::ImmutableBlock<TestMeta>, ManagerId) {
         let token = create_iota_token_block(salt, 4);
-        let mb = manager.allocate_blocks(1).unwrap().into_iter().next().unwrap();
+        let mb = manager
+            .allocate_blocks(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let cb = mb.complete(&token).unwrap();
-        let block = manager.register_blocks(vec![cb]).into_iter().next().unwrap();
+        let block = manager
+            .register_blocks(vec![cb])
+            .into_iter()
+            .next()
+            .unwrap();
         let id = block.pin().manager_id();
         (block, id)
     }
@@ -137,9 +146,18 @@ mod tests {
         let manager = create_test_manager::<TestMeta>(4);
         let initial = manager.available_blocks();
         let token = create_iota_token_block(100, 4);
-        let mb = manager.allocate_blocks(1).unwrap().into_iter().next().unwrap();
+        let mb = manager
+            .allocate_blocks(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let cb = mb.complete(&token).unwrap();
-        let block = manager.register_blocks(vec![cb]).into_iter().next().unwrap();
+        let block = manager
+            .register_blocks(vec![cb])
+            .into_iter()
+            .next()
+            .unwrap();
 
         // Slot now Active: not in reset+inactive count.
         assert_eq!(manager.available_blocks(), initial - 1);
@@ -163,9 +181,18 @@ mod tests {
     fn pin_clone_is_arc_bump() {
         let manager = create_test_manager::<TestMeta>(4);
         let token = create_iota_token_block(200, 4);
-        let mb = manager.allocate_blocks(1).unwrap().into_iter().next().unwrap();
+        let mb = manager
+            .allocate_blocks(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let cb = mb.complete(&token).unwrap();
-        let block = manager.register_blocks(vec![cb]).into_iter().next().unwrap();
+        let block = manager
+            .register_blocks(vec![cb])
+            .into_iter()
+            .next()
+            .unwrap();
 
         let pin = block.pin();
         let count_before = pin.use_count();
@@ -179,7 +206,12 @@ mod tests {
         let mgr_b = create_test_manager::<TestMeta>(4);
 
         let token_a = create_iota_token_block(300, 4);
-        let mb_a = mgr_a.allocate_blocks(1).unwrap().into_iter().next().unwrap();
+        let mb_a = mgr_a
+            .allocate_blocks(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let block_a = mgr_a
             .register_blocks(vec![mb_a.complete(&token_a).unwrap()])
             .into_iter()
@@ -187,7 +219,12 @@ mod tests {
             .unwrap();
 
         let token_b = create_iota_token_block(300, 4);
-        let mb_b = mgr_b.allocate_blocks(1).unwrap().into_iter().next().unwrap();
+        let mb_b = mgr_b
+            .allocate_blocks(1)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let block_b = mgr_b
             .register_blocks(vec![mb_b.complete(&token_b).unwrap()])
             .into_iter()
