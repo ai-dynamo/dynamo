@@ -5,39 +5,53 @@
 """Real-GPU end-to-end coverage for ``InstrumentedScheduler`` self-benchmark
 mode (``DYN_BENCHMARK_MODE``).
 
-These tests catch regressions that pure-Python unit tests can't see -- in
-particular two recently-fixed cases that only manifest on a live worker
-running the model on a GPU:
+Pure-Python unit tests on ``_bench_inject_fake_decode`` and the empty-frame
+schedule branch can't catch the recently-fixed regressions in isolation --
+both only manifest with the model running on a GPU:
 
 1. ``kv_connector_metadata`` must be attached to every benchmark-built
    ``SchedulerOutput``. Otherwise vLLM's worker-side
    ``_get_kv_connector_output`` asserts and EngineCore dies before the
-   first decode batch in any disagg config (any worker with a KV
-   connector configured -- NixlConnector, FlexKVConnectorV1, etc.).
+   first synthetic decode batch in any disagg config (any worker with a
+   KV connector configured: NixlConnector, FlexKVConnectorV1, etc.).
 
 2. The synthetic decode prompt must be padded to ``ctx_len + 1``.
-   Otherwise the async-scheduler ``-1`` placeholder write at
+   Otherwise the async-scheduler's ``-1`` placeholder write at
    ``token_ids_cpu[req_idx, ctx_len]`` collides with the read slot the
    next benchmark batch's request reads as its decode input -- the
-   embedding lookup OOBs and EngineCore dies somewhere on the second
-   decode point (first batch_size > 1 sweep).
+   embedding lookup OOBs and EngineCore dies on the second decode point
+   (first ``batch_size > 1`` sweep).
 
-The test launches a real ``python -m dynamo.vllm`` worker with
-``--benchmark-mode {agg,decode}`` and waits for the benchmark to write
-its JSON result. We then validate the file structure (right mode, right
-number of points, every point has at least one FPM with positive
-wall_time). The worker is terminated before it can register with the
-runtime so we don't depend on frontend handshake.
+This test runs the worker through its **normal** startup -- with
+``--benchmark-mode`` set, the worker performs the self-benchmark before
+registering with the runtime, then proceeds to serve. So a passing
+serving health check already proves the benchmark didn't break the
+engine. We additionally:
+
+* validate every worker wrote a benchmark JSON whose every point has
+  at least one FPM with positive ``wall_time``,
+* send a real chat-completion request and assert a non-empty response.
+
+This means a regression in either fix (or anything else that breaks
+the benchmark for a serving worker) fails this test.
 
 Coverage matrix:
-  * agg benchmark, no connector -- the simplest path; catches both bugs
-    if either re-regresses (the prompt-padding bug fires on agg too).
-  * decode benchmark, disagg + NixlConnector kv_both -- the original
-    user-reported configuration; catches the connector-metadata bug.
 
-Both runs use Qwen3-0.6B with tight benchmark granularity (``2``) and
-``--max-model-len 1024`` so each test takes ~30s of GPU time, well
-within a single-GPU pre-merge slot.
+* ``test_self_benchmark_agg_serves_after_bench`` -- aggregated worker,
+  ``--benchmark-mode agg`` (covers prompt-padding regression on the
+  decode sweep within agg mode; ``gpu_1``).
+* ``test_self_benchmark_disagg_serves_after_bench`` -- prefill worker
+  (``--benchmark-mode prefill``) + decode worker
+  (``--benchmark-mode decode``, NixlConnector ``kv_both``); the
+  user-reported configuration. Exercises BOTH fixes simultaneously
+  (``gpu_2``).
+
+Setup mirrors ``tests/fault_tolerance/cancellation/test_vllm.py``:
+same model (``FAULT_TOLERANCE_MODEL_NAME`` = ``Qwen/Qwen3-0.6B``),
+same ``DynamoFrontendProcess`` + ``ManagedProcess`` worker pattern,
+same ``runtime_services_dynamic_ports`` + ``predownload_models``
+fixtures, same NixlConnector / kv-events / VLLM_NIXL_SIDE_CHANNEL_PORT
+wiring for the disagg case.
 """
 
 from __future__ import annotations
@@ -50,73 +64,56 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils.constants import QWEN
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.client import send_request
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.payloads import check_health_generate, check_models_api
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
 pytestmark = [
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.pre_merge,
-    pytest.mark.model(QWEN),
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
 ]
 
 
-# Tight benchmark sweeps: 2 points per axis covers
-# (batch=1, batch=max) x (ctx=block_size, ctx=max) -- enough to exercise
-# both batch=1 and batch>1 code paths and both ctx=block_size_multiple
-# and ctx=non-multiple cases. Keeps the wall time short.
-_BENCH_GRANULARITY_FAST = "2"
+# Tight benchmark sweeps keep wall time short. Granularity 2 covers
+# both batch=1 and batch>1 (the case that regressed) and both
+# ctx=block_size and ctx=max-model-len cases.
+_BENCH_GRANULARITY = "2"
 _BENCH_WARMUP_ITERATIONS = "2"
-_MAX_MODEL_LEN = "1024"
-_GPU_MEMORY_UTIL = "0.4"
 
-
-def _wait_for_benchmark_json(output_path: Path, expected_mode: str):
-    """Health-check function for ManagedProcess: returns True once the
-    benchmark JSON file is on disk and parses cleanly."""
-
-    def _check(_remaining_timeout: float = 0.0) -> bool:
-        if not output_path.exists():
-            return False
-        # File can appear before write completes; tolerate JSONDecodeError.
-        try:
-            data = json.loads(output_path.read_text())
-        except (json.JSONDecodeError, ValueError):
-            return False
-        if data.get("config", {}).get("mode") != expected_mode:
-            logger.warning(
-                "Benchmark output mode mismatch: got %s expected %s",
-                data.get("config", {}).get("mode"),
-                expected_mode,
-            )
-            return False
-        if not data.get("results"):
-            return False
-        return True
-
-    return _check
+# Match the cancellation tests' worker config. max-model-len is a bit
+# tighter here so the benchmark sweep finishes quickly.
+_MAX_MODEL_LEN = "8192"
+_GPU_MEMORY_UTILIZATION = "0.45"
 
 
 def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
-    """Parse the benchmark JSON and assert that every point reported a
-    valid FPM with positive wall_time. Returns the parsed dict for
-    further per-test checks."""
-    assert output_path.exists(), f"benchmark JSON missing at {output_path}"
+    """Parse the benchmark JSON and assert every point produced a real
+    forward-pass measurement (positive ``wall_time``)."""
+    assert (
+        output_path.exists()
+    ), f"benchmark JSON missing at {output_path} -- worker never wrote it"
     data = json.loads(output_path.read_text())
 
-    assert data["config"]["mode"] == expected_mode, (
-        f"benchmark mode in JSON ({data['config']['mode']}) "
-        f"does not match expected ({expected_mode})"
+    actual_mode = data.get("config", {}).get("mode")
+    assert actual_mode == expected_mode, (
+        f"benchmark mode in JSON ({actual_mode}) does not match "
+        f"expected ({expected_mode})"
     )
-    results = data["results"]
-    assert len(results) > 0, "benchmark JSON has no result points"
+
+    results = data.get("results") or []
+    assert (
+        len(results) > 0
+    ), f"benchmark JSON has no result points (mode={expected_mode})"
 
     for r in results:
         point = r["point"]
-        fpms = r["fpms"]
+        fpms = r.get("fpms") or []
         assert len(fpms) > 0, (
             f"point {point} produced no FPMs -- the model didn't actually "
             f"execute that batch (regression in _bench_inject_fake_decode "
@@ -132,178 +129,313 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
     return data
 
 
-def _bench_command(
-    *,
-    mode: str,
-    output_path: str,
-    extra_args: list[str] | None = None,
-) -> list[str]:
-    """Build the ``python -m dynamo.vllm`` argv for a benchmark run."""
-    cmd = [
-        "python3",
-        "-m",
-        "dynamo.vllm",
-        "--model",
-        QWEN,
-        "--enforce-eager",
-        "--max-model-len",
-        _MAX_MODEL_LEN,
-        "--gpu-memory-utilization",
-        _GPU_MEMORY_UTIL,
-        "--benchmark-mode",
-        mode,
-        "--benchmark-prefill-granularity",
-        _BENCH_GRANULARITY_FAST,
-        "--benchmark-decode-length-granularity",
-        _BENCH_GRANULARITY_FAST,
-        "--benchmark-decode-batch-granularity",
-        _BENCH_GRANULARITY_FAST,
-        "--benchmark-warmup-iterations",
-        _BENCH_WARMUP_ITERATIONS,
-        "--benchmark-output-path",
-        output_path,
-        # Cap the worker's benchmark wait at ~3min; the result file is
-        # what we actually wait on, this is just a safety net for the
-        # worker side.
-        "--benchmark-timeout",
-        "180",
-    ]
-    if extra_args:
-        cmd.extend(extra_args)
-    return cmd
+class _DynamoBenchmarkWorker(ManagedProcess):
+    """Process manager for a vLLM worker started with ``--benchmark-mode``.
 
-
-def _run_benchmark(
-    request: pytest.FixtureRequest,
-    *,
-    mode: str,
-    extra_args: list[str] | None,
-    tmp_path: Path,
-    log_label: str,
-) -> Path:
-    """Spawn a vllm worker in benchmark mode, wait for the result JSON,
-    then terminate. Returns the path to the produced JSON."""
-    output_path = tmp_path / f"bench_{log_label}.json"
-
-    log_dir = f"{request.node.name}_{log_label}"
-    try:
-        shutil.rmtree(log_dir)
-    except FileNotFoundError:
-        pass
-
-    env = os.environ.copy()
-    # Verbose logging makes triage tractable when CI catches a regression.
-    env.setdefault("DYN_LOG", "info")
-
-    proc = ManagedProcess(
-        command=_bench_command(
-            mode=mode, output_path=str(output_path), extra_args=extra_args
-        ),
-        env=env,
-        # Wait on the JSON file rather than a frontend port: the benchmark
-        # finishes before the worker registers, and we tear down the
-        # worker before its serving loop matters.
-        health_check_funcs=[_wait_for_benchmark_json(output_path, mode)],
-        timeout=420,  # cold start (~30s) + warmup (~5s) + sweep (~30s) + buffer
-        display_output=True,
-        terminate_all_matching_process_names=False,
-        stragglers=["VLLM::EngineCore"],
-        straggler_commands=["-m dynamo.vllm"],
-        log_dir=log_dir,
-    )
-
-    with proc:
-        # ManagedProcess __enter__ has already polled
-        # _wait_for_benchmark_json until it returned True -- the JSON
-        # file is on disk and parses. Do the structural validation
-        # while the process is still alive so any error log is captured
-        # in the test's captured output.
-        _validate_benchmark_results(output_path, mode)
-
-    return output_path
-
-
-@pytest.mark.timeout(600)
-def test_self_benchmark_agg_mode(request, runtime_services, tmp_path):
-    """Aggregated worker (no kv-transfer-config) running
-    ``--benchmark-mode agg``.
-
-    Catches the prompt-padding bug: prefill sweep runs through normal
-    scheduling (unaffected), but the decode sweep within agg mode
-    hits ``_bench_inject_fake_decode`` and would CUDA-OOB at
-    batch>1 if the prompt isn't padded.
+    Modeled on ``tests/fault_tolerance/cancellation/test_vllm.py``'s
+    ``DynamoWorkerProcess`` so the disagg worker pair (prefill + decode)
+    wires NixlConnector / kv-events / NIXL side channel exactly the
+    same way -- this keeps CI ports and process layout consistent with
+    other vLLM e2e tests.
     """
-    output = _run_benchmark(
+
+    def __init__(
+        self,
         request,
-        mode="agg",
-        extra_args=None,
-        tmp_path=tmp_path,
-        log_label="agg",
-    )
-    data = json.loads(output.read_text())
+        frontend_port: int,
+        bench_output_path: Path,
+        bench_mode: str,
+        is_prefill: bool | None,
+    ):
+        self.bench_output_path = bench_output_path
+        self.bench_mode = bench_mode
+        self.is_prefill = is_prefill
+        self.frontend_port = frontend_port
 
-    # Sanity: agg sweep produces both prefill and decode points.
-    point_types = {r["point"]["point_type"] for r in data["results"]}
-    assert (
-        "prefill" in point_types
-    ), f"agg benchmark missing prefill points; got types={point_types}"
-    assert (
-        "decode" in point_types
-    ), f"agg benchmark missing decode points; got types={point_types}"
+        # Allocate a per-worker system port like the cancellation test does.
+        self.system_port = allocate_port(9100)
 
-    # Sanity: the decode sweep covers batch_size > 1 (the case that
-    # regressed). With granularity=2 we expect at least one decode point
-    # at batch_size > 1.
-    decode_batches = sorted(
-        r["point"]["batch_size"]
-        for r in data["results"]
-        if r["point"]["point_type"] == "decode"
-    )
-    assert any(b > 1 for b in decode_batches), (
-        f"agg decode sweep only ran batch=1; the prompt-padding regression "
-        f"would not be caught by this run. batch_sizes={decode_batches}"
-    )
+        command = [
+            "python3",
+            "-m",
+            "dynamo.vllm",
+            "--model",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--enforce-eager",
+            "--gpu-memory-utilization",
+            _GPU_MEMORY_UTILIZATION,
+            "--max-model-len",
+            _MAX_MODEL_LEN,
+            # Benchmark flags
+            "--benchmark-mode",
+            bench_mode,
+            "--benchmark-prefill-granularity",
+            _BENCH_GRANULARITY,
+            "--benchmark-decode-length-granularity",
+            _BENCH_GRANULARITY,
+            "--benchmark-decode-batch-granularity",
+            _BENCH_GRANULARITY,
+            "--benchmark-warmup-iterations",
+            _BENCH_WARMUP_ITERATIONS,
+            "--benchmark-output-path",
+            str(bench_output_path),
+            # Bound how long the worker waits internally for the
+            # benchmark file before failing startup. The outer
+            # ``timeout=`` below is a separate safety net.
+            "--benchmark-timeout",
+            "240",
+        ]
+
+        if is_prefill is True:
+            command.extend(["--disaggregation-mode", "prefill"])
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                ]
+            )
+            health_check_urls = [
+                (f"http://localhost:{self.system_port}/health", self._is_ready),
+            ]
+        elif is_prefill is False:
+            command.extend(["--disaggregation-mode", "decode"])
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                ]
+            )
+            health_check_urls = [
+                (f"http://localhost:{self.system_port}/health", self._is_ready),
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                (f"http://localhost:{frontend_port}/health", check_health_generate),
+            ]
+        else:
+            health_check_urls = [
+                (f"http://localhost:{self.system_port}/health", self._is_ready),
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                (f"http://localhost:{frontend_port}/health", check_health_generate),
+            ]
+
+        env = os.environ.copy()
+        env["DYN_LOG"] = "info"
+        # Match cancellation tests' config to avoid CI flake from
+        # canary health checks during startup.
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
+        env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        env["DYN_SYSTEM_PORT"] = str(self.system_port)
+        env["DYN_HTTP_PORT"] = str(frontend_port)
+
+        # Prefill worker publishes KV events on its own ZMQ port and uses
+        # a distinct NIXL side-channel port. Same constants as
+        # ``tests/fault_tolerance/cancellation/test_vllm.py``.
+        if is_prefill is True:
+            command.extend(
+                [
+                    "--kv-events-config",
+                    json.dumps(
+                        {
+                            "publisher": "zmq",
+                            "topic": "kv-events",
+                            "endpoint": "tcp://*:20082",
+                            "enable_kv_cache_events": True,
+                        }
+                    ),
+                ]
+            )
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
+
+        if is_prefill is True:
+            worker_type = "prefill_worker"
+        elif is_prefill is False:
+            worker_type = "decode_worker"
+        else:
+            worker_type = "worker"
+        log_dir = f"{request.node.name}_{worker_type}"
+        try:
+            shutil.rmtree(log_dir)
+        except FileNotFoundError:
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            health_check_urls=health_check_urls,
+            # Generous: cold model load + benchmark sweep + frontend
+            # registration all need to complete within this window.
+            timeout=420,
+            display_output=True,
+            terminate_all_matching_process_names=False,
+            stragglers=["VLLM::EngineCore"],
+            straggler_commands=["-m dynamo.vllm"],
+            log_dir=log_dir,
+        )
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            deallocate_port(self.system_port)
+        except Exception as e:
+            logger.warning(f"Failed to release worker system port: {e}")
+        return super().__exit__(exc_type, exc_val, exc_tb)
+
+    def _is_ready(self, response) -> bool:
+        try:
+            data = response.json()
+            if data.get("status") == "ready":
+                kind = (
+                    "Prefill"
+                    if self.is_prefill is True
+                    else "Decode"
+                    if self.is_prefill is False
+                    else "Aggregated"
+                )
+                logger.info(
+                    f"{kind} worker ready (bench_mode={self.bench_mode}, "
+                    f"system_port={self.system_port})"
+                )
+                return True
+            logger.warning(f"Worker status not ready yet: {data.get('status')!r}")
+        except ValueError:
+            logger.warning("Worker /health response was not valid JSON")
+        return False
 
 
+def _send_chat_completion(frontend_port: int) -> str:
+    """Send a real chat completion via the frontend and return the
+    assistant's content. Asserts the response is non-empty so a worker
+    that registered but can't actually generate fails the test."""
+    url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    payload = {
+        "model": FAULT_TOLERANCE_MODEL_NAME,
+        "messages": [{"role": "user", "content": "Say hello in one word."}],
+        "max_tokens": 16,
+        "temperature": 0.0,
+    }
+    response = send_request(url=url, payload=payload, timeout=120)
+    response.raise_for_status()
+    body = response.json()
+    choices = body.get("choices") or []
+    assert len(choices) > 0, f"chat completion returned no choices: {body}"
+    content = (choices[0].get("message") or {}).get("content") or ""
+    assert len(content.strip()) > 0, f"chat completion returned empty content: {body}"
+    logger.info(f"chat completion ok: content={content!r}")
+    return content
+
+
+@pytest.mark.gpu_1
 @pytest.mark.timeout(600)
-def test_self_benchmark_disagg_decode_with_nixl_connector(
-    request, runtime_services, tmp_path
+def test_self_benchmark_agg_serves_after_bench(
+    request, runtime_services_dynamic_ports, predownload_models, tmp_path
 ):
-    """Disagg decode worker with NixlConnector ``kv_both`` running
-    ``--benchmark-mode decode``.
+    """Aggregated worker runs ``--benchmark-mode agg`` during startup,
+    then serves a normal chat completion.
 
-    This is the configuration users hit in production -- it catches
-    BOTH:
-      * connector-metadata regression (fails on the very first
-        synthetic decode batch),
-      * prompt-padding regression (fails on the second decode point,
-        first batch>1).
+    Catches the prompt-padding regression on the decode sweep within
+    agg mode (``_bench_inject_fake_decode`` is also called from the
+    agg path).
     """
-    output = _run_benchmark(
-        request,
-        mode="decode",
-        extra_args=[
-            "--disaggregation-mode",
-            "decode",
-            "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
-        ],
-        tmp_path=tmp_path,
-        log_label="disagg_decode_nixl",
-    )
-    data = json.loads(output.read_text())
+    bench_output = tmp_path / "bench_agg.json"
 
-    # All result points must be decode-mode.
-    for r in data["results"]:
-        assert (
-            r["point"]["point_type"] == "decode"
-        ), f"--benchmark-mode decode produced a non-decode point: {r['point']}"
+    with DynamoFrontendProcess(request, frontend_port=0) as frontend:
+        logger.info(f"Frontend up on port {frontend.http_port}")
 
-    # Sanity: at least one batch>1 point ran. If it didn't, the
-    # connector-metadata fix passed but the prompt-padding fix isn't
-    # exercised -- a future regression in the latter would be silent.
-    decode_batches = sorted(r["point"]["batch_size"] for r in data["results"])
-    assert any(b > 1 for b in decode_batches), (
-        f"disagg decode sweep only ran batch=1; the prompt-padding "
-        f"regression would not be caught. batch_sizes={decode_batches}"
-    )
+        with _DynamoBenchmarkWorker(
+            request,
+            frontend_port=frontend.http_port,
+            bench_output_path=bench_output,
+            bench_mode="agg",
+            is_prefill=None,
+        ):
+            # Health checks already passed by the time we get here:
+            # worker startup includes the benchmark sweep, then frontend
+            # registration. So the engine survived the sweep.
+            data = _validate_benchmark_results(bench_output, "agg")
+
+            # Sanity: agg sweep produces both prefill and decode points,
+            # and the decode sweep includes batch>1 (the regression case).
+            point_types = {r["point"]["point_type"] for r in data["results"]}
+            assert (
+                "prefill" in point_types and "decode" in point_types
+            ), f"agg benchmark missing point types: got {point_types}"
+            decode_batches = sorted(
+                r["point"]["batch_size"]
+                for r in data["results"]
+                if r["point"]["point_type"] == "decode"
+            )
+            assert any(b > 1 for b in decode_batches), (
+                f"agg decode sweep only ran batch=1, prompt-padding "
+                f"regression would slip through. batch_sizes={decode_batches}"
+            )
+
+            # Now exercise normal serving end-to-end.
+            _send_chat_completion(frontend.http_port)
+
+
+@pytest.mark.gpu_2
+@pytest.mark.timeout(900)
+def test_self_benchmark_disagg_serves_after_bench(
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    tmp_path,
+):
+    """Disagg prefill + decode workers each run their own
+    ``--benchmark-mode``, then together serve a normal chat completion.
+
+    This is the user-reported configuration. Exercises:
+
+    * connector-metadata fix on the decode worker (NixlConnector
+      kv_both -- worker would die on the first synthetic decode batch
+      if the metadata isn't attached);
+    * prompt-padding fix on both workers' decode sweeps (the prefill
+      worker also runs decode warmup steps via ``_bench_step_warmup``).
+    """
+    bench_output_p = tmp_path / "bench_prefill.json"
+    bench_output_d = tmp_path / "bench_decode.json"
+
+    with DynamoFrontendProcess(request, frontend_port=0) as frontend:
+        logger.info(f"Frontend up on port {frontend.http_port}")
+
+        with _DynamoBenchmarkWorker(
+            request,
+            frontend_port=frontend.http_port,
+            bench_output_path=bench_output_p,
+            bench_mode="prefill",
+            is_prefill=True,
+        ) as prefill:
+            logger.info(f"Prefill worker ready (PID {prefill.proc.pid})")
+
+            with _DynamoBenchmarkWorker(
+                request,
+                frontend_port=frontend.http_port,
+                bench_output_path=bench_output_d,
+                bench_mode="decode",
+                is_prefill=False,
+            ) as decode:
+                logger.info(f"Decode worker ready (PID {decode.proc.pid})")
+
+                # Both workers passed serving health checks -- both
+                # survived their benchmark sweeps and registered.
+                p_data = _validate_benchmark_results(bench_output_p, "prefill")
+                d_data = _validate_benchmark_results(bench_output_d, "decode")
+
+                # Decode sweep on the decode worker must include batch>1.
+                decode_batches = sorted(
+                    r["point"]["batch_size"] for r in d_data["results"]
+                )
+                assert any(b > 1 for b in decode_batches), (
+                    f"disagg decode sweep only ran batch=1, prompt-padding "
+                    f"regression would slip through. "
+                    f"batch_sizes={decode_batches}"
+                )
+                # Prefill sweep on the prefill worker must produce
+                # prefill points.
+                p_types = {r["point"]["point_type"] for r in p_data["results"]}
+                assert (
+                    "prefill" in p_types
+                ), f"prefill benchmark missing prefill points: {p_types}"
+
+                # End-to-end: a real chat completion that traverses
+                # both workers (prefill on one, decode on the other).
+                _send_chat_completion(frontend.http_port)
