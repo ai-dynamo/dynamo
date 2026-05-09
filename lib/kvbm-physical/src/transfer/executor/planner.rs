@@ -1,15 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Planner-driven CudaAsync executor (`use_planner = true` path).
+//! Planner-driven CUDA / NIXL executor (`use_planner = true` path).
 //!
-//! Wires `transfer::plan::plan_copy` into the existing CUDA copy
-//! infrastructure for the
-//! [`TransferStrategy::CudaAsyncH2D`] / `CudaAsyncD2H` / `CudaAsyncD2D`
-//! strategies. Other strategies and `use_planner = false` callers stay
-//! on the legacy [`super::execute_direct_transfer`] path; this module
-//! is only reached when both conditions hold. Errors from the planner
-//! path are NOT silently fallen back to the legacy executor — bail
+//! Wires `transfer::plan::plan_copy` into the existing transfer
+//! infrastructure for two strategy families:
+//! - [`TransferStrategy::CudaAsync{H2D, D2H, D2D}`] — dispatched via
+//!   `kvbm_kernels::memcpy_batch` (PR-5).
+//! - [`TransferStrategy::Nixl{Read, Write, ReadFlipped, WriteFlipped}`]
+//!   — dispatched via NIXL `create_xfer_req` / `post_xfer_req` (PR-5.6).
+//!
+//! Other strategies and `use_planner = false` callers stay on the
+//! legacy [`super::execute_direct_transfer`] path; this module is only
+//! reached when both conditions hold. Errors from the planner path
+//! are NOT silently fallen back to the legacy executor — bail
 //! semantics are explicit so callers know whether the transfer ran.
 //!
 //! Pipeline:
@@ -34,6 +38,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use cudarc::driver::CudaStream;
 use cudarc::runtime::sys::cudaStream_t;
+use dynamo_memory::nixl::{XferDescList, XferOp};
 use kvbm_kernels::MemcpyBatchMode;
 
 use super::TransferContext;
@@ -71,65 +76,10 @@ pub(crate) fn execute_planner_cuda_transfer(
     cuda_stream: Option<Arc<CudaStream>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
-    let src_block_layout = src.layout().block_layout();
-    let dst_block_layout = dst.layout().block_layout();
-    if validate_planner_inputs(
-        src_block_layout,
-        dst_block_layout,
-        src_block_ids,
-        dst_block_ids,
-        strategy,
-    )?
-    .is_noop()
-    {
-        return Ok(TransferCompleteNotification::completed());
-    }
-
-    // 1. Project to labelled views.
-    let src_view = physical_to_layout_view(src)?;
-    let dst_view = physical_to_layout_view(dst)?;
-
-    // 2. Project to addressable annotated layouts.
-    let src_al = AnnotatedLayout::from_view(&src_view)?;
-    let dst_al = AnnotatedLayout::from_view(&dst_view)?;
-
-    // 3. Build the selection (no axis_slices in PR-5 — full-extent
-    //    transfers).
-    let block_pairs: Vec<(usize, usize)> = src_block_ids
-        .iter()
-        .zip(dst_block_ids.iter())
-        .map(|(&s, &d)| (s, d))
-        .collect();
-    let selection = TransferSelection::full(block_pairs);
-    // PR-5 policy: `min_inner_bytes = 0` so layouts that pass the
-    // `requires_transform` gate above always emit `CopyPlan::Direct`
-    // even when their inner contiguous tail is small. The default
-    // 4 KiB threshold exists for kernel-launch amortisation, and PR-5
-    // has no kernel candidate to hand small-tail plans off to. PR-6
-    // restores the threshold once `Candidate::TransformKernel` is
-    // executable.
-    let policy = CopyPolicy {
-        min_inner_bytes: 0,
-        coalesce: true,
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy)? {
+        PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
+        PlanOutcome::Ops(ops) => ops,
     };
-
-    // 4. Plan the copy.
-    let plan = plan_copy(&src_al, &dst_al, &selection, &policy)?;
-
-    // 5. Lower to candidates and pick.
-    let candidates = lower_to_candidates(plan)?;
-    let chosen = select_candidate(&candidates)?;
-    let ops = match chosen {
-        Candidate::DirectDma { ops } => ops.clone(),
-        other => bail!(
-            "execute_planner_cuda_transfer: PR-5 only supports DirectDma, got {:?}",
-            other
-        ),
-    };
-
-    if ops.is_empty() {
-        return Ok(TransferCompleteNotification::completed());
-    }
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
     // determines which stream pool we draw from.
@@ -143,19 +93,189 @@ pub(crate) fn execute_planner_cuda_transfer(
         }
     };
 
-    // 6. Dispatch ops to CUDA. Group by `size` so each `memcpy_batch`
-    //    call has a uniform `size_per_copy`. The common case is one
-    //    group (uniform op size after coalescing); if the planner emits
-    //    heterogeneous sizes (e.g. partial coalescing across non-
-    //    contiguous block runs), we issue one batch per size.
+    // Dispatch ops to CUDA. Group by `size` so each `memcpy_batch`
+    // call has a uniform `size_per_copy`. The common case is one
+    // group (uniform op size after coalescing); if the planner emits
+    // heterogeneous sizes (e.g. partial coalescing across non-
+    // contiguous block runs), we issue one batch per size.
     dispatch_ops_grouped_by_size(&ops, stream.as_ref())?;
 
-    // 7. Synchronisation handoff.
     if caller_manages_sync {
         return Ok(TransferCompleteNotification::completed());
     }
     let event = stream.record_event(None)?;
     Ok(ctx.register_cuda_event(event))
+}
+
+/// Dispatch a NIXL transfer through the stride-aware planner.
+///
+/// Behaves like [`execute_planner_cuda_transfer`] for the validation,
+/// planning, and lowering stages, then maps the lowered
+/// [`Vec<CopyOp>`] onto a NIXL `XferDescList` pair instead of
+/// `cudaMemcpyAsync`.
+///
+/// Per-side `MemType` and `device_id` come from each
+/// `PhysicalLayout::nixl_metadata` and are applied uniformly to every
+/// op (PR-5.6 option (b): a single transfer touches one src + one dst
+/// each homogeneous in storage). PR-7+ may carry per-axis storage
+/// in `LayoutView` once heterogeneous-storage planning lands.
+///
+/// Bails (no fallback) when:
+/// - the strategy is not one of `Nixl{Read, Write, ReadFlipped, WriteFlipped}`;
+/// - locality is wrong for the chosen op (Write requires src local;
+///   Read requires dst local — same invariants the legacy executor
+///   asserts);
+/// - any condition rejected by [`validate_planner_inputs`] or
+///   [`plan_and_lower`].
+pub(crate) fn execute_planner_nixl_transfer(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+    ctx: &TransferContext,
+) -> Result<TransferCompleteNotification> {
+    let xfer_op = match strategy {
+        TransferStrategy::NixlRead | TransferStrategy::NixlReadFlipped => XferOp::Read,
+        TransferStrategy::NixlWrite | TransferStrategy::NixlWriteFlipped => XferOp::Write,
+        other => bail!("execute_planner_nixl_transfer: strategy {other:?} not a NIXL strategy"),
+    };
+
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy)? {
+        PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
+        PlanOutcome::Ops(ops) => ops,
+    };
+
+    let nixl_agent = ctx.nixl_agent();
+    let src_metadata = src.nixl_metadata();
+    let dst_metadata = dst.nixl_metadata();
+    let src_is_local = nixl_agent.name() == src_metadata.agent_name();
+    let dst_is_local = nixl_agent.name() == dst_metadata.agent_name();
+    match xfer_op {
+        XferOp::Write => {
+            if !src_is_local {
+                bail!(
+                    "execute_planner_nixl_transfer: Write (push) requires local src; \
+                     src_agent={:?}, local_agent={:?}",
+                    src_metadata.agent_name(),
+                    nixl_agent.name()
+                );
+            }
+        }
+        XferOp::Read => {
+            if !dst_is_local {
+                bail!(
+                    "execute_planner_nixl_transfer: Read (pull) requires local dst; \
+                     dst_agent={:?}, local_agent={:?}",
+                    dst_metadata.agent_name(),
+                    nixl_agent.name()
+                );
+            }
+        }
+    }
+
+    let src_mem_type = src_metadata.mem_type();
+    let dst_mem_type = dst_metadata.mem_type();
+    let src_device_id = src_metadata.device_id();
+    let dst_device_id = dst_metadata.device_id();
+
+    // Build XferDescLists. One descriptor per CopyOp on each side —
+    // the planner already coalesced contiguous runs, so the
+    // descriptor count equals the op count.
+    let mut src_dl = XferDescList::new(src_mem_type)?;
+    let mut dst_dl = XferDescList::new(dst_mem_type)?;
+    for op in &ops {
+        src_dl.add_desc(op.src_addr, op.size, src_device_id);
+        dst_dl.add_desc(op.dst_addr, op.size, dst_device_id);
+    }
+
+    // Flipped strategies swap the roles assigned to the descriptor
+    // lists at the NIXL layer (the local agent issues the request
+    // against the descriptors as if the directionality were inverted).
+    if matches!(
+        strategy,
+        TransferStrategy::NixlReadFlipped | TransferStrategy::NixlWriteFlipped
+    ) {
+        std::mem::swap(&mut src_dl, &mut dst_dl);
+    }
+
+    let remote_agent = match xfer_op {
+        XferOp::Write => dst_metadata.agent_name(),
+        XferOp::Read => src_metadata.agent_name(),
+    };
+    let xfer_req = nixl_agent.create_xfer_req(xfer_op, &src_dl, &dst_dl, remote_agent, None)?;
+    let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+    if still_pending {
+        Ok(ctx.register_nixl_status(xfer_req))
+    } else {
+        Ok(TransferCompleteNotification::completed())
+    }
+}
+
+/// Result of [`plan_and_lower`].
+enum PlanOutcome {
+    /// The transfer has nothing to do (empty block list, or planner
+    /// returned an empty op vec).
+    Empty,
+    /// Lowered ops to dispatch.
+    Ops(Vec<CopyOp>),
+}
+
+/// Shared "validate → project → plan → lower" pipeline used by both
+/// the CUDA and NIXL planner-path entrypoints.
+fn plan_and_lower(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+) -> Result<PlanOutcome> {
+    let src_block_layout = src.layout().block_layout();
+    let dst_block_layout = dst.layout().block_layout();
+    if validate_planner_inputs(
+        src_block_layout,
+        dst_block_layout,
+        src_block_ids,
+        dst_block_ids,
+        strategy,
+    )?
+    .is_noop()
+    {
+        return Ok(PlanOutcome::Empty);
+    }
+
+    let src_view = physical_to_layout_view(src)?;
+    let dst_view = physical_to_layout_view(dst)?;
+    let src_al = AnnotatedLayout::from_view(&src_view)?;
+    let dst_al = AnnotatedLayout::from_view(&dst_view)?;
+
+    let block_pairs: Vec<(usize, usize)> = src_block_ids
+        .iter()
+        .zip(dst_block_ids.iter())
+        .map(|(&s, &d)| (s, d))
+        .collect();
+    let selection = TransferSelection::full(block_pairs);
+    // PR-5 policy: `min_inner_bytes = 0` — see
+    // `execute_planner_cuda_transfer` for rationale.
+    let policy = CopyPolicy {
+        min_inner_bytes: 0,
+        coalesce: true,
+    };
+
+    let plan = plan_copy(&src_al, &dst_al, &selection, &policy)?;
+    let candidates = lower_to_candidates(plan)?;
+    let chosen = select_candidate(&candidates)?;
+    let ops = match chosen {
+        Candidate::DirectDma { ops } => ops.clone(),
+        other => bail!(
+            "plan_and_lower: PR-5 only supports DirectDma, got {:?}",
+            other
+        ),
+    };
+    if ops.is_empty() {
+        return Ok(PlanOutcome::Empty);
+    }
+    Ok(PlanOutcome::Ops(ops))
 }
 
 /// Outcome of [`validate_planner_inputs`].
@@ -195,10 +315,14 @@ pub(crate) fn validate_planner_inputs(
         TransferStrategy::CudaAsyncH2D
             | TransferStrategy::CudaAsyncD2H
             | TransferStrategy::CudaAsyncD2D
+            | TransferStrategy::NixlRead
+            | TransferStrategy::NixlWrite
+            | TransferStrategy::NixlReadFlipped
+            | TransferStrategy::NixlWriteFlipped
     ) {
         bail!(
-            "execute_planner_cuda_transfer: strategy {strategy:?} not supported in PR-5 \
-             (only CudaAsync H2D / D2H / D2D)"
+            "validate_planner_inputs: strategy {strategy:?} not supported in PR-5 \
+             (only CudaAsync H2D / D2H / D2D and Nixl Read/Write)"
         );
     }
     if src_block_ids.len() != dst_block_ids.len() {
@@ -338,25 +462,57 @@ mod tests {
         assert!(r.is_err());
     }
 
-    /// Strategies outside the CudaAsync set are rejected — the
-    /// executor's branch wires planner only for those three.
+    /// CudaAsync and Nixl strategies are accepted; Memcpy / Invalid
+    /// are not (PR-5/5.6 wires only those two strategy families).
     #[test]
-    fn validator_rejects_non_cuda_async_strategy() {
-        let r = validate_planner_inputs(
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalNHD,
-            &[0],
-            &[0],
-            TransferStrategy::Memcpy,
-        );
-        assert!(r.is_err());
-        let r = validate_planner_inputs(
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalNHD,
-            &[0],
-            &[0],
+    fn validator_strategy_acceptance() {
+        // Accepted: every CudaAsync direction.
+        for s in [
+            TransferStrategy::CudaAsyncH2D,
+            TransferStrategy::CudaAsyncD2H,
+            TransferStrategy::CudaAsyncD2D,
+        ] {
+            assert!(matches!(
+                validate_planner_inputs(
+                    KvBlockLayout::OperationalNHD,
+                    KvBlockLayout::OperationalNHD,
+                    &[0],
+                    &[0],
+                    s,
+                ),
+                Ok(PlannerInputs::Proceed)
+            ));
+        }
+        // Accepted: every Nixl variant.
+        for s in [
+            TransferStrategy::NixlRead,
             TransferStrategy::NixlWrite,
-        );
-        assert!(r.is_err());
+            TransferStrategy::NixlReadFlipped,
+            TransferStrategy::NixlWriteFlipped,
+        ] {
+            assert!(matches!(
+                validate_planner_inputs(
+                    KvBlockLayout::OperationalNHD,
+                    KvBlockLayout::OperationalNHD,
+                    &[0],
+                    &[0],
+                    s,
+                ),
+                Ok(PlannerInputs::Proceed)
+            ));
+        }
+        // Rejected: Memcpy (CPU host-only path) and Invalid sentinel.
+        for s in [TransferStrategy::Memcpy, TransferStrategy::Invalid] {
+            assert!(
+                validate_planner_inputs(
+                    KvBlockLayout::OperationalNHD,
+                    KvBlockLayout::OperationalNHD,
+                    &[0],
+                    &[0],
+                    s,
+                )
+                .is_err()
+            );
+        }
     }
 }

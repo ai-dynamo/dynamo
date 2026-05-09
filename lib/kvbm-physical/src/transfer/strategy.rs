@@ -37,14 +37,14 @@ pub enum TransferStrategy {
     /// For example, the POSIX backend requires that host memory
     /// always be the "local" descriptor list, regardless of whether
     /// it's a read or write.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     NixlWriteFlipped,
 
     /// NIXL read (flipped local and remote order)
     NixlReadFlipped,
 
     /// Invalid/unsupported transfer
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     Invalid,
 }
 

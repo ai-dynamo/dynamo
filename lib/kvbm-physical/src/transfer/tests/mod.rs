@@ -4,6 +4,7 @@
 //! Comprehensive transfer tests for verifying data integrity across storage types and layout configurations.
 
 mod local_transfers;
+mod planner_nixl;
 mod planner_path;
 
 /// Skip test if stub kernels are in use (no real CUDA available).

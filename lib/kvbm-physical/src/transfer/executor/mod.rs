@@ -366,6 +366,24 @@ fn execute_direct_transfer(
                     "cuda_stream option is not supported for NIXL strategies"
                 ));
             }
+            if use_planner {
+                // PR-5.6: planner-driven NIXL path. Errors propagate;
+                // no silent fallback to legacy (caller flipped the flag).
+                if layer_range.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "use_planner=true currently incompatible with layer_range; \
+                         layer-restricted NIXL transfers stay on the legacy executor"
+                    ));
+                }
+                return planner::execute_planner_nixl_transfer(
+                    src,
+                    dst,
+                    src_block_ids,
+                    dst_block_ids,
+                    strategy,
+                    ctx,
+                );
+            }
             let mut builder = NixlTransferBuilder::new()
                 .src(src)
                 .dst(dst)

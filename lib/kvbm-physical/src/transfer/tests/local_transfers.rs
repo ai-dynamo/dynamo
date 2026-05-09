@@ -58,7 +58,7 @@ fn is_unsupported_transfer(src_kind: StorageKind, dst_kind: StorageKind) -> bool
 }
 
 /// Probe whether a NIXL backend is available by attempting to add it to a temporary agent.
-fn is_nixl_backend_available(backend: &str) -> bool {
+pub(super) fn is_nixl_backend_available(backend: &str) -> bool {
     let mut agent = match NixlAgent::new("__backend_probe__") {
         Ok(a) => a,
         Err(_) => return false,
