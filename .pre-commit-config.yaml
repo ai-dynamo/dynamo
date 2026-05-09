@@ -85,6 +85,7 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pytest
+        - pytest-asyncio
         - tomli
         - pydantic
         - filelock

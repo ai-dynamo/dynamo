@@ -123,8 +123,13 @@ fn extract_tool_calls(
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
 
-            // Add text before tool call to normal parts.
-            normal_parts.push(&text[cursor..abs_start]);
+            // Qwen3-Coder-style templates allow natural language before the
+            // tool call, but text after the tool-call block is not response
+            // content. Keep scanning for additional calls, but only surface
+            // normal text that precedes the first parsed call.
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..abs_start]);
+            }
 
             // Find the corresponding end token.
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -146,34 +151,34 @@ fn extract_tool_calls(
                 // `<tool_call>` is preserved verbatim.
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
-                let function_end = &config.function_end_token;
                 if config.allow_eof_recovery
                     && block.contains(function_start.as_str())
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
                 {
                     calls.append(&mut parsed_calls);
-                    // Preserve any suffix after the last function close so
-                    // non-tool trailing content isn't dropped.
-                    if let Some(last_end) = block.rfind(function_end.as_str()) {
-                        let suffix_start = abs_start + last_end + function_end.len();
-                        if suffix_start < text.len() {
-                            normal_parts.push(&text[suffix_start..]);
-                        }
-                    }
                     break;
                 }
-                normal_parts.push(&text[abs_start..]);
+                if calls.is_empty() {
+                    normal_parts.push(&text[abs_start..]);
+                }
                 break;
             }
         } else {
             // No more tool calls.
-            normal_parts.push(&text[cursor..]);
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..]);
+            }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let normal_text = normal_parts.join("");
+    let normal_text = if calls.is_empty() {
+        normal_text.trim().to_string()
+    } else {
+        normal_text
+    };
     Ok((normal_text, calls))
 }
 
@@ -768,10 +773,7 @@ Dallas
             try_tool_call_parse_xml(input, &XmlParserConfig::default(), None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(
-            normal,
-            Some("I'll help you with that.  Let me check that for you.".to_string())
-        );
+        assert_eq!(normal, Some("I'll help you with that. ".to_string()));
     }
 
     #[test] // PARSER.batch.2
@@ -951,11 +953,10 @@ NYC
         assert_eq!(args["city"], "NYC");
     }
 
-    // After EOF-recovery, any non-tool suffix following the last
-    // `</function>` close must surface as normal_text rather than being
-    // dropped along with the recovered call.
+    // Qwen3-Coder-style XML treats text after the first parsed tool call as
+    // non-content, including after EOF recovery.
     #[test]
-    fn test_parse_qwen3_no_outer_close_preserves_suffix() {
+    fn test_parse_qwen3_no_outer_close_drops_suffix() {
         let input = "<tool_call>\n<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\nTRAILING NOTE";
 
         let config = XmlParserConfig {
@@ -964,11 +965,7 @@ NYC
         };
         let (calls, normal) = try_tool_call_parse_xml(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
-        let normal = normal.unwrap_or_default();
-        assert!(
-            normal.contains("TRAILING NOTE"),
-            "normal must keep suffix after </function>: {normal:?}"
-        );
+        assert_eq!(normal, Some("".to_string()));
     }
 
     #[test] // PARSER.batch.5 — minimax_m2

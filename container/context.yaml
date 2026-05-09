@@ -91,11 +91,9 @@ sglang:
     runtime_image: intel/deep-learning-essentials
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
     sglang_ref: e5c2a9b6cf35e163c606ce2349b4c132d3c2e58c
-  # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
-  # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
-  # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
-  # build doesn't leak into the runtime image.
-  nixl_ref: 0.10.1
+  # SGLang uses the NIXL stack from the upstream lmsysorg/sglang runtime image.
+  # Do not add nixl_ref here: Dynamo does not build or install its NIXL wheel
+  # for SGLang, and SGLang does not use Dynamo KVBM/block-manager at runtime.
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
