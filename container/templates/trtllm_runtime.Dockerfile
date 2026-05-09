@@ -200,13 +200,16 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-# Point TRT-LLM's bundled libnixl at the system NIXL build.
+# Point TRT-LLM's bundled NIXL libs at the system NIXL build.
 #
-# Why: the TRT-LLM PyPI wheel ships its own libnixl.so under
-# tensorrt_llm/libs/nixl/. Two libnixl on disk + no SONAME version means
-# the wrong one can load if LD_LIBRARY_PATH is altered (e.g. by a deployer
-# pod spec). NIXL plugins live in the system tree, so bundle-libnixl loaded
+# Why: the TRT-LLM PyPI wheel ships its own copy of NIXL under
+# tensorrt_llm/libs/nixl/ (libnixl, libcore, libpull, libserdes, libstream,
+# libfile_utils, ...). Two builds on disk + no SONAME version means the
+# wrong one can load if LD_LIBRARY_PATH is altered (e.g. by a deployer pod
+# spec). NIXL plugins live in the system tree, so bundle-libnixl loaded
 # against system-plugin → ABI mismatch.
+#
+# libucx_utils.so is bundle-only (no system equivalent) and is left in place.
 #
 # Without this fix: NIXL agent init crashes with "backend 'UCX' not found"
 # at TRT-LLM disagg startup. https://github.com/ai-dynamo/dynamo/issues/6671
@@ -214,9 +217,13 @@ RUN TRTLLM_NIXL_BUNDLE=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
     [ -d "${TRTLLM_NIXL_BUNDLE}" ] || { echo "ERROR: missing TRT-LLM NIXL bundle: ${TRTLLM_NIXL_BUNDLE}" >&2; exit 1; } && \
     [ -d "${NIXL_LIB_DIR}" ] || { echo "ERROR: missing system NIXL lib dir: ${NIXL_LIB_DIR}" >&2; exit 1; } && \
     [ -d "${NIXL_PLUGIN_DIR}" ] || { echo "ERROR: missing system NIXL plugin dir: ${NIXL_PLUGIN_DIR}" >&2; exit 1; } && \
-    for f in libnixl.so libnixl_common.so libnixl_build.so libnixl_test_utils.so; do \
-        [ -f "${TRTLLM_NIXL_BUNDLE}/${f}" ] || { echo "ERROR: missing bundle lib: ${TRTLLM_NIXL_BUNDLE}/${f}" >&2; exit 1; }; \
-        [ -f "${NIXL_LIB_DIR}/${f}" ] || { echo "ERROR: missing system lib: ${NIXL_LIB_DIR}/${f}" >&2; exit 1; }; \
+    for f in libnixl.so libnixl_common.so libnixl_build.so libnixl_test_utils.so \
+             libcore.so libcore.so.1.3 libcore.so.1.3.0 \
+             libfile_utils.so \
+             libpull.so libpull.so.1.3 libpull.so.1.3.0 \
+             libserdes.so libstream.so; do \
+        [ -e "${TRTLLM_NIXL_BUNDLE}/${f}" ] || { echo "ERROR: missing bundle lib: ${TRTLLM_NIXL_BUNDLE}/${f}" >&2; exit 1; }; \
+        [ -e "${NIXL_LIB_DIR}/${f}" ] || { echo "ERROR: missing system lib: ${NIXL_LIB_DIR}/${f}" >&2; exit 1; }; \
         ln -sf "${NIXL_LIB_DIR}/${f}" "${TRTLLM_NIXL_BUNDLE}/${f}" || { echo "ERROR: ln -sf failed for ${f}" >&2; exit 1; }; \
     done && \
     [ -d "${TRTLLM_NIXL_BUNDLE}/plugins" ] || { echo "ERROR: missing bundle plugins dir: ${TRTLLM_NIXL_BUNDLE}/plugins" >&2; exit 1; } && \
