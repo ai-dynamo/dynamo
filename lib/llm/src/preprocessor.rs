@@ -780,13 +780,10 @@ impl OpenAIPreprocessor {
                 // 48 trailing zeros — paired with the {:016x} prefix this gives
                 // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
                 // expects (reads u64 from the first 16 chars).
-                const HEX_PAD: &str =
-                    "000000000000000000000000000000000000000000000000";
+                const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| {
-                        serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD))
-                    })
+                    .map(|e| serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
             }
