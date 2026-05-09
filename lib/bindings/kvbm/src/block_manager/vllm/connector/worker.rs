@@ -587,15 +587,10 @@ fn cuda_event_sync_blocking(event: u64) {
 }
 
 /// Dispatch event synchronization based on device type.
-///
-/// For XPU/ZE, event sync is handled on the Python side (host wait via
-/// `torch.xpu.Event.synchronize()`) before calling into Rust, so we skip here.
 pub fn event_sync_blocking_for_device(event: u64, device_type: &str) {
     match device_type {
         "cuda" => cuda_event_sync_blocking(event),
-        "xpu" | "ze" => {
-            // No-op: XPU events are synchronized on the Python side.
-        }
+        "xpu" | "ze" => unsafe { dynamo_memory::ze::sync_sycl_event(event) },
         other => panic!("Unsupported device type for event sync: {}", other),
     }
 }

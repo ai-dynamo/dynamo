@@ -25,6 +25,7 @@ block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
+dynamo-memory = { path = "../../memory" }
 dynamo-runtime = { path = "../../runtime" }
 
 anyhow = { version = "1" }

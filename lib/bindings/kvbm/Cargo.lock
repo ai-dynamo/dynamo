@@ -3342,6 +3342,7 @@ dependencies = [
  "derive-getters",
  "dlpark",
  "dynamo-llm",
+ "dynamo-memory",
  "dynamo-runtime",
  "pyo3",
  "pyo3-async-runtimes",
