@@ -818,9 +818,9 @@ impl OpenAIPreprocessor {
             && !suppress_reasoning_after_tool
             && !tool_choice_forces_guided_json;
         let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
-            && Self::should_strip_reasoning_start_when_disabled(
+            && matches!(
                 self.runtime_config.reasoning_parser.as_deref(),
-                request.chat_template_args.as_ref(),
+                Some("nemotron_nano") | Some("nemotron3") | Some("nemotron_v3")
             )
             && !suppress_reasoning_after_tool
             && !tool_choice_forces_guided_json;
@@ -840,8 +840,7 @@ impl OpenAIPreprocessor {
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
-                stream,
-                "<think>".to_string(),
+                stream, "<think>",
             ))
         } else {
             Box::pin(stream)
@@ -1380,33 +1379,6 @@ impl OpenAIPreprocessor {
         }
     }
 
-    // Motivation: vLLM's Nemotron v3 parser disables reasoning extraction for
-    // enable_thinking=false / force_nonempty_content=true, but still drops a
-    // leading <think> marker so it does not leak into user-visible content.
-    // This function checks if the reasoning parser is Nemotron v3 and if the
-    // chat template args contain enable_thinking=false or force_nonempty_content=true.
-    // If both are true, the function returns true, otherwise false.
-    fn should_strip_reasoning_start_when_disabled(
-        reasoning_parser: Option<&str>,
-        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
-    ) -> bool {
-        match reasoning_parser {
-            Some("nemotron_nano") | Some("nemotron3") | Some("nemotron_v3") => {
-                if let Some(args) = chat_template_args {
-                    return matches!(
-                        args.get("enable_thinking"),
-                        Some(serde_json::Value::Bool(false))
-                    ) || matches!(
-                        args.get("force_nonempty_content"),
-                        Some(serde_json::Value::Bool(true))
-                    );
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
     // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
@@ -1482,7 +1454,7 @@ impl OpenAIPreprocessor {
     // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
     fn strip_leading_reasoning_start_from_stream<S>(
         stream: S,
-        think_start_token: String,
+        think_start_token: &'static str,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -1490,7 +1462,7 @@ impl OpenAIPreprocessor {
         struct StripReasoningStartState {
             stream:
                 Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-            think_start_token: String,
+            think_start_token: &'static str,
             choices: HashMap<u32, StripChoiceState>,
             last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
             eof_flushed: bool,
