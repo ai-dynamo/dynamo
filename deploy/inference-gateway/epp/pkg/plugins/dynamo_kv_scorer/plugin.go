@@ -317,10 +317,7 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 	}
 
 	// Forward the caller's nvext block so the Rust router can lift
-	// nvext.agent_hints.priority into priority_jump and order the queue
-	// the same way a non-EPP Dynamo deployment does.
-	// GAIE's strongly-typed parser does not surface nvext, so we read it
-	// directly off the unparsed PayloadMap.
+	// nvext.agent_hints.priority into priority_jump.
 	if nvext := extractNvext(req.Body.Payload); nvext != nil {
 		requestBody["nvext"] = nvext
 	}

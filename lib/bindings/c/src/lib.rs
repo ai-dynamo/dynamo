@@ -539,11 +539,10 @@ impl RouterHandles {
 /// Extract the router queue `priority_jump` from a chat completion request's
 /// `nvext.agent_hints.priority`.
 ///
-/// Negative priorities are clamped to `0.0` so a low-priority hint never
-/// pushes a request behind FCFS arrivals (matches the standalone preprocessor
-/// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
-/// `latency_sensitivity` alias for callers still on the old field name.
-/// Returns `0.0` when `nvext` or `agent_hints` is absent.
+/// Negative values from either `priority` or the deprecated
+/// `latency_sensitivity` alias are clamped to `0.0` so a low-priority hint
+/// never pushes a request behind FCFS arrivals. Returns `0.0` when `nvext`
+/// or `agent_hints` is absent.
 fn extract_priority_jump(
     request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
 ) -> f64 {
@@ -551,11 +550,8 @@ fn extract_priority_jump(
         .nvext
         .as_ref()
         .and_then(|n| n.agent_hints.as_ref())
-        .and_then(|h| {
-            h.priority
-                .map(|p| p.max(0) as f64)
-                .or(h.latency_sensitivity)
-        })
+        .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
+        .map(|v| v.max(0.0))
         .unwrap_or(0.0)
 }
 
