@@ -80,6 +80,7 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -358,12 +359,15 @@ class InstrumentedScheduler(AsyncScheduler):
                 # parent scheduler attaches connector metadata to every
                 # SchedulerOutput when a connector is configured, so
                 # benchmark-built outputs must do the same or the worker
-                # asserts on bind_connector_metadata.
-                if getattr(self, "connector", None) is not None:
+                # asserts on bind_connector_metadata. Use direct
+                # attribute access (not getattr-with-default) so a
+                # future vLLM bump that drops these attributes from the
+                # parent fails loudly instead of being silently masked.
+                if self.connector is not None:
                     empty.kv_connector_metadata = self.connector.build_connector_meta(
                         empty
                     )
-                if getattr(self, "ec_connector", None) is not None:
+                if self.ec_connector is not None:
                     empty.ec_connector_metadata = (
                         self.ec_connector.build_connector_meta(empty)
                     )
@@ -642,7 +646,6 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_generate_decode_grid(self) -> None:
         n_len = max(1, self._bench_config.decode_length_granularity)
         n_bs = max(1, self._bench_config.decode_batch_size_granularity)
-        total_kv_tokens = self.cache_config.num_gpu_blocks * self.block_size
         max_ctx = self.max_model_len - 10
         if max_ctx < self.block_size:
             logger.warning("max_model_len too small for decode grid, skipping")
@@ -650,7 +653,19 @@ class InstrumentedScheduler(AsyncScheduler):
         ctx_lens = np.unique(np.linspace(self.block_size, max_ctx, n_len, dtype=int))
         for ctx_len in ctx_lens:
             ctx_len = int(ctx_len)
-            max_batch = min(self.max_num_running_reqs, total_kv_tokens // ctx_len)
+            # Match what _bench_inject_fake_decode actually allocates:
+            # ctx_len + 1 tokens (the +1 is the input slot for the
+            # async-scheduler placeholder write -- see the comment on
+            # _bench_inject_fake_decode), rounded UP to the next block
+            # boundary by the KV cache manager. Sizing max_batch from
+            # ctx_len directly would under-count blocks per request and
+            # let the allocator silently truncate the batch on boundary
+            # points (e.g. ctx_len that is a multiple of block_size:
+            # ctx_len=16 with block_size=16 actually consumes 2 blocks
+            # per request, not 1).
+            blocks_per_req = math.ceil((ctx_len + 1) / self.block_size)
+            kv_capped_batch = self.cache_config.num_gpu_blocks // blocks_per_req
+            max_batch = min(self.max_num_running_reqs, kv_capped_batch)
             if max_batch < 1:
                 continue
             batch_sizes = np.unique(np.linspace(1, max_batch, n_bs, dtype=int))
@@ -783,9 +798,9 @@ class InstrumentedScheduler(AsyncScheduler):
         # ``allocate_slots`` above, so ``build_connector_meta`` produces a
         # no-op metadata -- no transfers planned, just a non-None object
         # the worker-side ``bind_connector_metadata`` can consume.
-        if getattr(self, "connector", None) is not None:
+        if self.connector is not None:
             output.kv_connector_metadata = self.connector.build_connector_meta(output)
-        if getattr(self, "ec_connector", None) is not None:
+        if self.ec_connector is not None:
             output.ec_connector_metadata = self.ec_connector.build_connector_meta(
                 output
             )

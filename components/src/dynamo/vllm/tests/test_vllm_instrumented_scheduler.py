@@ -13,6 +13,7 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from vllm.v1.request import RequestStatus  # noqa: E402
@@ -25,7 +26,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # If this import is deferred to inside a test body, the real ``vllm`` will
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
-from dynamo.vllm.instrumented_scheduler import InstrumentedScheduler  # noqa: E402
+from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
+    InstrumentedScheduler,
+    _BenchPhase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -347,10 +351,6 @@ def _make_decode_sweep_stub(connector, ec_connector=None):
     DECODE_SWEEP empty-frame branch without spinning up the parent
     scheduler's vLLM-side state.
     """
-    from unittest.mock import MagicMock
-
-    from dynamo.vllm.instrumented_scheduler import _BenchPhase
-
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_active = True
     stub._bench_phase = _BenchPhase.DECODE_SWEEP
@@ -377,8 +377,6 @@ def test_decode_sweep_empty_frame_attaches_kv_connector_metadata():
     """Parent's ``build_connector_meta`` must be called on the empty drain
     frame; metadata is then attached to the returned SchedulerOutput.
     """
-    from unittest.mock import MagicMock
-
     sentinel = object()
     connector = MagicMock()
     connector.build_connector_meta = MagicMock(return_value=sentinel)
@@ -393,8 +391,6 @@ def test_decode_sweep_empty_frame_attaches_kv_connector_metadata():
 
 
 def test_decode_sweep_empty_frame_attaches_ec_connector_metadata_when_set():
-    from unittest.mock import MagicMock
-
     kv_meta = object()
     ec_meta = object()
     connector = MagicMock()
@@ -451,8 +447,6 @@ def test_bench_inject_fake_decode_pads_prompt_for_async_placeholder():
     on the first iteration -- the function still builds and returns the
     SchedulerOutput when the batch was empty due to KV exhaustion.
     """
-    from unittest.mock import MagicMock
-
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_seq = 0
     stub._bench_active_req_ids = set()
@@ -481,4 +475,85 @@ def test_bench_inject_fake_decode_pads_prompt_for_async_placeholder():
         f"Expected allocate_slots(req, ctx_len + 1 = 17, ...) to leave room "
         f"for the async-scheduler placeholder write at position ctx_len. "
         f"Got num_new_tokens={captured_num_new_tokens}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Decode-grid sizing must account for the +1-padded allocation
+# ---------------------------------------------------------------------------
+#
+# ``_bench_inject_fake_decode`` allocates ``ctx_len + 1`` tokens per request
+# (rounded UP to the next block boundary by the KV cache manager). If
+# ``_bench_generate_decode_grid`` keeps sizing ``max_batch`` from a raw
+# ``ctx_len`` token count it will under-count blocks per request and the
+# allocator will silently truncate the batch on boundary points
+# (``KV exhausted at ctx_len=...``). The benchmark would then record the
+# point under the wrong (over-stated) batch size.
+
+
+def _grid_stub_with_kv_capacity(num_gpu_blocks: int, block_size: int):
+    """Bypass ``__init__`` and populate only the attributes
+    ``_bench_generate_decode_grid`` reads."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid = []
+    stub._bench_config = SimpleNamespace(
+        decode_length_granularity=2,
+        decode_batch_size_granularity=2,
+    )
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=num_gpu_blocks)
+    stub.block_size = block_size
+    stub.max_model_len = 256
+    # Generous so the KV cap (not max_num_running_reqs) drives the boundary.
+    stub.max_num_running_reqs = 10_000
+    return stub
+
+
+def test_decode_grid_sizes_max_batch_from_padded_allocation():
+    """Each emitted decode point's ``batch_size`` must be feasible at the
+    actual per-request allocation size of
+    ``ceil((ctx_len + 1) / block_size)`` blocks. A regression that sized
+    the cap from raw ``ctx_len`` would emit batches that the allocator
+    truncates -- e.g. ctx_len=block_size yields 2 blocks/req, but the
+    old code would advertise ``num_gpu_blocks // 1`` requests.
+    """
+    block_size = 16
+    num_gpu_blocks = 64
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks, block_size)
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    assert len(stub._bench_grid) > 0, "decode grid should produce points"
+    for point in stub._bench_grid:
+        ctx_len = point.context_length
+        bs = point.batch_size
+        blocks_per_req = -(-(ctx_len + 1) // block_size)  # ceil
+        max_feasible = num_gpu_blocks // blocks_per_req
+        assert bs <= max_feasible, (
+            f"point ctx_len={ctx_len} batch_size={bs} would exceed KV "
+            f"capacity: needs {bs * blocks_per_req} blocks, only "
+            f"{num_gpu_blocks} available "
+            f"(blocks_per_req={blocks_per_req}, max_feasible={max_feasible})."
+        )
+
+
+def test_decode_grid_first_ctx_yields_block_aligned_capacity():
+    """At ``ctx_len == block_size`` the per-request allocation is exactly
+    2 blocks (16 prompt + 1 placeholder = 17 tokens, rounded up). The
+    grid's largest batch for this ctx must respect that.
+    """
+    block_size = 16
+    num_gpu_blocks = 100
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks, block_size)
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
+    assert (
+        len(boundary_points) > 0
+    ), f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
+    # 100 blocks // 2 blocks-per-req == 50 max batch.
+    assert max(p.batch_size for p in boundary_points) <= 50, (
+        f"boundary ctx_len={block_size}: max batch must not exceed "
+        f"num_gpu_blocks // 2 = 50; got "
+        f"{[p.batch_size for p in boundary_points]}"
     )
