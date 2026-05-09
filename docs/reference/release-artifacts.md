@@ -17,7 +17,7 @@ Release history in this document begins at v0.6.0.
 - **Docs:** [v1.1.1](https://docs.dynamo.nvidia.com/dynamo)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
-> **Experimental:** [v1.2.0-deepseek-v4-dev.2](#v120-deepseek-v4-dev2) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* is available as an experimental preview. Tagged **Pre-Releases** and experimental builds are listed under [Pre-Release Artifacts](#pre-release-artifacts).
+> **Experimental:** [v1.2.0-deepseek-v4-dev.3](#v120-deepseek-v4-dev3) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* is available as an experimental preview. Tagged **Pre-Releases** and experimental builds are listed under [Pre-Release Artifacts](#pre-release-artifacts).
 
 ### Container Images
 
@@ -196,7 +196,7 @@ For backend version pins, see the version-pins table above and the [GitHub Relea
 
 **Pre-Release and Experimental Git Tags**
 
-- **v1.2.0-deepseek-v4-dev.2**: **Images:** `vllm-runtime:*-deepseek-v4-cuda13-dev.2`, `sglang-runtime:*-deepseek-v4-cuda12-dev.2`, `sglang-runtime:*-deepseek-v4-cuda13-dev.2`. **Helm / PyPI:** Not published for this tag (see [Pre-Release Artifacts](#v120-deepseek-v4-dev2)).
+- **v1.2.0-deepseek-v4-dev.3**: **Images:** `vllm-runtime:*-deepseek-v4-cuda13-dev.3`, `sglang-runtime:*-deepseek-v4-cuda12-dev.3`, `sglang-runtime:*-deepseek-v4-cuda13-dev.3`. **Helm / PyPI:** Not published for this tag (see [Pre-Release Artifacts](#v120-deepseek-v4-dev3)).
 - **v1.1.0-dev.3**: **Images:** `tensorrtllm-runtime:1.1.0-dev.3`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime` on [pypi.nvidia.com](https://pypi.nvidia.com/) (see [below](#v110-dev3)).
 - **v1.1.0-dev.2**: **Images:** `sglang-runtime:1.1.0-dev.2`, `tensorrtllm-runtime:1.1.0-dev.2`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime` on [pypi.nvidia.com](https://pypi.nvidia.com/) (see [below](#v110-dev2)).
 - **v1.1.0-dev.1**: **Images:** vLLM, SGLang, TRT-LLM runtime matrix (CUDA 12 / 13 and EFA variants as listed), `dynamo-frontend`, `kubernetes-operator`, `snapshot-agent`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime` on [pypi.nvidia.com](https://pypi.nvidia.com/). **Helm:** `dynamo-platform`, `snapshot` at `1.1.0-dev.1` (see [below](#v110-dev1)).
@@ -234,6 +234,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Version | Release Date | GitHub | Docs | Notes |
 |---------|--------------|--------|------|-------|
+| `v1.2.0-deepseek-v4-dev.3` | May 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.2.0-deepseek-v4-dev.2` | May 1, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.1.1` | May 5, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v1.1.0` | May 1, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
@@ -699,6 +700,33 @@ pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo==1.1.0.dev
 ```
 
 A GitHub or container tag `v1.1.0-dev.N` maps to a wheel version `1.1.0.devN` (for example `v1.1.0-dev.2` → `==1.1.0.dev2`). Optional extras such as `ai-dynamo[vllm]` use the same flags; pin the version you want from the sections below.
+
+### v1.2.0-deepseek-v4-dev.3
+
+- **Branch:** [release/1.2.0-deepseek-v4-dev.3](https://github.com/ai-dynamo/dynamo/tree/release/1.2.0-deepseek-v4-dev.3)
+- **GitHub Tag:** [v1.2.0-deepseek-v4-dev.3](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3)
+- **Backends:** vLLM `v0.20.1` (DSv4 stabilization patch over `v0.20.0` native DSv4 support) | SGLang upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview (refreshed for dev.3) | NIXL `v0.10.1`
+- **Coverage:** Partial -- DeepSeek-V4-Flash and V4-Pro only. vLLM and SGLang containers are published for Blackwell (B200 plus GB200); no TensorRT-LLM container, no other component containers, no Helm charts, no wheels. Snapshot dev build for early-access V4 model support; not QA-gated.
+
+#### Container Images
+
+| Image:Tag | Backend | CUDA | Arch |
+|-----------|---------|------|------|
+| `vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` | vLLM `v0.20.1` | `v13.0` | AMD64/ARM64 |
+| `sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` | SGLang upstream DSv4 preview | `v12.9` | AMD64 |
+| `sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3` | SGLang upstream DSv4 preview | `v13.0` | ARM64 |
+
+#### Python Wheels
+
+Not published for this dev release. Use the `v1.1.1` wheels or `v1.1.0-dev.3` from [pypi.nvidia.com](https://pypi.nvidia.com/).
+
+#### Helm Charts
+
+Not published for this dev release. Use `v1.1.1` charts for platform install.
+
+#### Rust Crates
+
+Not shipped for pre-release versions.
 
 ### v1.2.0-deepseek-v4-dev.2
 

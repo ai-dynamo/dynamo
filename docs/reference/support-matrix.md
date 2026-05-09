@@ -11,7 +11,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 **Latest stable release:** [v1.1.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) -- SGLang `0.5.10.post1` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc11` (NIXL `0.10.1`) | vLLM `0.19.0` (NIXL `0.10.1`)
 
-**Experimental release:** [v1.2.0-deepseek-v4-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* -- vLLM `0.20.0` | SGLang upstream `deepseek-v4-blackwell` preview | NIXL `0.10.1`
+**Experimental release:** [v1.2.0-deepseek-v4-dev.3](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* -- vLLM `0.20.1` | SGLang upstream `deepseek-v4-blackwell` preview | NIXL `0.10.1`
 
 | Requirement | Supported |
 | :--- | :--- |
@@ -32,6 +32,7 @@ The following table shows the backend framework versions included with each Dyna
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.5.10.post1` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
+| **v1.2.0-deepseek-v4-dev.3** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.1` | `0.10.1` |
 | **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.0` | `0.10.1` |
 | **v1.1.1** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.1.0** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
@@ -55,7 +56,7 @@ The following table shows the backend framework versions included with each Dyna
 | **v0.6.1** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 | **v0.6.0** | `0.5.3.post2` | `1.1.0rc5` | `0.11.0` | `0.6.0` |
 
-For **v1.1.0-dev.2**, **v1.1.0-dev.3**, and **v1.2.0-deepseek-v4-dev.2**, the cells above match `container/context.yaml` on the corresponding release branch (pins used to build images). Those lines are **partial releases**: not every backend has a published Dynamo runtime container for that tag. See [Pre-Release Artifacts](release-artifacts.md#pre-release-artifacts) for what actually shipped. The `v1.2.0-deepseek-v4-dev.2` SGLang container is built on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview image rather than a tagged SGLang release; TensorRT-LLM is not part of that dev release.
+For **v1.1.0-dev.2**, **v1.1.0-dev.3**, **v1.2.0-deepseek-v4-dev.2**, and **v1.2.0-deepseek-v4-dev.3**, the cells above match `container/context.yaml` on the corresponding release branch (pins used to build images). Those lines are **partial releases**: not every backend has a published Dynamo runtime container for that tag. See [Pre-Release Artifacts](release-artifacts.md#pre-release-artifacts) for what actually shipped. The `v1.2.0-deepseek-v4-dev.2` and `v1.2.0-deepseek-v4-dev.3` SGLang containers are built on the upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview image rather than a tagged SGLang release; TensorRT-LLM is not part of those dev releases.
 
 ### Version Labels
 
@@ -124,7 +125,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
-Experimental `v1.1.0-dev.*` images follow the same CUDA matrix as `v1.0.2`. The `v1.2.0-deepseek-v4-dev.2` vLLM container is CUDA 13.0 multi-arch; the SGLang containers split by arch (CUDA 12.9 on `amd64`, CUDA 13.0 on `arm64`).
+Experimental `v1.1.0-dev.*` images follow the same CUDA matrix as `v1.0.2`. The `v1.2.0-deepseek-v4-dev.3` vLLM container is CUDA 13.0 multi-arch; the SGLang containers split by arch (CUDA 12.9 on `amd64`, CUDA 13.0 on `arm64`).
 
 Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 
