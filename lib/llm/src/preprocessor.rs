@@ -1004,14 +1004,20 @@ impl OpenAIPreprocessor {
 
     #[cfg(feature = "lightseek-mm")]
     async fn fetch_image_dims_uncached(url: &str) -> Result<(u32, u32)> {
+        use crate::preprocessor::media::MediaFetcher;
         use image::ImageReader;
         use std::io::Cursor;
+        use std::sync::LazyLock;
 
         // Most JPEG SOF markers and PNG/WebP headers fit in the first 4 KB.
         // Start small and only escalate to 64 KB if the parser fails on the
         // truncated header.
         const SMALL_RANGE: usize = 4 * 1024 - 1;
         const LARGE_RANGE: usize = 64 * 1024 - 1;
+        // Per-Range tighter bound than MediaFetcher's 30 s default — dim
+        // fetch is best-effort; on a slow remote we'd rather skip MM
+        // routing for this image than starve the request.
+        const DIM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
         if let Some(rest) = url.strip_prefix("data:") {
             let comma = rest
@@ -1037,14 +1043,31 @@ impl OpenAIPreprocessor {
             anyhow::bail!("unsupported url scheme for dim fetch: {}", url);
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+        // Shared SSRF-aware Client + connection pool. Reuses the same
+        // policy contract as the frontend-decode path (`MediaLoader`):
+        // blocklist DNS resolver, redirect revalidation, hostname/IP
+        // blocklist, `DYN_MM_ALLOW_INTERNAL` opt-in. Constructed once per
+        // process — Client connection-pooling kicks in across requests.
+        static MEDIA_FETCHER: LazyLock<MediaFetcher> = LazyLock::new(MediaFetcher::from_env);
+        static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+            MEDIA_FETCHER
+                .build_http_client()
+                .expect("dim-fetch http client construction failed")
+        });
+
+        // Pre-flight SSRF check on the original URL. Redirect targets are
+        // revalidated by the Client's redirect policy, and DNS-resolved
+        // IPs are filtered by the resolver — so a URL that passes here
+        // can't escape the contract on the wire either.
+        let parsed = url::Url::parse(url)?;
+        MEDIA_FETCHER.check_if_url_allowed_with_dns(&parsed).await?;
+
         let mut range_end = SMALL_RANGE;
         loop {
-            let resp = client
+            let resp = HTTP_CLIENT
                 .get(url)
                 .header("Range", format!("bytes=0-{}", range_end))
+                .timeout(DIM_FETCH_TIMEOUT)
                 .send()
                 .await?;
             let status = resp.status();
