@@ -1068,6 +1068,14 @@ impl ModelWatcher {
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_type.supports_realtime() {
+            // Mirrors the Images / Videos / Audios shape: a single PushRouter
+            // typed end-to-end on the realtime event pair, no Backend /
+            // Migration composition. Note that PushRouter's bidirectional
+            // generate currently bails after sticky-instance selection
+            // pending #9361 (remote dispatch over AddressedPushRouter), so
+            // the engine slot is populated but unusable for discovered
+            // workers until that work lands. The local-engine path via
+            // ModelManager.add_realtime_model is unaffected.
             let realtime_router = PushRouter::<
                 RealtimeClientEvent,
                 Annotated<RealtimeServerEvent>,

@@ -1040,6 +1040,9 @@ where
             .select_next_worker()
             .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
 
+        // Per-frame remote dispatch over AddressedPushRouter / PushWorkHandler
+        // is tracked in #9361. Until that lands, callers must register engines
+        // in-process via ModelManager rather than rely on discovered workers.
         anyhow::bail!(
             "bidirectional remote dispatch is not yet implemented (selected instance {instance_id})"
         )
