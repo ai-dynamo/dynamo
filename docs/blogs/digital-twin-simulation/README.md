@@ -382,15 +382,78 @@ Router discovery examples:
 - Add optional AIC-backed decode-load estimates so router decisions can better
   account for downstream decode pressure.
 
-[placeholder: Planner discovery experiment examples and owners]
+#### Planner Discovery Examples
+Planner exposes a family of stateful decisions: when to scale, how aggressively,
+and which optimization
+target to chase. Their effects compound across minutes of trace, and a
+misconfigured planner can under-provision (SLA misses) or thrash (workers churn
+and waste GPU budget). These are painful questions to study on hardware. The
+digital twin lets us replay the same production-shaped trace against the
+planner-in-the-loop with simulated engines and measure the effect of one knob
+at a time.
 
-Planner discovery examples:
+The three experiments below use the Mooncake FAST25 `toolagent_trace`
+(~23,600 requests over 59 minutes, avg ISL 8.6k / OSL 182, ~6.7 rps) on
+Qwen3-32B at TP=2 on H200-SXM. All scripts and per-run reports are
+reproducible from `scripts/planner_exp_{1,2,3}/`.
 
-- Compare scale-up and scale-down thresholds.
-- Study delayed scaling behavior.
-- Search prefill/decode pool allocation policies.
-- Balance responsiveness against oscillation risk.
-- Feed router-aware or cache-aware signals into Planner decisions.
+**Setup tradeoffs: planner vs static, agg vs disagg.** For each topology we
+sweep static replica counts (no planner; fixed deployment) and overlay three
+planner runs (`optimization_target` ∈ {throughput, latency, sla}) on the
+resulting Pareto plane. The SLA runs use a representative target of
+TTFT=1500 ms, ITL=50 ms.
+
+![Planner experiment 1 — setup tradeoffs](images/planner_exp_1.png)
+
+The agg SLA planner sits below the static-deployment Pareto curve on TTFT —
+roughly the same GPU-hours as a 4-GPU static deployment, but with p90 TTFT
+two orders of magnitude lower. Throughput-mode and latency-mode planner
+baselines, by contrast, both fall above the static curve: they spend
+GPU-hours without buying tail-latency improvement. Disagg on this long-ISL
+workload is consistently worse than agg under every planner target — a
+useful negative result that costs nothing in simulation and would have been
+expensive to discover live.
+
+**Tuning load-based scaling: responsiveness vs oscillation.** With throughput
+scaling disabled, `load_adjustment_interval` is the only knob driving fast
+reactions. Sweeping it across {1, 2, 5, 10, 20, 30, 60, 120, 300} s with
+instantaneous engine startup isolates the responsiveness-vs-flap tradeoff.
+
+![Planner experiment 2 — load adjustment interval](images/planner_exp_2.png)
+
+TTFT and ITL plateau between 1 and 10 seconds, while the scaling-event count
+drops from 764 to 116 over the same range — short intervals burn decisions
+without buying latency. Past ~30 s the planner can no longer keep up with
+traffic bursts: p90 TTFT degrades to 49 s at 60 s interval and 249 s at
+300 s. The sweet spot for this trace is around 5–10 s — short enough to
+track load, long enough to avoid pointless flapping.
+
+**Cold-start time and the SLA cliff.** On a real cluster, scale-up is not
+instant; a fresh engine pod takes seconds to minutes to become usable. The
+mocker's `startup_time` parameter injects this delay and lets us measure
+how the planner copes.
+
+![Planner experiment 3 — engine cold-start time](images/planner_exp_3.png)
+
+For Qwen3-32B at TP=2, the planner holds SLA up to roughly a 200-second
+startup delay. Beyond that, p90 TTFT rises sharply, and at 300 s the system
+runs perpetually backlogged (242 s p90 TTFT). GPU-hours stays nearly flat
+across the sweep — the planner does not over-provision to compensate for
+slow scale-up; it simply falls behind. The scaling-event count drops
+monotonically (42 → 9) as long-startup runs commit to fewer, longer-lived
+decisions. This is the kind of curve that motivates predictive scaling and
+pre-warmed reserves rather than purely reactive load tracking.
+
+These three experiments do not exhaust the design space — they illustrate
+how it can be explored cheaply. Other natural questions for the same loop:
+
+- Compare scale-up and scale-down thresholds, and asymmetric
+  hysteresis policies.
+- Search prefill/decode pool allocation policies (especially once the
+  planner can rebalance roles in disagg).
+- Feed router-aware or cache-aware signals into planner decisions.
+- Couple planner and router policies — e.g. shrink the worker pool when
+  the router predicts a cache-affine traffic drop.
 
 [placeholder: KV/cache discovery experiment examples and owners]
 
@@ -436,6 +499,17 @@ The payoff is not just a faster benchmark. It is a shared loop for algorithm
 research, engineering prioritization, and deployment sizing: use simulation to
 narrow the space, then spend hardware time on the candidates most likely to
 matter.
+
+Looking forward, we plan to close this loop in production as well. A smart
+sweeping algorithm built on top of the digital twin would run periodically
+against recently-recorded production traffic, search the configuration space
+under the current workload distribution, and recommend (or directly apply) a
+reconfiguration when a materially better deployment is found. Because traffic
+shape drifts over hours and days — different prompt mixes, ISL/OSL
+distributions, or burst patterns — what was the right TP shape, prefill/decode
+split, router policy, and planner setting last week may no longer be optimal
+today. A continuous twin-driven sweep keeps the live deployment tracking the
+current optimum instead of relying on a one-shot launch decision.
 
 [placeholder: external review for claims about hardware validation vs simulation]
 
