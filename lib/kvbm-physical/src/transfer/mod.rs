@@ -44,6 +44,7 @@ pub(crate) mod executor;
 pub(crate) mod fill;
 pub(crate) mod notifications;
 pub(crate) mod options;
+pub(crate) mod plan;
 pub(crate) mod preferences;
 pub(crate) mod strategy;
 pub(crate) mod validation;
