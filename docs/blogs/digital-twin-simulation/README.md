@@ -382,8 +382,9 @@ Router discovery examples:
 - Add optional AIC-backed decode-load estimates so router decisions can better
   account for downstream decode pressure.
 
-**Planner discovery examples.** The planner exposes a family of slow-moving,
-stateful decisions: when to scale, how aggressively, and which optimization
+#### Planner discovery examples.
+Planner exposes a family of stateful decisions: when to scale, how aggressively,
+and which optimization
 target to chase. Their effects compound across minutes of trace, and a
 misconfigured planner can under-provision (SLA misses) or thrash (workers churn
 and waste GPU budget). These are painful questions to study on hardware. The
@@ -396,7 +397,9 @@ The three experiments below use the Mooncake FAST25 `toolagent_trace`
 Qwen3-32B at TP=2 on H200-SXM. All scripts and per-run reports are
 reproducible from `scripts/planner_exp_{1,2,3}/`.
 
-*Setup tradeoffs: planner vs static, agg vs disagg.* For each topology we
+**Setup tradeoffs: planner vs static, agg vs disagg.**
+
+For each topology we
 sweep static replica counts (no planner; fixed deployment) and overlay three
 planner runs (`optimization_target` ∈ {throughput, latency, sla}) on the
 resulting Pareto plane. The SLA runs use a representative target of
@@ -413,7 +416,9 @@ workload is consistently worse than agg under every planner target — a
 useful negative result that costs nothing in simulation and would have been
 expensive to discover live.
 
-*Tuning load-based scaling: responsiveness vs oscillation.* With throughput
+**Tuning load-based scaling: responsiveness vs oscillation.**
+
+With throughput
 scaling disabled, `load_adjustment_interval` is the only knob driving fast
 reactions. Sweeping it across {1, 2, 5, 10, 20, 30, 60, 120, 300} s with
 instantaneous engine startup isolates the responsiveness-vs-flap tradeoff.
@@ -427,8 +432,9 @@ traffic bursts: p90 TTFT degrades to 49 s at 60 s interval and 249 s at
 300 s. The sweet spot for this trace is around 5–10 s — short enough to
 track load, long enough to avoid pointless flapping.
 
-*Cold-start time and the SLA cliff.* On a real cluster, scale-up is not
-free; a fresh engine pod takes seconds to minutes to become usable. The
+**Cold-start time and the SLA cliff.**
+On a real cluster, scale-up is not
+instant; a fresh engine pod takes seconds to minutes to become usable. The
 mocker's `startup_time` parameter injects this delay and lets us measure
 how the planner copes.
 
