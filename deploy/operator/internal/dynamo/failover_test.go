@@ -272,6 +272,7 @@ func TestGetGPUCount(t *testing.T) {
 		{"empty limits", corev1.ResourceRequirements{Limits: corev1.ResourceList{}}, 0},
 		{"valid limit gpu count", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}, 8},
 		{"valid request gpu count", corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}, 4},
+		{"valid MIG limit gpu count", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/mig-3g.20gb"): k8sresource.MustParse("1")}}, 1},
 	}
 
 	for _, tt := range tests {

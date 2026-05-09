@@ -46,11 +46,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
-	// Register custom types with the scheme
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	for _, addToScheme := range []func(*runtime.Scheme) error{
+		corev1.AddToScheme,
+		autoscalingv1.AddToScheme,
+		networkingv1.AddToScheme,
+		v1alpha1.AddToScheme,
+		v1beta1.AddToScheme,
+		grovev1alpha1.AddToScheme,
+	} {
+		if err := addToScheme(s); err != nil {
+			t.Fatalf("failed to add type to scheme: %v", err)
+		}
 	}
+	return s
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 
 	tests := []struct {
 		name                 string
@@ -297,7 +312,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 
 			// Create fake client
 			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme.Scheme).
+				WithScheme(testScheme).
 				WithObjects(initObjs...).
 				Build()
 
@@ -416,12 +431,70 @@ func TestDynamoGraphDeploymentReconciler_reconcilePVCs(t *testing.T) {
 	})
 }
 
-func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    v1beta1.DynamoComponentDeploymentSharedSpec
+		wantErr bool
+	}{
+		{
+			name: "intra-pod failover does not require DRA",
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Failover: &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+				},
+			},
+		},
+		{
+			name: "inter-pod failover requires DRA",
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Failover: &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "gpu memory service requires DRA",
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoGraphDeploymentReconciler{
+				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{tt.spec},
+				},
+			}
+
+			err := r.reconcileGMSResourceClaimTemplates(context.Background(), dgd)
+			if tt.wantErr {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
+				return
+			}
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
 	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -456,7 +529,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(existing).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
@@ -511,11 +584,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-
 	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -551,7 +621,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
@@ -614,11 +684,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesReadyReferencedCR(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-
 	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -644,7 +711,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
@@ -699,11 +766,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-
 	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -739,7 +803,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(existing).
 			WithStatusSubresource(existing).
 			Build(),
@@ -1129,11 +1193,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			s := scheme.Scheme
-			err := v1alpha1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			err = grovev1alpha1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
+			s := newDynamoGraphDeploymentControllerTestScheme(t)
 
 			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{

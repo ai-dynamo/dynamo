@@ -1901,7 +1901,7 @@ func GenerateGrovePodCliqueSet(
 	var resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
 
 	for i := range dynamoDeployment.Spec.Components {
-		component := &dynamoDeployment.Spec.Components[i]
+		component := dynamoDeployment.Spec.Components[i].DeepCopy()
 		componentName := component.ComponentName
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 

@@ -50,7 +50,6 @@ import (
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment
-		ingressSpec                 *v1alpha1.IngressSpec
 	}
 	tests := []struct {
 		name    string
@@ -273,7 +272,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateDynamoComponentsDeployments with ingress enabled",
+			name: "Test GenerateDynamoComponentsDeployments with frontend component",
 			args: args{
 				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -310,10 +309,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 					},
 				},
-				ingressSpec: &v1alpha1.IngressSpec{
-					Enabled: true,
-					Host:    "test-dynamographdeployment",
-				},
 			},
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
@@ -344,10 +339,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoComponent:           "service1",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
-							},
-							Ingress: &v1alpha1.IngressSpec{
-								Enabled: true,
-								Host:    "test-dynamographdeployment",
 							},
 						},
 					},
@@ -830,10 +821,32 @@ func TestGenerateDynamoComponentsDeployments_UsesDynDeploymentWorkers(t *testing
 
 			dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, RollingUpdateContext{})
 			require.NoError(t, err)
-			require.NotNil(t, dcds[componentName].Spec.Replicas)
-			assert.Equal(t, tt.wantReplicas, *dcds[componentName].Spec.Replicas)
+			dcd, ok := dcds[componentName]
+			require.True(t, ok, "expected generated DCD for component %q", componentName)
+			require.NotNil(t, dcd.Spec.Replicas)
+			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
 		})
 	}
+}
+
+func TestAppendMissingPVCVolumesForMountsAddsMissingPVCs(t *testing.T) {
+	volumes := []corev1.Volume{
+		{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cache-pvc"}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "cache", MountPath: "/cache"},
+		{Name: "model-cache", MountPath: "/models"},
+	}
+
+	got := appendMissingPVCVolumesForMounts(volumes, mounts)
+
+	require.Len(t, got, 3)
+	assert.Equal(t, "cache", got[0].Name)
+	assert.Equal(t, "model-cache", got[1].Name)
+	require.NotNil(t, got[1].PersistentVolumeClaim)
+	assert.Equal(t, "model-cache", got[1].PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, "config", got[2].Name)
 }
 
 func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnnotations(t *testing.T) {
