@@ -847,7 +847,7 @@ impl OpenAIPreprocessor {
             );
             return Ok(());
         };
-        let block_size = self.kv_cache_block_size as usize;
+        let block_size = self.kv_cache_block_size;
         if block_size == 0 {
             tracing::debug!(
                 target: "mm_routing",
