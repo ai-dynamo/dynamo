@@ -9,7 +9,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v1.1.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) -- SGLang `0.5.10.post1` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc11` (NIXL `0.10.1`) | vLLM `0.19.0` (NIXL `0.10.1`)
+**Latest stable release:** [v1.1.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) -- SGLang `0.5.10.post1` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc11` (NIXL `0.10.1`) | vLLM `0.19.0` (NIXL `0.10.1`)
 
 **Experimental release:** [v1.2.0-deepseek-v4-dev.2](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* -- vLLM `0.20.0` | SGLang upstream `deepseek-v4-blackwell` preview | NIXL `0.10.1`
 
@@ -33,6 +33,7 @@ The following table shows the backend framework versions included with each Dyna
 | :--- | :--- | :--- | :--- | :--- |
 | **main (ToT)** | `0.5.10.post1` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.0` | `0.10.1` |
+| **v1.1.1** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.1.0** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.1.0-dev.3** *(experimental, partial)* | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
 | **v1.1.0-dev.2** *(experimental, partial)* | `0.5.9` | `1.3.0rc9` | `0.19.0` | `0.10.1` |
@@ -73,6 +74,11 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| **1.1.1** | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
 | **1.1.0** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
