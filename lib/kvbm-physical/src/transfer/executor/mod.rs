@@ -327,8 +327,9 @@ fn execute_direct_transfer(
         | TransferStrategy::CudaAsyncD2D => {
             if use_planner {
                 // PR-5: planner-driven path for CudaAsync H2D / D2H / D2D.
-                // Falls through to the legacy path on any planner-rejected
-                // case (e.g. unsupported layout type).
+                // Errors here are NOT silently fallen back to the
+                // legacy executor — the caller flipped the flag, so a
+                // failure is propagated as-is.
                 if layer_range.is_some() {
                     return Err(anyhow::anyhow!(
                         "use_planner=true currently incompatible with layer_range; \

@@ -3,23 +3,29 @@
 
 //! Planner-driven CudaAsync executor (`use_planner = true` path).
 //!
-//! This is the PR-5 wiring of `transfer::plan::plan_copy` into the
-//! existing CUDA copy infrastructure. It runs only for the
+//! Wires `transfer::plan::plan_copy` into the existing CUDA copy
+//! infrastructure for the
 //! [`TransferStrategy::CudaAsyncH2D`] / `CudaAsyncD2H` / `CudaAsyncD2D`
-//! strategies — other routes fall through to the legacy
-//! `execute_direct_transfer` path even when `use_planner = true`.
+//! strategies. Other strategies and `use_planner = false` callers stay
+//! on the legacy [`super::execute_direct_transfer`] path; this module
+//! is only reached when both conditions hold. Errors from the planner
+//! path are NOT silently fallen back to the legacy executor — bail
+//! semantics are explicit so callers know whether the transfer ran.
 //!
 //! Pipeline:
-//! 1. `physical_to_layout_view` projects each `PhysicalLayout` to a
+//! 1. Reject `KvBlockLayout` pairs that would require a semantic
+//!    transform (PR-6 wires the kernel catalog).
+//! 2. `physical_to_layout_view` projects each `PhysicalLayout` to a
 //!    labelled [`LayoutView`].
-//! 2. `AnnotatedLayout::from_view` collapses each view into the
+//! 3. `AnnotatedLayout::from_view` collapses each view into the
 //!    addressable layout the planner expects.
-//! 3. `plan_copy` produces a [`CopyPlan`].
-//! 4. `lower_to_candidates` + `select_candidate` pick the executable
+//! 4. `plan_copy` runs with `min_inner_bytes = 0` so any compatible
+//!    layout produces [`CopyPlan::Direct`].
+//! 5. `lower_to_candidates` + `select_candidate` pick the executable
 //!    candidate (PR-5 only emits / accepts `Candidate::DirectDma`).
-//! 5. The candidate's `Vec<CopyOp>` is grouped by `size` and dispatched
-//!    via `kvbm_kernels::memcpy_batch` (FallbackOnly). Groups with
-//!    distinct sizes get distinct calls; identical-size groups
+//! 6. The candidate's `Vec<CopyOp>` is grouped by `size` and dispatched
+//!    via `kvbm_kernels::memcpy_batch` (`BatchedWithFallback`). Groups
+//!    with distinct sizes get distinct calls; identical-size groups
 //!    coalesce into one batch.
 
 use std::ffi::c_void;
@@ -33,6 +39,7 @@ use kvbm_kernels::MemcpyBatchMode;
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
+use crate::layout::KvBlockLayout;
 use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::lower::{
     Candidate, lower_to_candidates, physical_to_layout_view, select_candidate,
@@ -41,9 +48,20 @@ use crate::transfer::plan::{AnnotatedLayout, CopyOp, CopyPolicy, TransferSelecti
 
 /// Dispatch a CudaAsync transfer through the stride-aware planner.
 ///
-/// Triggered when `TransferOptions::use_planner = true` AND the chosen
-/// strategy is one of the CudaAsync variants. Other paths return
-/// `Ok(None)` so the caller can fall back to the legacy executor.
+/// Returns the same kind of [`TransferCompleteNotification`] the
+/// legacy `execute_cuda_transfer` returns, or an `Err` when the
+/// transfer cannot be safely handled by the PR-5 planner path.
+///
+/// Bails (no fallback) when:
+/// - the strategy is not one of `CudaAsync{H2D, D2H, D2D}`;
+/// - the src/dst block-id lists have unequal length;
+/// - `src.block_layout()` and `dst.block_layout()` would require a
+///   semantic transformation (NHD↔HND, ↔Universal, etc.). The
+///   planner-side projection collapses the per-token NHD/HND
+///   substructure into a single trailing `Payload` axis, so a
+///   raw-copy without going through the kernel catalog would silently
+///   transpose-corrupt the data. PR-6 wires the kernel candidates and
+///   removes this gate.
 pub(crate) fn execute_planner_cuda_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -53,25 +71,17 @@ pub(crate) fn execute_planner_cuda_transfer(
     cuda_stream: Option<Arc<CudaStream>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
-    if !matches!(
+    let src_block_layout = src.layout().block_layout();
+    let dst_block_layout = dst.layout().block_layout();
+    if validate_planner_inputs(
+        src_block_layout,
+        dst_block_layout,
+        src_block_ids,
+        dst_block_ids,
         strategy,
-        TransferStrategy::CudaAsyncH2D
-            | TransferStrategy::CudaAsyncD2H
-            | TransferStrategy::CudaAsyncD2D
-    ) {
-        bail!(
-            "execute_planner_cuda_transfer: strategy {strategy:?} not supported in PR-5 \
-             (only CudaAsync H2D / D2H / D2D)"
-        );
-    }
-    if src_block_ids.len() != dst_block_ids.len() {
-        bail!(
-            "execute_planner_cuda_transfer: src_block_ids ({}) != dst_block_ids ({})",
-            src_block_ids.len(),
-            dst_block_ids.len()
-        );
-    }
-    if src_block_ids.is_empty() {
+    )?
+    .is_noop()
+    {
         return Ok(TransferCompleteNotification::completed());
     }
 
@@ -91,7 +101,17 @@ pub(crate) fn execute_planner_cuda_transfer(
         .map(|(&s, &d)| (s, d))
         .collect();
     let selection = TransferSelection::full(block_pairs);
-    let policy = CopyPolicy::default();
+    // PR-5 policy: `min_inner_bytes = 0` so layouts that pass the
+    // `requires_transform` gate above always emit `CopyPlan::Direct`
+    // even when their inner contiguous tail is small. The default
+    // 4 KiB threshold exists for kernel-launch amortisation, and PR-5
+    // has no kernel candidate to hand small-tail plans off to. PR-6
+    // restores the threshold once `Candidate::TransformKernel` is
+    // executable.
+    let policy = CopyPolicy {
+        min_inner_bytes: 0,
+        coalesce: true,
+    };
 
     // 4. Plan the copy.
     let plan = plan_copy(&src_al, &dst_al, &selection, &policy)?;
@@ -138,10 +158,74 @@ pub(crate) fn execute_planner_cuda_transfer(
     Ok(ctx.register_cuda_event(event))
 }
 
+/// Outcome of [`validate_planner_inputs`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PlannerInputs {
+    /// Inputs are valid and the transfer must proceed.
+    Proceed,
+    /// Inputs are valid but the transfer is a no-op (empty block list).
+    /// Caller short-circuits with a "completed" notification.
+    Noop,
+}
+
+impl PlannerInputs {
+    fn is_noop(&self) -> bool {
+        matches!(self, Self::Noop)
+    }
+}
+
+/// Pure validation gate for `execute_planner_cuda_transfer`. Extracted
+/// so the rejection paths can be tested without a `TransferContext`
+/// (which needs a real CUDA stream pool, NIXL agent, and tokio
+/// runtime).
+///
+/// Returns `Err` for every condition that bails inside the executor:
+/// unsupported strategy, mismatched block-id list lengths, and
+/// `requires_transform` layout pairs. Returns `Ok(Noop)` when the
+/// transfer has no work to do, `Ok(Proceed)` otherwise.
+pub(crate) fn validate_planner_inputs(
+    src_block_layout: KvBlockLayout,
+    dst_block_layout: KvBlockLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+) -> Result<PlannerInputs> {
+    if !matches!(
+        strategy,
+        TransferStrategy::CudaAsyncH2D
+            | TransferStrategy::CudaAsyncD2H
+            | TransferStrategy::CudaAsyncD2D
+    ) {
+        bail!(
+            "execute_planner_cuda_transfer: strategy {strategy:?} not supported in PR-5 \
+             (only CudaAsync H2D / D2H / D2D)"
+        );
+    }
+    if src_block_ids.len() != dst_block_ids.len() {
+        bail!(
+            "execute_planner_cuda_transfer: src_block_ids ({}) != dst_block_ids ({})",
+            src_block_ids.len(),
+            dst_block_ids.len()
+        );
+    }
+    if src_block_ids.is_empty() {
+        return Ok(PlannerInputs::Noop);
+    }
+    if src_block_layout.requires_transform(&dst_block_layout) {
+        bail!(
+            "execute_planner_cuda_transfer: src ({src_block_layout:?}) and dst \
+             ({dst_block_layout:?}) require a kernel-side transform, which is not \
+             yet wired in the planner path (PR-6 lands the kernel catalog). Drop \
+             use_planner=true for this transfer."
+        );
+    }
+    Ok(PlannerInputs::Proceed)
+}
+
 /// Group `ops` by `size` and dispatch each group via
-/// `kvbm_kernels::memcpy_batch` in `FallbackOnly` mode (uniform-size
-/// batched memcpy with per-op fallback to individual `cudaMemcpyAsync`
-/// when the batch API is unavailable).
+/// `kvbm_kernels::memcpy_batch` in `BatchedWithFallback` mode (try
+/// `cudaMemcpyBatchAsync` when the runtime supports it, fall back to
+/// individual `cudaMemcpyAsync` otherwise).
 fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<()> {
     use std::collections::BTreeMap;
 
@@ -182,4 +266,97 @@ fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "testing-kvbm"))]
+mod tests {
+    use super::*;
+
+    /// Same operational layout: validator passes.
+    #[test]
+    fn validator_passes_same_operational_layout() {
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalNHD,
+            &[0, 1, 2],
+            &[0, 1, 2],
+            TransferStrategy::CudaAsyncD2D,
+        );
+        assert!(matches!(r, Ok(PlannerInputs::Proceed)));
+    }
+
+    /// NHD ↔ HND is a semantic transform that PR-5 cannot raw-copy
+    /// without corrupting data.
+    #[test]
+    fn validator_rejects_nhd_hnd() {
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalHND,
+            &[0],
+            &[0],
+            TransferStrategy::CudaAsyncD2D,
+        );
+        assert!(r.is_err());
+    }
+
+    /// Operational ↔ Universal also requires a kernel transform.
+    #[test]
+    fn validator_rejects_operational_to_universal() {
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::UniversalTP,
+            &[0],
+            &[0],
+            TransferStrategy::CudaAsyncD2D,
+        );
+        assert!(r.is_err());
+    }
+
+    /// Empty block lists are a valid no-op (caller short-circuits).
+    #[test]
+    fn validator_returns_noop_on_empty_block_list() {
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalNHD,
+            &[],
+            &[],
+            TransferStrategy::CudaAsyncD2D,
+        );
+        assert!(matches!(r, Ok(PlannerInputs::Noop)));
+    }
+
+    /// Mismatched block-id list lengths are rejected.
+    #[test]
+    fn validator_rejects_block_id_length_mismatch() {
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalNHD,
+            &[0, 1],
+            &[0],
+            TransferStrategy::CudaAsyncD2D,
+        );
+        assert!(r.is_err());
+    }
+
+    /// Strategies outside the CudaAsync set are rejected — the
+    /// executor's branch wires planner only for those three.
+    #[test]
+    fn validator_rejects_non_cuda_async_strategy() {
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalNHD,
+            &[0],
+            &[0],
+            TransferStrategy::Memcpy,
+        );
+        assert!(r.is_err());
+        let r = validate_planner_inputs(
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalNHD,
+            &[0],
+            &[0],
+            TransferStrategy::NixlWrite,
+        );
+        assert!(r.is_err());
+    }
 }

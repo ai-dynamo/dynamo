@@ -17,10 +17,13 @@
 //!   [`LayerSeparateLayout`]) and constructs the corresponding
 //!   labelled [`LayoutView`]. The projection uses a skeletal axis
 //!   labelling — Block, optional Layer (region or in-tensor), Outer,
-//!   Page, HeadSize — collapsing the per-token NHD/HND substructure
-//!   into a single trailing `HeadSize` axis. PR-5 same-layout copies
-//!   don't care about the substructure; PR-6 will refine when kernels
-//!   land.
+//!   Page, Payload — collapsing the per-token NHD/HND substructure
+//!   into a single opaque trailing [`KvDim::Payload`] axis sized to
+//!   `inner_dim`. `Payload` (vs the more specific `HeadSize`) is the
+//!   honest label here: PR-5 transfers don't reason about the
+//!   per-token head structure, only about contiguous byte runs. PR-6
+//!   will project true `HeadCount`/`HeadSize` axes when the kernel
+//!   catalog needs to distinguish NHD from HND.
 //!
 //! * [`Candidate`] is the executor-side representation of a lowered
 //!   plan. PR-5 emits only [`Candidate::DirectDma`] from
@@ -53,8 +56,17 @@ pub(crate) fn physical_to_layout_view(physical: &PhysicalLayout) -> Result<Layou
 /// Only [`FullyContiguousLayout`] and [`LayerSeparateLayout`] are
 /// supported; other layout kinds return an error. The projection is
 /// skeletal: the per-token NHD/HND substructure inside `inner_dim` is
-/// collapsed into a single `HeadSize` axis. PR-6 will refine this when
-/// the kernel catalog needs to distinguish the substructure.
+/// collapsed into a single opaque [`KvDim::Payload`] trailing axis.
+/// PR-6 will refine this when the kernel catalog needs to distinguish
+/// the substructure.
+///
+/// **Design note (deferred from PR-5 review).** `Layout::as_any()`
+/// downcasting is brittle: adding a new concrete `Layout` impl
+/// requires editing this dispatch and unsupported layouts fail late
+/// here rather than at the trait boundary. A follow-up PR can replace
+/// this with a `Layout::layout_view(&self) -> Result<LayoutView>`
+/// trait method (or a sibling projection trait) so each layout owns
+/// its projection.
 pub(crate) fn layout_to_view(layout: &dyn Layout) -> Result<LayoutView> {
     let cfg = layout.config();
     if let Some(fc) = layout.as_any().downcast_ref::<FullyContiguousLayout>() {
@@ -70,7 +82,7 @@ pub(crate) fn layout_to_view(layout: &dyn Layout) -> Result<LayoutView> {
     );
 }
 
-/// FC: single allocation, axes `[Block, Layer, Outer, Page, HeadSize]`,
+/// FC: single allocation, axes `[Block, Layer, Outer, Page, Payload]`,
 /// no region axis.
 fn fc_to_view(fc: &FullyContiguousLayout, cfg: &crate::layout::LayoutConfig) -> Result<LayoutView> {
     if matches!(fc.kv_block_layout(), KvBlockLayout::Unknown) {
@@ -82,7 +94,7 @@ fn fc_to_view(fc: &FullyContiguousLayout, cfg: &crate::layout::LayoutConfig) -> 
         KvDim::Layer,
         KvDim::Outer,
         KvDim::Page,
-        KvDim::HeadSize,
+        KvDim::Payload,
     ];
     let sizes = vec![
         cfg.num_blocks,
@@ -93,7 +105,7 @@ fn fc_to_view(fc: &FullyContiguousLayout, cfg: &crate::layout::LayoutConfig) -> 
     ];
     let layout = KvDimLayout::new(dims, sizes)?;
 
-    // Row-major byte strides over [Block, Layer, Outer, Page, HeadSize]:
+    // Row-major byte strides over [Block, Layer, Outer, Page, Payload]:
     let s_hs = elem;
     let s_pg = s_hs * cfg.inner_dim;
     let s_ot = s_pg * cfg.page_size;
@@ -115,8 +127,8 @@ fn fc_to_view(fc: &FullyContiguousLayout, cfg: &crate::layout::LayoutConfig) -> 
 
 /// LS: per-layer regions, `region_axis = Some(Layer)`. Inner axis order
 /// depends on `BlockDimension`:
-/// - BlockIsFirstDim:  `[Block, Outer, Page, HeadSize]`
-/// - BlockIsSecondDim: `[Outer, Block, Page, HeadSize]`
+/// - BlockIsFirstDim:  `[Block, Outer, Page, Payload]`
+/// - BlockIsSecondDim: `[Outer, Block, Page, Payload]`
 fn ls_to_view(ls: &LayerSeparateLayout, cfg: &crate::layout::LayoutConfig) -> Result<LayoutView> {
     if matches!(ls.kv_block_layout(), KvBlockLayout::Unknown) {
         bail!("physical_to_layout_view: LayerSeparateLayout has Unknown block layout");
@@ -142,7 +154,7 @@ fn ls_to_view(ls: &LayerSeparateLayout, cfg: &crate::layout::LayoutConfig) -> Re
                     KvDim::Block,
                     KvDim::Outer,
                     KvDim::Page,
-                    KvDim::HeadSize,
+                    KvDim::Payload,
                 ],
                 vec![
                     cfg.num_layers,
@@ -164,7 +176,7 @@ fn ls_to_view(ls: &LayerSeparateLayout, cfg: &crate::layout::LayoutConfig) -> Re
                     KvDim::Outer,
                     KvDim::Block,
                     KvDim::Page,
-                    KvDim::HeadSize,
+                    KvDim::Payload,
                 ],
                 vec![
                     cfg.num_layers,
@@ -352,7 +364,7 @@ mod tests {
             .with(KvDim::Layer, layer_id)
             .with(KvDim::Outer, outer_id)
             .with(KvDim::Page, page)
-            .with(KvDim::HeadSize, inner);
+            .with(KvDim::Payload, inner);
 
         let view_addr = al.addr_of(&coord).unwrap();
         let region = fc.memory_region(block_id, layer_id, outer_id).unwrap();
@@ -405,7 +417,7 @@ mod tests {
             .with(KvDim::Layer, layer_id)
             .with(KvDim::Outer, outer_id)
             .with(KvDim::Page, page)
-            .with(KvDim::HeadSize, inner);
+            .with(KvDim::Payload, inner);
 
         let view_addr = al.addr_of(&coord).unwrap();
         let region = ls.memory_region(block_id, layer_id, outer_id).unwrap();
@@ -413,5 +425,88 @@ mod tests {
             + page * cfg.inner_dim * cfg.dtype_width_bytes
             + inner * cfg.dtype_width_bytes;
         assert_eq!(view_addr, expected);
+    }
+
+    /// LayerSeparateLayout (BlockIsSecondDim): per-region inner shape
+    /// `[Outer, Block, Page, Payload]` with the outermost-region
+    /// stride larger than the per-block stride. Round-trip the same
+    /// way as the BlockIsFirstDim variant.
+    #[test]
+    fn layout_to_view_ls_second_dim_round_trips_with_memory_region() {
+        use crate::layout::LayerSeparateLayout;
+        use crate::layout::tests::MockMemory;
+        use crate::layout::{BlockDimension, Buffer, InnerShape, Layout, LayoutConfig};
+
+        let cfg = LayoutConfig::builder()
+            .num_blocks(4)
+            .num_layers(2)
+            .outer_dim(2)
+            .page_size(8)
+            .inner_dim(64)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap();
+        let per_layer =
+            cfg.num_blocks * cfg.outer_dim * cfg.page_size * cfg.inner_dim * cfg.dtype_width_bytes;
+        let memory: Vec<Buffer> = (0..cfg.num_layers)
+            .map(|i| Buffer::from_arc(MockMemory::new(0x2_0000_0000 + i * 0x10_0000, per_layer)))
+            .collect();
+        let ls = LayerSeparateLayout::builder()
+            .config(cfg.clone())
+            .memory(memory)
+            .block_dim(BlockDimension::BlockIsSecondDim)
+            .inner_shape(InnerShape::HND)
+            .build()
+            .unwrap();
+
+        let view = layout_to_view(&ls as &dyn Layout).unwrap();
+        let al = AnnotatedLayout::from_view(&view).unwrap();
+
+        let block_id = 2usize;
+        let layer_id = 1usize;
+        let outer_id = 0usize;
+        let page = 6usize;
+        let inner = 11usize;
+        let coord = kvbm_common::CoordByLabel::new()
+            .with(KvDim::Block, block_id)
+            .with(KvDim::Layer, layer_id)
+            .with(KvDim::Outer, outer_id)
+            .with(KvDim::Page, page)
+            .with(KvDim::Payload, inner);
+
+        let view_addr = al.addr_of(&coord).unwrap();
+        let region = ls.memory_region(block_id, layer_id, outer_id).unwrap();
+        let expected = region.addr()
+            + page * cfg.inner_dim * cfg.dtype_width_bytes
+            + inner * cfg.dtype_width_bytes;
+        assert_eq!(view_addr, expected);
+    }
+
+    /// Building a layout with `KvBlockLayout::Unknown` is rejected by
+    /// `layout_to_view` — the projection cannot honestly emit
+    /// `Direct` ops without knowing the per-token substructure.
+    #[test]
+    fn layout_to_view_rejects_unknown_block_layout() {
+        use crate::layout::FullyContiguousLayout;
+        use crate::layout::tests::MockMemory;
+        use crate::layout::{Buffer, KvBlockLayout, Layout, LayoutConfig};
+
+        let cfg = LayoutConfig::builder()
+            .num_blocks(2)
+            .num_layers(1)
+            .outer_dim(1)
+            .page_size(4)
+            .inner_dim(8)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap();
+        let mem = Buffer::from_arc(MockMemory::new(0x1_0000, cfg.required_bytes()));
+        let fc = FullyContiguousLayout::builder()
+            .config(cfg)
+            .memory(mem)
+            .kv_block_layout(KvBlockLayout::Unknown)
+            .build()
+            .unwrap();
+        assert!(layout_to_view(&fc as &dyn Layout).is_err());
     }
 }

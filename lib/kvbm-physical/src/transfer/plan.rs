@@ -17,10 +17,12 @@
 //! tail is too small to amortise launch overhead.
 //!
 //! The planner is pure addressing math — no GPU, no NIXL, no
-//! allocations beyond the output `Vec<CopyOp>`. It is **not yet wired
-//! into the executor**; the existing `transfer/executor`'s
-//! `select_transform_kernel(KvBlockLayout, KvBlockLayout)` keeps
-//! working unchanged. Tests in this module are the only consumer.
+//! allocations beyond the output `Vec<CopyOp>`. Wiring lives in
+//! [`crate::transfer::lower`] (lowering [`CopyPlan`] to executor
+//! candidates) and [`crate::transfer::executor::planner`] (CudaAsync
+//! dispatch behind `TransferOptions::use_planner`); the legacy
+//! `select_transform_kernel(KvBlockLayout, KvBlockLayout)` path
+//! continues to handle every transfer where `use_planner = false`.
 //!
 //! ## Block-pair semantics
 //!
