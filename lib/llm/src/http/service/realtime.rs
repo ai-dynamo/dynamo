@@ -12,13 +12,17 @@
 //!
 //! On connect the handler synthesizes a `session.created` server event before any
 //! engine event flows — the spec requires it to be the first server event on the
-//! wire. The handler then waits for the first client frame; it must be a
-//! `session.update`, and its `session.model` field selects the engine via
-//! [`ModelManager::get_realtime_engine`]. The selected engine handles everything
-//! subsequent (including `session.updated` echoes, audio-buffer state, and
-//! response generation). The first `session.update` is forwarded onto the
-//! engine's input stream verbatim — the handler used it only to pick the
-//! engine, the rest of the carried session config is the engine's to apply.
+//! wire. The handler then loops over inbound client frames in
+//! [`select_engine`] until a `session.update` arrives with a usable
+//! `session.model` and [`ModelManager::get_realtime_engine`] returns Ok.
+//! Non-conforming frames (wrong event type, missing model, unknown / unavailable
+//! model, malformed JSON, binary frames) emit a spec-shaped
+//! `RealtimeServerEvent::Error` and the loop continues so a well-behaved client
+//! can recover. Terminal states are engine selected (success) or client
+//! disconnect (no error event to send). The first qualifying `session.update`
+//! is forwarded onto the engine's input stream verbatim — the handler used it
+//! only to pick the engine; the rest of the carried session config is the
+//! engine's to apply.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,9 +57,10 @@ const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::{RouteDoc, service_v2};
 use crate::discovery::ModelManagerError;
+use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
-    EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeServerEvent,
-    RealtimeServerEventError, RealtimeServerEventSessionCreated, Session,
+    EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeClientEventSessionUpdate,
+    RealtimeServerEvent, RealtimeServerEventError, RealtimeServerEventSessionCreated, Session,
 };
 use uuid::Uuid;
 
@@ -110,88 +115,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<service_v2::State>) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let session_update = match expect_session_update(&mut ws_rx).await {
-        Ok(req) => req,
-        Err(close) => {
-            if let Some((code, reason)) = close {
-                send_error_event(
-                    &mut ws_tx,
-                    "invalid_request",
-                    &reason,
-                    Some("session.update"),
-                )
-                .await;
-                let _ = ws_tx.send(close_message(code, &reason)).await;
-                let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
-            }
-            return;
-        }
-    };
-
-    let model = match &session_update.session {
-        Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
-        Session::RealtimeTranscriptionSession(_) => None,
-    };
-    let Some(model_name) = model else {
-        send_error_event(
-            &mut ws_tx,
-            "invalid_request",
-            "session.model required",
-            Some("session.model"),
-        )
-        .await;
-        let _ = ws_tx
-            .send(close_message(close_code::POLICY, "session.model required"))
-            .await;
-        let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
+    let Some((engine, session_update)) =
+        select_engine(&mut ws_rx, &mut ws_tx, state.as_ref()).await
+    else {
+        // Client disconnected before an engine was selected; no close frame
+        // to send (the peer is already gone or sent its own Close).
         return;
-    };
-
-    let engine = match state.manager().get_realtime_engine(model_name) {
-        Ok(engine) => engine,
-        Err(ModelManagerError::ModelNotFound(_)) => {
-            send_error_event(
-                &mut ws_tx,
-                "model_not_found",
-                &format!("unknown model: {model_name}"),
-                Some("session.model"),
-            )
-            .await;
-            let _ = ws_tx
-                .send(close_message(close_code::POLICY, "unknown model"))
-                .await;
-            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
-            return;
-        }
-        Err(ModelManagerError::ModelUnavailable(_)) => {
-            send_error_event(
-                &mut ws_tx,
-                "model_unavailable",
-                &format!("model unavailable: {model_name}"),
-                Some("session.model"),
-            )
-            .await;
-            let _ = ws_tx
-                .send(close_message(close_code::AGAIN, "model unavailable"))
-                .await;
-            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
-            return;
-        }
-        Err(err) => {
-            tracing::error!(%err, "/v1/realtime engine lookup failed");
-            send_error_event(
-                &mut ws_tx,
-                "server_error",
-                &err.to_string(),
-                Some("session.model"),
-            )
-            .await;
-            let _ = ws_tx
-                .send(close_message(close_code::ERROR, "engine lookup failed"))
-                .await;
-            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
-            return;
-        }
     };
 
     let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
@@ -344,62 +273,130 @@ fn close_message(code: u16, reason: &str) -> Message {
     }))
 }
 
-/// Drain the inbound socket until a `session.update` arrives; that's the
-/// only event the handler accepts before engine selection. Returns
-/// `Err(Some((code, reason)))` for protocol violations the handler should
-/// signal back to the client, or `Err(None)` for a silent client-initiated
-/// close / EOF (no Close frame to send).
-async fn expect_session_update<S>(
+/// Drive engine selection by looping over inbound client frames until either
+/// a usable `session.update` lands and `ModelManager::get_realtime_engine`
+/// returns Ok — `Some((engine, session_update))` — or the client disconnects
+/// (Close frame, EOF, or transport error) — `None`.
+///
+/// Every other frame the loop sees (non-`session.update` event type, malformed
+/// JSON, binary frame, missing/empty `session.model`, model not found,
+/// model unavailable, other lookup errors) emits a spec-shaped
+/// `RealtimeServerEvent::Error` to the client and the loop continues — a
+/// well-behaved client can recover by sending another `session.update` with
+/// corrected fields.
+async fn select_engine<S, T>(
     ws_rx: &mut S,
-) -> Result<
-    dynamo_protocols::types::realtime::RealtimeClientEventSessionUpdate,
-    Option<(u16, String)>,
->
+    ws_tx: &mut T,
+    state: &service_v2::State,
+) -> Option<(
+    RealtimeBidirectionalEngine,
+    RealtimeClientEventSessionUpdate,
+)>
 where
     S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+    T: futures::Sink<Message, Error = axum::Error> + Unpin,
 {
     while let Some(msg) = ws_rx.next().await {
         let msg = match msg {
             Ok(m) => m,
             Err(err) => {
-                tracing::debug!(%err, "/v1/realtime inbound error before session.update");
-                return Err(None);
+                tracing::debug!(%err, "/v1/realtime inbound error during engine selection");
+                return None;
             }
         };
-        match msg {
-            Message::Text(text) => match serde_json::from_str::<RealtimeClientEvent>(text.as_str())
-            {
-                Ok(RealtimeClientEvent::SessionUpdate(req)) => return Ok(req),
-                Ok(other) => {
-                    tracing::warn!(
-                        event = other.event_type(),
-                        "/v1/realtime first frame must be session.update"
-                    );
-                    return Err(Some((
-                        close_code::INVALID,
-                        "expected session.update as first client event".to_string(),
-                    )));
+        let event = match msg {
+            Message::Text(text) => {
+                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        tracing::warn!(%err, "/v1/realtime malformed JSON during engine selection");
+                        send_error_event(ws_tx, "invalid_request", "malformed JSON frame", None)
+                            .await;
+                        continue;
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "/v1/realtime malformed JSON before session.update");
-                    return Err(Some((
-                        close_code::INVALID,
-                        "malformed JSON frame".to_string(),
-                    )));
-                }
-            },
-            Message::Binary(_) => {
-                tracing::warn!("/v1/realtime binary frame before session.update; rejecting");
-                return Err(Some((
-                    close_code::UNSUPPORTED,
-                    "binary frames not supported".to_string(),
-                )));
             }
-            Message::Close(_) => return Err(None),
-            Message::Ping(_) | Message::Pong(_) => {}
+            Message::Binary(_) => {
+                tracing::warn!("/v1/realtime binary frame during engine selection");
+                send_error_event(
+                    ws_tx,
+                    "invalid_request",
+                    "binary frames not supported",
+                    None,
+                )
+                .await;
+                continue;
+            }
+            Message::Close(_) => return None,
+            Message::Ping(_) | Message::Pong(_) => continue, // axum handles ping replies
+        };
+        let session_update = match event {
+            RealtimeClientEvent::SessionUpdate(req) => req,
+            other => {
+                tracing::warn!(
+                    event = other.event_type(),
+                    "/v1/realtime expected session.update before engine selection"
+                );
+                send_error_event(
+                    ws_tx,
+                    "invalid_request",
+                    "expected session.update before engine is selected",
+                    Some("session.update"),
+                )
+                .await;
+                continue;
+            }
+        };
+        let model_name = match &session_update.session {
+            Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
+            Session::RealtimeTranscriptionSession(_) => None,
+        };
+        let Some(model_name) = model_name else {
+            send_error_event(
+                ws_tx,
+                "invalid_request",
+                "session.model required",
+                Some("session.model"),
+            )
+            .await;
+            continue;
+        };
+        match state.manager().get_realtime_engine(model_name) {
+            Ok(engine) => return Some((engine, session_update)),
+            Err(ModelManagerError::ModelNotFound(_)) => {
+                send_error_event(
+                    ws_tx,
+                    "model_not_found",
+                    &format!("unknown model: {model_name}"),
+                    Some("session.model"),
+                )
+                .await;
+                continue;
+            }
+            Err(ModelManagerError::ModelUnavailable(_)) => {
+                send_error_event(
+                    ws_tx,
+                    "model_unavailable",
+                    &format!("model unavailable: {model_name}"),
+                    Some("session.model"),
+                )
+                .await;
+                continue;
+            }
+            Err(err) => {
+                tracing::error!(%err, "/v1/realtime engine lookup failed");
+                send_error_event(
+                    ws_tx,
+                    "server_error",
+                    &err.to_string(),
+                    Some("session.model"),
+                )
+                .await;
+                continue;
+            }
         }
     }
-    Err(None)
+    None
 }
 
 async fn send_error_event<S>(ws_tx: &mut S, code: &str, message: &str, param: Option<&str>)

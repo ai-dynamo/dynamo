@@ -393,8 +393,34 @@ async fn realtime_websocket_emits_close_after_client_close() {
     );
 }
 
+/// Wait for an `error` event, then assert no `Close` frame arrives within a
+/// short bounded window. The lenient engine-selection loop emits error events
+/// for intermediate failures (wrong event type, missing model, unknown model,
+/// binary frames) without closing the connection so a well-behaved client can
+/// recover by sending another `session.update`.
+async fn expect_error_event_no_close(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
+    let event = expect_text_event(ws, "error").await;
+    let probe = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
+    match probe {
+        Ok(Some(Ok(Message::Close(_)))) => {
+            panic!("server should not close on an intermediate error during engine selection")
+        }
+        Ok(None) => {
+            panic!(
+                "server should not end the stream on an intermediate error during engine selection"
+            )
+        }
+        _ => {} // timeout (no close) or non-close frame → connection kept open
+    }
+    event
+}
+
 #[tokio::test]
-async fn realtime_websocket_rejects_binary_frame() {
+async fn realtime_websocket_binary_frame_during_selection_emits_error() {
     let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
@@ -409,55 +435,20 @@ async fn realtime_websocket_rejects_binary_frame() {
         .await
         .expect("send binary");
 
-    let mut got_close = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while tokio::time::Instant::now() < deadline {
-        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-        let Ok(maybe) = frame else { break };
-        match maybe {
-            Some(Ok(Message::Close(_))) => {
-                got_close = true;
-                break;
-            }
-            None => break,
-            _ => {}
-        }
-    }
+    let event = expect_error_event_no_close(&mut ws).await;
+    assert_eq!(
+        event.pointer("/error/code").and_then(|s| s.as_str()),
+        Some("invalid_request"),
+        "error event should report invalid_request for binary frame: {event}"
+    );
 
     let _ = ws.close(None).await;
     token.cancel();
     let _ = handle.await;
-
-    assert!(
-        got_close,
-        "server should close the connection on a binary frame"
-    );
-}
-
-/// Wait for an `error` event then drain frames until a `Close` arrives.
-async fn expect_error_event_then_close(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) -> Value {
-    let event = expect_text_event(ws, "error").await;
-    let mut got_close = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while !got_close && tokio::time::Instant::now() < deadline {
-        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-        let Ok(maybe) = frame else { break };
-        match maybe {
-            Some(Ok(Message::Close(_))) => got_close = true,
-            None => break,
-            _ => {}
-        }
-    }
-    assert!(got_close, "server should send Close after error event");
-    event
 }
 
 #[tokio::test]
-async fn realtime_websocket_unknown_model_emits_error_and_closes() {
+async fn realtime_websocket_unknown_model_emits_error() {
     let (port, token, handle) = spawn_test_service_no_engine().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
@@ -475,19 +466,20 @@ async fn realtime_websocket_unknown_model_emits_error_and_closes() {
         .await
         .expect("send");
 
-    let event = expect_error_event_then_close(&mut ws).await;
+    let event = expect_error_event_no_close(&mut ws).await;
     assert_eq!(
         event.pointer("/error/code").and_then(|s| s.as_str()),
         Some("model_not_found"),
         "error event should report model_not_found: {event}"
     );
 
+    let _ = ws.close(None).await;
     token.cancel();
     let _ = handle.await;
 }
 
 #[tokio::test]
-async fn realtime_websocket_first_frame_must_be_session_update() {
+async fn realtime_websocket_non_session_update_first_frame_emits_error() {
     let (port, token, handle) = spawn_test_service().await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
@@ -505,13 +497,14 @@ async fn realtime_websocket_first_frame_must_be_session_update() {
         .await
         .expect("send");
 
-    let event = expect_error_event_then_close(&mut ws).await;
+    let event = expect_error_event_no_close(&mut ws).await;
     assert_eq!(
         event.pointer("/error/code").and_then(|s| s.as_str()),
         Some("invalid_request"),
         "error event should report invalid_request: {event}"
     );
 
+    let _ = ws.close(None).await;
     token.cancel();
     let _ = handle.await;
 }
@@ -535,13 +528,59 @@ async fn realtime_websocket_session_update_missing_model_emits_error() {
         .await
         .expect("send");
 
-    let event = expect_error_event_then_close(&mut ws).await;
+    let event = expect_error_event_no_close(&mut ws).await;
     assert_eq!(
         event.pointer("/error/code").and_then(|s| s.as_str()),
         Some("invalid_request"),
         "error event should report invalid_request when model is absent: {event}"
     );
 
+    let _ = ws.close(None).await;
+    token.cancel();
+    let _ = handle.await;
+}
+
+/// After an intermediate error during engine selection, the loop stays open
+/// and a follow-up `session.update` with a registered model selects the engine
+/// normally. Demonstrates the recovery property the lenient loop is designed
+/// for.
+#[tokio::test]
+async fn realtime_websocket_recovers_after_unknown_model() {
+    let (port, token, handle) = spawn_test_service().await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+
+    // First attempt: bogus model → error event, connection stays open.
+    let bad = serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "realtime", "model": "does-not-exist" }
+    });
+    ws.send(Message::Text(bad.to_string().into()))
+        .await
+        .expect("send bad");
+    let err = expect_error_event_no_close(&mut ws).await;
+    assert_eq!(
+        err.pointer("/error/code").and_then(|s| s.as_str()),
+        Some("model_not_found")
+    );
+
+    // Recovery: valid session.update with the registered echo model. The
+    // engine round-trips it back as session.updated.
+    let good = serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "realtime", "model": ECHO_MODEL }
+    });
+    ws.send(Message::Text(good.to_string().into()))
+        .await
+        .expect("send good");
+    expect_text_event(&mut ws, "session.updated").await;
+
+    let _ = ws.close(None).await;
     token.cancel();
     let _ = handle.await;
 }
