@@ -151,9 +151,21 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     # Inverse of the XML-family pattern: post-#9350 Dynamo trims trailing
     # text after wrapper-end on minimax_m2; SGLang preserves it. Only .a
     # matches (no trailing text in that shape).
-    ("sglang", "minimax_m2", "PARSER.batch.8.b"): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
-    ("sglang", "minimax_m2", "PARSER.batch.8.c"): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
-    ("sglang", "minimax_m2", "PARSER.batch.8.d"): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8.b",
+    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8.c",
+    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8.d",
+    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
     (
         "sglang",
         "deepseek_v3",
