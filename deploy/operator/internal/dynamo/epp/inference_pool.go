@@ -41,7 +41,7 @@ func GenerateInferencePool(
 	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
 	component := dgd.GetComponentByName(componentName)
 	if component == nil {
-		return nil, fmt.Errorf("service %q not found", componentName)
+		return nil, fmt.Errorf("component %q not found", componentName)
 	}
 	dynamoNamespace := dgd.GetDynamoNamespaceForComponent(component)
 

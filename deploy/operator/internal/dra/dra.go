@@ -8,6 +8,7 @@ package dra
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -83,30 +84,31 @@ func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceS
 		return 0, ""
 	}
 	deviceClassName = gmsSpec.DeviceClassName
+	return ExtractGPUCountFromResourceRequirements(resources), deviceClassName
+}
+
+func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequirements) int {
 	if q, ok := gpuResourceQuantity(resources.Limits); ok {
-		return int(q.Value()), deviceClassName
+		return int(q.Value())
 	}
 	if q, ok := gpuResourceQuantity(resources.Requests); ok {
-		return int(q.Value()), deviceClassName
+		return int(q.Value())
 	}
-	return 0, deviceClassName
+	return 0
 }
 
 func deleteGPUResources(resources corev1.ResourceList) {
-	for name := range resources {
-		if isGPUResourceName(name) {
-			delete(resources, name)
-		}
+	for _, name := range gpuResourceNames(resources) {
+		delete(resources, name)
 	}
 }
 
 func gpuResourceQuantity(resources corev1.ResourceList) (resource.Quantity, bool) {
-	for name, quantity := range resources {
-		if isGPUResourceName(name) {
-			return quantity, true
-		}
+	names := gpuResourceNames(resources)
+	if len(names) == 0 {
+		return resource.Quantity{}, false
 	}
-	return resource.Quantity{}, false
+	return resources[names[0]], true
 }
 
 func isGPUResourceName(name corev1.ResourceName) bool {
@@ -116,6 +118,21 @@ func isGPUResourceName(name corev1.ResourceName) bool {
 		strings.HasSuffix(normalized, "/gpu") ||
 		strings.Contains(normalized, "/mig-") ||
 		strings.HasPrefix(normalized, "gpu.")
+}
+
+func gpuResourceNames(resources corev1.ResourceList) []corev1.ResourceName {
+	matches := make([]string, 0)
+	for name := range resources {
+		if isGPUResourceName(name) {
+			matches = append(matches, string(name))
+		}
+	}
+	sort.Strings(matches)
+	result := make([]corev1.ResourceName, 0, len(matches))
+	for _, name := range matches {
+		result = append(result, corev1.ResourceName(name))
+	}
+	return result
 }
 
 // GenerateResourceClaimTemplate builds the ResourceClaimTemplate that provides

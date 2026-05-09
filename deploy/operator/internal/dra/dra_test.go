@@ -126,6 +126,17 @@ func TestExtractGPUParamsFromResourceRequirements_MIGResource(t *testing.T) {
 	assert.Equal(t, "gpu.nvidia.com", deviceClassName)
 }
 
+func TestExtractGPUCountFromResourceRequirements_DeterministicResourceSelection(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName("nvidia.com/mig-3g.20gb"):           resource.MustParse("1"),
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+		},
+	}
+
+	assert.Equal(t, 4, ExtractGPUCountFromResourceRequirements(resources))
+}
+
 func TestGenerateResourceClaimTemplate_Enabled(t *testing.T) {
 	tmpl, toDelete, err := GenerateResourceClaimTemplate(context.Background(), nil, "myapp-worker-gpu", "default", 4, "")
 	require.NoError(t, err)

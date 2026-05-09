@@ -286,14 +286,7 @@ func removeEnvVar(c *corev1.Container, name string) {
 
 // getGPUCount extracts the GPU count from the component's Kubernetes resource requirements.
 func getGPUCount(resources corev1.ResourceRequirements) int32 {
-	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
-	if q, ok := resources.Limits[gpuResource]; ok {
-		return int32(q.Value())
-	}
-	if q, ok := resources.Requests[gpuResource]; ok {
-		return int32(q.Value())
-	}
-	return 0
+	return int32(dra.ExtractGPUCountFromResourceRequirements(resources))
 }
 
 // getDeviceClassName returns the DRA device class name from the GMS config,
@@ -400,7 +393,9 @@ const (
 
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
-// engine pod. An empty mode means the API/defaulting path selected intra-pod.
+// engine pod. v1beta1 FailoverSpec is presence-only: v1alpha1 conversion only
+// creates it when Failover.Enabled was true, so non-nil means enabled. An empty
+// mode means the API/defaulting path selected intra-pod.
 func IsIntraPodFailoverEnabled(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	if component == nil || component.Experimental == nil || component.Experimental.Failover == nil {
 		return false
