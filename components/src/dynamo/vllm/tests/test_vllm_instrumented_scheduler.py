@@ -315,3 +315,110 @@ def test_decode_variance_spans_both_queues():
     assert q.num_decode_requests == 2
     assert q.sum_decode_kv_tokens == 2000
     assert q.var_decode_kv_tokens == pytest.approx(250000.0)
+
+
+# ---------------------------------------------------------------------------
+# kv_connector_metadata population on benchmark-built SchedulerOutputs
+# ---------------------------------------------------------------------------
+#
+# When a KV connector is configured (e.g. NixlConnector for disagg),
+# vLLM's worker-side ``_get_kv_connector_output`` asserts
+# ``scheduler_output.kv_connector_metadata is not None`` before calling
+# ``bind_connector_metadata``. The parent ``Scheduler.schedule()``
+# satisfies that contract by calling ``connector.build_connector_meta(...)``
+# on every SchedulerOutput it produces.
+#
+# ``InstrumentedScheduler`` builds two SchedulerOutputs from scratch
+# during ``DYN_BENCHMARK_MODE=decode``:
+#
+#   1. The synthetic decode batch in ``_bench_inject_fake_decode``.
+#   2. The empty drain frame in ``schedule()`` between decode points.
+#
+# Both must mirror the parent's connector hook or EngineCore dies with
+# ``AssertionError`` on the first iteration of the decode sweep.
+# (Repro: launching a vLLM disagg decode worker with
+# ``--kv-transfer-config '{"kv_connector":"NixlConnector",...}'`` and
+# ``DYN_BENCHMARK_MODE=decode`` -- assertion fires before the worker
+# can register and the planner never receives ``get_perf_metrics``.)
+
+
+def _make_decode_sweep_stub(connector, ec_connector=None):
+    """Build the minimal stub needed to drive ``schedule()`` into the
+    DECODE_SWEEP empty-frame branch without spinning up the parent
+    scheduler's vLLM-side state.
+    """
+    from unittest.mock import MagicMock
+
+    from dynamo.vllm.instrumented_scheduler import _BenchPhase
+
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_active_req_ids = {"__bench_0"}
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.finished_req_ids = set()
+    stub.connector = connector
+    stub.ec_connector = ec_connector
+    stub._update_after_schedule = MagicMock()
+    # Force the empty-frame branch: ``_bench_step`` returns None, drain
+    # path is selected because there are active req IDs.
+    stub._bench_step = MagicMock(return_value=None)
+    # Defensive: if the empty-frame branch isn't taken the test would
+    # otherwise fall through to ``_schedule_and_record_time`` which
+    # touches real parent state.
+    stub._schedule_and_record_time = MagicMock(
+        side_effect=AssertionError("empty-frame branch should have returned")
+    )
+    return stub
+
+
+def test_decode_sweep_empty_frame_attaches_kv_connector_metadata():
+    """Parent's ``build_connector_meta`` must be called on the empty drain
+    frame; metadata is then attached to the returned SchedulerOutput.
+    """
+    from unittest.mock import MagicMock
+
+    sentinel = object()
+    connector = MagicMock()
+    connector.build_connector_meta = MagicMock(return_value=sentinel)
+
+    stub = _make_decode_sweep_stub(connector=connector)
+    out = InstrumentedScheduler.schedule(stub)
+
+    assert out.kv_connector_metadata is sentinel
+    connector.build_connector_meta.assert_called_once_with(out)
+    # ec_connector is None on the stub; the ec field stays untouched.
+    assert out.ec_connector_metadata is None
+
+
+def test_decode_sweep_empty_frame_attaches_ec_connector_metadata_when_set():
+    from unittest.mock import MagicMock
+
+    kv_meta = object()
+    ec_meta = object()
+    connector = MagicMock()
+    connector.build_connector_meta = MagicMock(return_value=kv_meta)
+    ec_connector = MagicMock()
+    ec_connector.build_connector_meta = MagicMock(return_value=ec_meta)
+
+    stub = _make_decode_sweep_stub(connector=connector, ec_connector=ec_connector)
+    out = InstrumentedScheduler.schedule(stub)
+
+    assert out.kv_connector_metadata is kv_meta
+    assert out.ec_connector_metadata is ec_meta
+    connector.build_connector_meta.assert_called_once_with(out)
+    ec_connector.build_connector_meta.assert_called_once_with(out)
+
+
+def test_decode_sweep_empty_frame_no_connector_leaves_metadata_none():
+    """No connector configured (aggregated worker without
+    --kv-transfer-config): the empty frame is returned with both
+    metadata fields still None -- exercising the ``getattr(..., None)``
+    guard in the fix.
+    """
+    stub = _make_decode_sweep_stub(connector=None)
+    out = InstrumentedScheduler.schedule(stub)
+
+    assert out.kv_connector_metadata is None
+    assert out.ec_connector_metadata is None

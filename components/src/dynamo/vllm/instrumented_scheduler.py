@@ -354,6 +354,19 @@ class InstrumentedScheduler(AsyncScheduler):
                     finished_req_ids=self.finished_req_ids,
                     free_encoder_mm_hashes=[],
                 )
+                # See _bench_inject_fake_decode for the rationale; the
+                # parent scheduler attaches connector metadata to every
+                # SchedulerOutput when a connector is configured, so
+                # benchmark-built outputs must do the same or the worker
+                # asserts on bind_connector_metadata.
+                if getattr(self, "connector", None) is not None:
+                    empty.kv_connector_metadata = self.connector.build_connector_meta(
+                        empty
+                    )
+                if getattr(self, "ec_connector", None) is not None:
+                    empty.ec_connector_metadata = (
+                        self.ec_connector.build_connector_meta(empty)
+                    )
                 self._update_after_schedule(empty)
                 return empty
 
@@ -730,7 +743,7 @@ class InstrumentedScheduler(AsyncScheduler):
             else None
         )
 
-        return SchedulerOutput(
+        output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens=num_scheduled_tokens,
@@ -742,6 +755,25 @@ class InstrumentedScheduler(AsyncScheduler):
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
+
+        # Mirror the parent scheduler's connector-metadata population (see
+        # vllm/v1/core/sched/scheduler.py:912-923). Without this, the
+        # gpu_model_runner asserts ``scheduler_output.kv_connector_metadata
+        # is not None`` whenever a KV connector is configured (e.g. the
+        # NixlConnector used by disagg workers), and EngineCore dies the
+        # instant the decode sweep tries to run a synthetic batch.
+        # Our fake decode reqs have their KV pre-allocated via
+        # ``allocate_slots`` above, so ``build_connector_meta`` produces a
+        # no-op metadata -- no transfers planned, just a non-None object
+        # the worker-side ``bind_connector_metadata`` can consume.
+        if getattr(self, "connector", None) is not None:
+            output.kv_connector_metadata = self.connector.build_connector_meta(output)
+        if getattr(self, "ec_connector", None) is not None:
+            output.ec_connector_metadata = self.ec_connector.build_connector_meta(
+                output
+            )
+
+        return output
 
     def _bench_cleanup_requests(self) -> None:
         """Free all resources held by active benchmark requests."""
