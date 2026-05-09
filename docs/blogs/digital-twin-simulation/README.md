@@ -500,6 +500,17 @@ research, engineering prioritization, and deployment sizing: use simulation to
 narrow the space, then spend hardware time on the candidates most likely to
 matter.
 
+Looking forward, we plan to close this loop in production as well. A smart
+sweeping algorithm built on top of the digital twin would run periodically
+against recently-recorded production traffic, search the configuration space
+under the current workload distribution, and recommend (or directly apply) a
+reconfiguration when a materially better deployment is found. Because traffic
+shape drifts over hours and days — different prompt mixes, ISL/OSL
+distributions, or burst patterns — what was the right TP shape, prefill/decode
+split, router policy, and planner setting last week may no longer be optimal
+today. A continuous twin-driven sweep keeps the live deployment tracking the
+current optimum instead of relying on a one-shot launch decision.
+
 [placeholder: external review for claims about hardware validation vs simulation]
 
 [placeholder: final links to relevant Dynamo docs, PRs, or prior posts]
