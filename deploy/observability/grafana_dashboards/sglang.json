@@ -2717,19 +2717,183 @@
     },
     {
       "id": 36,
+      "type": "timeseries",
+      "title": "Speculative Decoding \u2014 Accept Rate",
+      "description": "SGL: sglang:spec_accept_rate (fraction of speculatively-drafted tokens accepted by the verifier). Zero on runs without --speculative-algorithm. Higher = better draft quality, more tokens-per-step.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 65,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "lineInterpolation": "linear",
+            "pointSize": 5,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P1809F7CD0C75ACF3"
+          },
+          "editorMode": "code",
+          "expr": "max(sglang:spec_accept_rate)",
+          "legendFormat": "accept rate",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Speculative Decoding \u2014 Accept Length",
+      "description": "SGL: sglang:spec_accept_length (avg accepted tokens per draft step). Zero on runs without --speculative-algorithm. Effectively the speedup multiplier vs non-spec decode.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P1809F7CD0C75ACF3"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 65,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "lineInterpolation": "linear",
+            "pointSize": 5,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P1809F7CD0C75ACF3"
+          },
+          "editorMode": "code",
+          "expr": "max(sglang:spec_accept_length)",
+          "legendFormat": "accept length (tokens/step)",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 38,
       "type": "row",
       "title": "SGLang Engine \u2014 KV Pool Breakdown (per pool type)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 65,
+        "y": 72,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 37,
+      "id": 39,
       "type": "timeseries",
       "title": "Pool Utilization % \u2014 Full / SWA / Mamba",
       "description": "SGL: per-pool fractional usage. full_token_usage = full-attention KV pool, swa_token_usage = sliding-window pool (populates on hybrid SWA models like Gemma-2), mamba_usage = Mamba SSM state pool (populates on hybrid SSM models like Jamba). Non-hybrid models only move `full attention`.",
@@ -2739,7 +2903,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 73,
         "w": 12,
         "h": 7
       },
@@ -2833,7 +2997,7 @@
       ]
     },
     {
-      "id": 38,
+      "id": 40,
       "type": "timeseries",
       "title": "Absolute KV Pool Tokens (used / evictable / available)",
       "description": "SGL: token counts in the main KV pool. used+evictable+available <= max_total_num_tokens. On hybrid models these reflect the FULL-attention pool only.",
@@ -2843,7 +3007,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 66,
+        "y": 73,
         "w": 12,
         "h": 7
       },
@@ -2937,7 +3101,7 @@
       ]
     },
     {
-      "id": 39,
+      "id": 41,
       "type": "timeseries",
       "title": "Cache Hit Rate (engine-side)",
       "description": "SGL: sglang:cache_hit_rate (radix prefix-cache hits)",
@@ -2947,7 +3111,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 73,
+        "y": 80,
         "w": 8,
         "h": 6
       },
@@ -3019,7 +3183,7 @@
       ]
     },
     {
-      "id": 40,
+      "id": 42,
       "type": "timeseries",
       "title": "Pending Pre-alloc Tokens (PD)",
       "description": "SGL: sglang:pending_prealloc_token_usage (disagg pre-allocation reservation; 0 in agg mode)",
@@ -3029,7 +3193,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 73,
+        "y": 80,
         "w": 8,
         "h": 6
       },
@@ -3101,7 +3265,7 @@
       ]
     },
     {
-      "id": 41,
+      "id": 43,
       "type": "timeseries",
       "title": "Streaming Sessions Held Tokens",
       "description": "SGL: sglang:streaming_session_held_tokens (KV held by retained streaming sessions)",
@@ -3111,7 +3275,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 73,
+        "y": 80,
         "w": 8,
         "h": 6
       },
@@ -3183,7 +3347,7 @@
       ]
     },
     {
-      "id": 42,
+      "id": 44,
       "type": "timeseries",
       "title": "LoRA Pool Utilization",
       "description": "SGL: sglang:lora_pool_* (only emitted when --enable-lora). Empty in non-LoRA runs.",
@@ -3193,7 +3357,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 79,
+        "y": 86,
         "w": 12,
         "h": 6
       },
@@ -3287,7 +3451,7 @@
       ]
     },
     {
-      "id": 43,
+      "id": 45,
       "type": "timeseries",
       "title": "Pool Capacity Reference",
       "description": "SGL: static pool sizing \u2014 max_total_num_tokens / num_pages / page_size",
@@ -3297,7 +3461,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 79,
+        "y": 86,
         "w": 12,
         "h": 6
       },
@@ -3391,19 +3555,19 @@
       ]
     },
     {
-      "id": 47,
+      "id": 49,
       "type": "row",
-      "title": "P/D Disagg Queues \u2014 prefill/decode/grammar/spec (collapsed)",
+      "title": "P/D Disagg Queues \u2014 prefill/decode/grammar (collapsed)",
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 85,
+        "y": 92,
         "w": 24,
         "h": 1
       },
       "panels": [
         {
-          "id": 44,
+          "id": 46,
           "type": "timeseries",
           "title": "Prefill Queues",
           "description": "SGL: prefill-side disagg queues (zero in agg mode)",
@@ -3496,7 +3660,7 @@
           ]
         },
         {
-          "id": 45,
+          "id": 47,
           "type": "timeseries",
           "title": "Decode Queues",
           "description": "SGL: decode-side disagg queues (zero in agg mode)",
@@ -3589,10 +3753,10 @@
           ]
         },
         {
-          "id": 46,
+          "id": 48,
           "type": "timeseries",
-          "title": "Grammar / Spec Decode Queue",
-          "description": "SGL: grammar-constrained queue + speculative decoding stats",
+          "title": "Grammar Queue",
+          "description": "SGL: sglang:num_grammar_queue_reqs (requests waiting on grammar-constrained generation init)",
           "datasource": {
             "type": "prometheus",
             "uid": "P1809F7CD0C75ACF3"
@@ -3667,47 +3831,25 @@
               "legendFormat": "grammar queue",
               "range": true,
               "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "max(sglang:spec_accept_rate)",
-              "legendFormat": "spec accept rate",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "max(sglang:spec_accept_length)",
-              "legendFormat": "spec accept length",
-              "range": true,
-              "refId": "C"
             }
           ]
         }
       ]
     },
     {
-      "id": 54,
+      "id": 56,
       "type": "row",
       "title": "HiCache (RAM/disk tiers) \u2014 collapsed; populates with --enable-hierarchical-cache",
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 86,
+        "y": 93,
         "w": 24,
         "h": 1
       },
       "panels": [
         {
-          "id": 48,
+          "id": 50,
           "type": "timeseries",
           "title": "HiCache Host Tokens (used vs total)",
           "description": "SGL: sglang:hicache_host_used_tokens / hicache_host_total_tokens (RAM tier; zero unless --enable-hierarchical-cache)",
@@ -3800,7 +3942,7 @@
           ]
         },
         {
-          "id": 49,
+          "id": 51,
           "type": "timeseries",
           "title": "Host Tier Utilization %",
           "description": "Derived: hicache_host_used / hicache_host_total",
@@ -3882,7 +4024,7 @@
           ]
         },
         {
-          "id": 50,
+          "id": 52,
           "type": "timeseries",
           "title": "Eviction & Load-back Rate by Cache Type",
           "description": "SGL: sglang:evicted_tokens_total / load_back_tokens_total (labeled by cache_type \u2014 RadixCache, SWARadixCache, MambaRadixCache, etc.)",
@@ -3975,7 +4117,7 @@
           ]
         },
         {
-          "id": 51,
+          "id": 53,
           "type": "timeseries",
           "title": "Eviction Latency (p99) by Cache Type",
           "description": "SGL: sglang:eviction_duration_seconds_bucket grouped by cache_type",
@@ -4057,7 +4199,7 @@
           ]
         },
         {
-          "id": 52,
+          "id": 54,
           "type": "timeseries",
           "title": "Prefetch / Backup Tokens Rate",
           "description": "SGL: sglang:prefetched_tokens_total / backuped_tokens_total (hicache prefetch + backup activity)",
@@ -4150,7 +4292,7 @@
           ]
         },
         {
-          "id": 53,
+          "id": 55,
           "type": "timeseries",
           "title": "Load-back Latency (p99) by Cache Type",
           "description": "SGL: sglang:load_back_duration_seconds_bucket grouped by cache_type",
@@ -4234,19 +4376,19 @@
       ]
     },
     {
-      "id": 59,
+      "id": 61,
       "type": "row",
       "title": "GPU & Runtime Health \u2014 collapsed",
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 87,
+        "y": 94,
         "w": 24,
         "h": 1
       },
       "panels": [
         {
-          "id": 55,
+          "id": 57,
           "type": "timeseries",
           "title": "GPU Utilization (DCGM)",
           "description": "DCGM: DCGM_FI_DEV_GPU_UTIL (only when dcgm-exporter is running)",
@@ -4328,7 +4470,7 @@
           ]
         },
         {
-          "id": 56,
+          "id": 58,
           "type": "timeseries",
           "title": "GPU KV Cache Usage % (Dynamo-reported)",
           "description": "DYN (worker side): dynamo_component_gpu_cache_usage_percent \u2014 Dynamo runtime's view of KV utilization",
@@ -4410,7 +4552,7 @@
           ]
         },
         {
-          "id": 57,
+          "id": 59,
           "type": "timeseries",
           "title": "Tokio Worker Busy Ratio",
           "description": "DYN: dynamo_tokio_worker_busy_ratio \u2014 async runtime saturation; >0.9 sustained means runtime is starved",
@@ -4492,7 +4634,7 @@
           ]
         },
         {
-          "id": 58,
+          "id": 60,
           "type": "timeseries",
           "title": "Request-Plane RTT TTFT",
           "description": "DYN: dynamo_request_plane_roundtrip_ttft_seconds (frontend\u2194worker request-plane TTFT, excludes engine compute)",
