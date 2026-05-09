@@ -382,7 +382,7 @@ Router discovery examples:
 - Add optional AIC-backed decode-load estimates so router decisions can better
   account for downstream decode pressure.
 
-#### Planner discovery examples.
+#### Planner Discovery Examples
 Planner exposes a family of stateful decisions: when to scale, how aggressively,
 and which optimization
 target to chase. Their effects compound across minutes of trace, and a
