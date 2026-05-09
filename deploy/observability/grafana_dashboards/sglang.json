@@ -3555,9 +3555,9 @@
       ]
     },
     {
-      "id": 49,
+      "id": 48,
       "type": "row",
-      "title": "P/D Disagg Queues \u2014 prefill/decode/grammar",
+      "title": "P/D Disagg Queues \u2014 prefill / decode",
       "collapsed": true,
       "gridPos": {
         "x": 0,
@@ -3751,93 +3751,11 @@
               "refId": "B"
             }
           ]
-        },
-        {
-          "id": 48,
-          "type": "timeseries",
-          "title": "Grammar Queue",
-          "description": "SGL: sglang:num_grammar_queue_reqs (requests waiting on grammar-constrained generation init)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "P1809F7CD0C75ACF3"
-          },
-          "gridPos": {
-            "x": 0,
-            "y": 8,
-            "w": 24,
-            "h": 6
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineWidth": 1,
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "spanNulls": false,
-                "showPoints": "never",
-                "stacking": {
-                  "mode": "none",
-                  "group": "A"
-                },
-                "axisPlacement": "auto",
-                "axisLabel": "",
-                "lineInterpolation": "linear",
-                "pointSize": 5,
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "lastNotNull",
-                "max"
-              ],
-              "displayMode": "table",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "P1809F7CD0C75ACF3"
-              },
-              "editorMode": "code",
-              "expr": "sum(sglang:num_grammar_queue_reqs)",
-              "legendFormat": "grammar queue",
-              "range": true,
-              "refId": "A"
-            }
-          ]
         }
       ]
     },
     {
-      "id": 56,
+      "id": 55,
       "type": "row",
       "title": "HiCache (RAM/disk tiers) \u2014 populates with --enable-hierarchical-cache",
       "collapsed": true,
@@ -3849,7 +3767,7 @@
       },
       "panels": [
         {
-          "id": 50,
+          "id": 49,
           "type": "timeseries",
           "title": "HiCache Host Tokens (used vs total)",
           "description": "SGL: sglang:hicache_host_used_tokens / hicache_host_total_tokens (RAM tier; zero unless --enable-hierarchical-cache)",
@@ -3942,7 +3860,7 @@
           ]
         },
         {
-          "id": 51,
+          "id": 50,
           "type": "timeseries",
           "title": "Host Tier Utilization %",
           "description": "Derived: hicache_host_used / hicache_host_total",
@@ -4024,7 +3942,7 @@
           ]
         },
         {
-          "id": 52,
+          "id": 51,
           "type": "timeseries",
           "title": "Eviction & Load-back Rate by Cache Type",
           "description": "SGL: sglang:evicted_tokens_total / load_back_tokens_total (labeled by cache_type \u2014 RadixCache, SWARadixCache, MambaRadixCache, etc.)",
@@ -4117,7 +4035,7 @@
           ]
         },
         {
-          "id": 53,
+          "id": 52,
           "type": "timeseries",
           "title": "Eviction Latency (p99) by Cache Type",
           "description": "SGL: sglang:eviction_duration_seconds_bucket grouped by cache_type",
@@ -4199,7 +4117,7 @@
           ]
         },
         {
-          "id": 54,
+          "id": 53,
           "type": "timeseries",
           "title": "Prefetch / Backup Tokens Rate",
           "description": "SGL: sglang:prefetched_tokens_total / backuped_tokens_total (hicache prefetch + backup activity)",
@@ -4292,7 +4210,7 @@
           ]
         },
         {
-          "id": 55,
+          "id": 54,
           "type": "timeseries",
           "title": "Load-back Latency (p99) by Cache Type",
           "description": "SGL: sglang:load_back_duration_seconds_bucket grouped by cache_type",
@@ -4376,7 +4294,7 @@
       ]
     },
     {
-      "id": 61,
+      "id": 60,
       "type": "row",
       "title": "GPU & Runtime Health",
       "collapsed": true,
@@ -4388,7 +4306,7 @@
       },
       "panels": [
         {
-          "id": 57,
+          "id": 56,
           "type": "timeseries",
           "title": "GPU Utilization (DCGM)",
           "description": "DCGM: DCGM_FI_DEV_GPU_UTIL (only when dcgm-exporter is running)",
@@ -4470,7 +4388,7 @@
           ]
         },
         {
-          "id": 58,
+          "id": 57,
           "type": "timeseries",
           "title": "GPU KV Cache Usage % (Dynamo-reported)",
           "description": "DYN (worker side): dynamo_component_gpu_cache_usage_percent \u2014 Dynamo runtime's view of KV utilization",
@@ -4552,7 +4470,7 @@
           ]
         },
         {
-          "id": 59,
+          "id": 58,
           "type": "timeseries",
           "title": "Tokio Worker Busy Ratio",
           "description": "DYN: dynamo_tokio_worker_busy_ratio \u2014 async runtime saturation; >0.9 sustained means runtime is starved",
@@ -4634,7 +4552,7 @@
           ]
         },
         {
-          "id": 60,
+          "id": 59,
           "type": "timeseries",
           "title": "Request-Plane RTT TTFT",
           "description": "DYN: dynamo_request_plane_roundtrip_ttft_seconds (frontend\u2194worker request-plane TTFT, excludes engine compute)",
