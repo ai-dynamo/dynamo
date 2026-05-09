@@ -122,11 +122,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     (
         "sglang",
         "deepseek_v3_1",
-        "PARSER.batch.8.b",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3_1",
         "PARSER.batch.8.c",
     ): "trims trailing space from preceding normal_text",
     (
@@ -142,11 +137,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     (
         "sglang",
         "deepseek_v3",
-        "PARSER.batch.8.b",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3",
         "PARSER.batch.8.c",
     ): "trims trailing space from preceding normal_text",
     (
@@ -158,6 +148,12 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("sglang", "pythonic", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "pythonic", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "pythonic", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
+    # Inverse of the XML-family pattern: post-#9350 Dynamo trims trailing
+    # text after wrapper-end on minimax_m2; SGLang preserves it. Only .a
+    # matches (no trailing text in that shape).
+    ("sglang", "minimax_m2", "PARSER.batch.8.b"): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    ("sglang", "minimax_m2", "PARSER.batch.8.c"): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    ("sglang", "minimax_m2", "PARSER.batch.8.d"): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
     (
         "sglang",
         "deepseek_v3",
@@ -307,7 +303,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("sglang", "mistral", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "mistral", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "mistral", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "mistral", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     (
         "sglang",
         "mistral",
