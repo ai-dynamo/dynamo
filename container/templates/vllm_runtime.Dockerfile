@@ -350,11 +350,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
         --requirement /tmp/requirements.benchmark.txt \
-        cupy-cuda13x
+        cupy-cuda${CUDA_VERSION_MAJOR}x
 
 # Copy tests, deploy, lib, and the vllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>

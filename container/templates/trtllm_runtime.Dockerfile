@@ -279,13 +279,14 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.benchmark.txt \
-        cupy-cuda13x && \
+        cupy-cuda${CUDA_VERSION_MAJOR}x && \
     # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
     # that unconditionally raises NotImplementedError, crashing TRT-LLM on import. cutlass-dsl==4.3.4
     # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
