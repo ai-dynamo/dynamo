@@ -137,9 +137,25 @@ fn extract_tool_calls(
                 if config.allow_eof_recovery && block.contains(arg_key_start.as_str()) {
                     match parse_tool_call_block(block, config, tools) {
                         Ok(parsed_call) => {
-                            calls.push(parsed_call);
-                            cursor = text.len();
-                            continue;
+                            // Guard: if the block contained arg tags but the
+                            // regex extracted zero pairs, truncation hit
+                            // mid-arg and the parse is incomplete. Reject
+                            // rather than returning empty-args (silent wrong
+                            // invocation).
+                            let args: serde_json::Value =
+                                serde_json::from_str(&parsed_call.function.arguments)
+                                    .unwrap_or(serde_json::Value::Null);
+                            let has_args = args.as_object().is_some_and(|m| !m.is_empty());
+                            if has_args {
+                                calls.push(parsed_call);
+                                cursor = text.len();
+                                continue;
+                            }
+                            warn!(
+                                "GLM-4.7 EOF recovery: block has arg tags but \
+                                 parsed zero complete pairs — truncation \
+                                 mid-arg; rejecting call"
+                            );
                         }
                         Err(e) => {
                             warn!("Failed to parse GLM-4.7 tool call block (no end token): {e}");
@@ -592,6 +608,106 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[1].function.name, "get_time");
+    }
+
+    // --- b5 multi-position truncation tests ---
+    // Verify that EOF recovery rejects incomplete arg pairs rather than
+    // returning a call with silently-empty arguments.
+
+    #[test] // PARSER.batch.5
+    fn test_eof_recovery_rejects_truncation_mid_arg_value() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
+        // Truncated inside <arg_value> content — no closing </arg_value>.
+        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NY";
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Truncation mid-arg-value must NOT produce a call with empty args"
+        );
+        let text = normal_text.unwrap();
+        assert!(
+            text.contains("get_weather"),
+            "Rejected block must be preserved as normal_text"
+        );
+    }
+
+    #[test] // PARSER.batch.5
+    fn test_eof_recovery_rejects_truncation_mid_arg_key() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
+        // Truncated inside <arg_key> tag content.
+        let message = "<tool_call>get_weather<arg_key>loc";
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Truncation mid-arg-key must NOT produce a call with empty args"
+        );
+        let text = normal_text.unwrap();
+        assert!(text.contains("get_weather"));
+    }
+
+    #[test] // PARSER.batch.5
+    fn test_eof_recovery_rejects_truncation_mid_arg_value_tag() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
+        // Truncated inside the <arg_value> opening tag itself.
+        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_val";
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Truncation mid-tag must NOT produce a call"
+        );
+        let text = normal_text.unwrap();
+        assert!(text.contains("get_weather"));
+    }
+
+    #[test] // PARSER.batch.5
+    fn test_eof_recovery_partial_second_arg_keeps_first() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
+        // First arg pair complete, second truncated mid-value.
+        // Should recover the first arg; second is silently lost but at
+        // least we have partial-correct data rather than empty.
+        let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fah";
+        let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(calls.len(), 1, "First complete pair should allow recovery");
+        let args: serde_json::Value =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            args.get("unit").is_none(),
+            "Truncated second arg should not appear"
+        );
+    }
+
+    #[test] // PARSER.batch.5
+    fn test_eof_recovery_rejects_truncation_inside_xml_entity() {
+        let config = Glm47ParserConfig {
+            allow_eof_recovery: true,
+            ..get_test_config()
+        };
+        // Truncated inside an XML entity within arg_value.
+        let message = "<tool_call>get_weather<arg_key>query</arg_key><arg_value>x &lt";
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Truncation inside XML entity must NOT produce a call"
+        );
+        let text = normal_text.unwrap();
+        assert!(text.contains("get_weather"));
     }
 
     #[test] // PARSER.batch.4, PARSER.batch.8
