@@ -93,6 +93,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(300),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
