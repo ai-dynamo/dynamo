@@ -40,6 +40,9 @@ KNOWN_TP_NCCL_FORWARD_MODELS: frozenset[str] = frozenset(
         "Qwen2_5_VLForConditionalGeneration",
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
+        # Qwen3.5 397B FP8 MoE shares the Qwen3 multimodal forward path,
+        # which issues the same post-encoder TP all-reduce — PlanB fence
+        # engages. Without this entry the 397B sweep falls back to PlanA.
         "Qwen3_5MoeForConditionalGeneration",
     }
 )
@@ -382,6 +385,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         # metadata was non-empty. Logging fires every _LOG_EVERY_N_STEPS.
         self._mm_active_steps: int = 0
 
+        # Per-step workload visibility (reset at bind, accumulated through
+        # start_load_caches / save_caches, drained at clear_connector_metadata).
+        self._step_loads_planned: int = 0
+        self._step_loads_issued: int = 0
+        self._step_loads_bytes: int = 0
+        self._step_saves_planned: int = 0
+        self._step_saves_issued: int = 0
+        self._step_saves_bytes: int = 0
+
         if role == ECConnectorRole.WORKER:
             # Defer the actual SHM/cudaHostRegister setup to first metadata
             # cycle: at __init__ time we may not know which CUDA device this
@@ -562,6 +574,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         regardless.
         """
         super().bind_connector_metadata(connector_metadata)
+        # Reset per-step counters — bind runs every step, so this also
+        # zeros out non-MM-active steps.
+        self._step_loads_planned = 0
+        self._step_loads_issued = 0
+        self._step_loads_bytes = 0
+        self._step_saves_planned = 0
+        self._step_saves_issued = 0
+        self._step_saves_bytes = 0
+
         if not isinstance(
             connector_metadata, MultimodalEmbeddingCacheConnectorMetadata
         ):
@@ -577,6 +598,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             self._save_cmd_by_hash = {
                 cmd.mm_hash: cmd for cmd in connector_metadata.saves
             }
+        self._step_loads_planned = len(connector_metadata.loads)
+        self._step_saves_planned = len(self._save_cmd_by_hash)
 
     def _setup_worker(self) -> None:
         """Allocate shm, cudaHostRegister, build the arena view, and create
@@ -760,6 +783,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 view.record_stream(compute)
                 encoder_cache[cmd.mm_hash] = view
                 self._loads_issued += 1
+                self._step_loads_issued += 1
+                self._step_loads_bytes += cmd.nbytes
 
             i = j
 
@@ -821,6 +846,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             src.record_stream(self._save_stream)
 
         self._saves_issued += 1
+        self._step_saves_issued += 1
+        self._step_saves_bytes += save_cmd.nbytes
 
         if self._nccl_fence_active:
             # Plan B: just mark that a D2H was enqueued on save_stream
@@ -855,6 +882,19 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             done.record(self._save_stream)
             torch.cuda.current_stream().wait_event(done)
             self._save_pending_this_step = False
+        if self._step_loads_planned or self._step_saves_planned:
+            logger.info(
+                "ec_step rank=%d/%d step=%d loads=%d/%d (%d B) saves=%d/%d (%d B)",
+                self._tp_rank,
+                self._tp_world_size,
+                self._mm_active_steps,
+                self._step_loads_issued,
+                self._step_loads_planned,
+                self._step_loads_bytes,
+                self._step_saves_issued,
+                self._step_saves_planned,
+                self._step_saves_bytes,
+            )
         self._save_cmd_by_hash = {}
         super().clear_connector_metadata()
 
